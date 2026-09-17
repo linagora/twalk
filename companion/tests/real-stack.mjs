@@ -47,6 +47,8 @@ const REGISTRATION_SECRET = 'test-only-registration-shared-secret';
 
 /** Where the specs read what this run created. */
 export const STACK_FILE = join(here, '.real-stack.json');
+/** The same, for the bridge journeys' own Gateway (ticket #68). */
+export const BRIDGE_STACK_FILE = join(here, '.bridge-stack.json');
 
 /**
  * Brings the stack up and returns what the tests need to know. Idempotent
@@ -111,6 +113,202 @@ export async function startRealStack() {
 	process.on('exit', () => gateway.kill('SIGTERM'));
 
 	return { ...info, stop };
+}
+
+/**
+ * The same stack, for the **bridge** journeys of ticket #68: screens 3, 3a–3d.
+ *
+ * Everything here is real except the bridge, which is
+ * [`./stub-bridge.mjs`] — a real mautrix-whatsapp needs a live WhatsApp
+ * account and a human with a phone (spec #47), so it can never be in a suite.
+ * What the suite does prove is the contract: the Gateway holds the bridge's
+ * blocking step, the browser polls, and the code drawn on screen is the
+ * payload the bridge handed over.
+ *
+ * ## Why a second Gateway rather than the one above
+ *
+ * [`startRealStack`] gives its Gateway an owner whose account does **not**
+ * exist, because that is what the bootstrap journey walks the user through
+ * creating, and the Gateway creates this deployment's one account and refuses
+ * a second. A bridge login is the opposite: it needs a signed-in device, so it
+ * needs an owner whose account already exists. One Gateway cannot be both, so
+ * this one is configured with `bot_alpha` — provisioned on the shared test
+ * stack by `tests/harness/scripts/provision-bots.sh`, with the password scheme
+ * every Twalk suite uses.
+ *
+ * Same compose stack, same Gateway binary, same proxy in
+ * `serve-like-gateway.mjs`: only the owner and the bridges differ.
+ */
+export async function startBridgeStack() {
+	const synapseUrl = `http://127.0.0.1:${SYNAPSE_PORT}`;
+
+	await composeUp();
+	await waitFor(`${synapseUrl}/health`, 'Synapse', 120_000);
+	provisionBots();
+
+	const { startStubBridge, STUB_PROVISIONING_SECRET } = await import('./stub-bridge.mjs');
+	const stub = await startStubBridge(
+		BRIDGES.map((bridge) => bridge.bridgeId),
+		{
+			// The stub's control surface is where a test asks for a session,
+			// because it is already proxied onto the browser's own origin. The
+			// homeserver is this file's business, not the stub's.
+			signIn: async (deviceName) => signInOwner(synapseUrl, gatewayOrigin, deviceName),
+			matrixUser: async (localpart) => {
+				const user = await matrixLogin(synapseUrl, localpart ?? OWNER_LOCALPART);
+				return {
+					user_id: user.user_id,
+					access_token: user.access_token,
+					homeserver: synapseUrl,
+					sensor: `@sensor:${SERVER_NAME}`
+				};
+			}
+		}
+	);
+
+	const bridgeEnvironment = {};
+	for (const { bridgeId, network } of BRIDGES) {
+		const slug = bridgeId.toUpperCase().replace(/[^A-Z0-9]/gu, '_');
+		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_URL`] = stub.bridgeUrl(bridgeId);
+		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_PROVISIONING_SECRET`] = STUB_PROVISIONING_SECRET;
+		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_NETWORK`] = network;
+	}
+
+	const stateDir = await mkdtemp(join(tmpdir(), 'twalk-companion-bridges-'));
+	const gatewayPort = await freePort();
+	const gateway = spawn(buildGateway(), [], {
+		env: {
+			...process.env,
+			GATEWAY_LISTEN: `127.0.0.1:${gatewayPort}`,
+			GATEWAY_STATIC_DIR: join(here, '..', 'build'),
+			GATEWAY_STATE_DIR: stateDir,
+			GATEWAY_OWNER: `@${OWNER_LOCALPART}:${SERVER_NAME}`,
+			GATEWAY_HOMESERVER_URL: synapseUrl,
+			GATEWAY_HOMESERVER_FEDERATION_URL: synapseUrl,
+			GATEWAY_REGISTRATION_SHARED_SECRET: REGISTRATION_SECRET,
+			GATEWAY_SENSOR_USER_ID: `@sensor:${SERVER_NAME}`,
+			GATEWAY_BRIDGES: BRIDGES.map((bridge) => bridge.bridgeId).join(','),
+			...bridgeEnvironment,
+			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'
+		},
+		stdio: ['ignore', 'inherit', 'inherit']
+	});
+	gateway.on('exit', (code) => {
+		if (code !== 0 && code !== null) {
+			console.error(`the Companion Gateway (bridges) exited with ${code}`);
+		}
+	});
+
+	const gatewayOrigin = `http://127.0.0.1:${gatewayPort}`;
+	await waitFor(`${gatewayOrigin}/health`, 'the Companion Gateway', 30_000);
+
+	const info = {
+		owner: OWNER_LOCALPART,
+		ownerId: `@${OWNER_LOCALPART}:${SERVER_NAME}`,
+		serverName: SERVER_NAME,
+		domain: `127.0.0.1:${SYNAPSE_PORT}`,
+		synapseUrl,
+		gatewayOrigin,
+		stubOrigin: stub.origin,
+		bridges: BRIDGES,
+		natsPort: NATS_PORT
+	};
+	await writeFile(BRIDGE_STACK_FILE, `${JSON.stringify(info, null, '\t')}\n`);
+
+	process.on('exit', () => gateway.kill('SIGTERM'));
+
+	return {
+		...info,
+		stop: async () => {
+			gateway.kill('SIGTERM');
+			await stub.close();
+			await rm(stateDir, { recursive: true, force: true }).catch(() => {});
+		}
+	};
+}
+
+/**
+ * The bridges the networks suite configures, and the network each one serves.
+ * Three, because screen 3's picker is a join of the catalogue with this list
+ * and a screen that only ever saw one bridge would not prove it.
+ */
+const BRIDGES = [
+	{ bridgeId: 'mautrix-whatsapp', network: 'whatsapp' },
+	{ bridgeId: 'mautrix-signal', network: 'signal' },
+	{ bridgeId: 'mautrix-gmessages', network: 'sms' }
+];
+
+/** The shared stack's owner bot for the bridge journeys, and its password scheme. */
+const OWNER_LOCALPART = 'bot_alpha';
+
+/** Idempotent: an account that exists is skipped. */
+function provisionBots() {
+	const result = spawnSync(join(repo, 'tests', 'harness', 'scripts', 'provision-bots.sh'), [], {
+		env: { ...process.env, TWALK_TEST_STACK: PROJECT },
+		stdio: 'inherit',
+		timeout: 300_000
+	});
+	if (result.status !== 0) {
+		throw new Error('provision-bots.sh failed');
+	}
+}
+
+/**
+ * A Matrix account on the test stack, standing in for the user's own browser.
+ * Its access token stays on this side of the seam: the Gateway is handed an
+ * OpenID token and never the token that minted it (ADR 0011).
+ */
+async function matrixLogin(synapseUrl, localpart) {
+	const answer = await fetch(`${synapseUrl}/_matrix/client/v3/login`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({
+			type: 'm.login.password',
+			identifier: { type: 'm.id.user', user: localpart },
+			password: `test-only-password-${localpart}`
+		})
+	});
+	if (!answer.ok) {
+		throw new Error(`the homeserver refused to log ${localpart} in: ${answer.status}`);
+	}
+	return answer.json();
+}
+
+/**
+ * One signed-in device, the way the Companion gets one: a Matrix OpenID token
+ * from the homeserver, exchanged at the Gateway for a device token.
+ *
+ * The token comes back to the test rather than as a cookie the browser
+ * already holds, because the Gateway sets it `HttpOnly` and a spec cannot read
+ * it back out of a page. What reaches the Gateway is identical either way.
+ */
+async function signInOwner(synapseUrl, gatewayOrigin, deviceName) {
+	const user = await matrixLogin(synapseUrl, OWNER_LOCALPART);
+	const token = await fetch(
+		`${synapseUrl}/_matrix/client/v3/user/${encodeURIComponent(user.user_id)}/openid/request_token`,
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json', authorization: `Bearer ${user.access_token}` },
+			body: '{}'
+		}
+	);
+	if (!token.ok) {
+		throw new Error(`the homeserver refused an OpenID token: ${token.status}`);
+	}
+	const answer = await fetch(`${gatewayOrigin}/api/session`, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ matrix_openid_token: await token.json(), device_name: deviceName })
+	});
+	const session = await answer.json();
+	const cookie = answer.headers
+		.getSetCookie()
+		.map((value) => value.split(';')[0])
+		.find((pair) => pair.startsWith('twalk_device='));
+	if (cookie === undefined) {
+		throw new Error(`the sign-in set no device cookie: ${answer.status}`);
+	}
+	return { device_token: cookie.slice('twalk_device='.length), session };
 }
 
 async function composeUp() {

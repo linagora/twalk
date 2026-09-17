@@ -12,6 +12,8 @@
 // import `@lucide/svelte` anywhere else.
 
 import ArrowRight from '@lucide/svelte/icons/arrow-right';
+import AtSign from '@lucide/svelte/icons/at-sign';
+import Ban from '@lucide/svelte/icons/ban';
 import Bug from '@lucide/svelte/icons/bug';
 import Check from '@lucide/svelte/icons/check';
 import ChevronLeft from '@lucide/svelte/icons/chevron-left';
@@ -20,18 +22,27 @@ import CircleCheck from '@lucide/svelte/icons/circle-check';
 import CircleX from '@lucide/svelte/icons/circle-x';
 import ClipboardCheck from '@lucide/svelte/icons/clipboard-check';
 import CloudDownload from '@lucide/svelte/icons/cloud-download';
+import Cookie from '@lucide/svelte/icons/cookie';
 import Copy from '@lucide/svelte/icons/copy';
 import Cpu from '@lucide/svelte/icons/cpu';
 import Database from '@lucide/svelte/icons/database';
 import ExternalLink from '@lucide/svelte/icons/external-link';
 import FileDown from '@lucide/svelte/icons/file-down';
+import Gamepad2 from '@lucide/svelte/icons/gamepad-2';
 import Globe from '@lucide/svelte/icons/globe';
+import Hash from '@lucide/svelte/icons/hash';
 import Info from '@lucide/svelte/icons/info';
 import KeyRound from '@lucide/svelte/icons/key-round';
 import Languages from '@lucide/svelte/icons/languages';
 import LockKeyhole from '@lucide/svelte/icons/lock-keyhole';
+import MessageCircle from '@lucide/svelte/icons/message-circle';
+import MessageSquareLock from '@lucide/svelte/icons/message-square-lock';
+import MessageSquareText from '@lucide/svelte/icons/message-square-text';
 import MonitorSmartphone from '@lucide/svelte/icons/monitor-smartphone';
+import QrCode from '@lucide/svelte/icons/qr-code';
 import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+import Send from '@lucide/svelte/icons/send';
+import Settings from '@lucide/svelte/icons/settings';
 import ShieldCheck from '@lucide/svelte/icons/shield-check';
 import Smartphone from '@lucide/svelte/icons/smartphone';
 import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
@@ -71,7 +82,22 @@ export const icons = {
 	'recovery-key': KeyRound,
 	device: MonitorSmartphone,
 	phone: Smartphone,
-	diagnostics: Bug
+	diagnostics: Bug,
+	'qr-code': QrCode,
+	manage: Settings,
+	cookie: Cookie,
+	unavailable: Ban,
+
+	// The networks of screen 3. Lucide dropped its brand marks, so each card
+	// gets the symbol that says what the network *is* rather than a logo we
+	// are not licensed to draw; the card's own name does the identifying.
+	whatsapp: MessageCircle,
+	signal: MessageSquareLock,
+	sms: MessageSquareText,
+	matrix: Hash,
+	telegram: Send,
+	discord: Gamepad2,
+	account: AtSign
 } as const;
 
 /** A name the app may ask [`Icon`](./Icon.svelte) to draw. */
