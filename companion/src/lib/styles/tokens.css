@@ -1,0 +1,212 @@
+/*
+ * The Companion's design tokens, as CSS custom properties.
+ *
+ * The values are the ones `docs/wireframes/companion-v0.1.md` fixes in its
+ * "Design system notes" section — Twake teal for primary actions, amber for
+ * warnings, red for errors, green for success, Inter for UI and JetBrains Mono
+ * for technical strings, an 8 px baseline grid, 200 ms state transitions and
+ * 400 ms screen transitions. No consumable Messagr package exists to import
+ * them from (`@linagora/twake-mui` is React and MUI), so they live here, in one
+ * file, ready to be replaced by one when there is.
+ *
+ * Every rule in the app reads a token. A component that hard-codes `#00A896`
+ * is a component that will not follow the design system into dark mode.
+ *
+ * Dark mode inverts the neutrals and keeps the accents, as the wireframes ask.
+ * It follows the system by default (`prefers-color-scheme`) and can be pinned
+ * with `data-theme="light"` / `data-theme="dark"` on the root element.
+ */
+
+:root {
+	color-scheme: light dark;
+
+	/* --- Accents: the same four hues in both themes ------------------- */
+	--color-teal: #00a896;
+	--color-amber: #f4a261;
+	--color-red: #e63946;
+	--color-green: #2a9d8f;
+
+	--color-primary: var(--color-teal);
+	--color-primary-strong: #00887a;
+	--color-primary-contrast: #ffffff;
+	--color-warning: var(--color-amber);
+	--color-danger: var(--color-red);
+	--color-success: var(--color-green);
+
+	/* A surface tint per accent: the wireframes' informational cards
+	   (amber for the WhatsApp disclosure, red for errors) need a ground,
+	   not just a border. */
+	--color-primary-surface: #e2f5f2;
+	--color-warning-surface: #fdf1e5;
+	--color-danger-surface: #fdeaec;
+	--color-success-surface: #e4f3f1;
+
+	/* --- Neutrals ----------------------------------------------------- */
+	--color-gray-50: #f8f9fa;
+	--color-gray-100: #f1f3f5;
+	--color-gray-200: #e9ecef;
+	--color-gray-300: #dee2e6;
+	--color-gray-400: #ced4da;
+	--color-gray-500: #adb5bd;
+	--color-gray-600: #868e96;
+	--color-gray-700: #495057;
+	--color-gray-800: #343a40;
+	--color-gray-900: #212529;
+	--color-gray-950: #121417;
+
+	/* --- Semantic surfaces and text ----------------------------------- */
+	--color-canvas: var(--color-gray-50);
+	--color-surface: #ffffff;
+	--color-surface-raised: #ffffff;
+	--color-border: var(--color-gray-300);
+	--color-border-strong: var(--color-gray-400);
+
+	/* 4.5:1 or better on --color-surface and --color-canvas, both
+	   themes: the wireframes require WCAG AA everywhere. */
+	--color-text: var(--color-gray-900);
+	--color-text-muted: var(--color-gray-700);
+	--color-text-subtle: var(--color-gray-600);
+
+	--color-focus-ring: var(--color-teal);
+	--color-overlay: rgb(18 20 23 / 45%);
+
+	/* A disabled control is its own pair, not "the neutrals dimmed": the
+	   inverted neutrals of dark mode would otherwise leave a disabled button
+	   pale and its label unreadable. */
+	--color-disabled-surface: var(--color-gray-200);
+	--color-disabled-text: var(--color-text-subtle);
+
+	/* --- Typography --------------------------------------------------- */
+	/* `Inter Variable` and `JetBrains Mono Variable` are the family names
+	   @fontsource-variable declares; the stacks degrade to the platform's
+	   own faces rather than to a network request. */
+	--font-ui:
+		'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+		sans-serif;
+	--font-mono:
+		'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas,
+		monospace;
+
+	--font-weight-body: 400;
+	--font-weight-label: 500;
+	--font-weight-heading: 700;
+
+	/* Base 16 px, line height 1.5. The scale is a 1.25 ratio rounded to
+	   whole pixels, so text still lands on the 8 px grid. */
+	--text-xs: 0.75rem; /* 12px */
+	--text-sm: 0.875rem; /* 14px */
+	--text-base: 1rem; /* 16px */
+	--text-lg: 1.25rem; /* 20px */
+	--text-xl: 1.5rem; /* 24px */
+	--text-2xl: 2rem; /* 32px */
+
+	--line-height-body: 1.5;
+	--line-height-heading: 1.25;
+
+	/* --- Spacing: the 8 px baseline grid ------------------------------ */
+	--space-0: 0;
+	--space-1: 0.25rem; /* 4px — the half step, for icon gaps only */
+	--space-2: 0.5rem; /* 8px */
+	--space-3: 1rem; /* 16px */
+	--space-4: 1.5rem; /* 24px */
+	--space-5: 2rem; /* 32px */
+	--space-6: 3rem; /* 48px */
+	--space-7: 4rem; /* 64px */
+
+	/* --- Shape and elevation ------------------------------------------ */
+	--radius-sm: 6px;
+	--radius-md: 10px;
+	--radius-lg: 16px;
+	--radius-pill: 999px;
+
+	--shadow-sm: 0 1px 2px rgb(18 20 23 / 6%);
+	--shadow-md: 0 2px 8px rgb(18 20 23 / 8%);
+
+	/* --- Icons: Lucide's own defaults --------------------------------- */
+	--icon-size: 24px;
+	--icon-size-dense: 20px;
+	--icon-stroke-width: 2;
+
+	/* --- Motion ------------------------------------------------------- */
+	--duration-state: 200ms;
+	--duration-screen: 400ms;
+	--easing: cubic-bezier(0.22, 0.61, 0.36, 1); /* ease-out */
+
+	/* --- Layout ------------------------------------------------------- */
+	/* Mobile-first: the wireframes design for 375–428 CSS px and extend
+	   upwards. This is the reading width a screen's column stops at. */
+	--layout-width: 30rem; /* 480px */
+	--layout-gutter: var(--space-3);
+}
+
+/* Dark mode: the neutrals invert, the accents do not. Written twice so an
+   explicit choice wins over the system in both directions — the media query
+   is skipped when the root says `light`. */
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		--color-canvas: var(--color-gray-950);
+		--color-surface: #1b1e22;
+		--color-surface-raised: #23272c;
+		--color-border: #343a40;
+		--color-border-strong: #495057;
+
+		--color-text: var(--color-gray-100);
+		--color-text-muted: var(--color-gray-300);
+		--color-text-subtle: var(--color-gray-500);
+
+		/* Surfaces tinted for a dark ground, not the light ones dimmed. */
+		--color-primary-surface: #0d2c29;
+		--color-warning-surface: #33261a;
+		--color-danger-surface: #341a1e;
+		--color-success-surface: #122a27;
+
+		/* Teal on a dark ground needs lifting to clear AA as text. */
+		--color-primary: #2bc4b2;
+		--color-primary-strong: #4fd6c6;
+		--color-primary-contrast: #0b1d1b;
+
+		--color-disabled-surface: #2a2f35;
+		--color-disabled-text: var(--color-gray-500);
+
+		--shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+		--shadow-md: 0 2px 10px rgb(0 0 0 / 50%);
+		--color-overlay: rgb(0 0 0 / 60%);
+	}
+}
+
+:root[data-theme='dark'] {
+	--color-canvas: var(--color-gray-950);
+	--color-surface: #1b1e22;
+	--color-surface-raised: #23272c;
+	--color-border: #343a40;
+	--color-border-strong: #495057;
+
+	--color-text: var(--color-gray-100);
+	--color-text-muted: var(--color-gray-300);
+	--color-text-subtle: var(--color-gray-500);
+
+	--color-primary-surface: #0d2c29;
+	--color-warning-surface: #33261a;
+	--color-danger-surface: #341a1e;
+	--color-success-surface: #122a27;
+
+	--color-primary: #2bc4b2;
+	--color-primary-strong: #4fd6c6;
+	--color-primary-contrast: #0b1d1b;
+
+	--color-disabled-surface: #2a2f35;
+	--color-disabled-text: var(--color-gray-500);
+
+	--shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
+	--shadow-md: 0 2px 10px rgb(0 0 0 / 50%);
+	--color-overlay: rgb(0 0 0 / 60%);
+}
+
+/* Reduced motion is honoured by zeroing the durations rather than by asking
+   every component to check the query: a token nobody can forget. */
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--duration-state: 0ms;
+		--duration-screen: 0ms;
+	}
+}

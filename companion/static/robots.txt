@@ -1,0 +1,5 @@
+# A self-hosted configuration surface for one owner. Nothing here is for a
+# crawler, and the Gateway answers every unknown path with the app shell, so an
+# indexer would otherwise walk it forever.
+User-agent: *
+Disallow: /

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+	<title>Twalk</title>
+	<rect width="512" height="512" rx="144" fill="#00A896"/>
+	<path d="M144 184h224M256 184v176" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round"/>
+	<path d="M344 328v72l64-72z" fill="#FFFFFF"/>
+</svg>

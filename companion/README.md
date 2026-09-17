@@ -1,3 +1,150 @@
 # companion
 
-The Twalk Companion PWA (SvelteKit static export): the user-facing configuration surface, from Matrix account bootstrap to bridge login, persona activation, and consent management. Wireframes live in `docs/wireframes/`.
+The Twalk Companion PWA: the user-facing configuration surface, from Matrix
+account bootstrap to bridge login, persona activation and consent management.
+"The Companion" means this app alone — the backend is the **Companion Gateway**
+(`companion-gateway/`), always named in full.
+
+A SvelteKit static export, served by the Companion Gateway on its own origin.
+It is a client of that Gateway's HTTP API and of the user's homeserver, and
+nothing else. The screens it implements are designed in
+`docs/wireframes/companion-v0.1.md`; the cryptographic decisions are
+[ADR 0014](../docs/architecture/adr/0014-companion-crypto-runs-in-the-browser.md).
+
+## Commands
+
+Node 22 and npm 10. Everything runs from this directory.
+
+```bash
+npm ci               # install; also runs `svelte-kit sync`
+npm run dev          # the Vite dev server, for working on a screen
+npm run build        # the static export, into build/
+npm run api:generate # regenerate the Gateway client from the OpenAPI description
+npm run api:check    # fail if that generated client is stale
+npm run check        # svelte-check (types, templates, a11y warnings)
+npm run test:unit    # Vitest, over the pure modules
+npm run test:e2e     # Playwright, against build/ served like the Gateway
+npm test             # api:check + check + unit + build + e2e — the full suite
+```
+
+`npm run test:e2e` needs a browser once: `npx playwright install chromium`.
+
+Nothing built is committed. `build/` is produced by the Gateway's image
+(`deploy/docker-compose/companion-gateway.Dockerfile`), whose Node stage runs
+`npm ci && npm run build`, and by `npm test` locally.
+
+## How it is put together
+
+| Path | What lives there |
+|---|---|
+| `src/routes/` | The screens. `+layout.ts` holds the page options that make this a static SPA; `+layout.svelte` is the shell and the capability gate. |
+| `src/lib/api/` | The Gateway client. `schema.d.ts` and `gateway-version.ts` are **generated**; `client.ts` is the two lines of configuration around them. |
+| `src/lib/capabilities/` | The capability gate: `report.ts` decides (pure), `probe.ts` measures (browser-only). |
+| `src/lib/version/` | The version handshake against the Gateway's `/health`, and the reload it forces. |
+| `src/lib/i18n/` | French and English, ICU patterns, `<locale>.json` per the wireframes. |
+| `src/lib/icons/` | The one module that imports an icon library. |
+| `src/lib/styles/` | `tokens.css` (the design tokens) and `base.css` (element defaults). |
+| `src/service-worker.ts` | Installability. Caches the fingerprinted build and nothing else. |
+| `tests/serve-like-gateway.mjs` | The Gateway's own path resolution, in Node, for Playwright. |
+
+## The decisions worth knowing before you change something
+
+### The static export, and the contract with the Gateway
+
+`adapter-static` with `fallback: '200.html'` and `precompress: true`
+(`vite.config.ts`), `ssr = false`, `prerender = true` and
+**`trailingSlash = 'never'`** (`src/routes/+layout.ts`).
+
+`'never'` is the chosen half of the contract. It makes the adapter write a
+prerendered page as `<path>.html` (`diagnostics.html`, not
+`diagnostics/index.html`), which is step 2 of the resolution order in
+`companion-gateway/src/static_files.rs`; the Gateway's step 3 redirects the
+slashed spelling onto it, so both spellings work and the build has one. A route
+the build has no file for is answered with `200.html` at HTTP **200**, so a
+deep link reloaded cold loads the app rather than a 404.
+
+### The Gateway client is generated, and checked
+
+`companion-gateway/openapi.yaml` is the source of truth (ticket #63): the
+Gateway embeds and serves those bytes at `/openapi.yaml`, and its own test
+suite fails on a route the description does not cover.
+`scripts/generate-api-client.mjs` turns it into `src/lib/api/schema.d.ts` and
+`src/lib/api/gateway-version.ts`. Both are committed, because the image's Node
+stage builds `companion/` alone and has no sibling directory to generate from —
+and committed generated code drifts, so `npm run api:check` regenerates in
+memory and fails when the two differ. It runs first in `npm test`.
+
+**Never hand-edit those two files, and never hand-write a request.**
+`openapi-fetch` types every call off the schema, so `gateway.GET('/api/devices')`
+is checked against the description and a path or a response member nobody
+described is a compile error.
+
+### Browser-only code stays out of module scope
+
+Prerendering imports every statically reachable module in **Node**, where
+`indexedDB`, `window` and `crypto.subtle` do not exist. A reference to one at
+module scope breaks `npm run build`, not just the page. So:
+
+- `src/lib/capabilities/probe.ts` is imported with `await import(...)`, from
+  `src/lib/boot.ts`;
+- `src/lib/version/reload.ts` likewise;
+- everything else touches a browser API inside a function, called from
+  `onMount` or an event handler.
+
+`vitest.config.ts` deliberately runs **without** the SvelteKit plugin, so a
+module that broke this rule would not even load in the unit tests.
+
+### The capability gate names a cause, not a list
+
+Secure context, WebAssembly, IndexedDB and Web Crypto are required; service
+workers and Web Locks are not (missing them costs installation and the two-tab
+warning). But the useful output is the *cause*: iOS Lockdown Mode switches off
+IndexedDB, service workers and Web Locks while leaving WebAssembly running, and
+"IndexedDB is missing" is true there and helps nobody.
+`src/lib/capabilities/report.ts` distinguishes an insecure origin, Lockdown
+Mode, blocked site data and an unsupported browser, and the screen leads with
+whichever it found.
+
+### No telemetry
+
+No analytics, no error collector, no third-party request of any kind — one
+Playwright test asserts that every request the app makes goes to its own
+origin, which is why the fonts are self-hosted (`@fontsource-variable/*`)
+rather than loaded from a CDN. What the user gets instead is `/diagnostics`
+and a "copy diagnostics" button. `src/lib/diagnostics.ts` builds that text, and
+its unit test asserts both halves: that it carries what a maintainer needs, and
+that it carries nothing about the owner or their conversations.
+
+### `events` is a direct dependency on purpose
+
+matrix-js-sdk imports the Node `events` builtin without declaring it. Today it
+resolves only by accident, through matrix-widget-api, which is a transitive
+dependency nobody promised to keep. Declaring it here is what stops the crypto
+work of ticket #67 from breaking on a dependency bump. Nothing in this app
+imports it directly yet.
+
+## Testing
+
+**Playwright is authoritative** (spec #65). It runs `channel: 'chromium'` — the
+real browser in its new headless mode — against `build/`, served by
+`tests/serve-like-gateway.mjs`. That server is not a convenience: it
+transcribes the Gateway's resolution order, content-type table and
+pre-compressed-sibling handling, because a test server that resolves paths
+differently proves a routing contract nobody ships. `localhost` is a secure
+context, so no flags and no HTTPS are needed for `crypto.subtle`, IndexedDB or
+a service worker.
+
+Vitest covers the pure modules only: the capability report, the version
+comparison, locale negotiation, hostname validation, the diagnostics text.
+Anything touching crypto, the session or the Gateway goes through Playwright.
+
+iOS behaviour — Safari's seven-day eviction, the installed-app exemption,
+Lockdown Mode — is verified by hand on a real device, as spec #65 requires:
+Playwright's WebKit is not Safari.
+
+## What is not here yet
+
+Screens 2 to 5 of the wireframes: the account and recovery key (#67), the
+network flows (#68), persona activation and the dashboard. `/onboarding` is the
+seam the bootstrap journey replaces. Screen 1's secondary "pair with my other
+device" link waits on the device-pairing flow and is not wired.
