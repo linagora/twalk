@@ -250,8 +250,8 @@ async fn main() -> Result<()> {
                 };
                 let body = event.content.body().to_owned();
                 let sender: OwnedUserId = event.sender.clone();
-                let bridge_content = room_bridge_content(&room).await;
-                let Some(network) = network::resolve(bridge_content.as_ref(), sender.localpart()) else {
+                let bridge_contents = room_bridge_contents(&room).await;
+                let Some(network) = network::resolve(&bridge_contents, sender.localpart()) else {
                     warn!(room = %room.room_id(), %sender, "cannot determine the network, skipping event");
                     return;
                 };
@@ -743,26 +743,34 @@ fn rfc3339_ms(ms: u64) -> String {
         .expect("RFC 3339 formatting is infallible")
 }
 
-/// Reads the room's `m.bridge` state event content (the IO), the mautrix
-/// portal marker identifying the network.
-async fn room_bridge_content(room: &Room) -> Option<serde_json::Value> {
-    room.get_state_event("m.bridge".into(), "")
+/// Reads the contents of every `m.bridge` state event of the room (the IO),
+/// the mautrix portal markers identifying the network. Mautrix keys the
+/// marker with the bridge's unique id (`<homeserver domain>/<appservice id>`
+/// in bridgev2), so it is read regardless of state key; ordering by state
+/// key keeps the choice deterministic when several bridges marked the room.
+async fn room_bridge_contents(room: &Room) -> Vec<serde_json::Value> {
+    let mut markers: Vec<(String, serde_json::Value)> = room
+        .get_state_events("m.bridge".into())
         .await
-        .ok()
-        .flatten()
-        .and_then(|raw| {
-            let json = match &raw {
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|raw| {
+            let json = match raw {
                 RawAnySyncOrStrippedState::Sync(raw) => raw.json().get(),
                 RawAnySyncOrStrippedState::Stripped(raw) => raw.json().get(),
             };
-            serde_json::from_str::<serde_json::Value>(json).ok()
+            let mut event = serde_json::from_str::<serde_json::Value>(json).ok()?;
+            let state_key = event.get("state_key")?.as_str()?.to_owned();
+            Some((state_key, event.get_mut("content")?.take()))
         })
-        .and_then(|event| event.get("content").cloned())
+        .collect();
+    markers.sort_by(|(left, _), (right, _)| left.cmp(right));
+    markers.into_iter().map(|(_, content)| content).collect()
 }
 
 /// Defers to the pure attribution policy in `network::resolve`.
 async fn resolve_network(room: &Room, sender: &OwnedUserId) -> Option<network::Network> {
-    network::resolve(room_bridge_content(room).await.as_ref(), sender.localpart())
+    network::resolve(&room_bridge_contents(room).await, sender.localpart())
 }
 
 /// Splits `m.relates_to` into the contract's reply target and thread root.

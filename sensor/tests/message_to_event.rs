@@ -125,6 +125,64 @@ async fn ghost_prefix_determines_the_network_without_bridge_state() -> Result<()
 }
 
 #[tokio::test]
+async fn a_keyed_bridge_marker_attributes_a_non_ghost_sender() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let sensor = SensorProc::start(&sensor_env())?;
+    let alpha = Bot::login("bot_alpha").await?;
+    // A double-puppeted user: the bridge relays the user's own messages as
+    // their real Matrix account, whose localpart carries no network prefix.
+    let puppet = Bot::login("bot_beta").await?;
+
+    // mautrix bridgev2 keys its m.bridge marker with the bridge's unique id.
+    // An unrelated bridge's marker sorts first and names no known network:
+    // the Sensor must look past it to the one that does.
+    let room_id = alpha.create_room("keyed-portal", false).await?;
+    let (other_key, other_content) =
+        harness::bridge_state(alpha.user_id(), "irc", "irc", "#keyed-portal");
+    alpha
+        .send_state_event(&room_id, "m.bridge", &other_key, other_content)
+        .await?;
+    let (state_key, content) = harness::whatsapp_bridge_state(alpha.user_id(), "keyed-portal");
+    assert!(
+        other_key < state_key && !state_key.is_empty(),
+        "the decoy marker must sort before the real one"
+    );
+    alpha
+        .send_state_event(&room_id, "m.bridge", &state_key, content)
+        .await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha.invite(&room_id, puppet.user_id()).await?;
+    puppet.join_room(&room_id).await?;
+
+    let matrix_event_id = puppet
+        .send_message(&room_id, "sent from my phone")
+        .await?;
+
+    let stored = bus
+        .wait_for_room_message(STREAM, MESSAGE_SUBJECT, &room_id)
+        .await?;
+    let event = &stored.payload;
+
+    validate_against_contract(event, "inbound.message.received")?;
+    assert_eq!(
+        event["id"].as_str(),
+        Some(sha256_hex(&format!("{matrix_event_id}:{room_id}")).as_str())
+    );
+    assert_eq!(event["subject"].as_str(), Some("@bot_beta:test.twalk"));
+    assert_eq!(
+        event["network"].as_str(),
+        Some("whatsapp"),
+        "the keyed m.bridge marker attributes the network without a ghost prefix"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_removed_room_stops_producing_events() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;

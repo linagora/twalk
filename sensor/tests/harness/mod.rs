@@ -439,8 +439,9 @@ impl Bot {
             .send_json(
                 reqwest::Method::PUT,
                 &format!(
-                    "/_matrix/client/v3/rooms/{}/state/{event_type}/{state_key}",
-                    esc(room_id)
+                    "/_matrix/client/v3/rooms/{}/state/{event_type}/{}",
+                    esc(room_id),
+                    esc(state_key)
                 ),
                 Some(&content),
                 "send state event",
@@ -454,8 +455,9 @@ impl Bot {
         self.send_json(
             reqwest::Method::GET,
             &format!(
-                "/_matrix/client/v3/rooms/{}/state/{event_type}/{state_key}",
-                esc(room_id)
+                "/_matrix/client/v3/rooms/{}/state/{event_type}/{}",
+                esc(room_id),
+                esc(state_key)
             ),
             None,
             "get state event",
@@ -529,22 +531,43 @@ pub fn sha256_hex(input: &str) -> String {
         .collect()
 }
 
-/// A mautrix-style portal room marker: the bridge identifies the network
-/// through an m.bridge state event.
+/// An `m.bridge` portal marker as current mautrix bridges (bridgev2 in
+/// mautrix-go) write it: the state key is the bridge's unique id,
+/// `<homeserver domain>/<appservice id>` (empty only when the operator sets
+/// `no_bridge_info_state_key`), `protocol.id` names the bridge and
+/// `channel.id` the remote chat. A WhatsApp chat has no `network` section:
+/// in bridgev2 that section describes a parent portal (a Discord guild, a
+/// Telegram forum), never the network. Returns `(state_key, content)`.
+pub fn bridge_state(
+    bridge_user_id: &str,
+    appservice_id: &str,
+    protocol_id: &str,
+    chat_id: &str,
+) -> (String, Value) {
+    let state_key = format!("{SERVER_NAME}/{appservice_id}");
+    let content = serde_json::json!({
+        "bridgebot": bridge_user_id,
+        "creator": bridge_user_id,
+        "protocol": { "id": protocol_id, "displayname": protocol_id },
+        "channel": { "id": chat_id, "displayname": chat_id },
+        "com.beeper.room_type": "dm",
+        "com.beeper.room_type.v2": "dm",
+    });
+    (state_key, content)
+}
+
+/// [`bridge_state`] for a mautrix-whatsapp portal.
+pub fn whatsapp_bridge_state(bridge_user_id: &str, chat_id: &str) -> (String, Value) {
+    bridge_state(bridge_user_id, "whatsapp", "whatsapp", chat_id)
+}
+
+/// A mautrix-style portal room: the bridge identifies the network through a
+/// keyed m.bridge state event.
 pub async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
     let room_id = bridge.create_room(name, false).await?;
+    let (state_key, content) = whatsapp_bridge_state(bridge.user_id(), name);
     bridge
-        .send_state_event(
-            &room_id,
-            "m.bridge",
-            "",
-            serde_json::json!({
-                "bridgebot": bridge.user_id(),
-                "creator": bridge.user_id(),
-                "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
-                "network": { "id": "whatsapp", "displayname": "WhatsApp" },
-            }),
-        )
+        .send_state_event(&room_id, "m.bridge", &state_key, content)
         .await?;
     Ok(room_id)
 }

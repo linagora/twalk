@@ -34,7 +34,10 @@ impl Network {
             "signal" => Some(Self::Signal),
             "discord" => Some(Self::Discord),
             "sms" => Some(Self::Sms),
-            "gmessages" => Some(Self::Sms),
+            // mautrix-gmessages refines its protocol id per conversation.
+            "gmessages" | "gmessages-sms" | "gmessages-rcs" => Some(Self::Sms),
+            // mautrix-discord (legacy bridge) reports its software id.
+            "discordgo" => Some(Self::Discord),
             _ => None,
         }
     }
@@ -62,19 +65,20 @@ impl Network {
     }
 }
 
-/// Resolves the network of an observed event: the content of the room's
-/// `m.bridge` state event (the mautrix mechanism) wins; the ghost naming
+/// Resolves the network of an observed event: the room's `m.bridge` state
+/// event contents (the mautrix mechanism) win — the first, in the given
+/// order, whose `protocol.id` names a known network; the ghost naming
 /// convention is the fallback. `None` when neither yields a network.
-pub fn resolve(bridge_content: Option<&Value>, sender_localpart: &str) -> Option<Network> {
-    if let Some(id) = bridge_content
-        .and_then(|content| content.pointer("/network/id"))
-        .and_then(Value::as_str)
-    {
-        if let Some(network) = Network::from_bridge_id(id) {
-            return Some(network);
-        }
-    }
-    Network::from_ghost_localpart(sender_localpart)
+///
+/// Only `protocol.id` identifies the bridged network: in mautrix the
+/// `network` section describes a parent portal (a Discord guild, a Telegram
+/// forum) and never carries a network name.
+pub fn resolve(bridge_contents: &[Value], sender_localpart: &str) -> Option<Network> {
+    bridge_contents
+        .iter()
+        .filter_map(|content| content.pointer("/protocol/id").and_then(Value::as_str))
+        .find_map(Network::from_bridge_id)
+        .or_else(|| Network::from_ghost_localpart(sender_localpart))
 }
 
 /// The contact's native network identifier, derived from a ghost localpart
@@ -153,32 +157,62 @@ mod tests {
 
     #[test]
     fn bridge_state_wins_over_the_ghost_prefix() {
-        let content = json!({ "network": { "id": "signal" }, "protocol": { "id": "signal" } });
+        let content = json!({ "protocol": { "id": "signal" }, "channel": { "id": "abc" } });
         assert_eq!(
-            resolve(Some(&content), "whatsapp_33612345678"),
+            resolve(&[content], "whatsapp_33612345678"),
             Some(Network::Signal)
         );
     }
 
     #[test]
     fn ghost_prefix_is_the_fallback() {
-        assert_eq!(
-            resolve(None, "whatsapp_33612345678"),
-            Some(Network::Whatsapp)
-        );
+        assert_eq!(resolve(&[], "whatsapp_33612345678"), Some(Network::Whatsapp));
     }
 
     #[test]
     fn bridge_transports_fold_through_resolve() {
-        let content = json!({ "network": { "id": "gmessages" } });
-        assert_eq!(resolve(Some(&content), "bot_alpha"), Some(Network::Sms));
+        let content = json!({ "protocol": { "id": "gmessages" } });
+        assert_eq!(resolve(&[content], "bot_alpha"), Some(Network::Sms));
+    }
+
+    #[test]
+    fn bridge_software_protocol_ids_map_to_their_network() {
+        // mautrix-gmessages refines the id per conversation type;
+        // mautrix-discord (legacy bridge) reports `discordgo`.
+        for (id, network) in [
+            ("gmessages-sms", Network::Sms),
+            ("gmessages-rcs", Network::Sms),
+            ("discordgo", Network::Discord),
+        ] {
+            let content = json!({ "protocol": { "id": id } });
+            assert_eq!(resolve(&[content], "bot_alpha"), Some(network), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_network_section_is_a_parent_portal_not_a_network() {
+        // In mautrix, `network` names a parent portal (a Discord guild, a
+        // Telegram forum): only `protocol.id` identifies the network.
+        let content = json!({ "protocol": { "id": "irc" }, "network": { "id": "whatsapp" } });
+        assert_eq!(resolve(&[content], "bot_alpha"), None);
+    }
+
+    #[test]
+    fn the_first_marker_naming_a_known_network_wins() {
+        let unknown = json!({ "protocol": { "id": "irc" } });
+        let telegram = json!({ "protocol": { "id": "telegram" } });
+        let signal = json!({ "protocol": { "id": "signal" } });
+        assert_eq!(
+            resolve(&[unknown, telegram, signal], "whatsapp_33612345678"),
+            Some(Network::Telegram)
+        );
     }
 
     #[test]
     fn nothing_resolved_without_bridge_state_or_prefix() {
-        assert_eq!(resolve(None, "bot_alpha"), None);
+        assert_eq!(resolve(&[], "bot_alpha"), None);
         let junk = json!({ "unrelated": true });
-        assert_eq!(resolve(Some(&junk), "bot_alpha"), None);
+        assert_eq!(resolve(&[junk], "bot_alpha"), None);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use matrix_sdk::{Client, Room};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use super::{poll_until, synapse_url, SERVER_NAME};
+use super::{poll_until, synapse_url, whatsapp_bridge_state, SERVER_NAME};
 
 pub struct CryptoBot {
     client: Client,
@@ -141,9 +141,15 @@ impl CryptoBot {
 
     /// Sends a state event (e.g. the `m.bridge` portal marker). State events
     /// are never Megolm-encrypted, matching real bridge behaviour.
-    pub async fn send_state_event(&self, room_id: &str, event_type: &str, content: Value) -> Result<()> {
+    pub async fn send_state_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        content: Value,
+    ) -> Result<()> {
         self.room(room_id)?
-            .send_state_event_raw(event_type, "", content)
+            .send_state_event_raw(event_type, state_key, content)
             .await
             .context("send state event failed")?;
         Ok(())
@@ -233,20 +239,12 @@ fn initial_state_event(event_type: &str, content: Value) -> Result<Raw<AnyInitia
 }
 
 /// A mautrix-style encrypted portal room: Megolm from creation plus the
-/// `m.bridge` state event identifying the network.
+/// keyed `m.bridge` state event identifying the network.
 pub async fn make_encrypted_whatsapp_portal(bridge: &CryptoBot, name: &str) -> Result<String> {
     let room_id = bridge.create_room(name, true).await?;
+    let (state_key, content) = whatsapp_bridge_state(bridge.user_id(), name);
     bridge
-        .send_state_event(
-            &room_id,
-            "m.bridge",
-            serde_json::json!({
-                "bridgebot": bridge.user_id(),
-                "creator": bridge.user_id(),
-                "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
-                "network": { "id": "whatsapp", "displayname": "WhatsApp" },
-            }),
-        )
+        .send_state_event(&room_id, "m.bridge", &state_key, content)
         .await?;
     Ok(room_id)
 }
