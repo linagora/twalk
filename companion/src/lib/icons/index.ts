@@ -24,6 +24,7 @@ import Copy from '@lucide/svelte/icons/copy';
 import Cpu from '@lucide/svelte/icons/cpu';
 import Database from '@lucide/svelte/icons/database';
 import ExternalLink from '@lucide/svelte/icons/external-link';
+import FileDown from '@lucide/svelte/icons/file-down';
 import Globe from '@lucide/svelte/icons/globe';
 import Info from '@lucide/svelte/icons/info';
 import KeyRound from '@lucide/svelte/icons/key-round';
@@ -46,6 +47,7 @@ export const icons = {
 	copy: Copy,
 	copied: ClipboardCheck,
 	reload: RefreshCw,
+	download: FileDown,
 	'external-link': ExternalLink,
 	language: Languages,
 

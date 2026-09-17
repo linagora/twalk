@@ -36,6 +36,21 @@ test.describe('the app loads', () => {
 	});
 
 	test('carries the domain into the next screen', async ({ page }) => {
+		// Screen 1 probes before it hands over (ticket #67), so the homeserver
+		// has to answer. A stand-in is enough here: what is under test is the
+		// normalisation and the hand-over, not the cryptography — that is the
+		// real-stack journey's (`bootstrap.spec.ts`).
+		await page.route('https://twalk.example.com/.well-known/matrix/client', (route) =>
+			route.fulfill({ status: 404 })
+		);
+		await page.route('https://twalk.example.com/_matrix/client/versions', (route) =>
+			route.fulfill({
+				status: 200,
+				contentType: 'application/json',
+				body: JSON.stringify({ versions: ['v1.11'] })
+			})
+		);
+
 		await page.goto('/');
 		await page.getByRole('textbox').fill('https://Twalk.Example.COM/');
 		await page.getByTestId('continue').click();

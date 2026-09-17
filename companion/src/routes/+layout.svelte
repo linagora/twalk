@@ -20,14 +20,44 @@
 
 	import CapabilityGate from '$lib/components/CapabilityGate.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
+	import TabElsewhere from '$lib/components/TabElsewhere.svelte';
 	import VersionBanner from '$lib/components/VersionBanner.svelte';
 	import { boot, startBoot } from '$lib/boot';
 	import { locale, t } from '$lib/i18n';
+	import type { TabRole } from '$lib/tabs/lock';
 
 	let { children } = $props();
 
+	/**
+	 * Which tab this is (ADR 0014). `electing` until the Web Lock answers,
+	 * which is one task, so no screen flashes on the way through.
+	 */
+	let tabRole = $state<TabRole>('electing');
+	let takeOver = $state<() => void>(() => {});
+
 	onMount(() => {
 		void startBoot();
+
+		// Browser-only, and dynamic for the same reason as the capability
+		// probe: `navigator.locks` does not exist in the Node process that
+		// prerenders this app.
+		let stop: (() => void) | null = null;
+		void (async () => {
+			const [{ electTab }, { releaseClient }] = await Promise.all([
+				import('$lib/tabs/lock'),
+				import('$lib/crypto/bootstrap')
+			]);
+			const election = electTab({
+				onRole: (role) => (tabRole = role),
+				// Giving up the lock without giving up the client would leave
+				// the store open in a tab that no longer owns it.
+				onYield: () => releaseClient()
+			});
+			takeOver = election.takeOver;
+			stop = election.stop;
+		})();
+
+		return () => stop?.();
 	});
 
 	const bootState = $derived($boot);
@@ -60,7 +90,7 @@
 
 <VersionBanner handshake={bootState.handshake} reloadRefused={bootState.reloadRefused} />
 
-<main id="main" data-testid="app" data-locale={$locale}>
+<main id="main" data-testid="app" data-locale={$locale} data-tab-role={tabRole}>
 	{#if bootState.capabilities === null}
 		<p class="booting" data-testid="booting">
 			<span class="spinner" aria-hidden="true"></span>
@@ -68,6 +98,8 @@
 		</p>
 	{:else if blocked && bootState.capabilities !== null}
 		<CapabilityGate report={bootState.capabilities} />
+	{:else if tabRole === 'elsewhere' && !alwaysAllowed}
+		<TabElsewhere onTakeOver={takeOver} />
 	{:else}
 		{#if degraded}
 			<p class="degraded" data-testid="capability-degraded" role="status">
