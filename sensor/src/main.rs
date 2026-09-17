@@ -1,11 +1,13 @@
 //! The Twalk Sensor binary. All the decision logic lives in the library
 //! modules; this file only wires them to matrix-sdk and NATS JetStream.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_nats::jetstream::AckKind;
 use futures::StreamExt;
+use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
@@ -31,18 +33,54 @@ async fn main() -> Result<()> {
         .init();
     info!(homeserver = %config.homeserver_url, user = %config.user_id, "sensor starting");
 
-    let client = Client::builder()
-        .homeserver_url(&config.homeserver_url)
-        .build()
-        .await?;
-    client
-        .matrix_auth()
-        .login_username(&config.user_id, &config.password)
-        .initial_device_display_name("twalk-sensor")
-        .send()
-        .await
-        .context("matrix login failed")?;
-    info!("logged in to the homeserver");
+    // Persistence (ticket 03): with SENSOR_STATE_DIR set, the SDK's state
+    // and crypto stores live in that directory (sqlite), so the sync token
+    // survives restarts and the sync loop resumes where it stopped instead
+    // of re-syncing (and re-emitting) the recent timeline. The stores are
+    // not encrypted at rest: the directory is the operator's to protect
+    // (volume permissions, disk encryption). Without SENSOR_STATE_DIR the
+    // Sensor keeps the in-memory behaviour: a fresh login and initial sync
+    // on every start.
+    let client = match &config.state_dir {
+        Some(state_dir) => Client::builder()
+            .homeserver_url(&config.homeserver_url)
+            .sqlite_store(state_dir, None)
+            .build()
+            .await?,
+        None => Client::builder()
+            .homeserver_url(&config.homeserver_url)
+            .build()
+            .await?,
+    };
+
+    // With a persisted store, a fresh password login on every start would
+    // mint a new device each time — growing the account's device list and
+    // resetting the crypto identity the crypto store was persisted for. The
+    // session is therefore kept in `session.json` in the state directory:
+    // restore it when present, log in otherwise and persist the new session
+    // for the next start. Restoring also reloads the persisted sync token,
+    // which `SyncSettings::default()` (SyncToken::ReusePrevious) picks up.
+    let session_file = config.state_dir.as_ref().map(|dir| dir.join("session.json"));
+    if restore_session(&client, session_file.as_deref()).await? {
+        info!("restored the persisted session");
+    } else {
+        client
+            .matrix_auth()
+            .login_username(&config.user_id, &config.password)
+            .initial_device_display_name("twalk-sensor")
+            .send()
+            .await
+            .context("matrix login failed")?;
+        info!("logged in to the homeserver");
+        if let Some(session_file) = &session_file {
+            let session = client
+                .matrix_auth()
+                .session()
+                .expect("a session exists right after login");
+            write_private_file(session_file, &serde_json::to_vec(&session)?)
+                .context("failed to persist the session")?;
+        }
+    }
 
     let nats = async_nats::connect(&config.nats_url)
         .await
@@ -341,6 +379,55 @@ async fn main() -> Result<()> {
         .await
         .context("sync loop failed")?;
     Ok(())
+}
+
+/// Restores the Matrix session persisted in `session_file` (ticket 03).
+/// Returns false — and the caller logs in fresh — when there is no file or
+/// the file is unreadable or unparseable; the store's sync token still
+/// applies after the fresh login, so nothing is re-emitted. A session that
+/// parses but fails to restore is fatal: it points at store corruption the
+/// operator should see, and logging in past a half-restored session is not
+/// safe (the SDK refuses to set authentication data twice).
+async fn restore_session(client: &Client, session_file: Option<&Path>) -> Result<bool> {
+    let Some(session_file) = session_file else {
+        return Ok(false);
+    };
+    if !session_file.is_file() {
+        return Ok(false);
+    }
+    let session = std::fs::read_to_string(session_file)
+        .with_context(|| format!("failed to read {}", session_file.display()))
+        .and_then(|raw| {
+            serde_json::from_str::<MatrixSession>(&raw)
+                .with_context(|| format!("failed to parse {}", session_file.display()))
+        });
+    match session {
+        Ok(session) => {
+            client
+                .restore_session(session)
+                .await
+                .context("failed to restore the persisted session")?;
+            Ok(true)
+        }
+        Err(error) => {
+            warn!(%error, "persisted session is unusable, falling back to a fresh login");
+            Ok(false)
+        }
+    }
+}
+
+/// Writes a file readable by its owner only — the session file holds an
+/// access token.
+fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    std::io::Write::write_all(&mut file, contents)
 }
 
 fn rfc3339(time: std::time::SystemTime) -> String {
