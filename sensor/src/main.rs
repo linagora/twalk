@@ -109,7 +109,12 @@ async fn main() -> Result<()> {
             session = None;
         }
     }
-    if session.is_none() {
+    // Only a fresh password login mints a new device, and only then is the
+    // existing crypto store stale. A configured access token names the
+    // device it belongs to, so its store is the right one and is kept — if
+    // the operator points a new token at a store from another device,
+    // matrix-sdk says so loudly rather than being second-guessed here.
+    if session.is_none() && config.access_token.is_none() {
         if let Some(state_dir) = &config.state_dir {
             set_stale_store_aside(state_dir).context("failed to move the stale store aside")?;
         }
@@ -144,14 +149,46 @@ async fn main() -> Result<()> {
             .context("failed to restore the persisted session")?;
         info!("restored the persisted session");
     } else {
-        client
-            .matrix_auth()
-            .login_username(&config.user_id, &config.password)
-            .initial_device_display_name("twalk-sensor")
-            .send()
-            .await
-            .context("matrix login failed")?;
-        info!("logged in to the homeserver");
+        match (&config.access_token, &config.device_id) {
+            // A pre-provisioned device: the operator obtained the token out
+            // of band (Synapse's admin registration API, or an SSO login),
+            // which is the only way in on a homeserver whose password login
+            // is disabled. Restoring it is a local operation — the first
+            // sync is what proves the token — so an invalid one fails there
+            // with M_UNKNOWN_TOKEN like a revoked persisted session does.
+            (Some(access_token), Some(device_id)) => {
+                let session = MatrixSession {
+                    meta: matrix_sdk::SessionMeta {
+                        user_id: matrix_sdk::ruma::UserId::parse(&config.user_id)
+                            .context("SENSOR_USER_ID is not a valid Matrix user ID")?,
+                        device_id: device_id.as_str().into(),
+                    },
+                    tokens: matrix_sdk::SessionTokens {
+                        access_token: access_token.clone(),
+                        refresh_token: None,
+                    },
+                };
+                client
+                    .restore_session(session)
+                    .await
+                    .context("failed to start from the configured access token")?;
+                info!(%device_id, "started from the configured access token");
+            }
+            _ => {
+                let password = config
+                    .password
+                    .as_deref()
+                    .expect("config validation guarantees a password when no token is set");
+                client
+                    .matrix_auth()
+                    .login_username(&config.user_id, password)
+                    .initial_device_display_name("twalk-sensor")
+                    .send()
+                    .await
+                    .context("matrix login failed")?;
+                info!("logged in to the homeserver");
+            }
+        }
         if let Some(session_file) = &session_file {
             let session = client
                 .matrix_auth()

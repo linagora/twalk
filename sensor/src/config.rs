@@ -12,10 +12,25 @@ pub struct Config {
     pub homeserver_url: String,
     /// Full Matrix user ID of the Sensor account, e.g. `@sensor:example.com`.
     pub user_id: String,
-    /// Password of the Sensor account. The Sensor logs in with it; the
-    /// password also lets the SDK complete the UIAA dance the first time it
-    /// bootstraps cross-signing (ticket 04).
-    pub password: String,
+    /// Password of the Sensor account (SENSOR_PASSWORD). The Sensor logs in
+    /// with it; the password also lets the SDK complete the UIAA dance the
+    /// first time it bootstraps cross-signing (ticket 04). Optional only
+    /// when `access_token` is set: a homeserver with password login disabled
+    /// (SSO-only) cannot be given one.
+    pub password: Option<String>,
+    /// Access token of a pre-provisioned device (SENSOR_ACCESS_TOKEN, with
+    /// SENSOR_DEVICE_ID). The operator obtains it out of band — Synapse's
+    /// admin registration API returns one, and so does any SSO login — and
+    /// the Sensor starts as that device instead of logging in. Required on a
+    /// homeserver where password login is disabled, since `login_username`
+    /// simply has no path there. Without a password the SDK cannot answer a
+    /// UIAA challenge, so cross-signing bootstrap needs either
+    /// `recovery_key` or a device already cross-signed by the operator.
+    pub access_token: Option<String>,
+    /// Device ID the `access_token` belongs to (SENSOR_DEVICE_ID). Must be
+    /// the device the token was issued for: the crypto store is bound to it,
+    /// and matrix-sdk refuses to open a store belonging to another device.
+    pub device_id: Option<String>,
     /// NATS server URL, e.g. `nats://nats:4222`.
     pub nats_url: String,
     /// Matrix user IDs allowed to invite the Sensor into a room: the bridge
@@ -56,10 +71,12 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        Ok(Self {
+        let config = Self {
             homeserver_url: required("SENSOR_HOMESERVER")?,
             user_id: required("SENSOR_USER_ID")?,
-            password: required("SENSOR_PASSWORD")?,
+            password: optional_string("SENSOR_PASSWORD"),
+            access_token: optional_string("SENSOR_ACCESS_TOKEN"),
+            device_id: optional_string("SENSOR_DEVICE_ID"),
             nats_url: required("SENSOR_NATS_URL")?,
             allowed_inviters: required("SENSOR_ALLOWED_INVITERS")?
                 .split(',')
@@ -83,11 +100,37 @@ impl Config {
                 .map(PathBuf::from),
             send_retry_base: Duration::from_millis(optional("SENSOR_SEND_RETRY_BASE_MS", 1000)?),
             send_retry_max_attempts: optional("SENSOR_SEND_RETRY_MAX_ATTEMPTS", 5)?,
-            recovery_key: std::env::var("SENSOR_RECOVERY_KEY")
-                .ok()
-                .filter(|value| !value.is_empty()),
-        })
+            recovery_key: optional_string("SENSOR_RECOVERY_KEY"),
+        };
+        config.validate_credentials()?;
+        Ok(config)
     }
+
+    /// One of the two credential shapes must be complete: a password to log
+    /// in with, or an access token and the device ID it was issued for.
+    /// Checked here rather than at login so a misconfigured deployment fails
+    /// on startup with a name to fix, not several seconds later inside the
+    /// SDK.
+    fn validate_credentials(&self) -> Result<()> {
+        match (&self.access_token, &self.device_id) {
+            (Some(_), Some(_)) => Ok(()),
+            (Some(_), None) => anyhow::bail!(
+                "SENSOR_ACCESS_TOKEN is set without SENSOR_DEVICE_ID: the token's device ID is \
+                 required, as the crypto store is bound to it"
+            ),
+            (None, _) if self.password.is_some() => Ok(()),
+            (None, _) => anyhow::bail!(
+                "no Sensor credentials: set SENSOR_PASSWORD, or SENSOR_ACCESS_TOKEN with \
+                 SENSOR_DEVICE_ID on a homeserver whose password login is disabled"
+            ),
+        }
+    }
+}
+
+/// An environment variable that is absent or empty is unset: an empty value
+/// in a compose `.env` file is how an operator leaves an option out.
+fn optional_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 fn required(name: &str) -> Result<String> {
