@@ -1,0 +1,64 @@
+# mautrix-signal base configuration for the Twalk reference deployment.
+#
+# Same shape and the same rules as ../mautrix-whatsapp/config.yaml, which
+# carries the full commentary: decisions only, no secrets, partial config
+# merged onto the pinned version's upstream defaults, and the
+# environment-dependent fields rendered on top at provisioning time by
+# ../generate-registration.sh.
+
+network:
+    # The device name the user sees in Signal's "Linked devices" list.
+    device_name: Twalk
+
+bridge:
+    # `bridge_status_notices` deliberately left at the upstream default
+    # (errors) — see the WhatsApp config for why.
+
+    # Overwritten at provisioning time with MATRIX_OWNER_USER_ID.
+    permissions: {}
+
+database:
+    type: sqlite3-fk-wal
+    uri: file:/data/mautrix-signal.db?_txlock=immediate
+
+homeserver:
+    # Rendered at provisioning time (MATRIX_INTERNAL_URL, MATRIX_DOMAIN).
+    address: http://synapse:8008
+    domain: localhost
+    software: standard
+    # Rendered from SIGNAL_STATUS_ENDPOINT: the Companion Gateway's
+    # bridge-status webhook.
+    status_endpoint:
+
+appservice:
+    address: http://bridge-signal:29328
+    hostname: 0.0.0.0
+    port: 29328
+
+    id: signal
+    bot:
+        username: signalbot
+        displayname: Signal bridge bot
+
+    # Rendered at provisioning time (SIGNAL_AS_TOKEN, SIGNAL_HS_TOKEN).
+    as_token: ""
+    hs_token: ""
+
+matrix:
+    federate_rooms: false
+
+provisioning:
+    # Rendered from SIGNAL_PROVISIONING_SECRET (at least 16 characters).
+    shared_secret: disable
+    allow_matrix_auth: false
+
+encryption:
+    allow: true
+    default: true
+    require: false
+
+logging:
+    min_level: info
+    writers:
+        - type: stdout
+          format: json

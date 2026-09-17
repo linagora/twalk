@@ -8,8 +8,21 @@
 # The provision one-shot creates the Sensor account on the way up;
 # ./provision.sh remains for ad-hoc account creation from the host.
 #
-# Bridges, Hermes and the other planes join this stack as they land (see the
-# repository roadmap).
+# The mautrix bridges are off by default, behind the `bridges` compose
+# profile: an operator who does not want them pulls no bridge image, runs no
+# bridge container and sets no bridge variable. Enabling them is two steps and
+# not one, because installing an appservice registration means editing the
+# homeserver's configuration and restarting it — there is no runtime API for
+# it (see ../README.md and ./provision-bridges.sh):
+#
+#   ./provision-bridges.sh                      # registrations, then Synapse
+#   docker compose --profile bridges up -d --wait
+#
+# Running only the second is a loud failure, not a subtle one — ../README.md
+# names both shapes it takes.
+#
+# Hermes and the other planes join this stack as they land (see the repository
+# roadmap).
 
 name: twalk
 
@@ -35,6 +48,13 @@ services:
       # secrets to avoid generating unused files.
       SYNAPSE_REGISTRATION_SHARED_SECRET: ${MATRIX_REGISTRATION_SHARED_SECRET:?set MATRIX_REGISTRATION_SHARED_SECRET in .env}
       SYNAPSE_MACAROON_SECRET_KEY: ${MATRIX_MACAROON_SECRET:?set MATRIX_MACAROON_SECRET in .env}
+      # Comma-separated appservice registration paths, as Synapse reads them
+      # from the bridge-registrations volume. Empty (the default): no
+      # `app_service_config_files` at all, which is what the stack without
+      # bridges needs — Synapse refuses to start on a path that does not
+      # exist yet, so this stays the operator's explicit opt-in and
+      # ./provision-bridges.sh checks it before generating anything.
+      MATRIX_APPSERVICE_REGISTRATIONS: ${MATRIX_APPSERVICE_REGISTRATIONS:-}
     volumes:
       - ./synapse/homeserver.yaml:/conf/homeserver.yaml:ro
       - synapse-data:/data
@@ -47,6 +67,13 @@ services:
     volumes:
       # Database, media store and signing key.
       - synapse-data:/data
+      # The bridges' appservice registrations, generated at provisioning
+      # time (./provision-bridges.sh) and read here — read-only, because the
+      # homeserver is their consumer and never their author. Mounted
+      # unconditionally: an empty volume costs nothing, and the paths inside
+      # it only reach Synapse's configuration through
+      # MATRIX_APPSERVICE_REGISTRATIONS above.
+      - bridge-registrations:/registrations:ro
     ports:
       # Localhost only by default: in production the client API is fronted
       # by the operator's TLS reverse proxy on the same host (which is what
@@ -215,8 +242,151 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # --- Bridges: mautrix-whatsapp and mautrix-signal ------------------------
+  #
+  # All four services below carry `profiles: [bridges]`, so a plain
+  # `docker compose up` ignores them entirely. Their variables all have empty
+  # defaults for the same reason: compose interpolates the whole file whatever
+  # the active profiles are, and a stack without bridges must not be asked for
+  # a bridge token. The missing-value errors therefore come from
+  # ../../bridges/generate-registration.sh, which can say what is missing and
+  # why, rather than from interpolation.
+  #
+  # Image versions are pinned. A bridge holds the user's account on an
+  # external network (docs/architecture/security-model.md): its version is not
+  # something a `docker compose pull` should change underneath a working
+  # login.
+
+  # One-shot: renders the bridge's configuration from ../../bridges/
+  # mautrix-whatsapp/config.yaml plus the environment, and generates the
+  # appservice registration into the shared bridge-registrations volume. Runs
+  # as root because it writes that shared volume and then hands the bridge's
+  # own data directory back to the unprivileged bridge user.
+  #
+  # It is also what ./provision-bridges.sh runs, before Synapse ever starts —
+  # generating a registration needs no homeserver, which is precisely why this
+  # is provisioning-time work and not something the running bridge can do.
+  bridge-whatsapp-registration:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/whatsapp:v26.09
+    user: "0:0"
+    environment:
+      BRIDGE_NETWORK: whatsapp
+      MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
+      MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
+      # The single owner whose login this bridge accepts. Defaults to
+      # GATEWAY_OWNER: it is the same human, and one deployment has one
+      # (ADR 0011).
+      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-${GATEWAY_OWNER:-}}
+      BRIDGE_AS_TOKEN: ${WHATSAPP_AS_TOKEN:-}
+      BRIDGE_HS_TOKEN: ${WHATSAPP_HS_TOKEN:-}
+      BRIDGE_PROVISIONING_SECRET: ${WHATSAPP_PROVISIONING_SECRET:-}
+      BRIDGE_STATUS_ENDPOINT: ${WHATSAPP_STATUS_ENDPOINT:-}
+      # The image's own UID/GID, under names bash does not already own.
+      BRIDGE_UID: "1337"
+      BRIDGE_GID: "1337"
+    volumes:
+      - ../../bridges/generate-registration.sh:/opt/twalk/generate-registration.sh:ro
+      - ../../bridges/mautrix-whatsapp/config.yaml:/opt/twalk/config.yaml:ro
+      - whatsapp-data:/data
+      - bridge-registrations:/registrations
+    entrypoint: ["/usr/bin/env", "bash", "/opt/twalk/generate-registration.sh"]
+
+  bridge-whatsapp:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/whatsapp:v26.09
+    depends_on:
+      # The bridge asserts its own registration against the homeserver on
+      # startup and exits if Synapse does not know its as_token — so Synapse
+      # has to be up, and its configuration has to name the registration
+      # already. That second half is ./provision-bridges.sh's job and cannot
+      # be a compose dependency; a bridge left crash-looping with
+      # "appservice not found" in its log is the symptom of skipping it.
+      synapse:
+        condition: service_healthy
+      bridge-whatsapp-registration:
+        condition: service_completed_successfully
+    volumes:
+      # Rendered config, SQLite database, and the WhatsApp session once a
+      # human has scanned the QR code.
+      - whatsapp-data:/data
+    ports:
+      # Localhost only: this port carries the appservice listener, and with
+      # it the provisioning API (`/_matrix/provision/v3/*`) whose bearer
+      # token starts and destroys logins. Inside the stack the Companion
+      # Gateway reaches it as http://bridge-whatsapp:29318 with no published
+      # port at all; this mapping exists so that an operator (and the
+      # deployment test) can probe `/_matrix/mau/live` from the host.
+      - "127.0.0.1:${WHATSAPP_APPSERVICE_PORT:-29318}:29318"
+    healthcheck:
+      # The appservice listener's unauthenticated liveness probe. Readiness
+      # (`/_matrix/mau/ready`) additionally waits for the network connection,
+      # which without a login never comes — so liveness is the right probe
+      # for a bridge nobody has logged in to yet.
+      test: ["CMD", "curl", "-fsS", "http://localhost:29318/_matrix/mau/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  # As above, for Signal. See the WhatsApp pair for the commentary.
+  bridge-signal-registration:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/signal:v26.09
+    user: "0:0"
+    environment:
+      BRIDGE_NETWORK: signal
+      MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
+      MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
+      # The single owner whose login this bridge accepts. Defaults to
+      # GATEWAY_OWNER: it is the same human, and one deployment has one
+      # (ADR 0011).
+      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-${GATEWAY_OWNER:-}}
+      BRIDGE_AS_TOKEN: ${SIGNAL_AS_TOKEN:-}
+      BRIDGE_HS_TOKEN: ${SIGNAL_HS_TOKEN:-}
+      BRIDGE_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
+      BRIDGE_STATUS_ENDPOINT: ${SIGNAL_STATUS_ENDPOINT:-}
+      BRIDGE_UID: "1337"
+      BRIDGE_GID: "1337"
+    volumes:
+      - ../../bridges/generate-registration.sh:/opt/twalk/generate-registration.sh:ro
+      - ../../bridges/mautrix-signal/config.yaml:/opt/twalk/config.yaml:ro
+      - signal-data:/data
+      - bridge-registrations:/registrations
+    entrypoint: ["/usr/bin/env", "bash", "/opt/twalk/generate-registration.sh"]
+
+  bridge-signal:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/signal:v26.09
+    depends_on:
+      synapse:
+        condition: service_healthy
+      bridge-signal-registration:
+        condition: service_completed_successfully
+    volumes:
+      - signal-data:/data
+    ports:
+      - "127.0.0.1:${SIGNAL_APPSERVICE_PORT:-29328}:29328"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:29328/_matrix/mau/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   synapse-data:
   nats-data:
   sensor-data:
   gateway-data:
+  # Written by the bridges' registration one-shots, read by Synapse. Shared
+  # on purpose: it is the one piece of state a bridge and the homeserver must
+  # agree on, and it is created empty whether or not the profile is on.
+  bridge-registrations:
+  # Each bridge's config, database and — after a human has scanned the QR
+  # code — its session on the external network. Deleting one of these is
+  # logging that account out.
+  whatsapp-data:
+  signal-data:

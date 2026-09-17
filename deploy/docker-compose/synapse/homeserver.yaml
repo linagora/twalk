@@ -51,3 +51,21 @@ registration_shared_secret: "{{ MATRIX_REGISTRATION_SHARED_SECRET }}"
 # enable_registration is test-only): accounts are provisioned by an operator
 # with register_new_matrix_user, which authenticates with the registration
 # shared secret above — see ../provision.sh.
+
+# Appservice registrations: the bridges, when the operator enabled them.
+# MATRIX_APPSERVICE_REGISTRATIONS is a comma-separated list of paths inside
+# the bridge-registrations volume (../compose.yaml mounts it at
+# /registrations), filled in by ../provision-bridges.sh's instructions. When
+# it is empty the key is left out entirely — Synapse refuses to start on a
+# registration path that does not exist, so the stack without bridges must
+# not name one.
+#
+# Installing a registration is a configuration change plus a restart; Synapse
+# has no runtime API for it. That is why bringing up bridges is a two-step
+# procedure and why ../provision-bridges.sh restarts the homeserver for you.
+{% if MATRIX_APPSERVICE_REGISTRATIONS %}
+app_service_config_files:
+{%- for path in MATRIX_APPSERVICE_REGISTRATIONS.split(",") %}
+  - "{{ path.strip() }}"
+{%- endfor %}
+{% endif %}
