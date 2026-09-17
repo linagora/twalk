@@ -14,10 +14,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use harness::{
-    ensure_stack, poll_until, sensor_env, sha256_hex, validate_against_contract, Bot, Bus,
+    ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sha256_hex, validate_against_contract, Bot, Bus,
     SensorProc, SENSOR_USER_ID,
 };
-use serde_json::json;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::time::sleep;
 
@@ -44,20 +43,7 @@ async fn puppet_presence_becomes_a_schema_valid_cloud_event() -> Result<()> {
         puppet.leave_room(&stale_room).await?;
     }
 
-    let room_id = alpha.create_room("presence-portal", false).await?;
-    alpha
-        .send_state_event(
-            &room_id,
-            "m.bridge",
-            "",
-            json!({
-                "bridgebot": alpha.user_id(),
-                "creator": alpha.user_id(),
-                "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
-                "network": { "id": "whatsapp", "displayname": "WhatsApp" },
-            }),
-        )
-        .await?;
+    let room_id = make_whatsapp_portal(&alpha, "presence-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
     alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
     alpha.invite(&room_id, puppet.user_id()).await?;
