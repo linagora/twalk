@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/bridge.status.changed.schema.json",
+  "title": "fr.linagora.twalk.bridge.status.changed.v1",
+  "description": "A bridge changed state (connected, disconnected, session expired, ...). Produced by the Companion Gateway, which supervises bridge provisioning and health. This is an operational event: the network and consent extensions are declared but optional, because a bridge state change has no meaningful consent dimension.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "datacontenttype",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(bridge_id + ':' + to_state + ':' + occurred_at). Re-emitting the same recorded transition produces the same id."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^gateway://[^/]+/bridges/[A-Za-z0-9_-]+$",
+      "description": "URI of the bridge resource on the Companion Gateway. Format: gateway://<domain>/bridges/<bridge_id>.",
+      "examples": [
+        "gateway://example.com/bridges/bridge-gmessages-1"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.bridge.status.changed.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the Companion Gateway produced the event."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^bridge-[a-z0-9-]+$",
+      "description": "Optional identifier of the bridge whose state changed. Mirrors data.bridge_id for filtering convenience.",
+      "examples": ["bridge-gmessages-1"]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/bridge.status.changed.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header."
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Optional on this operational event: when set, mirrors data.network for server-side filtering on NATS."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Optional on this operational event; bridge state changes normally carry no consent dimension."
+    },
+    "data": {
+      "type": "object",
+      "required": ["bridge_id", "network", "from_state", "to_state", "occurred_at"],
+      "additionalProperties": false,
+      "properties": {
+        "bridge_id": {
+          "type": "string",
+          "pattern": "^bridge-[a-z0-9-]+$",
+          "description": "Identifier of the bridge instance. Prefixed with bridge- even for non-Mautrix paths (e.g. bridge-sms-* for the SMS Companion) to keep the taxonomy consistent.",
+          "examples": ["bridge-whatsapp-1", "bridge-gmessages-1", "bridge-sms-android-1"]
+        },
+        "network": {
+          "type": "string",
+          "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+          "description": "The network this bridge serves, as the user experiences it. SMS is sms whether the transport is mautrix-gmessages or the SMS Companion (see ADR 0005)."
+        },
+        "from_state": {
+          "type": "string",
+          "enum": ["starting", "connected", "degraded", "disconnected", "session_expired"],
+          "description": "Bridge state before the transition."
+        },
+        "to_state": {
+          "type": "string",
+          "enum": ["starting", "connected", "degraded", "disconnected", "session_expired"],
+          "description": "Bridge state after the transition."
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp of when the transition was observed. Part of the id natural key."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Optional machine- or human-readable cause of the transition, e.g. 'session revoked by network'.",
+          "examples": ["session revoked by network"]
+        },
+        "last_message_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC 3339 timestamp of the last message seen through this bridge, for dashboard display."
+        }
+      }
+    }
+  }
+}

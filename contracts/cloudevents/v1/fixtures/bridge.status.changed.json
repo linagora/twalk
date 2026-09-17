@@ -1,0 +1,18 @@
+{
+  "specversion": "1.0",
+  "id": "029285728dfbbe8e00996a1e7a4c9baceb984a94e8360eb4b593ff9a70d661d9",
+  "source": "gateway://example.com/bridges/bridge-gmessages-1",
+  "type": "fr.linagora.twalk.bridge.status.changed.v1",
+  "time": "2026-09-17T10:20:00Z",
+  "subject": "bridge-gmessages-1",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/bridge.status.changed.schema.json",
+  "network": "sms",
+  "data": {
+    "bridge_id": "bridge-gmessages-1",
+    "network": "sms",
+    "from_state": "starting",
+    "to_state": "connected",
+    "occurred_at": "2026-09-17T10:20:00Z"
+  }
+}

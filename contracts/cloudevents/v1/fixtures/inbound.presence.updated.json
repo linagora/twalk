@@ -1,0 +1,19 @@
+{
+  "specversion": "1.0",
+  "id": "3faeb1e775a4f00e6405420717a84b4d51d241db50ee3b6e11fa584aa8ad68d4",
+  "source": "matrix://matrix.example.com/!abcXYZ123:example.com",
+  "type": "fr.linagora.twalk.inbound.presence.updated.v1",
+  "time": "2026-09-17T10:15:00Z",
+  "subject": "@whatsapp_33612345678:example.com",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.presence.updated.schema.json",
+  "network": "whatsapp",
+  "consent": "granted",
+  "data": {
+    "presence": "online",
+    "last_active_at": "2026-09-17T10:15:00Z",
+    "contact": {
+      "display_name": "Aïcha Benali"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "specversion": "1.0",
+  "id": "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0",
+  "source": "matrix://matrix.example.com/!abcXYZ123:example.com",
+  "type": "fr.linagora.twalk.inbound.message.received.v1",
+  "time": "2026-09-17T10:00:00Z",
+  "subject": "@whatsapp_33612345678:example.com",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
+  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+  "network": "whatsapp",
+  "consent": "granted",
+  "data": {
+    "body": "On décale à 20h ?",
+    "format": "text/plain",
+    "reply_to": null,
+    "attachments": [],
+    "contact": {
+      "display_name": "Aïcha Benali",
+      "network_identifier": "+33612345678"
+    },
+    "network_timestamp": "2026-09-17T09:59:58Z"
+  }
+}

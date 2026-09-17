@@ -1,0 +1,28 @@
+{
+  "specversion": "1.0",
+  "id": "319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b",
+  "source": "hermes://twalk.example.com/personas/assistant",
+  "type": "fr.linagora.twalk.persona.suggest.produced.v1",
+  "time": "2026-09-17T10:00:09Z",
+  "subject": "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/persona.suggest.produced.schema.json",
+  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+  "network": "whatsapp",
+  "consent": "granted",
+  "data": {
+    "persona_id": "assistant",
+    "trigger": {
+      "event_id": "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0",
+      "event_type": "fr.linagora.twalk.inbound.message.received.v1"
+    },
+    "suggestion": {
+      "body": "Pas de problème, à 20h !",
+      "format": "text/plain"
+    },
+    "attempt": 1,
+    "confidence": 0.86,
+    "rationale": "Demande simple et ton amical : une confirmation courte suffit.",
+    "expires_at": "2026-09-17T11:00:00Z"
+  }
+}

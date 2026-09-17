@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/persona.suggest.produced.schema.json",
+  "title": "fr.linagora.twalk.persona.suggest.produced.v1",
+  "description": "A persona produced a suggested reply for human oversight. Nothing is ever sent on the sole basis of this event: a suggestion only becomes a reply when a persona.reply.approved event references it. Produced by Hermes on the NATS JetStream bus.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "consent",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(persona_id + ':' + trigger_event_id + ':' + attempt), with attempt starting at 1. Several suggestions may exist for the same trigger; each attempt has its own id while remaining replay-safe."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^hermes://[^/]+/personas/[a-z0-9_-]+$",
+      "description": "URI identifying the persona that produced the suggestion. Format: hermes://<domain>/personas/<persona_id>.",
+      "examples": [
+        "hermes://twalk.example.com/personas/assistant"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.persona.suggest.produced.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when Hermes produced the event."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "CloudEvents id of the trigger event the suggestion replies to."
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/persona.suggest.produced.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header, normally continued from the trigger event."
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Network of the trigger event, copied for server-side filtering on NATS without deserializing the data payload."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Consent state of the trigger event's sender, copied from the trigger."
+    },
+    "data": {
+      "type": "object",
+      "required": ["persona_id", "trigger", "suggestion"],
+      "additionalProperties": false,
+      "properties": {
+        "persona_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$",
+          "description": "Identifier of the persona that produced the suggestion.",
+          "examples": ["assistant"]
+        },
+        "trigger": {
+          "type": "object",
+          "required": ["event_id", "event_type"],
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "description": "CloudEvents id of the trigger event. Identical to the top-level subject."
+            },
+            "event_type": {
+              "type": "string",
+              "pattern": "^fr\\.linagora\\.twalk\\.[a-z]+\\.[a-z]+\\.[a-z]+\\.v[0-9]+$",
+              "description": "CloudEvents type of the trigger event."
+            }
+          },
+          "description": "Structured reference to the event the suggestion replies to."
+        },
+        "suggestion": {
+          "type": "object",
+          "required": ["body", "format"],
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "type": "string",
+              "maxLength": 65536,
+              "description": "The suggested reply in its canonical text form."
+            },
+            "format": {
+              "type": "string",
+              "enum": ["text/plain", "text/markdown", "text/html"],
+              "description": "Content type of the body field. text/plain is the default and safest."
+            }
+          },
+          "description": "The suggested reply itself."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Suggestion number for this trigger, starting at 1. Part of the id natural key."
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Optional self-reported confidence of the persona, for oversight display. Not a correctness guarantee."
+        },
+        "rationale": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "Optional short explanation of why the persona suggests this reply, for oversight display."
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC 3339 timestamp after which the suggestion should be considered stale (e.g. a same-day appointment answer)."
+        }
+      }
+    }
+  }
+}

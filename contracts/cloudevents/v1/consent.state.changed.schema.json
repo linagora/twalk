@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/consent.state.changed.schema.json",
+  "title": "fr.linagora.twalk.consent.state.changed.v1",
+  "description": "The user modified the data-processing consent state of a contact, a channel or a persona. Produced by the Companion Gateway, the single writer of consent state (see ADR 0006). This is an operational event: the network and consent extensions are declared but optional, because a consent change can span several networks and is itself about consent.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "datacontenttype",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(subject_type + ':' + subject_id + ':' + new_state + ':' + occurred_at). Re-emitting the same recorded change produces the same id."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^gateway://[^/]+/consent$",
+      "description": "URI of the consent resource on the Companion Gateway. Format: gateway://<domain>/consent.",
+      "examples": [
+        "gateway://example.com/consent"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.consent.state.changed.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the Companion Gateway produced the event."
+    },
+    "subject": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Optional identifier of the affected subject (a contact's Matrix user ID, a persona id, or a channel id). Mirrors data.subject.id for filtering convenience.",
+      "examples": [
+        "assistant",
+        "@whatsapp_33612345678:example.com"
+      ]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/consent.state.changed.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header."
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Optional on this operational event: only set when the consent change targets exactly one network; the authoritative scope is data.scope.networks."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Optional on this operational event: when set, mirrors data.new_state for filtering convenience."
+    },
+    "data": {
+      "type": "object",
+      "required": ["subject", "old_state", "new_state", "scope", "occurred_at"],
+      "additionalProperties": false,
+      "properties": {
+        "subject": {
+          "type": "object",
+          "required": ["type", "id"],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["contact", "channel", "persona"],
+              "description": "What the consent decision applies to: a contact, a whole channel, or a persona."
+            },
+            "id": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Identifier of the subject: a Matrix user ID for a contact, a persona id for a persona, a channel identifier for a channel."
+            }
+          },
+          "description": "Who or what the consent decision applies to."
+        },
+        "old_state": {
+          "type": "string",
+          "enum": ["unset", "granted", "pending", "revoked"],
+          "description": "Consent state before the change. 'unset' means no decision had ever been recorded for this subject."
+        },
+        "new_state": {
+          "type": "string",
+          "enum": ["granted", "pending", "revoked"],
+          "description": "Consent state after the change."
+        },
+        "scope": {
+          "type": "object",
+          "required": ["networks"],
+          "additionalProperties": false,
+          "properties": {
+            "networks": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["whatsapp", "telegram", "signal", "discord", "sms"]
+              },
+              "description": "Networks the decision applies to. A contact reachable on several networks gets one decision per scope."
+            }
+          },
+          "description": "The perimeter of the consent decision."
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp of when the user took the decision. Part of the id natural key."
+        },
+        "actor": {
+          "type": "string",
+          "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+          "description": "Optional Matrix user ID of the human who took the decision.",
+          "examples": ["@michel:example.com"]
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Optional free-text reason recorded with the decision, for the audit trail."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/inbound.presence.updated.schema.json",
+  "title": "fr.linagora.twalk.inbound.presence.updated.v1",
+  "description": "A contact came online, went offline or became unavailable on an external messaging network, observed by the Sensor from bridge presence traffic in a Matrix portal room and normalized as a CloudEvents 1.0 envelope. Matrix presence is ephemeral (EDU): it carries no event ID, so the deterministic id derives from the sender, the state and the receipt timestamp. Consumed by Hermes personas subscribed to the inbound.presence.updated.* subject on NATS JetStream.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "consent",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(matrix_user_id + ':' + presence + ':' + receipt_timestamp_ms), where receipt_timestamp_ms is the homeserver receipt time of the presence update in milliseconds. Presence EDUs carry no Matrix event ID; this natural key keeps bus resynchronizations idempotent."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
+      "description": "URI identifying the Matrix portal room through which the presence update was observed. Format: matrix://<homeserver>/<room_id>.",
+      "examples": [
+        "matrix://matrix.example.com/!abcXYZ123:example.com"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.inbound.presence.updated.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the Sensor produced the event."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+      "description": "Matrix user ID of the contact whose presence changed, as materialized by the bridge. Used for routing and for consent evaluation.",
+      "examples": [
+        "@whatsapp_33612345678:example.com"
+      ]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/inbound.presence.updated.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header. Enables distributed tracing across Sensor, NATS, Hermes and downstream services without mandating a specific tracing backend."
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Identifies the external network the presence update originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Current consent state of the contact's data-processing agreement, as tracked by the Companion Gateway, the single writer of consent state. Personas MUST refuse to process events where consent is not 'granted', unless they are explicitly authorized to handle consent-management workflows."
+    },
+    "data": {
+      "type": "object",
+      "required": ["presence", "contact"],
+      "additionalProperties": false,
+      "properties": {
+        "presence": {
+          "type": "string",
+          "enum": ["online", "offline", "unavailable"],
+          "description": "The new presence state of the contact, normalized across networks."
+        },
+        "last_active_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC 3339 timestamp of when the contact was last active, when the bridge reports it."
+        },
+        "contact": {
+          "type": "object",
+          "required": ["display_name"],
+          "additionalProperties": false,
+          "properties": {
+            "display_name": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Human-readable display name of the contact, as known to the recipient."
+            },
+            "network_identifier": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Optional native network identifier (e.g. phone number for WhatsApp, username for Telegram). Only populated when consent state allows it."
+            },
+            "avatar_mxc_uri": {
+              "type": "string",
+              "pattern": "^mxc://[^/]+/[A-Za-z0-9]+$",
+              "description": "Optional Matrix content URI for the contact's avatar."
+            }
+          },
+          "description": "Structured information about the contact, resolved by Sensor from the Matrix membership state and bridge metadata."
+        }
+      }
+    }
+  }
+}

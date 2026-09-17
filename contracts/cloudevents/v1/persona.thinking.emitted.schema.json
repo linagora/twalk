@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/persona.thinking.emitted.schema.json",
+  "title": "fr.linagora.twalk.persona.thinking.emitted.v1",
+  "description": "A persona hosted by Hermes has started processing an event. Emitted so oversight interfaces (Buzz Watch Room, the Companion activity feed) can render agent activity in real time. Produced by Hermes on the NATS JetStream bus.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "consent",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(persona_id + ':' + trigger_event_id). A persona starts processing a given trigger once; retries produce the same id and deduplicate safely."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^hermes://[^/]+/personas/[a-z0-9_-]+$",
+      "description": "URI identifying the persona that started processing. Format: hermes://<domain>/personas/<persona_id>.",
+      "examples": [
+        "hermes://twalk.example.com/personas/assistant"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.persona.thinking.emitted.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when Hermes produced the event."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "CloudEvents id of the event being processed (the trigger). Links agent activity back to the exact inbound occurrence on the bus."
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/persona.thinking.emitted.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header, normally continued from the trigger event."
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Network of the trigger event, copied for server-side filtering on NATS without deserializing the data payload."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Consent state of the trigger event's sender, copied from the trigger. Personas must only start processing events whose consent is 'granted'."
+    },
+    "data": {
+      "type": "object",
+      "required": ["persona_id", "trigger"],
+      "additionalProperties": false,
+      "properties": {
+        "persona_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$",
+          "description": "Identifier of the persona that started processing (e.g. assistant, watch, archive).",
+          "examples": ["assistant"]
+        },
+        "trigger": {
+          "type": "object",
+          "required": ["event_id", "event_type"],
+          "additionalProperties": false,
+          "properties": {
+            "event_id": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$",
+              "description": "CloudEvents id of the trigger event. Identical to the top-level subject."
+            },
+            "event_type": {
+              "type": "string",
+              "pattern": "^fr\\.linagora\\.twalk\\.[a-z]+\\.[a-z]+\\.[a-z]+\\.v[0-9]+$",
+              "description": "CloudEvents type of the trigger event, so consumers can reason about what is being processed without a bus lookup."
+            }
+          },
+          "description": "Structured reference to the event the persona started processing."
+        },
+        "model": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Optional identifier of the LLM the persona will reason with, for oversight display."
+        }
+      }
+    }
+  }
+}

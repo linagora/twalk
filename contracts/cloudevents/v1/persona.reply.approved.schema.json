@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/persona.reply.approved.schema.json",
+  "title": "fr.linagora.twalk.persona.reply.approved.v1",
+  "description": "A suggested reply was approved by the user and should be sent back to the external network through the bridge that owns the target portal room. Emitted by Hermes when an oversight interface (Buzz Dialogue Room, the Companion) records the approval. This is the only v1 event that triggers an outbound message.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "consent",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(suggestion_event_id + ':' + approved_by). A given suggestion is approved at most once by a given user."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^hermes://[^/]+/personas/[a-z0-9_-]+$",
+      "description": "URI identifying the persona whose suggestion was approved. Format: hermes://<domain>/personas/<persona_id>.",
+      "examples": [
+        "hermes://twalk.example.com/personas/assistant"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.persona.reply.approved.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when Hermes produced the event."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "CloudEvents id of the approved suggestion (a persona.suggest.produced event)."
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/persona.reply.approved.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header, normally continued from the trigger event."
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Network the reply will be sent to, copied from the trigger event for server-side filtering on NATS."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Consent state of the original sender, copied from the trigger event."
+    },
+    "data": {
+      "type": "object",
+      "required": ["persona_id", "suggestion_event_id", "approved_by", "final", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "persona_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]+$",
+          "description": "Identifier of the persona whose suggestion was approved.",
+          "examples": ["assistant"]
+        },
+        "suggestion_event_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "CloudEvents id of the approved persona.suggest.produced event. Identical to the top-level subject."
+        },
+        "approved_by": {
+          "type": "string",
+          "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+          "description": "Matrix user ID of the human who approved the reply. The audit trail of who sent what always goes through this field.",
+          "examples": ["@michel:example.com"]
+        },
+        "final": {
+          "type": "object",
+          "required": ["body", "format"],
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "type": "string",
+              "maxLength": 65536,
+              "description": "The exact content to send. May differ from the suggestion when the user edited it before approving."
+            },
+            "format": {
+              "type": "string",
+              "enum": ["text/plain", "text/markdown", "text/html"],
+              "description": "Content type of the body field. text/plain is the default and safest."
+            }
+          },
+          "description": "The final content to send, as approved."
+        },
+        "edited": {
+          "type": "boolean",
+          "description": "True when the final content differs from the approved suggestion. Lets oversight interfaces measure how often personas are corrected."
+        },
+        "target": {
+          "type": "object",
+          "required": ["room_id"],
+          "additionalProperties": false,
+          "properties": {
+            "room_id": {
+              "type": "string",
+              "pattern": "^![A-Za-z0-9]+:[^/]+$",
+              "description": "Matrix ID of the portal room the reply must be posted to; the bridge owning the room performs the outbound send."
+            },
+            "reply_to_event_id": {
+              "type": "string",
+              "pattern": "^\\$[A-Za-z0-9_-]+$",
+              "description": "Optional Matrix event ID the reply should be threaded under, normally the original inbound message."
+            }
+          },
+          "description": "Where the approved reply must be sent."
+        }
+      }
+    }
+  }
+}
