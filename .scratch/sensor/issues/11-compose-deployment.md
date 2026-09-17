@@ -6,8 +6,8 @@
 
 **Blocked by:** 10 — Observability.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `docker compose up` starts Synapse, NATS and Sensor together with named volumes
-- [ ] The Sensor is configured through a documented `.env.example`, environment only
-- [ ] On a fresh deployment, an invited room produces events on the bus without manual intervention
+- [x] `docker compose up` starts Synapse, NATS and Sensor together with named volumes
+- [x] The Sensor is configured through a documented `.env.example`, environment only
+- [x] On a fresh deployment, an invited room produces events on the bus without manual intervention
