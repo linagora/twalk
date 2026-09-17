@@ -289,9 +289,13 @@ async fn run_first_life(
 }
 
 /// After a recovery the Sensor is up and publishing, on a new persisted
-/// session, with the stale store kept aside.
+/// session, with the stale crypto store kept aside and the state store (and
+/// its sync token) kept in place: the message published before the recovery
+/// is not published a second time.
+#[allow(clippy::too_many_arguments)]
 async fn assert_recovered(
     bus: &Bus,
+    publishes: &mut UnboundedReceiver<Value>,
     alpha: &Bot,
     env: &[(String, String)],
     state_dir: &std::path::Path,
@@ -302,6 +306,8 @@ async fn assert_recovered(
     let mut sensor = SensorProc::start(env)?;
     let event_id = alpha.send_message(room_id, "second life").await?;
     let messages = wait_for_room_events(bus, room_id, 2).await?;
+    // Let any erroneous re-emission happen before counting publishes.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
     assert!(sensor.is_running(), "the Sensor must not crash on a stale store");
     assert_bus_events(
         &messages,
@@ -309,12 +315,17 @@ async fn assert_recovered(
         &[first_event_id, event_id],
         &["first life", "second life"],
     )?;
+    assert_no_republish(publishes, room_id, 2);
     let new_token = persisted_access_token(state_dir)?;
     assert_ne!(new_token, old_token, "a fresh login must persist its new session");
     assert_eq!(
         stale_stores(state_dir).len(),
         1,
-        "the stale store must be moved aside, not deleted"
+        "the stale crypto store must be moved aside, not deleted"
+    );
+    assert!(
+        state_dir.join("matrix-sdk-state.sqlite3").exists(),
+        "the state store (sync token) must be kept in place"
     );
     sensor.stop().await;
     Ok(())
@@ -325,6 +336,7 @@ async fn an_unparseable_session_file_recovers_on_a_clean_store() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
+    let mut publishes = bus.subscribe_raw("twalk.>").await?;
     let state_dir = fresh_state_dir("corrupt-session");
     let env = env_with_state_dir(&state_dir);
     let alpha = Bot::login("bot_alpha").await?;
@@ -337,7 +349,7 @@ async fn an_unparseable_session_file_recovers_on_a_clean_store() -> Result<()> {
     // the previous device.
     std::fs::write(state_dir.join("session.json"), b"{\"meta\": {\"user_")?;
 
-    assert_recovered(&bus, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
+    assert_recovered(&bus, &mut publishes, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
     let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }
@@ -347,6 +359,7 @@ async fn a_revoked_access_token_recovers_with_a_fresh_login() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
+    let mut publishes = bus.subscribe_raw("twalk.>").await?;
     let state_dir = fresh_state_dir("revoked-token");
     let env = env_with_state_dir(&state_dir);
     let alpha = Bot::login("bot_alpha").await?;
@@ -365,7 +378,7 @@ async fn a_revoked_access_token_recovers_with_a_fresh_login() -> Result<()> {
         .await?
         .error_for_status()?;
 
-    assert_recovered(&bus, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
+    assert_recovered(&bus, &mut publishes, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
     let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }

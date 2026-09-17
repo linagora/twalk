@@ -91,8 +91,8 @@ async fn main() -> Result<()> {
     // opens the store (issue #28): the crypto store belongs to the session's
     // device, and matrix-sdk refuses to open it for the new device a fresh
     // login mints. So when the session is missing, unparseable or its token
-    // was revoked, the stale store is moved aside first and the client
-    // starts on a clean one.
+    // was revoked, the stale crypto store is moved aside first and the client
+    // starts on a clean one (the state store and its sync token are kept).
     let session_file = config.state_dir.as_ref().map(|dir| dir.join("session.json"));
     let mut session = session_file.as_deref().and_then(load_session);
     if let Some(persisted) = &session {
@@ -764,16 +764,25 @@ async fn access_token_revoked(homeserver_url: &str, access_token: &str) -> bool 
         .is_some_and(|error| error["errcode"] == "M_UNKNOWN_TOKEN")
 }
 
-/// Prefix of the stores matrix-sdk's sqlite backend keeps in the state
-/// directory (state, crypto, event cache, media, with their -wal/-shm files).
-const SDK_STORE_PREFIX: &str = "matrix-sdk-";
+/// The crypto store matrix-sdk's sqlite backend keeps in the state
+/// directory; its `-wal`/`-shm` companions share this prefix.
+const CRYPTO_STORE_FILE: &str = "matrix-sdk-crypto.sqlite3";
 
-/// Moves the stores of a previous device (and its dead session file) into a
-/// timestamped `stale-store-*` subdirectory of `state_dir`, so the client
-/// starts on a clean store (issue #28). Nothing is deleted: the operator
-/// decides what to do with the old store. The subdirectory stays inside
-/// `state_dir` because that is typically a volume mount point, which cannot
-/// be renamed itself, and a rename within it never crosses filesystems.
+/// Moves the previous device's crypto store (and its dead session file)
+/// into a timestamped `stale-store-*` subdirectory of `state_dir`, so the
+/// new device starts on a clean crypto store (issue #28). Nothing is
+/// deleted: the operator decides what to do with the old store.
+///
+/// Only the crypto store is bound to the device: in matrix-sdk 0.19 the
+/// account check (`CryptoStoreError::MismatchedAccount`) lives in the
+/// `OlmMachine` alone, while the state and event-cache stores are opened and
+/// reloaded (rooms, sync token) on login and restore alike without any
+/// user/device check. They are therefore kept, so the sync resumes from the
+/// persisted token and the recent timeline is not re-emitted on the bus.
+///
+/// The subdirectory stays inside `state_dir` because that is typically a
+/// volume mount point, which cannot be renamed itself, and a rename within
+/// it never crosses filesystems.
 fn set_stale_store_aside(state_dir: &Path) -> Result<()> {
     let entries = match std::fs::read_dir(state_dir) {
         Ok(entries) => entries,
@@ -784,12 +793,12 @@ fn set_stale_store_aside(state_dir: &Path) -> Result<()> {
     for entry in entries {
         let name = entry?.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.starts_with(SDK_STORE_PREFIX) || name_str == "session.json" {
+        if name_str.starts_with(CRYPTO_STORE_FILE) || name_str == "session.json" {
             stale.push(name);
         }
     }
-    if !stale.iter().any(|name| name.to_string_lossy().starts_with(SDK_STORE_PREFIX)) {
-        return Ok(()); // no store yet: a first start, nothing to set aside
+    if !stale.iter().any(|name| name.to_string_lossy().starts_with(CRYPTO_STORE_FILE)) {
+        return Ok(()); // no crypto store yet: a first start, nothing to set aside
     }
     let stamp = now_unix_seconds();
     let mut aside = state_dir.join(format!("stale-store-{stamp}"));
@@ -805,11 +814,10 @@ fn set_stale_store_aside(state_dir: &Path) -> Result<()> {
     }
     warn!(
         moved_to = %aside.display(),
-        "the persisted session is unusable: moved the previous device's store aside and starting on a clean \
-         store with a new device. Its sync position is lost (the recent timeline is re-synced; JetStream \
-         deduplicates republished ids within its window) and Megolm sessions held only by the old device \
-         cannot be decrypted by the new one unless SENSOR_RECOVERY_KEY restores the key backup. Delete the \
-         moved directory once it is no longer needed."
+        "the persisted session is unusable: moved the previous device's crypto store aside and logging in as a \
+         new device on a clean crypto store. The state store and sync token are kept, so nothing is re-emitted. \
+         Megolm sessions held only by the old device cannot be decrypted by the new one unless \
+         SENSOR_RECOVERY_KEY restores the key backup. Delete the moved directory once it is no longer needed."
     );
     Ok(())
 }
