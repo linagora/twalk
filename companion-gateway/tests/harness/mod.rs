@@ -505,6 +505,66 @@ impl MatrixUser {
     }
 }
 
+/// The bus stream and subject the Gateway publishes consent decisions on
+/// (ticket #49) — the Sensor's stream, the contract's subject.
+pub const CONSENT_STREAM: &str = "twalk";
+pub const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
+
+/// [`gateway_env`] plus the one variable the consent store adds: the bus its
+/// outbox publishes to. Everything else consent needs — the state directory,
+/// the owner, the domain its events name themselves by — it takes from the
+/// sign-in configuration already in [`gateway_env`].
+pub fn gateway_env_with_consent(static_dir: &Path, nats_url: &str) -> Vec<(String, String)> {
+    gateway_env_with(static_dir, &[("GATEWAY_NATS_URL", nats_url)])
+}
+
+/// A TCP port nothing listens on: asked of the kernel, then released. The
+/// crash test points a Gateway at it to record decisions the bus cannot have
+/// heard.
+pub fn unreachable_nats_url() -> Result<String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("failed to ask the kernel for a free port")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(format!("nats://127.0.0.1:{port}"))
+}
+
+/// Signs the owner's device in and returns its device token: what every
+/// endpoint behind #52's guard needs.
+///
+/// The sign-in suite drives this flow by hand, because the flow is what it
+/// tests; every other suite only needs a device that is signed in, and says
+/// so in one line.
+pub async fn signed_in_device_token(base: &str) -> Result<String> {
+    let owner = MatrixUser::login(OWNER_LOCALPART).await?;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/session"))
+        .json(&serde_json::json!({
+            "matrix_openid_token": owner.openid_token().await?,
+            "device_name": "the test's device",
+        }))
+        .send()
+        .await
+        .context("failed to post a sign-in")?;
+    anyhow::ensure!(
+        response.status() == reqwest::StatusCode::OK,
+        "the owner's sign-in was refused with {}: {}",
+        response.status(),
+        response.text().await.unwrap_or_default()
+    );
+    response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|value| {
+            let (pair, _) = value.split_once(';').unwrap_or((value, ""));
+            let (name, token) = pair.split_once('=')?;
+            (name == "twalk_device").then(|| token.to_owned())
+        })
+        .context("the sign-in set no device cookie")
+}
+
 /// `gateway_env` with per-test overrides: an existing key is replaced, a new
 /// key is appended. An override with an empty value removes the variable, so
 /// a test can exercise a missing required variable.

@@ -30,7 +30,9 @@ use tracing::{debug, warn};
 
 use crate::bootstrap::Bootstrap;
 use crate::bootstrap_http;
+use crate::consent_http;
 use crate::metrics::{Metrics, Route};
+use crate::outbox::Outbox;
 use crate::session::Sessions;
 use crate::session_http;
 use crate::static_files::{Resolution, Resolver};
@@ -51,6 +53,10 @@ pub struct Gateway {
     /// homeserver to bootstrap against — each half is then answered with the
     /// variable that would enable it.
     bootstrap: Option<Arc<Bootstrap>>,
+    /// The consent store and its outbox ([`crate::store`],
+    /// [`crate::outbox`]). `None` when this deployment writes no consent —
+    /// the consent endpoints then answer `503 consent_not_configured`.
+    consent: Option<Arc<Outbox>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -64,6 +70,7 @@ impl Gateway {
             metrics,
             sessions: None,
             bootstrap: None,
+            consent: None,
             now_unix_seconds,
         }
     }
@@ -90,6 +97,16 @@ impl Gateway {
         self.bootstrap.clone()
     }
 
+    /// Adds the consent half (ticket #49), the same way the others are added.
+    pub fn with_consent(mut self, consent: Option<Arc<Outbox>>) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    pub fn consent(&self) -> Option<Arc<Outbox>> {
+        self.consent.clone()
+    }
+
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
@@ -113,10 +130,14 @@ pub fn router(gateway: Gateway) -> Router {
         // Bootstrap: the registration relay and the Sensor's invitation
         // (ticket #53). Merged the same way, and behind the same guard.
         .merge(bootstrap_http::routes())
-        // The Gateway's API surface keeps growing this way (consent and the
-        // bridge facade land in the remaining tickets of spec #46), and the
-        // prefix answers as an API throughout: a JSON 404, never the app
-        // shell.
+        // Consent's own routes (ticket #49), merged the same way — and
+        // behind the same guard, so they need a device token without asking
+        // for one.
+        .merge(consent_http::routes())
+        // The Gateway's API surface keeps growing this way (the consent
+        // snapshot #50 and the bridge facade land in the remaining tickets of
+        // spec #46), and the prefix answers as an API throughout: a JSON 404,
+        // never the app shell.
         .route("/api", any(api_not_found))
         .route("/api/{*rest}", any(api_not_found))
         .fallback(companion)

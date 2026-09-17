@@ -4,11 +4,12 @@
 //! health endpoint, exposing its metrics and serving the Companion's index
 //! file on its own origin.
 //!
-//! The Gateway depends on no other service to come up (it talks to the
-//! homeserver only while somebody signs in, and to no bus yet), so the first
-//! test brings up the `companion-gateway` service alone — compose still
-//! interpolates the whole file, so the env file below carries every
-//! documented variable, exactly as `.env.example` does. The second test is
+//! The Gateway needs no homeserver to come up (it talks to one only while
+//! somebody signs in), and the bus its consent outbox publishes to comes up
+//! with it, so the first test brings up the `companion-gateway` service and
+//! the `nats` it depends on — compose still interpolates the whole file, so
+//! the env file below carries every documented variable, exactly as
+//! `.env.example` does. The second test is
 //! about the deployment's Synapse configuration: the `openid` resource that
 //! sign-in verifies tokens at (ticket #52), which nothing else in the
 //! repository would notice the loss of.
@@ -171,6 +172,7 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_STATE_DIR=/data\n\
          GATEWAY_REGISTRATION_SHARED_SECRET={REGISTRATION_SHARED_SECRET}\n\
          GATEWAY_SENSOR_USER_ID=@sensor:{SERVER_NAME}\n\
+         GATEWAY_NATS_URL=nats://nats:4222\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n\
          TWALK_SENSOR_IMAGE={sensor_image}\n"
     );
@@ -426,6 +428,34 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
         body["error"].as_str(),
         Some("unauthenticated"),
         "a 503 here would mean GATEWAY_OWNER never reached the container: {body}"
+    );
+
+    // Consent (#49) is wired in the deployed image: the same guard answers
+    // for its routes, and the consent store opened on the gateway-data
+    // volume with the bus behind it — which is what the outbox gauge being
+    // present at all says. (A decision taken end to end needs an owner
+    // account on the deployment's homeserver, which this stack does not
+    // provision; tests/consent.rs takes that path against the test stack.)
+    let unauthenticated = reqwest::get(format!("{base}/api/consent/state")).await?;
+    assert_eq!(
+        unauthenticated.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the deployed Gateway's consent routes must require a device token"
+    );
+    let samples = parse_exposition(
+        &reqwest::get(format!("{base}/metrics"))
+            .await?
+            .text()
+            .await?,
+    );
+    assert_eq!(
+        samples
+            .iter()
+            .find(|(name, _)| name == "twalk_companion_gateway_consent_outbox_pending")
+            .map(|(_, value)| *value),
+        Some(0),
+        "the deployed Gateway must have opened its consent journal and drained its outbox: \
+         no gauge at all means GATEWAY_NATS_URL or GATEWAY_STATE_DIR never reached the container"
     );
 
     // Only on request: a service left up (with its image) is what makes the

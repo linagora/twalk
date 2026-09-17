@@ -173,11 +173,10 @@ services:
     # restarts it until both are there.
     restart: unless-stopped
 
-  # The Companion Gateway: the origin that serves the Companion PWA, and (in
-  # the later tickets of spec #46) the single writer of consent state. The
-  # skeleton depends on no other service — it talks to neither the homeserver
-  # nor the bus yet — so it comes up on its own; the depends_on edges arrive
-  # with the features that need them.
+  # The Companion Gateway: the origin that serves the Companion PWA, the
+  # user's session, and the single writer of consent state (ADR 0006). It
+  # needs no homeserver to come up — it talks to one only while somebody is
+  # signing in — and it publishes its consent decisions on the bus below.
   companion-gateway:
     build:
       # The repository root, for the same reason as the sensor's: cargo needs
@@ -189,6 +188,13 @@ services:
     # Overridable (issue #38) so that several stacks built from different
     # checkouts on one Docker daemon never overwrite each other's image.
     image: ${TWALK_GATEWAY_IMAGE:-twalk/companion-gateway:local}
+    depends_on:
+      # Where the consent outbox publishes each committed decision. Not a
+      # hard dependency inside the Gateway — a decision commits and waits in
+      # the outbox while the bus is away — but in this stack the bus is right
+      # there, so there is no reason to start without it.
+      nats:
+        condition: service_started
     environment:
       # The container-internal origin; the host-side port is published below.
       GATEWAY_LISTEN: 0.0.0.0:8080
@@ -211,9 +217,15 @@ services:
       # federation API, on this compose network. Pinned rather than resolved
       # from the server name — one deployment, one homeserver.
       GATEWAY_HOMESERVER_FEDERATION_URL: ${GATEWAY_HOMESERVER_FEDERATION_URL:-http://synapse:8008}
-      # Where the Gateway keeps its SQLite stores (the session store today).
-      # Must stay on the gateway-data volume mounted below.
+      # Where the Gateway keeps its SQLite stores: the session store and the
+      # consent decision journal. Must stay on the gateway-data volume
+      # mounted below — the journal is the record of truth for consent.
       GATEWAY_STATE_DIR: ${GATEWAY_STATE_DIR:-/data}
+      # The bus the consent outbox publishes each committed decision on.
+      # Fixed to this stack's own bus, as the Sensor's URL is: a deployment
+      # has one bus, and pointing the Gateway at another would split the
+      # audit trail from the events the Sensor labels by.
+      GATEWAY_NATS_URL: nats://nats:4222
       # Session lifetimes in seconds; empty means the Gateway's defaults
       # (15 minutes for a device token, 30 days for its refresh token).
       GATEWAY_DEVICE_TOKEN_TTL: ${GATEWAY_DEVICE_TOKEN_TTL:-}
@@ -237,8 +249,9 @@ services:
       # invite, never how to create it.
       GATEWAY_SENSOR_USER_ID: ${GATEWAY_SENSOR_USER_ID:-${SENSOR_USER_ID:-}}
     volumes:
-      # The device list and the session tokens' digests: a restart keeps the
-      # user signed in on every device they signed in on.
+      # The device list and the session tokens' digests — a restart keeps the
+      # user signed in on every device they signed in on — and the consent
+      # decision journal, which outlives every container by design.
       - gateway-data:/data
     #   # Serve a Companion build from the host instead of the image's.
     #   - ${GATEWAY_STATIC_SOURCE:-./companion}:/srv/companion:ro

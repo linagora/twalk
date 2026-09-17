@@ -46,8 +46,9 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use harness::{
     companion_build, ensure_stack, fresh_owner_user_id, gateway_env, gateway_env_with,
-    gateway_env_without_sign_in, missing_static_dir, owner_user_id, poll_until, GatewayProc,
-    MatrixUser, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME,
+    gateway_env_with_consent, gateway_env_without_sign_in, missing_static_dir, nats_url,
+    owner_user_id, poll_until, GatewayProc, MatrixUser, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART,
+    OWNER_LOCALPART, SERVER_NAME,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -87,6 +88,30 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "/api/devices/{id}",
         "500",
         "store_failed, as above",
+    ),
+    (
+        "post",
+        "/api/consent/decisions",
+        "200",
+        "the already-recorded answer needs two identical decisions inside one millisecond — the Gateway stamps occurred_at, which is part of the id, so this seam cannot force the collision; `store::tests::the_identical_decision_arriving_twice_records_once` covers it",
+    ),
+    (
+        "post",
+        "/api/consent/decisions",
+        "500",
+        "store_unavailable needs the consent journal to fail under a running process: the same fault-injection seam this suite does not have",
+    ),
+    (
+        "get",
+        "/api/consent/state",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
+        "get",
+        "/api/consent/effective",
+        "500",
+        "store_unavailable, as above",
     ),
 ];
 
@@ -980,6 +1005,17 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         ),
         (Method::POST, "/api/session/refresh", "/api/session/refresh"),
         (Method::POST, "/api/bootstrap/rooms", "/api/bootstrap/rooms"),
+        (
+            Method::POST,
+            "/api/consent/decisions",
+            "/api/consent/decisions",
+        ),
+        (Method::GET, "/api/consent/state", "/api/consent/state"),
+        (
+            Method::GET,
+            "/api/consent/effective",
+            "/api/consent/effective?contact=%40a%3Atest.twalk&network=whatsapp",
+        ),
     ] {
         call.check(
             method,
@@ -990,6 +1026,50 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             None,
             401,
             Some("unauthenticated"),
+        )
+        .await?;
+    }
+
+    // --- consent, on a Gateway that has no bus: signed in, and told so
+    // rather than told nothing. That Gateway is the one started above —
+    // `gateway_env` configures sign-in and no bus, which is a deployment an
+    // operator can have. A device of its own, because the one above was
+    // rotated and then signed out.
+    let (consent_device, _) = sign_in_cookies(&http, &base, &owner, "the consent device").await?;
+    let consent_cookie = [("twalk_device", consent_device.as_str())];
+    for (method, template, target, body) in [
+        (
+            Method::POST,
+            "/api/consent/decisions",
+            "/api/consent/decisions",
+            Some(json!({
+                "subject": { "type": "contact", "id": "@whatsapp_33612345678:test.twalk" },
+                "new_state": "granted",
+                "scope": { "networks": ["whatsapp"] }
+            })),
+        ),
+        (
+            Method::GET,
+            "/api/consent/state",
+            "/api/consent/state",
+            None,
+        ),
+        (
+            Method::GET,
+            "/api/consent/effective",
+            "/api/consent/effective?contact=%40whatsapp_33612345678%3Atest.twalk&network=whatsapp",
+            None,
+        ),
+    ] {
+        call.check(
+            method,
+            &base,
+            template,
+            target,
+            &consent_cookie,
+            body,
+            503,
+            Some("consent_not_configured"),
         )
         .await?;
     }
@@ -1374,6 +1454,178 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
     unreachable_client.stop().await;
+
+    // --- a Gateway that does write consent (#49): its own bus, its own
+    // journal, and a device of its own to sign in on. Consent is one of the
+    // halves a deployment can have configured or not, so its answers are
+    // driven on a Gateway of its own rather than by reconfiguring the first.
+    let consent_static = companion_build("openapi-consent")?;
+    let consenting = GatewayProc::start(&gateway_env_with_consent(&consent_static, &nats_url()))?;
+    let consenting_base = consenting.base_url().await?;
+    wait_until_answering(&consenting_base).await?;
+    let (deciding_device, _) =
+        sign_in_cookies(&http, &consenting_base, &owner, "the deciding device").await?;
+    let deciding_cookie = [("twalk_device", deciding_device.as_str())];
+    // A contact nobody else's run has decided about: the bus and this
+    // Synapse are shared with every other suite.
+    let subject = format!(
+        "@whatsapp_openapi_{}:{SERVER_NAME}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+
+    let recorded = call
+        .check(
+            Method::POST,
+            &consenting_base,
+            "/api/consent/decisions",
+            "/api/consent/decisions",
+            &deciding_cookie,
+            Some(json!({
+                "subject": { "type": "contact", "id": subject },
+                "new_state": "granted",
+                "scope": { "networks": ["whatsapp"] },
+                "reason": "the description says a reason is kept"
+            })),
+            201,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        recorded.body["actor"].as_str(),
+        Some(owner_id.as_str()),
+        "a decision is attributed to the owner, not to the device it arrived from"
+    );
+    assert_eq!(recorded.body["old_state"].as_str(), Some("unset"));
+    assert_eq!(recorded.body["replayed"].as_bool(), Some(false));
+
+    // The two reads over it, and the precedence the second one resolves.
+    let state = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/consent/state",
+            "/api/consent/state",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        state.body["entries"]
+            .as_array()
+            .is_some_and(|entries| entries
+                .iter()
+                .any(|entry| entry["subject"]["id"] == json!(subject))),
+        "the decision just taken is in the current state: {}",
+        state.body
+    );
+    let effective = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/consent/effective",
+            &format!(
+                "/api/consent/effective?contact={}&network=whatsapp",
+                subject.replace('@', "%40").replace(':', "%3A")
+            ),
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(effective.body["state"].as_str(), Some("granted"));
+    assert_eq!(
+        effective.body["decided_by"]["type"].as_str(),
+        Some("contact")
+    );
+    // And a contact nobody decided about: pending, decided by nothing — the
+    // `null` the description declares.
+    let undecided = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/consent/effective",
+            "/api/consent/effective?contact=%40nobody-decided%3Atest.twalk&network=telegram",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(undecided.body["state"].as_str(), Some("pending"));
+    assert_eq!(undecided.body["decided_by"], Value::Null);
+
+    // The write path's refusals, one per code the description enumerates.
+    for (body, error) in [
+        (
+            json!({
+                "subject": { "type": "persona", "id": "assistant" },
+                "new_state": "granted",
+                "scope": { "networks": ["whatsapp"] }
+            }),
+            "unsupported_subject_type",
+        ),
+        (
+            json!({
+                "subject": { "type": "network", "id": "whatsapp" },
+                "new_state": "granted",
+                "scope": { "networks": ["signal"] }
+            }),
+            "scope_contradicts_subject",
+        ),
+        (
+            json!({
+                "subject": { "type": "contact", "id": subject },
+                "new_state": "granted",
+                "scope": { "networks": ["gmessages"] }
+            }),
+            "unknown_value",
+        ),
+        (
+            json!({ "new_state": "granted", "scope": { "networks": ["whatsapp"] } }),
+            "malformed_request",
+        ),
+    ] {
+        call.check(
+            Method::POST,
+            &consenting_base,
+            "/api/consent/decisions",
+            "/api/consent/decisions",
+            &deciding_cookie,
+            Some(body),
+            400,
+            Some(error),
+        )
+        .await?;
+    }
+    // And the read's, on the network it is asked about.
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/consent/effective",
+        "/api/consent/effective?contact=%40a%3Atest.twalk",
+        &deciding_cookie,
+        None,
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/consent/effective",
+        "/api/consent/effective?contact=%40a%3Atest.twalk&network=irc",
+        &deciding_cookie,
+        None,
+        400,
+        Some("unknown_value"),
+    )
+    .await?;
+    consenting.stop().await;
 
     // --- and now the coverage assertion: everything the description
     // declares was either exercised above, or is listed with its reason.
