@@ -80,6 +80,32 @@ A `traceparent` on an inbound request is continued (and returned on the response
 - **The obligation on later tickets.** Every ticket of spec #46 that adds an endpoint extends `openapi.yaml` in the same commit. It is not a convention to remember: an undescribed route fails the suite.
 
 `GET /openapi.yaml` serves the committed file's bytes (`application/yaml`, RFC 9512), unauthenticated — a generator must be able to read it before anyone can sign in, and it holds no secret.
+## Connecting a network: the bridge login facade (ticket #55)
+
+A bridge's provisioning API lives on the bridge's own appservice listener (`/_matrix/provision/v3/*`), and its QR step **blocks**: the caller POSTs to it and the request stays open until the phone answers. A browser cannot hold that — a phone that locks mid-scan kills the request, and the login dies with it. So the Gateway holds it, and the Companion polls.
+
+- **The Gateway holds the blocking step.** One task per bridge sits in `POST .../login/step/{process}/{step}/display_and_wait`. Each answer it gets — a refreshed QR, the next step, the completion — updates an in-memory document and bumps its `generation`.
+- **The browser polls.** `GET /api/bridges/{bridge_id}/login` answers immediately, always: the current `state`, the current `step` with its payload and how long it is valid, and that `generation`. A refresh is a bumped generation with a new `step.payload.data` — the signal to redraw *before* the code on screen expires. `data` is the raw payload: a mautrix bridge renders no image, so the browser draws the code.
+- **The browser never calls a bridge**, even though mautrix's CORS would allow it. The provisioning secret starts and destroys logins on the user's account (`docs/architecture/security-model.md`), so it stays on this side; the acting Matrix user is the configured owner, because mautrix's shared-secret auth takes that parameter on trust.
+- **One login at a time per bridge.** The contract has no login dimension in v0.1 (spec #47). A second start is `409 login_in_flight`, naming the device and the instant that started the first — so the user can tell "my other phone is mid-scan" from "the server is stuck". A login that completed, failed or was cancelled does not stand in the way.
+- **Reconnect is re-login.** `POST .../login` with `login_id` restarts the flow against the login the bridge already holds (mautrix's `?login_id=`). It repairs a broken session and never restarts a container.
+- **A login in flight survives no restart**, of the bridge or of the Gateway: the process lives in the bridge's memory (capped at 30 minutes) and the held request lives in this one's. That is an error code, `login_lost`, not a silence.
+- **A step the Companion cannot drive fails loudly.** `webauthn` (which WhatsApp can inject mid-flow) and `client_http` end the login with `webauthn_required` / `unsupported_step` and cancel the process, rather than hanging on a step nobody will answer. A bridge with `provisioning.fail_on_webauthn` refuses it one step earlier, which is the setting to prefer.
+- **Credentials pass through and are never stored** (ADR 0011). A QR payload, a pairing code, the SMS preview path's Google cookies: relayed to the bridge, held in memory only until the next step replaces them, in no store and in no log line. What a log line records is the *shape* of what went through (`bridge::redacted`), and `BridgeConfig`'s `Debug` prints `<redacted>` for the secret.
+
+```http
+POST /api/bridges/mautrix-whatsapp/login      → 201, first step (a QR) in the body
+GET  /api/bridges/mautrix-whatsapp/login      → poll: state, step, generation, expires_at
+POST /api/bridges/mautrix-whatsapp/login/submit  → answer a user_input or cookies step
+DELETE /api/bridges/mautrix-whatsapp/login    → cancel; 204
+GET  /api/bridges/mautrix-whatsapp/logins     → what the bridge already holds (reconnect, logout)
+DELETE /api/bridges/mautrix-whatsapp/logins/{login_id} → log out; 204
+```
+
+The whole surface, with every status and every error code, is in `openapi.yaml`.
+
+**What the tests do not prove.** A real mautrix bridge needs a live WhatsApp or Signal account and a human with a phone, so it is never in the suite. `tests/bridges.rs` runs against a **stub bridge** implementing the provisioning contract (`tests/harness/stub_bridge.rs`), whose blocking step the test releases on command: a full login, a refresh mid-flow, a cancellation, the concurrent-login refusal, a login lost when the bridge restarts, and that no credential reaches the store or the logs. The facade's *network* side is therefore not proven by tests — an accepted limitation of spec #47, stated rather than discovered.
+
 ## Consent
 
 The Gateway is the single writer of consent state, and its own store is the record of truth — the bus is the audit trail, not the memory (ADR 0010).
@@ -151,6 +177,10 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_HOMESERVER_URL` | the federation URL | Base URL of the homeserver's **client** API, where registration is relayed and invitations are sent. Same host and port as the federation URL in the reference deployment, hence the default. |
 | `GATEWAY_REGISTRATION_SHARED_SECRET` | *unset* | The homeserver's registration shared secret. Unset: the registration relay is off and `POST /api/bootstrap/account` answers `503`. |
 | `GATEWAY_SENSOR_USER_ID` | *unset* | The Sensor's Matrix ID — who gets invited. Unset: `POST /api/bootstrap/rooms` answers `503`. |
+| `GATEWAY_BRIDGES` | *unset* | The bridge instances this deployment can log in to, by `bridge_id`, comma-separated and in the order the Companion offers them (`mautrix-whatsapp,mautrix-signal`). Unset: `GET /api/bridges` answers an empty list. |
+| `GATEWAY_BRIDGE_<ID>_URL` | *required per bridge* | That bridge's appservice listener, where its provisioning API is — e.g. `http://bridge-whatsapp:29318`. `<ID>` is the `bridge_id` upper-cased with every non-alphanumeric character as `_`. |
+| `GATEWAY_BRIDGE_<ID>_PROVISIONING_SECRET` | *required per bridge* | The same value as that bridge's `provisioning.shared_secret`. It drives logins and logouts on the user's account. |
+| `GATEWAY_BRIDGE_<ID>_NETWORK` | the id without `mautrix-` | The network the user experiences (`whatsapp`, `signal`, `sms`) — what the Companion labels the screen with. `mautrix-gmessages` sets it, because its network is `sms`. |
 
 SIGTERM (or SIGINT) drains in-flight requests, then exits `0`.
 
@@ -165,9 +195,10 @@ cargo test --test service     # the origin's own suite alone (no Docker)
 cargo test --test signin      # sign-in against the shared test stack's Synapse
 cargo test --test consent     # consent against the shared test stack's Synapse and NATS JetStream
 cargo test --test bootstrap   # the registration relay and the Sensor's invitation, same stack
+cargo test --test bridges     # the bridge login facade against a stub bridge
 cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.

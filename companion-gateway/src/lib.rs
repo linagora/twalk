@@ -12,8 +12,13 @@
 //! as a `consent.state.changed.v1` ([`outbox`]); ticket #53 added bootstrap —
 //! the registration relay for the one and only account and the Sensor's
 //! invitation into the rooms the user chooses ([`bootstrap`],
-//! [`bootstrap_http`]). The consent snapshot (#50) and the bridge facade land
-//! the same way in the remaining tickets of spec #46.
+//! [`bootstrap_http`]); ticket #55 added the bridge login provisioning
+//! facade — the Gateway speaks each configured bridge's own provisioning API
+//! with that bridge's secret, **holds the blocking step of a QR login
+//! itself**, and exposes a pollable state the Companion reads ([`bridge`],
+//! [`bridge_http`]), so a phone that sleeps mid-scan loses a poll and not
+//! the login. The consent snapshot (#50) lands the same way in a remaining
+//! ticket of spec #46.
 //!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
@@ -27,6 +32,8 @@
 
 pub mod bootstrap;
 pub mod bootstrap_http;
+pub mod bridge;
+pub mod bridge_http;
 pub mod config;
 pub mod consent;
 pub mod consent_http;
