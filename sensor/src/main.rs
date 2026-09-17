@@ -203,14 +203,25 @@ async fn main() -> Result<()> {
                     }
                 }
                 shared_room_ids.sort_unstable();
-                let Some(room_id) = shared_room_ids.first() else {
-                    return; // not a portal contact: shares no observed room
-                };
-                let Some(room) = client.get_room(room_id) else {
-                    return;
-                };
-                let Some(network) = resolve_network(&room, &sender).await else {
-                    warn!(room = %room.room_id(), %sender, "cannot determine the network, skipping event");
+                // Pick the first shared room whose network resolves: a
+                // contact may share non-portal rooms (no m.bridge state)
+                // with the Sensor; those must not shadow a real portal
+                // room further down the list.
+                let mut resolved = None;
+                for room_id in &shared_room_ids {
+                    let Some(candidate) = client.get_room(room_id) else {
+                        continue;
+                    };
+                    if let Some(network) = resolve_network(&candidate, &sender).await {
+                        resolved = Some((candidate, network));
+                        break;
+                    }
+                }
+                let Some((room, network)) = resolved else {
+                    if shared_room_ids.is_empty() {
+                        return; // not a portal contact: shares no observed room
+                    }
+                    warn!(%sender, "cannot determine the network in any shared room, skipping event");
                     return;
                 };
                 let display_name = room
