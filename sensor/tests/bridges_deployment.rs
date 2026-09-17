@@ -136,10 +136,17 @@ fn deploy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deploy/docker-compose")
 }
 
-/// Writes the environment file the stack is configured through: exactly what
-/// `.env.example` documents, with throwaway test values and this test's own
-/// host ports. Compose interpolates the whole file whatever the active
-/// profiles are, so every documented variable is here.
+/// Writes the environment file the stack is configured through, with
+/// throwaway test values and this test's own host ports.
+///
+/// It carries what the services this test starts read, plus every variable
+/// `compose.yaml` guards with `:?` — compose interpolates the whole file
+/// whatever the active profiles are, so a required variable of a service that
+/// never starts is still a hard error. Variables that only other services
+/// read (the Gateway's session settings, the Sensor's credentials beyond the
+/// guarded ones) are deliberately absent: they have defaults, nothing here
+/// reads them, and listing them would be a second copy of `.env.example` to
+/// keep in step.
 fn write_env_file() -> Result<PathBuf> {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
