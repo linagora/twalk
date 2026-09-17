@@ -146,6 +146,7 @@ impl Bus {
                         })
                         .collect(),
                     payload: serde_json::from_slice(&message.payload)?,
+                    sequence: message.sequence,
                 }),
                 Ok(_) => {}
                 Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
@@ -219,6 +220,98 @@ impl Bus {
         .await
     }
 
+    /// What a cold consumer sees when it starts at a given stream sequence:
+    /// a durable pull consumer created with
+    /// `DeliverPolicy::ByStartSequence`, filtered to one subject, drained
+    /// once and deleted.
+    ///
+    /// This is the consumer side of the Companion Gateway's consent snapshot
+    /// hand-off (ADR 0010): the snapshot names the sequence it reflects, and
+    /// a consumer applying it then starts *at that sequence plus one*. A
+    /// test asserting that hand-off has to create the consumer exactly as a
+    /// real one would, which is what this does — the durable name is unique
+    /// per call, because the bus is shared by every suite and run.
+    ///
+    /// Deliberately a single drain rather than a subscription: the messages
+    /// are acked as they arrive, the batch ends as soon as the stream has no
+    /// more, and the caller gets one deterministic list to assert on. Wait
+    /// for what you expect to be *stored* (`fetch_all_with_headers`) before
+    /// calling this, or a race makes the list short.
+    pub async fn consume_from(
+        &self,
+        stream: &str,
+        subject: &str,
+        start_sequence: u64,
+        max_messages: usize,
+    ) -> Result<Vec<StoredMessage>> {
+        use futures::StreamExt;
+
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        let name = format!(
+            "harness-from-{start_sequence}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the clock is after the epoch")
+                .as_nanos()
+        );
+        let consumer = stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(name.clone()),
+                filter_subject: subject.to_owned(),
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                    start_sequence,
+                },
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ..Default::default()
+            })
+            .await
+            .context("failed to create the consumer")?;
+        let mut batch = consumer
+            .fetch()
+            .max_messages(max_messages)
+            .messages()
+            .await
+            .context("failed to fetch from the consumer")?;
+        let mut out = Vec::new();
+        while let Some(message) = batch.next().await {
+            let message =
+                message.map_err(|error| anyhow::anyhow!("failed to read a message: {error}"))?;
+            let sequence = message
+                .info()
+                .map(|info| info.stream_sequence)
+                .unwrap_or_default();
+            out.push(StoredMessage {
+                headers: message
+                    .headers
+                    .iter()
+                    .flat_map(|headers| {
+                        headers.iter().flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(move |value| (name.to_string(), value.to_string()))
+                        })
+                    })
+                    .collect(),
+                payload: serde_json::from_slice(&message.payload)?,
+                sequence,
+            });
+            message
+                .ack()
+                .await
+                .map_err(|error| anyhow::anyhow!("failed to ack a message: {error}"))?;
+        }
+        stream
+            .delete_consumer(&name)
+            .await
+            .context("failed to delete the consumer")?;
+        Ok(out)
+    }
+
     /// Subscribes to a subject with core NATS, bypassing JetStream dedup:
     /// the returned receiver observes EVERY publish, including a republish
     /// that the stream later deduplicates on storage. This is how tests
@@ -246,10 +339,13 @@ impl Bus {
     }
 }
 
-/// A message as stored on the bus: payload plus NATS headers.
+/// A message as stored on the bus: payload plus NATS headers, and the stream
+/// sequence it is stored at — which is what a consumer resumes from, and what
+/// the Gateway's consent snapshot names (ADR 0010).
 pub struct StoredMessage {
     pub headers: Vec<(String, String)>,
     pub payload: Value,
+    pub sequence: u64,
 }
 
 impl StoredMessage {

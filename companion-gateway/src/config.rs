@@ -63,6 +63,10 @@ pub struct Config {
     /// answer to "what can I connect?" — the origin, the session and consent
     /// are untouched. See [`bridges_from_env`].
     pub bridges: Vec<crate::bridge::BridgeConfig>,
+    /// The consent snapshot a cold consumer reads (ticket #50), or `None`
+    /// when GATEWAY_SERVICE_TOKEN is unset — in which case the snapshot
+    /// endpoint answers 503 naming it. See [`Snapshot`].
+    pub snapshot: Option<Snapshot>,
 }
 
 /// The bridges from the environment.
@@ -267,6 +271,75 @@ pub struct Consent {
     pub owner: String,
 }
 
+/// What the consent snapshot needs (ticket #50): the credential that
+/// authenticates its one caller, and the cap that makes an oversized
+/// snapshot an error instead of a truncation.
+///
+/// The caller is the Sensor, which is not a device and has no Matrix OpenID
+/// token to sign in with, so the snapshot takes a **service token** from
+/// configuration instead of a device cookie — the same value in the
+/// Gateway's environment and in the Sensor's. Unset, the snapshot endpoint
+/// answers `503 service_token_not_configured` and names the variable; every
+/// other endpoint is untouched, and no device token has ever opened this one.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// The shared secret a caller presents as `Authorization: Bearer …`
+    /// (GATEWAY_SERVICE_TOKEN). It grants the whole consent state — every
+    /// contact the user ever decided about — so it is generated, not chosen:
+    /// `openssl rand -hex 32`.
+    pub service_token: String,
+    /// The largest snapshot this Gateway will serve
+    /// (GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES, default
+    /// [`crate::consent_snapshot::DEFAULT_MAX_ENTRIES`]). There is no
+    /// pagination: a state over the cap is refused with an error naming it,
+    /// because a silently truncated snapshot would tell a consumer that
+    /// contacts the user granted were never decided about.
+    pub max_entries: usize,
+}
+
+/// How short a service token this Gateway refuses to start with. It is a
+/// bearer token on a read of the user's whole social graph, so a short one
+/// is a guessable one; 32 characters is what `openssl rand -hex 32` gives
+/// with room to spare for a passphrase an operator typed.
+const MINIMUM_SERVICE_TOKEN_LENGTH: usize = 32;
+
+impl Snapshot {
+    /// `Ok(None)` when GATEWAY_SERVICE_TOKEN is unset; an error when it is
+    /// set to something too short to be a secret.
+    ///
+    /// Why an error rather than the "keep the origin up" treatment
+    /// [`SignIn`] gets: a missing variable is a deployment an operator has
+    /// not finished, and the endpoint says so. A present but weak one is a
+    /// deliberate act that would publish the whole consent state to anyone
+    /// who guesses it — the loud direction is to refuse to start, with a
+    /// message naming the variable and the minimum.
+    fn from_env() -> Result<Option<Self>> {
+        let Some(service_token) = env("GATEWAY_SERVICE_TOKEN").map(|value| value.trim().to_owned())
+        else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            service_token.chars().count() >= MINIMUM_SERVICE_TOKEN_LENGTH,
+            "environment variable GATEWAY_SERVICE_TOKEN is too short to be a secret: \
+             it authenticates a read of the whole consent state, so it must be at least \
+             {MINIMUM_SERVICE_TOKEN_LENGTH} characters (generate one with `openssl rand -hex 32`)"
+        );
+        let max_entries: usize = optional(
+            "GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES",
+            &crate::consent_snapshot::DEFAULT_MAX_ENTRIES.to_string(),
+        )?;
+        anyhow::ensure!(
+            max_entries > 0,
+            "environment variable GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES must be at least 1: \
+             a cap of zero would refuse every snapshot, including an empty one"
+        );
+        Ok(Some(Self {
+            service_token,
+            max_entries,
+        }))
+    }
+}
+
 impl Consent {
     fn from_env(sign_in: Option<&SignIn>) -> Result<Option<Self>> {
         let nats_url = std::env::var("GATEWAY_NATS_URL")
@@ -308,6 +381,7 @@ impl Config {
             // state directory and the domain from it.
             consent: Consent::from_env(sign_in.as_ref())?,
             bridges: bridges_from_env()?,
+            snapshot: Snapshot::from_env()?,
             sign_in,
             bootstrap,
         })

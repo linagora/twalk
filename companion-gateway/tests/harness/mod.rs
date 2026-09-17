@@ -233,6 +233,14 @@ pub fn owner_user_id() -> String {
 /// configured with (ticket #53).
 pub const REGISTRATION_SHARED_SECRET: &str = "test-only-registration-shared-secret";
 
+/// The service token the Gateway is configured with in tests, and the one a
+/// test presents to read the consent snapshot (ticket #50). A throwaway
+/// constant for the local test stack, long enough to satisfy the Gateway's
+/// own minimum — it refuses to start with a service token under 32
+/// characters, because that token authenticates a read of the whole consent
+/// state.
+pub const SERVICE_TOKEN: &str = "test-only-gateway-service-token-g50";
+
 /// The Matrix ID of the Sensor's account on the test stack, provisioned by
 /// `provision-bots.sh`: who the Gateway invites into the rooms the user
 /// selects.
@@ -308,6 +316,12 @@ pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
             "GATEWAY_SENSOR_USER_ID".to_owned(),
             SENSOR_USER_ID.to_owned(),
         ),
+        // The consent snapshot (ticket #50): the service token its one
+        // caller presents. On, as a deployment that runs a Sensor has it —
+        // and independently of the bus, so that a Gateway with a token and
+        // no bus answers `consent_not_configured` rather than pretending
+        // the snapshot is the thing that is missing.
+        ("GATEWAY_SERVICE_TOKEN".to_owned(), SERVICE_TOKEN.to_owned()),
     ]
 }
 

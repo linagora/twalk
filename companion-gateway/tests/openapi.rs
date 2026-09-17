@@ -49,8 +49,8 @@ use harness::{
     companion_build, ensure_stack, fresh_owner_user_id, gateway_env, gateway_env_with,
     gateway_env_with_bridges, gateway_env_with_consent, gateway_env_without_sign_in,
     missing_static_dir, nats_url, owner_user_id, poll_until, GatewayProc, MatrixUser, StubBridge,
-    FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME, STUB_BRIDGE_ID,
-    UNREACHABLE_BRIDGE_ID,
+    FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN,
+    STUB_BRIDGE_ID, UNREACHABLE_BRIDGE_ID,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -303,9 +303,44 @@ impl Call<'_> {
         expected_status: u16,
         expected_error: Option<&str>,
     ) -> Result<Checked> {
+        self.check_with_bearer(
+            method,
+            base,
+            template,
+            target,
+            cookies,
+            None,
+            body,
+            expected_status,
+            expected_error,
+        )
+        .await
+    }
+
+    /// The same check, with a bearer credential: the consent snapshot's
+    /// service token (#50), which is the one endpoint of this origin that
+    /// takes one. Kept as a separate entry point rather than a tenth
+    /// parameter on [`Self::check`], so that the many calls that send a
+    /// cookie stay as readable as they were.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_with_bearer(
+        &mut self,
+        method: Method,
+        base: &str,
+        template: &str,
+        target: &str,
+        cookies: &[(&str, &str)],
+        bearer: Option<&str>,
+        body: Option<Value>,
+        expected_status: u16,
+        expected_error: Option<&str>,
+    ) -> Result<Checked> {
         let mut request = self
             .client
             .request(method.clone(), format!("{base}{target}"));
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
         if !cookies.is_empty() {
             let header = cookies
                 .iter()
@@ -1018,6 +1053,13 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/consent/effective",
             "/api/consent/effective?contact=%40a%3Atest.twalk&network=whatsapp",
         ),
+        // The snapshot's refusal has a different reason — no service token
+        // rather than no device token — and deliberately the same answer.
+        (
+            Method::GET,
+            "/api/consent/snapshot",
+            "/api/consent/snapshot",
+        ),
         (Method::GET, "/api/bridges", "/api/bridges"),
         (
             Method::GET,
@@ -1075,6 +1117,20 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // rotated and then signed out.
     let (consent_device, _) = sign_in_cookies(&http, &base, &owner, "the consent device").await?;
     let consent_cookie = [("twalk_device", consent_device.as_str())];
+    // A live device token, on the one route that does not take one: the two
+    // credentials are disjoint, which is a property a client must not have to
+    // guess at.
+    call.check(
+        Method::GET,
+        &base,
+        "/api/consent/snapshot",
+        "/api/consent/snapshot",
+        &consent_cookie,
+        None,
+        401,
+        Some("unauthenticated"),
+    )
+    .await?;
     for (method, template, target, body) in [
         (
             Method::POST,
@@ -1111,6 +1167,20 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         )
         .await?;
     }
+    // The snapshot answers the same way, to the service token this Gateway
+    // does have: authentication first, then the half that is missing.
+    call.check_with_bearer(
+        Method::GET,
+        &base,
+        "/api/consent/snapshot",
+        "/api/consent/snapshot",
+        &[],
+        Some(SERVICE_TOKEN),
+        None,
+        503,
+        Some("consent_not_configured"),
+    )
+    .await?;
 
     // --- the sign-in's own refusals
     call.check(
@@ -1633,6 +1703,31 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     assert_eq!(undecided.body["state"].as_str(), Some("pending"));
     assert_eq!(undecided.body["decided_by"], Value::Null);
 
+    // The snapshot (#50): the same entries, with the stream sequence they
+    // reflect, to a caller presenting the service token instead of a device
+    // cookie.
+    let snapshot = call
+        .check_with_bearer(
+            Method::GET,
+            &consenting_base,
+            "/api/consent/snapshot",
+            "/api/consent/snapshot",
+            &[],
+            Some(SERVICE_TOKEN),
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        snapshot.body["next_stream_sequence"].as_u64(),
+        snapshot.body["stream_sequence"]
+            .as_u64()
+            .map(|sequence| sequence + 1),
+        "the start sequence a consumer uses is the position plus one: {}",
+        snapshot.body
+    );
+
     // The write path's refusals, one per code the description enumerates.
     for (body, error) in [
         (
@@ -1700,6 +1795,96 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
     consenting.stop().await;
+
+    // --- a Gateway whose snapshot cap is below its own state: the one
+    // answer that is neither the state nor a truncation of it (#50). One
+    // entry is the smallest cap there is, so two decisions exceed it.
+    let capped_static = companion_build("openapi-snapshot-cap")?;
+    let capped = GatewayProc::start(&gateway_env_with(
+        &capped_static,
+        &[
+            ("GATEWAY_NATS_URL", &nats_url()),
+            ("GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES", "1"),
+        ],
+    ))?;
+    let capped_base = capped.base_url().await?;
+    wait_until_answering(&capped_base).await?;
+    let (capped_device, _) =
+        sign_in_cookies(&http, &capped_base, &owner, "the capped device").await?;
+    for index in 0..2 {
+        let response = http
+            .post(format!("{capped_base}/api/consent/decisions"))
+            .header(
+                reqwest::header::COOKIE,
+                format!("twalk_device={capped_device}"),
+            )
+            .json(&json!({
+                "subject": { "type": "contact", "id": format!("{subject}-capped-{index}") },
+                "new_state": "granted",
+                "scope": { "networks": ["whatsapp"] }
+            }))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().as_u16() == 201,
+            "a decision the cap test relies on was not recorded: {}",
+            response.text().await.unwrap_or_default()
+        );
+    }
+    // The snapshot reflects the published prefix, so the refusal appears
+    // once the outbox has drained both decisions.
+    poll_until(
+        || async {
+            let status = http
+                .get(format!("{capped_base}/api/consent/snapshot"))
+                .bearer_auth(SERVICE_TOKEN)
+                .send()
+                .await
+                .ok()?
+                .status();
+            (status.as_u16() != 200).then_some(())
+        },
+        "the capped Gateway to refuse its oversized snapshot",
+    )
+    .await?;
+    call.check_with_bearer(
+        Method::GET,
+        &capped_base,
+        "/api/consent/snapshot",
+        "/api/consent/snapshot",
+        &[],
+        Some(SERVICE_TOKEN),
+        None,
+        500,
+        Some("snapshot_too_large"),
+    )
+    .await?;
+    capped.stop().await;
+
+    // --- a Gateway that serves no snapshot at all: no service token, so
+    // there is no credential that would open it, and the answer says which
+    // variable would.
+    let tokenless_static = companion_build("openapi-snapshot-tokenless")?;
+    let tokenless = GatewayProc::start(&gateway_env_with(
+        &tokenless_static,
+        // An empty override removes the variable.
+        &[("GATEWAY_SERVICE_TOKEN", "")],
+    ))?;
+    let tokenless_base = tokenless.base_url().await?;
+    wait_until_answering(&tokenless_base).await?;
+    call.check_with_bearer(
+        Method::GET,
+        &tokenless_base,
+        "/api/consent/snapshot",
+        "/api/consent/snapshot",
+        &[],
+        Some(SERVICE_TOKEN),
+        None,
+        503,
+        Some("service_token_not_configured"),
+    )
+    .await?;
+    tokenless.stop().await;
 
     // --- the bridge facade (#55): a Gateway of its own, with a stub bridge
     // implementing the provisioning contract behind it and a second bridge

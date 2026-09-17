@@ -33,6 +33,7 @@ use crate::bootstrap_http;
 use crate::bridge::Bridges;
 use crate::bridge_http;
 use crate::consent_http;
+use crate::consent_snapshot::{self, Snapshots};
 use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
 use crate::session::Sessions;
@@ -64,6 +65,12 @@ pub struct Gateway {
     /// `GET /api/bridges` answers an empty list rather than a refusal —
     /// which is the honest answer to "what can I connect?".
     bridges: Arc<Bridges>,
+    /// The consent snapshot's own half ([`crate::consent_snapshot`], ticket
+    /// #50): the service token that authenticates the Sensor's read, and the
+    /// cap. `None` when `GATEWAY_SERVICE_TOKEN` is unset — the snapshot
+    /// endpoint then answers `503 service_token_not_configured`, and nothing
+    /// else changes.
+    snapshots: Option<Arc<Snapshots>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -81,6 +88,7 @@ impl Gateway {
             bridges: Arc::new(
                 Bridges::new(Vec::new()).expect("no bridge configured is a valid configuration"),
             ),
+            snapshots: None,
             now_unix_seconds,
         }
     }
@@ -128,6 +136,20 @@ impl Gateway {
         self.bridges.clone()
     }
 
+    /// Adds the consent snapshot's half (ticket #50), the same way. Separate
+    /// from [`Self::with_consent`] because the two are independently
+    /// configured: a deployment can write consent without serving a snapshot
+    /// (no service token), and an operator who set a token before setting a
+    /// bus gets an answer that names what is actually missing.
+    pub fn with_snapshots(mut self, snapshots: Option<Arc<Snapshots>>) -> Self {
+        self.snapshots = snapshots;
+        self
+    }
+
+    pub fn snapshots(&self) -> Option<Arc<Snapshots>> {
+        self.snapshots.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -173,10 +195,12 @@ pub fn router(gateway: Gateway) -> Router {
         // guard. The Gateway holds each bridge's blocking login step and
         // these routes are what the Companion polls.
         .merge(bridge_http::routes())
-        // The Gateway's API surface keeps growing this way (the consent
-        // snapshot #50 lands in a remaining ticket of spec #46), and the
-        // prefix answers as an API throughout: a JSON 404, never the app
-        // shell.
+        // The consent snapshot (ticket #50), merged the same way — and
+        // behind the same guard, which for this one route requires the
+        // service token instead of a device cookie.
+        .merge(consent_snapshot::routes())
+        // The Gateway's API surface keeps growing this way, and the prefix
+        // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))
         .route("/api/{*rest}", any(api_not_found))
         .fallback(companion)

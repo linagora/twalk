@@ -12,7 +12,7 @@
 # is this file and cannot drift from it.
 #
 # Every later ticket of spec #46 that adds an endpoint extends this document
-# in the same commit — consent decisions and the snapshot (#49, #50), the
+# in the same commit — consent decisions (#49), the snapshot (#50), the
 # registration relay (#53), the bridge facade. The conformance test makes
 # that an obligation rather than a habit: a route registered in the router
 # and absent here fails the suite.
@@ -47,9 +47,9 @@ info:
     (where a device gets its first token), the refresh (which authenticates
     the refresh token and rotates it), the registration relay (which runs
     before the account that would authenticate anyone exists — see
-    `POST /api/bootstrap/account`) and, from ticket #50, the consent
-    snapshot, whose caller is the Sensor and not a device: it takes the
-    `serviceToken` scheme declared below.
+    `POST /api/bootstrap/account`) and the consent snapshot, whose caller is
+    the Sensor and not a device: it takes the `serviceToken` scheme declared
+    below, and refuses a device token.
 
     The device token travels as the `twalk_device` cookie
     (`HttpOnly`, `SameSite=Lax`, `Secure` off localhost) set by the
@@ -758,10 +758,11 @@ paths:
         explicit as grants, and an absent subject means "never decided",
         never "revoked".
 
-        Ticket #50 adds the snapshot a cold consumer reads: the same state
-        plus the JetStream sequence it reflects, authenticated by the
-        Sensor's service token. This endpoint names no stream position and
-        is not paginated.
+        This endpoint is the owner's own read, behind a device token, and it
+        names no stream position. The snapshot a cold consumer reads is
+        `GET /api/consent/snapshot`: the same entries plus the JetStream
+        sequence they reflect, authenticated by the Sensor's service token,
+        and with `persona` subjects excluded. Neither is paginated.
       security:
         - deviceToken: []
       responses:
@@ -832,6 +833,118 @@ paths:
           $ref: "#/components/responses/ConsentStoreUnavailable"
         "503":
           $ref: "#/components/responses/ConsentNotConfigured"
+
+  /api/consent/snapshot:
+    get:
+      operationId: getConsentSnapshot
+      tags: [consent]
+      summary: The whole consent state, with the stream position it reflects.
+      description: |
+        What a consumer whose cache is cold reads before it follows the bus
+        (ADR 0010). A durable consumer resumes at its ack floor, so decisions
+        it has already applied are never redelivered; this endpoint answers
+        the question directly, and names the JetStream sequence its content
+        reflects so the consumer can carry on from there.
+
+        **The hand-off.** Apply `entries`, then create the stream consumer at
+        `next_stream_sequence` — which is `stream_sequence + 1`, spelled out
+        because that off-by-one is the one mistake that would skip a
+        decision. Every decision ever taken is then in exactly one of the
+        two: in this snapshot, or on the stream after `stream_sequence`.
+        Never both, never neither.
+
+        That holds because the snapshot reflects the journal's **published
+        prefix**: a decision still waiting in the Gateway's outbox has no
+        position on the bus yet, so it is left out of the content and
+        arrives, in order, after the position named here. A bus outage
+        therefore delays what the snapshot knows rather than corrupting the
+        hand-off. With nothing published yet, `stream_sequence` is `0` and
+        the consumer starts at `1`: the whole stream.
+
+        **What is in `entries`.** One entry per (subject, network):
+        `network` entries are that network's default and `contact` entries
+        override them, exactly as `GET /api/consent/state` reports them and
+        with the precedence resolved by `GET /api/consent/effective`.
+        Revocations are as explicit as grants — an absent subject means
+        "never decided", never "revoked", which is the distinction the shape
+        exists to keep. `persona` subjects are excluded: activating a persona
+        is a consent decision (ADR 0013), but it is not state a consumer
+        labels senders by.
+
+        **Not paginated.** A cursor would be a second ordering to get wrong,
+        and a half-applied snapshot is worse than none. Instead there is a
+        cap (`GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES`, 100000 by default) and a
+        state over it is refused with `snapshot_too_large` rather than
+        truncated.
+
+        **Authentication.** A service token from the Gateway's own
+        configuration (`GATEWAY_SERVICE_TOKEN`), as `Authorization: Bearer`.
+        Its caller is the Sensor: a service, not one of the owner's browsers,
+        with no Matrix OpenID token to sign in with and no cookie to send.
+        The two credentials are disjoint — a device token is not accepted
+        here, and this token opens no other endpoint. There is no timestamp
+        and no version in the answer: the stream sequence is the only
+        ordering this design trusts.
+      security:
+        - serviceToken: []
+      responses:
+        "200":
+          description: |
+            The whole consent state, and the position it reflects.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentSnapshot"
+        "401":
+          description: |
+            `unauthenticated` — no `Authorization: Bearer` header, one the
+            Gateway cannot read, or a token that is not this Gateway's
+            service token. One answer for all of them, so a probe learns
+            nothing from the difference; a device token is one of the things
+            refused here.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [unauthenticated]
+        "500":
+          description: |
+            - `snapshot_too_large` — the consent state holds more entries
+              than this Gateway serves in one snapshot. The snapshot is
+              refused whole and `detail` names the cap: a silently truncated
+              snapshot would tell a consumer that contacts the user granted
+              were never decided about.
+            - `store_unavailable` — the consent journal could not be read.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [snapshot_too_large, store_unavailable]
+        "503":
+          description: |
+            - `service_token_not_configured` — `GATEWAY_SERVICE_TOKEN` is
+              unset, so this Gateway serves no snapshot to anyone. Answered
+              before authentication, so an unauthenticated caller learns
+              nothing about the deployment's consent configuration beyond
+              this.
+            - `consent_not_configured` — the token is configured and
+              correct, but `GATEWAY_NATS_URL` is not set, so there is no
+              consent journal to snapshot.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [service_token_not_configured, consent_not_configured]
 
   /api/bridges:
     get:
@@ -1320,14 +1433,16 @@ components:
       type: http
       scheme: bearer
       description: |
-        A token from the Gateway's own configuration, for a caller that is
-        not a device and has no OpenID token to sign in with: the Sensor
-        reading the consent snapshot. No endpoint uses it yet — ticket #50
-        brings the snapshot and is the ticket that references this scheme.
-        Declared here so that the distinction a client must not guess at is
-        already written down: a device cookie grants no access to a
-        service-token route, and a service token grants no access to a
-        device route.
+        A token from the Gateway's own configuration
+        (`GATEWAY_SERVICE_TOKEN`), for a caller that is not a device and has
+        no OpenID token to sign in with: the Sensor reading the consent
+        snapshot, which is the one endpoint that takes it. The distinction is
+        not one a client may guess at: a device cookie grants no access to a
+        service-token route, and a service token grants no access to a device
+        route. It is a bearer credential over the whole consent state, so an
+        operator generates it (`openssl rand -hex 32`) rather than choosing
+        it, and the Gateway refuses to start with one shorter than 32
+        characters.
 
   parameters:
     bridgeId:
@@ -1882,7 +1997,8 @@ components:
           description: |
             The decision's position in the journal, which is the only
             ordering the Gateway trusts. Not the bus's sequence — that is
-            the snapshot's business (#50).
+            `decision_sequence` against `stream_sequence` in
+            `GET /api/consent/snapshot`.
         subject:
           $ref: "#/components/schemas/ConsentSubject"
         old_state:
@@ -1947,7 +2063,70 @@ components:
             $ref: "#/components/schemas/ConsentStateEntry"
           description: |
             Every recorded entry, ordered by subject type, subject and
-            network. Not paginated: the snapshot's documented cap is #50's.
+            network. Not paginated, and uncapped: the cap belongs to the
+            snapshot, where the entries are a consumer's whole starting
+            state.
+
+    ConsentSnapshot:
+      type: object
+      description: |
+        The whole consent state, and the bus position it reflects. The two
+        are read together, so no decision can be committed and published
+        between them without appearing in one of the two.
+      required:
+        [
+          stream,
+          subject,
+          stream_sequence,
+          next_stream_sequence,
+          decision_sequence,
+          entries,
+        ]
+      additionalProperties: false
+      properties:
+        stream:
+          type: string
+          description: |
+            The JetStream stream `stream_sequence` is a sequence of — the
+            deployment's one stream, `twalk`. Named here so a consumer does
+            not have to agree with the Gateway about it out of band.
+          example: twalk
+        subject:
+          type: string
+          description: |
+            The subject the decisions in this state were published on, which
+            is what a consumer filters its stream consumer by.
+          example: twalk.consent.state.changed.v1
+        stream_sequence:
+          type: integer
+          minimum: 0
+          description: |
+            The sequence of the last decision this snapshot reflects, as the
+            bus stored it. `0` when no decision has reached the bus yet.
+        next_stream_sequence:
+          type: integer
+          minimum: 1
+          description: |
+            `stream_sequence + 1`: where a consumer starts its stream
+            consumer after applying `entries`. Spelled out rather than left
+            to the client to compute, because that off-by-one would silently
+            skip or re-apply one decision.
+        decision_sequence:
+          type: integer
+          minimum: 0
+          description: |
+            The position in the Gateway's own decision journal this snapshot
+            reflects — the same counter as a recorded decision's `sequence`.
+            Not what a consumer starts from (that is the stream sequence
+            above): this is for an operator comparing the two.
+        entries:
+          type: array
+          description: |
+            One entry per (subject, network), ordered by subject type,
+            subject and network. Revocations are explicit; `persona`
+            subjects are excluded.
+          items:
+            $ref: "#/components/schemas/ConsentStateEntry"
 
     EffectiveConsent:
       type: object

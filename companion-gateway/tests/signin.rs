@@ -556,6 +556,8 @@ async fn every_api_endpoint_requires_the_device_token() -> Result<()> {
         ("DELETE", "/api/session"),
         ("GET", "/api/devices"),
         ("DELETE", "/api/devices/whatever"),
+        // The one route that takes a service token instead (#50) refuses a
+        // caller with no credential the same way, and with the same code.
         ("GET", "/api/consent/snapshot"),
         ("GET", "/api/not/a/route"),
     ] {
@@ -566,7 +568,7 @@ async fn every_api_endpoint_requires_the_device_token() -> Result<()> {
         assert_eq!(
             response.status(),
             reqwest::StatusCode::UNAUTHORIZED,
-            "{method} {path} must require a device token"
+            "{method} {path} must require a credential"
         );
         assert_eq!(
             json(response).await?["error"].as_str(),

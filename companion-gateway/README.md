@@ -2,7 +2,7 @@
 
 The Companion backend (Rust): bridge provisioning facade, persona orchestrator, and consent broker. It is the single writer of consent state (see `docs/architecture/adr/0006-consent-state-owned-by-companion-gateway.md`).
 
-What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation — the consent store (ticket #49): an append-only decision journal in SQLite, the current state as its projection, and a transactional outbox that publishes each committed decision exactly once as a `consent.state.changed.v1` — and bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses. The consent snapshot (#50) and the bridge facade land on top of them in the remaining tickets of spec #46.
+What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation — the consent store (ticket #49): an append-only decision journal in SQLite, the current state as its projection, and a transactional outbox that publishes each committed decision exactly once as a `consent.state.changed.v1` — bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses — the consent snapshot (ticket #50): the whole current state with the bus sequence it reflects, served to a consumer whose cache is cold — and the bridge login facade (ticket #55): each configured bridge's provisioning API driven by the Gateway, which holds the blocking step of a QR login itself. What is left of specs #46 and #47 lands on top of them.
 
 ## The origin
 
@@ -22,6 +22,7 @@ One HTTP origin serves everything, so there is no CORS and the device token can 
 | `/api/consent/decisions` | `POST` records one consent decision (below). |
 | `/api/consent/state` | `GET` returns the current state, one entry per (subject, network), as recorded. |
 | `/api/consent/effective` | `GET` returns the state that applies to one contact on one network, with the precedence resolved. |
+| `/api/consent/snapshot` | `GET` returns the whole state with the JetStream sequence it reflects, for a consumer starting cold (below). The one route that takes a **service token** and refuses a device token. |
 | `/api/…` (anything else) | A JSON error, never HTML: a client parsing a response must not be handed a page. Unauthenticated, that is a `401` — the guard answers before routing, so an unknown path tells a caller with no device token nothing about the API's shape. |
 | anything else | The Companion's build in `GATEWAY_STATIC_DIR`, resolved the way SvelteKit's static adapter lays it out (see below). |
 
@@ -44,7 +45,7 @@ The Companion is a static export with no secret of its own, so the user's Matrix
 
 No Matrix access token is ever stored or logged — asserted, not promised: `tests/signin.rs` signs in against a real Synapse and then reads the store's bytes and the process's captured log output looking for the tokens involved.
 
-Authentication is the default and not an opt-in: everything under `/api/` requires a live device token unless `session_http::requirement` says otherwise, so a route added by a later ticket is protected before its author writes a line of authentication code. The exceptions are the sign-in itself, the refresh (which authenticates the refresh cookie and rotates it), and — when ticket #50 lands — the consent snapshot, which takes a service token because the Sensor is not a device: it adds one line to that table, and the guard then asks for no device cookie there and injects no device identity, leaving the snapshot handler to check the service token from its own configuration.
+Authentication is the default and not an opt-in: everything under `/api/` requires a live device token unless `session_http::requirement` says otherwise, so a route added by a later ticket is protected before its author writes a line of authentication code. The exceptions are the sign-in itself, the refresh (which authenticates the refresh cookie and rotates it), and the consent snapshot, which takes a service token because the Sensor is not a device: it is one line in that table, and the guard asks for no device cookie there and injects no device identity, leaving `src/consent_snapshot.rs` to check the service token from its own configuration.
 
 Revocation is immediate because nothing is cached: every authenticated request reads the device's row, so a revoked device is refused on its very next request. Revoked rows stay in the list, with the date, and their token digests are dropped.
 
@@ -158,6 +159,34 @@ Each committed decision is published on `twalk.consent.state.changed.v1`, valida
 
 Consent follows sign-in: it needs an owner to attribute a decision to, a state directory to keep the journal in and a domain to name its events by, and takes all three from the sign-in configuration. The one variable it adds is `GATEWAY_NATS_URL`; without it the consent endpoints answer `503 consent_not_configured` and the rest of the origin is untouched.
 
+### The snapshot, and the hand-off to the bus
+
+A consumer whose cache is cold cannot recover consent from the bus alone: a durable consumer resumes at its ack floor, so the decisions it already applied are never redelivered, and replaying the whole stream would make a confidentiality guarantee expire with a retention policy. So it asks the Gateway (ADR 0010):
+
+```
+GET /api/consent/snapshot
+Authorization: Bearer <GATEWAY_SERVICE_TOKEN>
+
+{ "stream": "twalk", "subject": "twalk.consent.state.changed.v1",
+  "stream_sequence": 41, "next_stream_sequence": 42, "decision_sequence": 7,
+  "entries": [ { "subject": { "type": "network", "id": "whatsapp" }, "network": "whatsapp",
+                 "state": "granted", "decided_at": "…", "decision_sequence": 3 } ] }
+```
+
+Apply `entries`, then create the stream consumer at `next_stream_sequence` — `stream_sequence + 1`, spelled out because that off-by-one is the one mistake that would skip a decision. Every decision ever taken is then in **exactly one** of the two: in the snapshot, or on the stream after `stream_sequence`. Never both, never neither.
+
+What makes that exact:
+
+- **The snapshot is the state of the journal's published prefix.** A decision still waiting in the outbox has no position on the bus yet, so including it would hand the consumer a decision it is about to receive again. The journal remembers where each published decision landed (`stream_sequence`, written with the outbox's mark), and the snapshot stops at the last decision every decision before which also has a position. A bus outage therefore delays what the snapshot knows rather than corrupting the hand-off.
+- **The position and the content are read together**, in one transaction over the one connection every write also goes through. No decision can be committed, and none marked published, between the two reads: whatever a concurrent caller does lands entirely inside the snapshot or entirely after it.
+- **Nothing else is in the answer.** No timestamp, no version, no entry count: the stream sequence is the only ordering this design trusts, and ADR 0010 rejected version counters and clocks precisely so that there is nothing to arbitrate between.
+
+Revocations are explicit, as they are in `/api/consent/state` — an absent subject means "never decided", never "revoked" — network defaults are included, and `persona` subjects are excluded (a persona's activation is a consent decision, ADR 0013, but it is not state a consumer labels senders by). The exclusion is in the SQL, so the snapshot never even reads such a row.
+
+There is no pagination: a cursor would be a second ordering to get wrong, and a half-applied snapshot is worse than none. Instead `GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES` (100000 by default) caps it, and a state over the cap is refused with `500 snapshot_too_large` naming the variable — never truncated, because a truncated snapshot would tell a consumer that contacts the user granted were never decided about.
+
+The caller is a service, not one of the owner's browsers: the Sensor has no Matrix OpenID token to sign in with and no cookie to send, so this route takes `GATEWAY_SERVICE_TOKEN` as an `Authorization: Bearer` credential. The two credentials are disjoint — a device token opens every other endpoint and not this one; the service token opens this one and nothing else — and the Gateway compares the token as a SHA-256 digest, so a refusal leaks neither its length nor how far a guess got. It grants a read of the whole social graph the user ever decided about, which is why it is generated (`openssl rand -hex 32`) and why the Gateway refuses to start with one under 32 characters.
+
 ## Configuration
 
 Environment variables only, like the Sensor. They are documented for an operator in `deploy/docker-compose/.env.example`.
@@ -177,6 +206,8 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_HOMESERVER_URL` | the federation URL | Base URL of the homeserver's **client** API, where registration is relayed and invitations are sent. Same host and port as the federation URL in the reference deployment, hence the default. |
 | `GATEWAY_REGISTRATION_SHARED_SECRET` | *unset* | The homeserver's registration shared secret. Unset: the registration relay is off and `POST /api/bootstrap/account` answers `503`. |
 | `GATEWAY_SENSOR_USER_ID` | *unset* | The Sensor's Matrix ID — who gets invited. Unset: `POST /api/bootstrap/rooms` answers `503`. |
+| `GATEWAY_SERVICE_TOKEN` | *unset* | The token the consent snapshot is read with. Unset: `GET /api/consent/snapshot` answers `503`. Shorter than 32 characters: the Gateway refuses to start. |
+| `GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES` | `100000` | The largest snapshot served. Over it, an error — never a truncation. |
 | `GATEWAY_BRIDGES` | *unset* | The bridge instances this deployment can log in to, by `bridge_id`, comma-separated and in the order the Companion offers them (`mautrix-whatsapp,mautrix-signal`). Unset: `GET /api/bridges` answers an empty list. |
 | `GATEWAY_BRIDGE_<ID>_URL` | *required per bridge* | That bridge's appservice listener, where its provisioning API is — e.g. `http://bridge-whatsapp:29318`. `<ID>` is the `bridge_id` upper-cased with every non-alphanumeric character as `_`. |
 | `GATEWAY_BRIDGE_<ID>_PROVISIONING_SECRET` | *required per bridge* | The same value as that bridge's `provisioning.shared_secret`. It drives logins and logouts on the user's account. |
@@ -195,10 +226,11 @@ cargo test --test service     # the origin's own suite alone (no Docker)
 cargo test --test signin      # sign-in against the shared test stack's Synapse
 cargo test --test consent     # consent against the shared test stack's Synapse and NATS JetStream
 cargo test --test bootstrap   # the registration relay and the Sensor's invitation, same stack
+cargo test --test consent_snapshot  # the snapshot, and the hand-off to the bus
 cargo test --test bridges     # the bridge login facade against a stub bridge
 cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.
