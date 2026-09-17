@@ -1,0 +1,262 @@
+//! The bus side of the seam: NATS JetStream, as the components use it.
+
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use serde_json::Value;
+use tokio::time::sleep;
+
+use crate::stack::{nats_url, SERVER_NAME};
+use crate::wait::poll_until;
+
+pub struct Bus {
+    client: async_nats::Client,
+    jetstream: async_nats::jetstream::Context,
+}
+
+impl Bus {
+    /// Connects, retrying while the container finishes starting: the nats
+    /// image ships no wget or CLI, so the compose stack cannot healthcheck
+    /// it and `--wait` does not cover it.
+    pub async fn connect() -> Result<Self> {
+        Self::connect_to(&nats_url()).await
+    }
+
+    /// Connects to an arbitrary NATS URL: the deployment test targets the
+    /// deploy stack's bus, not the harness's own.
+    pub async fn connect_to(url: &str) -> Result<Self> {
+        for attempt in 0..30 {
+            match async_nats::connect(url).await {
+                Ok(client) => {
+                    return Ok(Self {
+                        jetstream: async_nats::jetstream::new(client.clone()),
+                        client,
+                    })
+                }
+                Err(e) if attempt < 29 => {
+                    let _ = e;
+                    sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e).context("failed to connect to NATS"),
+            }
+        }
+        unreachable!("the loop either returns or exhausts attempts")
+    }
+
+    /// Creates (or reuses) a JetStream stream capturing the given subjects.
+    pub async fn ensure_stream(&self, name: &str, subjects: &[&str]) -> Result<()> {
+        let config = async_nats::jetstream::stream::Config {
+            name: name.to_owned(),
+            subjects: subjects.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        self.jetstream
+            .get_or_create_stream(config)
+            .await
+            .context("failed to create stream")?;
+        Ok(())
+    }
+
+    pub async fn publish(&self, subject: &str, payload: &Value) -> Result<()> {
+        let ack = self
+            .jetstream
+            .publish(subject.to_owned(), serde_json::to_vec(payload)?.into())
+            .await
+            .context("publish failed")?;
+        ack.await.context("publish ack failed")?;
+        Ok(())
+    }
+
+    /// Publishes a CloudEvent the way a component does: with `Nats-Msg-Id`
+    /// set to the event's `id`, so the bus de-duplicates a re-published
+    /// event.
+    pub async fn publish_event(&self, subject: &str, event: &Value) -> Result<()> {
+        let id = event["id"].as_str().context("the event has no string id")?;
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
+        let ack = self
+            .jetstream
+            .publish_with_headers(
+                subject.to_owned(),
+                headers,
+                serde_json::to_vec(event)?.into(),
+            )
+            .await
+            .context("publish failed")?;
+        ack.await.context("publish ack failed")?;
+        Ok(())
+    }
+
+    /// Fetches the most recent message stored on a subject, if any.
+    pub async fn last_message(&self, stream: &str, subject: &str) -> Result<Option<Value>> {
+        use async_nats::jetstream::stream::LastRawMessageErrorKind;
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        match stream.get_last_raw_message_by_subject(subject).await {
+            Ok(message) => Ok(Some(serde_json::from_slice(&message.payload)?)),
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(None),
+            Err(e) => Err(e).context("failed to fetch last message"),
+        }
+    }
+
+    /// Fetches every message stored on a subject, in stream order: the
+    /// harness's "consume a subject" primitive. Tests assert on whole
+    /// sequences (e.g. no duplicate ids after a replay).
+    pub async fn fetch_all(&self, stream: &str, subject: &str) -> Result<Vec<Value>> {
+        Ok(self
+            .fetch_all_with_headers(stream, subject)
+            .await?
+            .into_iter()
+            .map(|message| message.payload)
+            .collect())
+    }
+
+    /// Like `fetch_all`, but keeps the NATS headers alongside each payload
+    /// (needed to assert on `NATS-Msg-Id` and the filtering extensions).
+    pub async fn fetch_all_with_headers(
+        &self,
+        stream: &str,
+        subject: &str,
+    ) -> Result<Vec<StoredMessage>> {
+        use async_nats::jetstream::stream::LastRawMessageErrorKind;
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        let last = match stream.get_last_raw_message_by_subject(subject).await {
+            Ok(message) => message,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).context("failed to fetch last message"),
+        };
+        let mut out = Vec::new();
+        for sequence in 1..=last.sequence {
+            match stream.get_raw_message(sequence).await {
+                Ok(message) if message.subject.as_str() == subject => out.push(StoredMessage {
+                    headers: message
+                        .headers
+                        .iter()
+                        .flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(move |value| (name.to_string(), value.to_string()))
+                        })
+                        .collect(),
+                    payload: serde_json::from_slice(&message.payload)?,
+                }),
+                Ok(_) => {}
+                Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
+                Err(e) => return Err(e).context("failed to fetch message"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Fetches every stored event whose `source` identifies the given room.
+    /// Several tests share the bus, so consumers filter by room — as real
+    /// consumers will.
+    pub async fn fetch_room_messages(
+        &self,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<Vec<StoredMessage>> {
+        self.fetch_room_messages_on(SERVER_NAME, stream, subject, room_id)
+            .await
+    }
+
+    /// Same as `fetch_room_messages`, against an arbitrary server name: the
+    /// deploy stack has its own (`deploy.twalk` in deployment.rs).
+    pub async fn fetch_room_messages_on(
+        &self,
+        server_name: &str,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<Vec<StoredMessage>> {
+        let expected_source = format!("matrix://{server_name}/{room_id}");
+        Ok(self
+            .fetch_all_with_headers(stream, subject)
+            .await?
+            .into_iter()
+            .filter(|m| m.payload["source"].as_str() == Some(expected_source.as_str()))
+            .collect())
+    }
+
+    /// Polls until an event whose `source` identifies the given room is
+    /// stored on the subject.
+    pub async fn wait_for_room_message(
+        &self,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<StoredMessage> {
+        self.wait_for_room_message_on(SERVER_NAME, stream, subject, room_id)
+            .await
+    }
+
+    /// Same as `wait_for_room_message`, against an arbitrary server name.
+    pub async fn wait_for_room_message_on(
+        &self,
+        server_name: &str,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<StoredMessage> {
+        poll_until(
+            || async {
+                self.fetch_room_messages_on(server_name, stream, subject, room_id)
+                    .await
+                    .ok()?
+                    .into_iter()
+                    .next()
+            },
+            &format!("waiting for an event from {room_id} on {subject}"),
+        )
+        .await
+    }
+
+    /// Subscribes to a subject with core NATS, bypassing JetStream dedup:
+    /// the returned receiver observes EVERY publish, including a republish
+    /// that the stream later deduplicates on storage. This is how tests
+    /// prove a component never re-emits an event, instead of relying on the
+    /// bus to absorb replays. Subscribe before the traffic under test.
+    pub async fn subscribe_raw(
+        &self,
+        subject: &str,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Value>> {
+        let mut subscription = self
+            .client
+            .subscribe(subject.to_owned())
+            .await
+            .context("subscribe failed")?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            while let Some(message) = subscription.next().await {
+                if let Ok(payload) = serde_json::from_slice::<Value>(&message.payload) {
+                    let _ = tx.send(payload);
+                }
+            }
+        });
+        Ok(rx)
+    }
+}
+
+/// A message as stored on the bus: payload plus NATS headers.
+pub struct StoredMessage {
+    pub headers: Vec<(String, String)>,
+    pub payload: Value,
+}
+
+impl StoredMessage {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}

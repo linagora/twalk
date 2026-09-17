@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Provision the test bot users on the test Synapse. Idempotent: existing
 # users are skipped. Passwords follow the scheme test-only-password-<localpart>,
-# throwaway constants for the local stack; the Rust harness
-# (tests/harness/mod.rs) logs in with the same scheme — keep in sync.
+# throwaway constants for the local stack; the Sensor harness's Bot helper
+# (sensor/tests/harness/mod.rs) logs in with the same scheme — keep in sync.
 set -euo pipefail
 
 # TWALK_TEST_STACK selects the compose project so parallel worktrees each

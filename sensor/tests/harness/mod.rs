@@ -1,59 +1,37 @@
 //! Integration-test harness for the Twalk Sensor (ticket 01).
 //!
 //! The seam under test is the Sensor's process boundary: a real Synapse and
-//! a real NATS JetStream (see `compose.test.yaml`). Bots play the role of
-//! bridges, speaking the documented Matrix client-server API over HTTP —
-//! except `crypto::CryptoBot`, which runs matrix-sdk with its crypto stack
-//! because raw HTTP cannot Megolm-encrypt (ticket 04).
+//! a real NATS JetStream (the shared test stack, brought up by
+//! `twalk-test-harness`). Bots play the role of bridges, speaking the
+//! documented Matrix client-server API over HTTP — except
+//! `crypto::CryptoBot`, which runs matrix-sdk with its crypto stack because
+//! raw HTTP cannot Megolm-encrypt (ticket 04).
 //! Nothing here reaches inside the Sensor process.
+//!
+//! What every component's suite needs — the stack's lifecycle, the `Bus`,
+//! contract validation, `poll_until` — lives in the shared harness crate
+//! (`tests/harness/`, ticket #20) and is re-exported here, so the Sensor's
+//! test files keep seeing one flat `harness::` namespace. What is
+//! Sensor-specific stays here: the Matrix `Bot`, the portal-room helpers
+//! and `SensorProc`.
 
 // Every test binary compiles this module but uses only a subset of it.
 #![allow(dead_code)]
 
 pub mod crypto;
 
+pub use twalk_test_harness::*;
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::process::Command;
-use tokio::time::sleep;
 
-/// The harness stack is parameterizable so that parallel worktrees each run
-/// their own isolated instance: TWALK_TEST_STACK names the compose project,
-/// TWALK_TEST_SYNAPSE_PORT / TWALK_TEST_NATS_PORT move the host ports.
-/// Defaults match the main checkout.
-pub fn synapse_url() -> String {
-    let port = std::env::var("TWALK_TEST_SYNAPSE_PORT").unwrap_or_else(|_| "18008".to_owned());
-    format!("http://localhost:{port}")
-}
-
-pub fn nats_url() -> String {
-    let port = std::env::var("TWALK_TEST_NATS_PORT").unwrap_or_else(|_| "14222".to_owned());
-    format!("nats://localhost:{port}")
-}
-
-fn stack_id() -> String {
-    std::env::var("TWALK_TEST_STACK").unwrap_or_else(|_| "twalk-sensor-test".to_owned())
-}
-
-pub const SERVER_NAME: &str = "test.twalk";
-
-fn tests_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
-}
-
-fn contract_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("contracts")
-        .join("cloudevents")
-        .join("v1")
-}
+static TXN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Percent-encodes a path segment (room ids and user ids contain `!`, `@`, `:`).
 fn esc(segment: &str) -> String {
@@ -67,64 +45,6 @@ fn esc(segment: &str) -> String {
         }
     }
     out
-}
-
-/// Brings the compose stack up (idempotent) and provisions the bots.
-/// Safe to call at the top of every test: the bootstrap is serialized
-/// through a OnceCell (all tests share one process), so the first caller
-/// does the work and concurrent callers wait for it instead of racing
-/// parallel `docker compose up` invocations on a cold volume.
-pub async fn ensure_stack() -> Result<()> {
-    static STACK: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-    STACK.get_or_try_init(do_ensure_stack).await?;
-    Ok(())
-}
-
-async fn do_ensure_stack() -> Result<()> {
-    let compose = tests_dir().join("compose.test.yaml");
-    let status = Command::new("docker")
-        .args([
-            "compose".to_owned(),
-            "-p".to_owned(),
-            stack_id(),
-            "-f".to_owned(),
-            compose.to_string_lossy().into_owned(),
-            "up".to_owned(),
-            "-d".to_owned(),
-            "--wait".to_owned(),
-        ])
-        .stdout(Stdio::null())
-        .status()
-        .await
-        .context("failed to run docker compose up")?;
-    if !status.success() {
-        bail!("docker compose up failed with {status}");
-    }
-
-    let status = Command::new(tests_dir().join("scripts").join("provision-bots.sh"))
-        .status()
-        .await
-        .context("failed to run provision-bots.sh")?;
-    if !status.success() {
-        bail!("bot provisioning failed with {status}");
-    }
-    Ok(())
-}
-
-static TXN_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Polls `attempt` every 500 ms until it yields `Some`, or fails after ~20 s.
-pub async fn poll_until<T, Fut>(mut attempt: impl FnMut() -> Fut, description: &str) -> Result<T>
-where
-    Fut: std::future::Future<Output = Option<T>>,
-{
-    for _ in 0..40 {
-        if let Some(value) = attempt().await {
-            return Ok(value);
-        }
-        sleep(Duration::from_millis(500)).await;
-    }
-    bail!("timed out {description}")
 }
 
 /// Extracts a required string field from a client-server API response.
@@ -147,7 +67,7 @@ pub struct Bot {
 
 impl Bot {
     /// Logs in with the password scheme provisioned by
-    /// tests/scripts/provision-bots.sh — keep the two in sync.
+    /// tests/harness/scripts/provision-bots.sh — keep the two in sync.
     pub async fn login(localpart: &str) -> Result<Self> {
         Self::login_with(
             &synapse_url(),
@@ -558,18 +478,6 @@ fn chunk_extract(response: &Value) -> Result<Vec<Value>> {
     Ok(chunk.clone())
 }
 
-/// SHA-256 of the input as lowercase hex: recomputes the contract's
-/// deterministic event ids independently of the Sensor's own code.
-pub fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// An `m.bridge` portal marker as current mautrix bridges (bridgev2 in
 /// mautrix-go) write it: the state key is the bridge's unique id,
 /// `<homeserver domain>/<appservice id>` (empty only when the operator sets
@@ -609,306 +517,6 @@ pub async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
         .send_state_event(&room_id, "m.bridge", &state_key, content)
         .await?;
     Ok(room_id)
-}
-
-/// The bus side of the seam: NATS JetStream, as the Sensor will use it.
-pub struct Bus {
-    client: async_nats::Client,
-    jetstream: async_nats::jetstream::Context,
-}
-
-impl Bus {
-    /// Connects, retrying while the container finishes starting: the nats
-    /// image ships no wget or CLI, so the compose stack cannot healthcheck
-    /// it and `--wait` does not cover it.
-    pub async fn connect() -> Result<Self> {
-        Self::connect_to(&nats_url()).await
-    }
-
-    /// Connects to an arbitrary NATS URL: the deployment test targets the
-    /// deploy stack's bus, not the harness's own.
-    pub async fn connect_to(url: &str) -> Result<Self> {
-        for attempt in 0..30 {
-            match async_nats::connect(url).await {
-                Ok(client) => {
-                    return Ok(Self {
-                        jetstream: async_nats::jetstream::new(client.clone()),
-                        client,
-                    })
-                }
-                Err(e) if attempt < 29 => {
-                    let _ = e;
-                    sleep(Duration::from_millis(500)).await;
-                }
-                Err(e) => return Err(e).context("failed to connect to NATS"),
-            }
-        }
-        unreachable!("the loop either returns or exhausts attempts")
-    }
-
-    /// Creates (or reuses) a JetStream stream capturing the given subjects.
-    pub async fn ensure_stream(&self, name: &str, subjects: &[&str]) -> Result<()> {
-        let config = async_nats::jetstream::stream::Config {
-            name: name.to_owned(),
-            subjects: subjects.iter().map(|s| s.to_string()).collect(),
-            ..Default::default()
-        };
-        self.jetstream
-            .get_or_create_stream(config)
-            .await
-            .context("failed to create stream")?;
-        Ok(())
-    }
-
-    pub async fn publish(&self, subject: &str, payload: &Value) -> Result<()> {
-        let ack = self
-            .jetstream
-            .publish(subject.to_owned(), serde_json::to_vec(payload)?.into())
-            .await
-            .context("publish failed")?;
-        ack.await.context("publish ack failed")?;
-        Ok(())
-    }
-
-    /// Publishes a CloudEvent the way Hermes does: with `Nats-Msg-Id` set to
-    /// the event's `id`, so the bus de-duplicates a re-published event.
-    pub async fn publish_event(&self, subject: &str, event: &Value) -> Result<()> {
-        let id = event["id"].as_str().context("the event has no string id")?;
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
-        let ack = self
-            .jetstream
-            .publish_with_headers(
-                subject.to_owned(),
-                headers,
-                serde_json::to_vec(event)?.into(),
-            )
-            .await
-            .context("publish failed")?;
-        ack.await.context("publish ack failed")?;
-        Ok(())
-    }
-
-    /// Fetches the most recent message stored on a subject, if any.
-    pub async fn last_message(&self, stream: &str, subject: &str) -> Result<Option<Value>> {
-        use async_nats::jetstream::stream::LastRawMessageErrorKind;
-        let stream = self
-            .jetstream
-            .get_stream(stream)
-            .await
-            .context("failed to get stream")?;
-        match stream.get_last_raw_message_by_subject(subject).await {
-            Ok(message) => Ok(Some(serde_json::from_slice(&message.payload)?)),
-            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(None),
-            Err(e) => Err(e).context("failed to fetch last message"),
-        }
-    }
-
-    /// Fetches every message stored on a subject, in stream order: the
-    /// harness's "consume a subject" primitive. Later tickets assert on
-    /// whole sequences (e.g. no duplicate ids after a Sensor replay).
-    pub async fn fetch_all(&self, stream: &str, subject: &str) -> Result<Vec<Value>> {
-        Ok(self
-            .fetch_all_with_headers(stream, subject)
-            .await?
-            .into_iter()
-            .map(|message| message.payload)
-            .collect())
-    }
-
-    /// Like `fetch_all`, but keeps the NATS headers alongside each payload
-    /// (needed to assert on `NATS-Msg-Id` and the filtering extensions).
-    pub async fn fetch_all_with_headers(
-        &self,
-        stream: &str,
-        subject: &str,
-    ) -> Result<Vec<StoredMessage>> {
-        use async_nats::jetstream::stream::LastRawMessageErrorKind;
-        let stream = self
-            .jetstream
-            .get_stream(stream)
-            .await
-            .context("failed to get stream")?;
-        let last = match stream.get_last_raw_message_by_subject(subject).await {
-            Ok(message) => message,
-            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).context("failed to fetch last message"),
-        };
-        let mut out = Vec::new();
-        for sequence in 1..=last.sequence {
-            match stream.get_raw_message(sequence).await {
-                Ok(message) if message.subject.as_str() == subject => out.push(StoredMessage {
-                    headers: message
-                        .headers
-                        .iter()
-                        .flat_map(|(name, values)| {
-                            values
-                                .iter()
-                                .map(move |value| (name.to_string(), value.to_string()))
-                        })
-                        .collect(),
-                    payload: serde_json::from_slice(&message.payload)?,
-                }),
-                Ok(_) => {}
-                Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
-                Err(e) => return Err(e).context("failed to fetch message"),
-            }
-        }
-        Ok(out)
-    }
-
-    /// Fetches every stored event whose `source` identifies the given room.
-    /// Several tests share the bus, so consumers filter by room — as real
-    /// consumers will.
-    pub async fn fetch_room_messages(
-        &self,
-        stream: &str,
-        subject: &str,
-        room_id: &str,
-    ) -> Result<Vec<StoredMessage>> {
-        self.fetch_room_messages_on(SERVER_NAME, stream, subject, room_id)
-            .await
-    }
-
-    /// Same as `fetch_room_messages`, against an arbitrary server name: the
-    /// deploy stack has its own (`deploy.twalk` in deployment.rs).
-    pub async fn fetch_room_messages_on(
-        &self,
-        server_name: &str,
-        stream: &str,
-        subject: &str,
-        room_id: &str,
-    ) -> Result<Vec<StoredMessage>> {
-        let expected_source = format!("matrix://{server_name}/{room_id}");
-        Ok(self
-            .fetch_all_with_headers(stream, subject)
-            .await?
-            .into_iter()
-            .filter(|m| m.payload["source"].as_str() == Some(expected_source.as_str()))
-            .collect())
-    }
-
-    /// Polls until an event whose `source` identifies the given room is
-    /// stored on the subject.
-    pub async fn wait_for_room_message(
-        &self,
-        stream: &str,
-        subject: &str,
-        room_id: &str,
-    ) -> Result<StoredMessage> {
-        self.wait_for_room_message_on(SERVER_NAME, stream, subject, room_id)
-            .await
-    }
-
-    /// Same as `wait_for_room_message`, against an arbitrary server name.
-    pub async fn wait_for_room_message_on(
-        &self,
-        server_name: &str,
-        stream: &str,
-        subject: &str,
-        room_id: &str,
-    ) -> Result<StoredMessage> {
-        poll_until(
-            || async {
-                self.fetch_room_messages_on(server_name, stream, subject, room_id)
-                    .await
-                    .ok()?
-                    .into_iter()
-                    .next()
-            },
-            &format!("waiting for an event from {room_id} on {subject}"),
-        )
-        .await
-    }
-
-    /// Subscribes to a subject with core NATS, bypassing JetStream dedup:
-    /// the returned receiver observes EVERY publish, including a republish
-    /// that the stream later deduplicates on storage. This is how tests
-    /// prove the Sensor never re-emits an event, instead of relying on the
-    /// bus to absorb replays. Subscribe before the traffic under test.
-    pub async fn subscribe_raw(
-        &self,
-        subject: &str,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Value>> {
-        let mut subscription = self
-            .client
-            .subscribe(subject.to_owned())
-            .await
-            .context("subscribe failed")?;
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            use futures::StreamExt;
-            while let Some(message) = subscription.next().await {
-                if let Ok(payload) = serde_json::from_slice::<Value>(&message.payload) {
-                    let _ = tx.send(payload);
-                }
-            }
-        });
-        Ok(rx)
-    }
-}
-
-/// A message as stored on the bus: payload plus NATS headers.
-pub struct StoredMessage {
-    pub headers: Vec<(String, String)>,
-    pub payload: Value,
-}
-
-impl StoredMessage {
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-/// Validates an event against one of the contract schemas by type name,
-/// e.g. `validate_against_contract(&event, "inbound.message.received")`.
-pub fn validate_against_contract(event: &Value, type_name: &str) -> Result<()> {
-    let schema_path = contract_dir().join(format!("{type_name}.schema.json"));
-    let schema: Value = serde_json::from_slice(
-        &std::fs::read(&schema_path)
-            .with_context(|| format!("failed to read schema {}", schema_path.display()))?,
-    )?;
-    let validator = jsonschema::validator_for(&schema)
-        .map_err(|e| anyhow!("invalid schema {type_name}: {e}"))?;
-    let errors = validator
-        .iter_errors(event)
-        .map(|e| format!("  - {}: {}", e.instance_path(), e))
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        bail!(
-            "event failed contract validation for {type_name}:\n{}",
-            errors.join("\n")
-        );
-    }
-    Ok(())
-}
-
-/// Loads one of the contract fixtures by type name.
-pub fn contract_fixture(type_name: &str) -> Result<Value> {
-    let path = contract_dir()
-        .join("fixtures")
-        .join(format!("{type_name}.json"));
-    let fixture = serde_json::from_slice(
-        &std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
-    )?;
-    Ok(fixture)
-}
-
-/// Lists every contract type that has a fixture, straight from the fixtures
-/// directory: a new fixture is automatically covered, never silently skipped.
-pub fn contract_fixture_types() -> Result<Vec<String>> {
-    let mut types = Vec::new();
-    for entry in std::fs::read_dir(contract_dir().join("fixtures"))? {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            types.push(path.file_stem().unwrap().to_string_lossy().into_owned());
-        }
-    }
-    types.sort();
-    Ok(types)
 }
 
 /// The Sensor under test, running as the real binary it ships as — the
@@ -1022,7 +630,7 @@ pub fn fresh_state_dir(test_name: &str) -> PathBuf {
 pub static SENSOR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The environment the Sensor runs from in tests. The password follows the
-/// provisioning scheme (see tests/scripts/provision-bots.sh).
+/// provisioning scheme (see tests/harness/scripts/provision-bots.sh).
 pub fn sensor_env() -> Vec<(String, String)> {
     vec![
         ("SENSOR_HOMESERVER".to_owned(), synapse_url()),

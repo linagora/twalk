@@ -4,12 +4,21 @@
 # registry and the target directory across builds: the first build compiles
 # the whole dependency tree (several minutes), later builds only recompile
 # the sensor crate itself.
+#
+# The build context is the repository root, not the sensor crate: cargo
+# resolves a package's whole dependency graph, dev dependencies included, so
+# the shared test harness (`tests/harness/`) has to be in the context even
+# though a release build never compiles it. Without it cargo stops at
+# "failed to load source for dependency twalk-test-harness" before compiling
+# anything. The root `.dockerignore` keeps that wider context small.
 
 FROM rust:1-bookworm AS build
 WORKDIR /src
-COPY . .
+COPY sensor sensor
+COPY tests/harness tests/harness
+WORKDIR /src/sensor
 RUN --mount=type=cache,id=twalk-sensor-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=twalk-sensor-target,target=/src/target \
+    --mount=type=cache,id=twalk-sensor-target,target=/src/sensor/target \
     cargo build --release --locked \
     && cp target/release/twalk-sensor /usr/local/bin/twalk-sensor
 

@@ -106,7 +106,7 @@ twalk/
 ├── sdk/                 Client libraries for third-party persona authors (Python, TS, Rust)
 ├── examples/            Runnable end-to-end scenarios
 ├── tools/               Operational scripts (replay, validation, schema generation)
-├── tests/               End-to-end and CloudEvents conformance tests
+├── tests/               Shared test harness crate (tests/harness/) and end-to-end tests
 └── docs/                Architecture docs, ADRs, deployment and authoring guides
 ```
 

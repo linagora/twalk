@@ -1,9 +1,10 @@
-# Test-only stack for the Sensor integration harness. NOT the reference
-# deployment (that lives in deploy/). Brings up a real Synapse and a real
-# NATS JetStream; test-side bots play the role of bridges.
+# Test-only stack for the Twalk integration suites, shared by every
+# component (the Sensor and Hermes today). NOT the reference deployment
+# (that lives in deploy/). Brings up a real Synapse and a real NATS
+# JetStream; test-side bots play the role of bridges.
 #
 # Usage: docker compose -p twalk-sensor-test -f compose.test.yaml up -d --wait
-# (the Rust harness does this for you; see tests/harness/mod.rs)
+# (the harness crate does this for you; see src/stack.rs)
 
 services:
   synapse:
