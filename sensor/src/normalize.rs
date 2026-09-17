@@ -76,6 +76,139 @@ pub fn excerpt(body: &str) -> String {
     cap_chars(body, 512)
 }
 
+/// A structured reply reference: the parent event id plus an excerpt of its
+/// body, so consumers never need a bus lookup to reason about a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyTo {
+    pub matrix_event_id: String,
+    /// The parent's body, capped at 512 chars by the builder.
+    pub excerpt: String,
+}
+
+/// The contract's `data.attachments[].kind` values the Sensor produces.
+/// The contract also defines `location`, but geo messages carry no mxc URI
+/// and the attachment shape requires one: v1 carries a location as the
+/// message body only, with no attachment entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    Image,
+    Video,
+    Audio,
+    File,
+    Sticker,
+}
+
+impl AttachmentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::File => "file",
+            Self::Sticker => "sticker",
+        }
+    }
+}
+
+/// One contract attachment entry, resolved at the seam: an `mxc://`
+/// reference plus bridge-reported metadata. The binary itself stays in
+/// Matrix media storage — only the reference ever transits the bus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub kind: AttachmentKind,
+    pub mxc_uri: String,
+    /// IANA media type reported by the bridge; unreported or
+    /// contract-invalid values publish as `application/octet-stream`.
+    pub mime_type: Option<String>,
+    /// Size reported by the bridge; unreported sizes publish as 0.
+    pub size_bytes: Option<u64>,
+    /// The message body when it differs from the filename (the Matrix media
+    /// caption rule), capped at 1024 chars by the builder.
+    pub caption: Option<String>,
+    /// Pixel dimensions (width, height) for image and video attachments.
+    pub dimensions: Option<(u64, u64)>,
+    /// Duration in milliseconds for audio and video attachments.
+    pub duration_ms: Option<u64>,
+}
+
+/// Bridges without native sticker events relay stickers as `m.room.message`
+/// with msgtype `m.sticker`: the content keeps the sticker shape (`url`
+/// plus an `info` object) and never reaches a typed ruma variant. Returns
+/// None when the content has no usable mxc URI — an attachment entry
+/// without one can never be schema-valid.
+pub fn attachment_from_sticker_data(data: &serde_json::Map<String, Value>) -> Option<Attachment> {
+    let mxc_uri = data.get("url")?.as_str()?;
+    if !mxc_uri.starts_with("mxc://") {
+        return None;
+    }
+    let info = data.get("info");
+    let field = |key: &str| info.and_then(|info| info.get(key));
+    let dimensions = match (
+        field("w").and_then(Value::as_u64),
+        field("h").and_then(Value::as_u64),
+    ) {
+        (Some(width), Some(height)) if width >= 1 && height >= 1 => Some((width, height)),
+        _ => None,
+    };
+    Some(Attachment {
+        kind: AttachmentKind::Sticker,
+        mxc_uri: mxc_uri.to_owned(),
+        mime_type: field("mimetype")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        size_bytes: field("size").and_then(Value::as_u64),
+        caption: None,
+        dimensions,
+        duration_ms: None,
+    })
+}
+
+/// The contract constrains `mime_type` to `^[a-z]+/[a-zA-Z0-9.+-]+$`. MIME
+/// types are case-insensitive, so the bridge's value is lowercased first;
+/// anything still off-pattern becomes the IANA "unknown binary" type rather
+/// than breaking the whole event's validity.
+fn mime_type_or_default(reported: Option<&str>) -> String {
+    let Some(reported) = reported else {
+        return "application/octet-stream".to_owned();
+    };
+    let lowercased = reported.to_ascii_lowercase();
+    let valid = match lowercased.split_once('/') {
+        Some((type_, subtype)) => {
+            !type_.is_empty()
+                && type_.chars().all(|c| c.is_ascii_lowercase())
+                && !subtype.is_empty()
+                && subtype
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+        }
+        None => false,
+    };
+    if valid {
+        lowercased
+    } else {
+        "application/octet-stream".to_owned()
+    }
+}
+
+fn attachment_entry(attachment: &Attachment) -> Value {
+    let mut entry = json!({
+        "kind": attachment.kind.as_str(),
+        "mxc_uri": attachment.mxc_uri,
+        "mime_type": mime_type_or_default(attachment.mime_type.as_deref()),
+        "size_bytes": attachment.size_bytes.unwrap_or(0),
+    });
+    if let Some(caption) = &attachment.caption {
+        entry["caption"] = json!(cap_chars(caption, 1024));
+    }
+    if let Some((width, height)) = attachment.dimensions {
+        entry["dimensions"] = json!({ "width": width, "height": height });
+    }
+    if let Some(duration_ms) = attachment.duration_ms {
+        entry["duration_ms"] = json!(duration_ms);
+    }
+    entry
+}
+
 /// Everything needed to build an `inbound.message.received.v1` envelope,
 /// already resolved at the seam.
 pub struct InboundMessage {
@@ -89,6 +222,12 @@ pub struct InboundMessage {
     pub network: Network,
     pub consent: Consent,
     pub display_name: String,
+    /// Structured reply reference, when the message replies to a parent.
+    pub reply_to: Option<ReplyTo>,
+    /// Thread root event id, when the message is part of a Matrix thread.
+    pub thread_root: Option<String>,
+    /// Media references carried by the message — never the binaries.
+    pub attachments: Vec<Attachment>,
     /// RFC 3339 timestamp of when the Sensor produced the event.
     pub produced_at: String,
     /// RFC 3339 timestamp reported by the source network, when the bridge
@@ -98,13 +237,24 @@ pub struct InboundMessage {
 }
 
 pub fn build_message_received(input: &InboundMessage) -> Value {
+    let reply_to = match &input.reply_to {
+        Some(reply) => json!({
+            "matrix_event_id": reply.matrix_event_id,
+            "excerpt": excerpt(&reply.excerpt),
+        }),
+        None => Value::Null,
+    };
+    let attachments: Vec<Value> = input.attachments.iter().map(attachment_entry).collect();
     let mut data = json!({
-        "body": input.body,
+        "body": cap_chars(&input.body, 65536),
         "format": "text/plain",
-        "reply_to": Value::Null,
-        "attachments": [],
+        "reply_to": reply_to,
+        "attachments": attachments,
         "contact": { "display_name": cap_chars(&input.display_name, 256) },
     });
+    if let Some(thread_root) = &input.thread_root {
+        data["thread_root"] = json!(thread_root);
+    }
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
     }
@@ -287,6 +437,9 @@ mod tests {
             network: Network::Whatsapp,
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
+            reply_to: None,
+            thread_root: None,
+            attachments: Vec::new(),
             produced_at: "2026-09-17T10:00:00Z".to_owned(),
             network_timestamp: None,
         }
@@ -325,6 +478,179 @@ mod tests {
         input.network_timestamp = Some("2026-09-17T09:59:58Z".to_owned());
         let event = build_message_received(&input);
         assert_eq!(event["data"]["network_timestamp"], "2026-09-17T09:59:58Z");
+    }
+
+    fn sample_attachment() -> Attachment {
+        Attachment {
+            kind: AttachmentKind::Image,
+            mxc_uri: "mxc://example.com/AbCdEf0123456789".to_owned(),
+            mime_type: Some("image/png".to_owned()),
+            size_bytes: Some(53201),
+            caption: Some("regarde cette photo".to_owned()),
+            dimensions: Some((800, 600)),
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn reply_to_carries_the_parent_id_and_a_capped_excerpt() {
+        let mut input = sample_input();
+        input.reply_to = Some(ReplyTo {
+            matrix_event_id: "$PaReNt9876".to_owned(),
+            excerpt: "é".repeat(600),
+        });
+        let event = build_message_received(&input);
+        assert_eq!(
+            event["data"]["reply_to"]["matrix_event_id"],
+            "$PaReNt9876"
+        );
+        assert_eq!(
+            event["data"]["reply_to"]["excerpt"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            512
+        );
+    }
+
+    #[test]
+    fn thread_root_is_included_only_when_threaded() {
+        let event = build_message_received(&sample_input());
+        assert!(event["data"].get("thread_root").is_none());
+        let mut input = sample_input();
+        input.thread_root = Some("$RoOtThReAd1".to_owned());
+        let event = build_message_received(&input);
+        assert_eq!(event["data"]["thread_root"], "$RoOtThReAd1");
+    }
+
+    #[test]
+    fn attachment_entries_carry_the_full_metadata() {
+        let mut input = sample_input();
+        input.attachments = vec![Attachment {
+            duration_ms: Some(4200),
+            ..sample_attachment()
+        }];
+        let event = build_message_received(&input);
+        assert_eq!(
+            event["data"]["attachments"][0],
+            json!({
+                "kind": "image",
+                "mxc_uri": "mxc://example.com/AbCdEf0123456789",
+                "mime_type": "image/png",
+                "size_bytes": 53201,
+                "caption": "regarde cette photo",
+                "dimensions": { "width": 800, "height": 600 },
+                "duration_ms": 4200,
+            })
+        );
+    }
+
+    #[test]
+    fn unreported_attachment_metadata_falls_back_to_schema_valid_defaults() {
+        let mut input = sample_input();
+        input.attachments = vec![Attachment {
+            mime_type: None,
+            size_bytes: None,
+            caption: None,
+            dimensions: None,
+            ..sample_attachment()
+        }];
+        let event = build_message_received(&input);
+        let entry = &event["data"]["attachments"][0];
+        assert_eq!(entry["mime_type"], "application/octet-stream");
+        assert_eq!(entry["size_bytes"], 0);
+        assert!(entry.get("caption").is_none());
+        assert!(entry.get("dimensions").is_none());
+        assert!(entry.get("duration_ms").is_none());
+    }
+
+    #[test]
+    fn mime_types_are_lower_cased_and_invalid_ones_defaulted() {
+        assert_eq!(
+            mime_type_or_default(Some("IMAGE/PNG")),
+            "image/png"
+        );
+        assert_eq!(
+            mime_type_or_default(Some("image/svg+xml")),
+            "image/svg+xml"
+        );
+        assert_eq!(
+            mime_type_or_default(Some("not a mime type")),
+            "application/octet-stream"
+        );
+        assert_eq!(mime_type_or_default(None), "application/octet-stream");
+    }
+
+    #[test]
+    fn captions_are_capped_at_the_contract_limit() {
+        let mut input = sample_input();
+        input.attachments = vec![Attachment {
+            caption: Some("x".repeat(1500)),
+            ..sample_attachment()
+        }];
+        let event = build_message_received(&input);
+        assert_eq!(
+            event["data"]["attachments"][0]["caption"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            1024
+        );
+    }
+
+    #[test]
+    fn bodies_are_capped_at_the_contract_limit() {
+        let mut input = sample_input();
+        input.body = "x".repeat(70_000);
+        let event = build_message_received(&input);
+        assert_eq!(
+            event["data"]["body"].as_str().unwrap().chars().count(),
+            65536
+        );
+    }
+
+    #[test]
+    fn sticker_data_builds_a_sticker_attachment() {
+        let data = serde_json::from_str::<serde_json::Map<String, Value>>(
+            r#"{
+                "url": "mxc://example.com/StIcKeR0123456",
+                "info": { "mimetype": "image/png", "size": 2048, "w": 512, "h": 512 }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            attachment_from_sticker_data(&data),
+            Some(Attachment {
+                kind: AttachmentKind::Sticker,
+                mxc_uri: "mxc://example.com/StIcKeR0123456".to_owned(),
+                mime_type: Some("image/png".to_owned()),
+                size_bytes: Some(2048),
+                caption: None,
+                dimensions: Some((512, 512)),
+                duration_ms: None,
+            })
+        );
+    }
+
+    #[test]
+    fn sticker_data_without_a_usable_mxc_yields_no_attachment() {
+        let no_url = serde_json::Map::new();
+        assert_eq!(attachment_from_sticker_data(&no_url), None);
+        let mut http_url = serde_json::Map::new();
+        http_url.insert("url".to_owned(), json!("https://example.com/x.png"));
+        assert_eq!(attachment_from_sticker_data(&http_url), None);
+    }
+
+    #[test]
+    fn sticker_data_without_info_still_builds_an_entry() {
+        let mut data = serde_json::Map::new();
+        data.insert("url".to_owned(), json!("mxc://example.com/StIcKeR0123456"));
+        let attachment = attachment_from_sticker_data(&data).unwrap();
+        assert_eq!(attachment.mime_type, None);
+        assert_eq!(attachment.size_bytes, None);
+        assert_eq!(attachment.dimensions, None);
     }
 
     #[test]

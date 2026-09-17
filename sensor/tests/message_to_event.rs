@@ -70,8 +70,8 @@ async fn text_message_becomes_a_schema_valid_cloud_event() -> Result<()> {
         Some("bot_alpha")
     );
     assert!(
-        event["data"].get("network_timestamp").is_none(),
-        "a bot-sent message has no bridge-provided network timestamp"
+        event["data"].get("network_timestamp").is_some(),
+        "a message in a bridge portal room carries the bridge-reported network timestamp"
     );
 
     sensor.stop().await;
