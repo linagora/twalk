@@ -199,3 +199,72 @@ async fn an_undeliverable_reply_lands_on_the_dead_letter_subject() -> Result<()>
     sensor.stop().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_reply_the_homeserver_rejects_is_retried_then_dead_lettered() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let sensor = SensorProc::start(&outbound_sensor_env())?;
+    let alpha = Bot::login("bot_alpha").await?;
+
+    // The Sensor is a joined member of the portal room, but the room's power
+    // levels forbid it to post: every Sensor-side check passes and only the
+    // homeserver refuses the send.
+    let room_id = make_whatsapp_portal(&alpha, "outbound-forbidden").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    let mut power_levels = alpha
+        .get_state_event(&room_id, "m.room.power_levels", "")
+        .await?;
+    power_levels["events_default"] = json!(50);
+    power_levels["events"]["m.room.message"] = json!(50);
+    alpha
+        .send_state_event(&room_id, "m.room.power_levels", "", power_levels)
+        .await?;
+
+    let approved = approved_reply(&room_id, "$AbCdEfGh1234")?;
+    let approved_id = approved["id"].as_str().unwrap().to_owned();
+    bus.publish(REPLY_APPROVED_SUBJECT, &approved).await?;
+
+    // The rejection must not be swallowed by an early ack: the approval goes
+    // through the retry schedule and ends on the dead-letter subject.
+    let dead = poll_until(
+        || async {
+            bus.fetch_all_with_headers(STREAM, DEAD_LETTER_SUBJECT)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|m| m.payload["id"].as_str() == Some(approved_id.as_str()))
+        },
+        "the rejected approval on the dead-letter subject",
+    )
+    .await?;
+    assert_eq!(
+        dead.payload["data"]["target"]["room_id"].as_str(),
+        Some(room_id.as_str()),
+        "the dead-lettered event is the rejected approved reply"
+    );
+
+    // It was retried before being dead-lettered, not given up on at once:
+    // a forbidden send may succeed once the room's power levels change.
+    let logs = sensor.logs().await;
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("approved reply send failed, scheduling a retry")),
+        "a send the homeserver rejects must be retried before dead-lettering"
+    );
+
+    // And nothing was ever posted to the room.
+    let events = alpha.room_events(&room_id, 50).await?;
+    assert!(
+        events.iter().all(|event| {
+            event.get("sender").and_then(|s| s.as_str()) != Some(SENSOR_USER_ID)
+                || event.pointer("/content/msgtype").is_none()
+        }),
+        "the homeserver must have refused every post"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
