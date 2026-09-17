@@ -1,0 +1,144 @@
+# Twalk reference deployment: Synapse (the Matrix hub), NATS JetStream (the
+# bus) and the Sensor, wired together with named volumes and configured only
+# through the environment file — copy .env.example to .env and edit it first.
+#
+#   docker compose up -d --wait
+#
+# The provision one-shot creates the Sensor account on the way up;
+# ./provision.sh remains for ad-hoc account creation from the host.
+#
+# Bridges, Hermes and the other planes join this stack as they land (see the
+# repository roadmap).
+
+name: twalk
+
+services:
+  # One-shot: renders /data/homeserver.yaml from the Jinja2 template in
+  # ./synapse with the environment below (the image's `migrate_config` mode),
+  # generates the signing key on first start and fixes /data ownership, then
+  # exits. Re-rendered whenever the environment changes.
+  synapse-config:
+    image: matrixdotorg/synapse:v1.161.0
+    command: ["migrate_config"]
+    environment:
+      # start.py requires these two even though the template reads the
+      # MATRIX_* variables directly.
+      SYNAPSE_SERVER_NAME: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
+      SYNAPSE_REPORT_STATS: "no"
+      MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
+      MATRIX_REGISTRATION_SHARED_SECRET: ${MATRIX_REGISTRATION_SHARED_SECRET:?set MATRIX_REGISTRATION_SHARED_SECRET in .env}
+      MATRIX_MACAROON_SECRET: ${MATRIX_MACAROON_SECRET:?set MATRIX_MACAROON_SECRET in .env}
+      MATRIX_FORM_SECRET: ${MATRIX_FORM_SECRET:?set MATRIX_FORM_SECRET in .env}
+      # start.py persists these two to key files in /data when unset; the
+      # rendered config uses the MATRIX_* values, so pin them to the same
+      # secrets to avoid generating unused files.
+      SYNAPSE_REGISTRATION_SHARED_SECRET: ${MATRIX_REGISTRATION_SHARED_SECRET:?set MATRIX_REGISTRATION_SHARED_SECRET in .env}
+      SYNAPSE_MACAROON_SECRET_KEY: ${MATRIX_MACAROON_SECRET:?set MATRIX_MACAROON_SECRET in .env}
+    volumes:
+      - ./synapse/homeserver.yaml:/conf/homeserver.yaml:ro
+      - synapse-data:/data
+
+  synapse:
+    image: matrixdotorg/synapse:v1.161.0
+    depends_on:
+      synapse-config:
+        condition: service_completed_successfully
+    volumes:
+      # Database, media store and signing key.
+      - synapse-data:/data
+    ports:
+      # Localhost only by default: in production the client API is fronted
+      # by the operator's TLS reverse proxy on the same host (which is what
+      # x_forwarded in the Synapse config is for).
+      - "127.0.0.1:${MATRIX_HTTP_PORT:-8008}:8008"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health').read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot: creates the Sensor account once Synapse is healthy, so a fresh
+  # `docker compose up` is the whole setup — no manual provisioning step.
+  # Open registration stays off; this authenticates with the registration
+  # shared secret from the rendered config, like provision.sh does from the
+  # host. Idempotent: an existing account is skipped.
+  provision:
+    image: matrixdotorg/synapse:v1.161.0
+    depends_on:
+      synapse:
+        condition: service_healthy
+    environment:
+      SENSOR_USER_ID: ${SENSOR_USER_ID:?set SENSOR_USER_ID in .env}
+      SENSOR_PASSWORD: ${SENSOR_PASSWORD:?set SENSOR_PASSWORD in .env}
+    volumes:
+      # Read-only: register_new_matrix_user only reads the registration
+      # shared secret from the rendered config.
+      - synapse-data:/data:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        localpart="$${SENSOR_USER_ID#@}"; localpart="$${localpart%%:*}"
+        output=$$(register_new_matrix_user -u "$$localpart" -p "$$SENSOR_PASSWORD" --no-admin \
+          -c /data/homeserver.yaml http://synapse:8008 2>&1) \
+          && { echo "provisioned $$localpart"; exit 0; }
+        echo "$$output" >&2
+        echo "$$output" | grep -qi "already" && exit 0
+        exit 1
+    # Tolerate early boot races the same way the sensor does.
+    restart: on-failure
+
+  nats:
+    image: nats:2
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    ports:
+      # Localhost only: the bus has no authentication in this reference
+      # stack, so it must not be reachable from the network. Host-side
+      # consumers (Hermes, replay tools) use this port.
+      - "127.0.0.1:${NATS_PORT:-4222}:4222"
+    # No healthcheck: the nats image ships no shell, wget or CLI to probe
+    # with. The sensor service below retries its way in instead.
+    restart: unless-stopped
+
+  sensor:
+    build:
+      context: ../../sensor
+      # Resolved from the build context: the Dockerfile lives with the
+      # reference deployment, the context is the sensor crate alone.
+      dockerfile: ../deploy/docker-compose/sensor.Dockerfile
+    image: twalk/sensor:local
+    depends_on:
+      synapse:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      # Starts only once its account exists; the restart policy below stays
+      # as the safety net for a skipped or failed provisioning.
+      provision:
+        condition: service_completed_successfully
+    environment:
+      SENSOR_HOMESERVER: http://synapse:8008
+      SENSOR_NATS_URL: nats://nats:4222
+      SENSOR_USER_ID: ${SENSOR_USER_ID:?set SENSOR_USER_ID in .env}
+      SENSOR_PASSWORD: ${SENSOR_PASSWORD:?set SENSOR_PASSWORD in .env}
+      SENSOR_ALLOWED_INVITERS: ${SENSOR_ALLOWED_INVITERS:?set SENSOR_ALLOWED_INVITERS in .env}
+      SENSOR_STATE_DIR: ${SENSOR_STATE_DIR:-/data}
+      SENSOR_LOG_LEVEL: ${SENSOR_LOG_LEVEL:-info}
+      SENSOR_METRICS_LISTEN: ${SENSOR_METRICS_LISTEN:-}
+      SENSOR_RECOVERY_KEY: ${SENSOR_RECOVERY_KEY:-}
+    volumes:
+      # Session, sync token and crypto store: a restart resumes the sync
+      # instead of re-syncing (and re-emitting) recent traffic.
+      - sensor-data:/data
+    # The sensor exits on an unreachable homeserver or bus and on a missing
+    # account (should provisioning have been skipped or failed); compose
+    # restarts it until both are there.
+    restart: unless-stopped
+
+volumes:
+  synapse-data:
+  nats-data:
+  sensor-data:

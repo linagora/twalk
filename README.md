@@ -122,18 +122,14 @@ Requirements: Docker Engine 25+, Docker Compose v2.20+, a public DNS name for yo
 git clone https://github.com/linagora/twalk.git
 cd twalk/deploy/docker-compose
 cp .env.example .env
-# Edit .env: set MATRIX_DOMAIN, NETWORK_ADMIN_HANDLE, LLM_ENDPOINT
+# Edit .env: set MATRIX_DOMAIN, the Synapse secrets, the Sensor account credentials.
+# SENSOR_ALLOWED_INVITERS must name the bridge bot accounts and your own account.
 docker compose up -d
 ```
 
-Once containers are healthy:
+Once containers are healthy, the reference stack is running: Synapse (the Matrix hub), NATS JetStream (the bus) and the Sensor, whose account the stack provisions itself on the way up. From here, any allowed inviter — in production, a bridge's provisioning user — invites the Sensor into a portal room and its traffic lands as CloudEvents on the bus, with no further manual steps. Mautrix bridges register their own bot accounts through their appservice registration, so the allowed inviters exist without manual provisioning; `./provision.sh` remains for ad-hoc accounts. Bridges, Hermes personas and the oversight interfaces (Element Web, Buzz Control Room) join the reference stack as their components land; see the roadmap below.
 
-1. Open Element Web at `https://element.<your-domain>`, log in as your admin user.
-2. Start Mautrix onboarding by sending `login` to `@whatsappbot:<your-domain>`, scan the QR code.
-3. Repeat for the bridges you want to enable in v0.1 (Signal for direct messaging, mautrix-gmessages for SMS as a proof of concept). Telegram and Discord are v0.2 targets. The sovereign SMS path via the Twake SMS Companion Android app replaces mautrix-gmessages in v0.2, see the roadmap below.
-4. Visit the Buzz Control Room at `https://buzz.<your-domain>` to see the event stream.
-
-The full deployment guide, including Kubernetes and bare-metal Ansible, is in [`docs/guides/deployment.md`](docs/guides/deployment.md).
+The reference deployment lives in [`deploy/docker-compose/`](deploy/docker-compose/): its compose file and `.env.example` are the documented configuration surface. Kubernetes overlays and bare-metal Ansible land with later milestones.
 
 ---
 
