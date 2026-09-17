@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -23,16 +24,12 @@ use matrix_sdk::ruma::events::room::message::{
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent};
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedUserId, UInt};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::{Client, LoopCtrl, Room, RoomState};
 use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
+use twalk_sensor::metrics::Metrics;
 use twalk_sensor::{consent, network, normalize, outbound};
-
-/// Process-wide count of events the crypto stack could not decrypt (ticket
-/// 04). Surfaced in the logs on every failure; a metrics endpoint is a later
-/// ticket's business.
-static DECRYPTION_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,6 +38,22 @@ async fn main() -> Result<()> {
         .with_env_filter(&config.log_level)
         .init();
     info!(homeserver = %config.homeserver_url, user = %config.user_id, "sensor starting");
+
+    // Observability (ticket 10): one shared metrics registry, optionally
+    // served over HTTP in the Prometheus text format. Binding fails fast and
+    // loud — a configured-but-unusable endpoint is an operator error to fix,
+    // not a condition to swallow.
+    let metrics = Arc::new(Metrics::new());
+    if let Some(listen) = config.metrics_listen {
+        let listener = tokio::net::TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("failed to bind the metrics endpoint on {listen}"))?;
+        info!(%listen, "serving metrics");
+        tokio::spawn(serve_metrics(listener, metrics.clone()));
+    }
+    // In-flight publishes are spawned through this tracker: a graceful
+    // shutdown drains them before exiting instead of cutting them off.
+    let publish_tracker = PublishTracker::default();
 
     // Persistence (ticket 03): with SENSOR_STATE_DIR set, the SDK's state
     // and crypto stores live in that directory (sqlite), so the sync token
@@ -207,10 +220,14 @@ async fn main() -> Result<()> {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
         let consent_cache = consent_cache.clone();
+        let publish_tracker = publish_tracker.clone();
+        let metrics = metrics.clone();
         client.add_event_handler(move |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
             let consent_cache = consent_cache.clone();
+            let publish_tracker = publish_tracker.clone();
+            let metrics = metrics.clone();
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
@@ -273,14 +290,16 @@ async fn main() -> Result<()> {
                     network_timestamp: Some(rfc3339_ms(u64::from(event.origin_server_ts.0))),
                 };
                 let envelope = normalize::build_message_received(&input);
-                publish_envelope(
-                    &jetstream,
-                    normalize::MESSAGE_RECEIVED_TYPE,
-                    &envelope,
-                    network,
-                    consent,
-                )
-                .await;
+                publish_tracker
+                    .publish(
+                        jetstream,
+                        normalize::MESSAGE_RECEIVED_TYPE,
+                        envelope,
+                        network,
+                        consent,
+                        metrics,
+                    )
+                    .await;
             }
         });
     }
@@ -293,16 +312,20 @@ async fn main() -> Result<()> {
     // (no event cache), so a skipped event stays unpublished; portal rooms
     // share keys at send time, so live traffic does not hit this.
     {
+        let metrics = metrics.clone();
         client.add_event_handler(
-            |event: OriginalSyncRoomEncryptedEvent, room: Room| async move {
-                let failures = DECRYPTION_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
-                warn!(
-                    room = %room.room_id(),
-                    event_id = %event.event_id,
-                    sender = %event.sender,
-                    failures,
-                    "cannot decrypt event, skipping it"
-                );
+            move |event: OriginalSyncRoomEncryptedEvent, room: Room| {
+                let metrics = metrics.clone();
+                async move {
+                    let failures = metrics.record_decryption_failure();
+                    warn!(
+                        room = %room.room_id(),
+                        event_id = %event.event_id,
+                        sender = %event.sender,
+                        failures,
+                        "cannot decrypt event, skipping it"
+                    );
+                }
             },
         );
     }
@@ -314,10 +337,14 @@ async fn main() -> Result<()> {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
         let consent_cache = consent_cache.clone();
+        let publish_tracker = publish_tracker.clone();
+        let metrics = metrics.clone();
         client.add_event_handler(move |event: OriginalSyncReactionEvent, room: Room, _client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
             let consent_cache = consent_cache.clone();
+            let publish_tracker = publish_tracker.clone();
+            let metrics = metrics.clone();
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
@@ -357,14 +384,16 @@ async fn main() -> Result<()> {
                     network_timestamp: None,
                 };
                 let envelope = normalize::build_reaction_added(&input);
-                publish_envelope(
-                    &jetstream,
-                    normalize::REACTION_ADDED_TYPE,
-                    &envelope,
-                    network,
-                    consent,
-                )
-                .await;
+                publish_tracker
+                    .publish(
+                        jetstream,
+                        normalize::REACTION_ADDED_TYPE,
+                        envelope,
+                        network,
+                        consent,
+                        metrics,
+                    )
+                    .await;
             }
         });
     }
@@ -384,10 +413,14 @@ async fn main() -> Result<()> {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
         let consent_cache = consent_cache.clone();
+        let publish_tracker = publish_tracker.clone();
+        let metrics = metrics.clone();
         client.add_event_handler(move |event: PresenceEvent, client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
             let consent_cache = consent_cache.clone();
+            let publish_tracker = publish_tracker.clone();
+            let metrics = metrics.clone();
             async move {
                 let sender: OwnedUserId = event.sender.clone();
                 if sender == own_user {
@@ -473,14 +506,16 @@ async fn main() -> Result<()> {
                     last_active_at,
                 };
                 let envelope = normalize::build_presence_updated(&input);
-                publish_envelope(
-                    &jetstream,
-                    normalize::PRESENCE_UPDATED_TYPE,
-                    &envelope,
-                    network,
-                    consent,
-                )
-                .await;
+                publish_tracker
+                    .publish(
+                        jetstream,
+                        normalize::PRESENCE_UPDATED_TYPE,
+                        envelope,
+                        network,
+                        consent,
+                        metrics,
+                    )
+                    .await;
             }
         });
     }
@@ -493,17 +528,141 @@ async fn main() -> Result<()> {
         let jetstream = jetstream.clone();
         let retry_base = config.send_retry_base;
         let max_attempts = config.send_retry_max_attempts;
+        let metrics = metrics.clone();
         tokio::spawn(async move {
-            consume_approved_replies(client, jetstream, retry_base, max_attempts).await;
+            consume_approved_replies(client, jetstream, retry_base, max_attempts, metrics).await;
         });
     }
 
     info!("sensor running");
-    client
-        .sync(SyncSettings::default())
-        .await
-        .context("sync loop failed")?;
+    // The sync callback runs once per completed sync response: it drives the
+    // sync-age gauge (the operator's lag signal). Boxed so the shutdown path
+    // can drop the loop itself, not just a pinned reference to it.
+    let sync_metrics = metrics.clone();
+    let mut sync = Box::pin(client.sync_with_callback(SyncSettings::default(), move |_response| {
+        sync_metrics.record_sync(now_unix_seconds());
+        async { LoopCtrl::Continue }
+    }));
+    tokio::select! {
+        result = &mut sync => {
+            result.context("sync loop failed")?;
+        }
+        _ = shutdown_signal() => {
+            // Dropping the sync future stops the loop; publishes already in
+            // flight live in the tracker (spawned, not awaited inline) and
+            // are drained below. The bus consumers need no draining: a
+            // message they leave unacked is redelivered after the ack
+            // deadline, so at-least-once holds across the restart.
+            info!("shutdown signal received, draining in-flight work");
+            drop(sync);
+            if publish_tracker.wait_for_idle(Duration::from_secs(5)).await {
+                info!("in-flight publishes drained, shutting down");
+            } else {
+                warn!("shutdown timed out with publishes still in flight; the events stay dedup-able on the bus");
+            }
+        }
+    }
     Ok(())
+}
+
+/// Resolves when the process is asked to stop (SIGTERM, or SIGINT from an
+/// interactive operator).
+async fn shutdown_signal() {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("installing a SIGTERM handler never fails");
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
+}
+
+fn now_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// Serves the Prometheus text exposition over HTTP/1.1, one connection at a
+/// time, any path — the endpoint has exactly one document.
+async fn serve_metrics(listener: tokio::net::TcpListener, metrics: Arc<Metrics>) {
+    loop {
+        match listener.accept().await {
+            Ok((mut socket, _peer)) => {
+                let metrics = metrics.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // Drain the request head first (bounded); responding
+                    // without reading risks an RST that discards the answer.
+                    let mut request = Vec::with_capacity(1024);
+                    let mut chunk = [0u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n")
+                        && request.len() < 8192
+                    {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+                    let body = metrics.render(now_unix_seconds());
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4; charset=utf-8\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+            Err(error) => warn!(%error, "metrics accept failed"),
+        }
+    }
+}
+
+/// Counts publishes that are in flight (spawned, not yet acked) so a graceful
+/// shutdown can drain them instead of cutting them off mid-request.
+#[derive(Clone, Default)]
+struct PublishTracker {
+    in_flight: Arc<AtomicU64>,
+    idle: Arc<tokio::sync::Notify>,
+}
+
+impl PublishTracker {
+    /// Publishes through a detached task, awaited here: normal operation
+    /// keeps the handler's ordering, while a shutdown that drops the handler
+    /// futures leaves the publish running to completion.
+    async fn publish(
+        &self,
+        jetstream: async_nats::jetstream::Context,
+        event_type: &'static str,
+        envelope: serde_json::Value,
+        network: network::Network,
+        consent: Consent,
+        metrics: Arc<Metrics>,
+    ) {
+        self.in_flight.fetch_add(1, Ordering::Relaxed);
+        let tracker = self.clone();
+        let task = tokio::spawn(async move {
+            publish_envelope(&jetstream, event_type, &envelope, network, consent, &metrics).await;
+            if tracker.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
+                tracker.idle.notify_waiters();
+            }
+        });
+        let _ = task.await;
+    }
+
+    /// True once no publish is in flight; false when the deadline expired.
+    async fn wait_for_idle(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.idle.notified();
+            if self.in_flight.load(Ordering::Relaxed) == 0 {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.in_flight.load(Ordering::Relaxed) == 0;
+            }
+        }
+    }
 }
 
 /// Restores the Matrix session persisted in `session_file` (ticket 03).
@@ -713,20 +872,24 @@ async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
 }
 
 /// Publishes a CloudEvents envelope on the bus with the contract's headers:
-/// NATS-Msg-Id (the JetStream dedup anchor) plus the network/consent
-/// extensions duplicated for server-side filtering.
+/// NATS-Msg-Id (the JetStream dedup anchor) plus the network, consent and
+/// traceparent extensions duplicated for server-side filtering.
 async fn publish_envelope(
     jetstream: &async_nats::jetstream::Context,
     event_type: &str,
     envelope: &serde_json::Value,
     network: network::Network,
     consent: Consent,
+    metrics: &Metrics,
 ) {
     let id = envelope["id"].as_str().unwrap().to_owned();
     let mut headers = async_nats::header::HeaderMap::new();
     headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
     headers.insert("network", network.as_str());
     headers.insert("consent", consent.as_str());
+    if let Some(traceparent) = envelope.get("traceparent").and_then(serde_json::Value::as_str) {
+        headers.insert("traceparent", traceparent);
+    }
     let payload = serde_json::to_vec(envelope).expect("the envelope is serializable");
     let subject = normalize::bus_subject(event_type);
     match jetstream
@@ -734,7 +897,10 @@ async fn publish_envelope(
         .await
     {
         Ok(ack) => match ack.await {
-            Ok(_) => info!(%id, "published {}", event_type),
+            Ok(_) => {
+                metrics.record_published(event_type);
+                info!(%id, "published {}", event_type);
+            }
             Err(error) => warn!(%id, %error, "publish ack failed"),
         },
         Err(error) => warn!(%id, %error, "publish failed"),
@@ -759,9 +925,10 @@ async fn consume_approved_replies(
     jetstream: async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
+    metrics: Arc<Metrics>,
 ) {
     loop {
-        match run_approved_reply_consumer(&client, &jetstream, retry_base, max_attempts).await {
+        match run_approved_reply_consumer(&client, &jetstream, retry_base, max_attempts, &metrics).await {
             Ok(()) => error!("the approved-reply message stream ended; rebuilding the consumer"),
             Err(error) => error!(%error, "the approved-reply consumer failed; rebuilding it"),
         }
@@ -776,6 +943,7 @@ async fn run_approved_reply_consumer(
     jetstream: &async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
+    metrics: &Metrics,
 ) -> Result<()> {
     let stream = jetstream
         .get_stream(normalize::STREAM_NAME)
@@ -830,7 +998,7 @@ async fn run_approved_reply_consumer(
                 // A malformed event can never be delivered: dead-letter it
                 // on the spot instead of burning retries.
                 error!(%error, "unusable persona.reply.approved event, dead-lettering");
-                dead_letter(&jetstream, &dead_letter_subject, &message).await;
+                dead_letter(&jetstream, &dead_letter_subject, &message, metrics).await;
                 continue;
             }
         };
@@ -839,17 +1007,25 @@ async fn run_approved_reply_consumer(
                 if let Err(error) = message.ack().await {
                     warn!(id = %job.event_id, %error, "ack failed after a successful post");
                 }
-                info!(id = %job.event_id, room = %job.room_id, "posted approved reply");
+                info!(
+                    id = %job.event_id,
+                    room = %job.room_id,
+                    traceparent = job.traceparent.as_deref(),
+                    "posted approved reply"
+                );
             }
             Err(PostError::Permanent(error)) => {
+                metrics.record_outbound_send_failure();
                 error!(id = %job.event_id, room = %job.room_id, %error, "approved reply can never be posted, dead-lettering");
-                dead_letter(&jetstream, &dead_letter_subject, &message).await;
+                dead_letter(&jetstream, &dead_letter_subject, &message, metrics).await;
             }
             Err(PostError::Transient(error)) if delivered >= max_attempts => {
+                metrics.record_outbound_send_failure();
                 error!(id = %job.event_id, room = %job.room_id, %error, %delivered, "approved reply exhausted its retries, dead-lettering");
-                dead_letter(&jetstream, &dead_letter_subject, &message).await;
+                dead_letter(&jetstream, &dead_letter_subject, &message, metrics).await;
             }
             Err(PostError::Transient(error)) => {
+                metrics.record_outbound_send_failure();
                 let delay = outbound::retry_delay(retry_base, delivered);
                 warn!(id = %job.event_id, room = %job.room_id, %error, %delivered, ?delay, "approved reply send failed, scheduling a retry");
                 if let Err(error) = message.ack_with(AckKind::Nak(Some(delay))).await {
@@ -958,21 +1134,22 @@ async fn run_consent_consumer(
 
 /// Publishes an undeliverable event to the dead-letter subject and acks the
 /// original. The dead-letter copy keeps the event id as `NATS-Msg-Id` so
-/// bus-level dedup still works, and duplicates the event's `network` and
-/// `consent` extensions as headers, like the inbound path does. If the
-/// publish itself fails the message stays unacked, so it is redelivered
-/// while attempts remain rather than disappearing.
+/// bus-level dedup still works, and duplicates the event's `network`,
+/// `consent` and `traceparent` extensions as headers, like the inbound path
+/// does. If the publish itself fails the message stays unacked, so it is
+/// redelivered while attempts remain rather than disappearing.
 async fn dead_letter(
     jetstream: &async_nats::jetstream::Context,
     subject: &str,
     message: &async_nats::jetstream::Message,
+    metrics: &Metrics,
 ) {
     let mut headers = async_nats::header::HeaderMap::new();
     if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
         if let Some(id) = event.get("id").and_then(serde_json::Value::as_str) {
             headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
         }
-        for extension in ["network", "consent"] {
+        for extension in ["network", "consent", "traceparent"] {
             if let Some(value) = event.get(extension).and_then(serde_json::Value::as_str) {
                 headers.insert(extension, value);
             }
@@ -984,6 +1161,7 @@ async fn dead_letter(
     {
         Ok(ack) => match ack.await {
             Ok(_) => {
+                metrics.record_dead_lettered();
                 if let Err(error) = message.ack().await {
                     error!(%error, "ack failed after dead-lettering, a duplicate may be dead-lettered again");
                 }
