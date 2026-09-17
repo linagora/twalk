@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
+use matrix_sdk::attachment::AttachmentConfig;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::ruma::api::client::room::create_room;
@@ -19,6 +20,7 @@ use matrix_sdk::ruma::events::AnyInitialStateEvent;
 use matrix_sdk::ruma::serde::Raw;
 use matrix_sdk::ruma::{OwnedUserId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
+use mime::Mime;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -184,6 +186,27 @@ impl CryptoBot {
             .await
             .context("failed to queue the message")?;
         Ok(())
+    }
+
+    /// Uploads `data` as an attachment and sends it. In an encrypted room the
+    /// SDK encrypts the bytes with a fresh AES-256-CTR key, uploads the
+    /// ciphertext and puts the decryption material in the event's `file`
+    /// object — what a real client (and a mautrix bridge) does there. Returns
+    /// the sent event's id: in an encrypted room that is the
+    /// `m.room.encrypted` event the Sensor derives its event id from.
+    pub async fn send_attachment(
+        &self,
+        room_id: &str,
+        filename: &str,
+        content_type: &Mime,
+        data: Vec<u8>,
+    ) -> Result<String> {
+        let response = self
+            .room(room_id)?
+            .send_attachment(filename, content_type, data, AttachmentConfig::new())
+            .await
+            .context("failed to send the attachment")?;
+        Ok(response.event_id.to_string())
     }
 
     /// Waits until the bot's sync loop has learned that `user_id` is a joined

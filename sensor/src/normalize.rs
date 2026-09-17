@@ -160,15 +160,110 @@ pub struct Attachment {
     pub dimensions: Option<(u64, u64)>,
     /// Duration in milliseconds for audio and video attachments.
     pub duration_ms: Option<u64>,
+    /// The contract's `encryption` object when the media itself is
+    /// encrypted — the normal case in an end-to-end encrypted room, and so
+    /// in every bridge portal room. Built by
+    /// [`attachment_encryption`]; `None` for media served in the clear, and
+    /// for material the Sensor cannot publish completely.
+    pub encryption: Option<Value>,
+}
+
+/// Rebuilds the contract's `attachments[].encryption` object from a Matrix
+/// `EncryptedFile` — the `file` a media message carries instead of `url`
+/// when the bytes themselves are encrypted, taken as ruma re-serialises it
+/// rather than as it sat on the event.
+///
+/// What crosses over is the material and nothing else: the 256-bit key, the
+/// counter block and the ciphertext digest, in the canonical unpadded base64
+/// the contract pins (URL-safe for `k`, the standard alphabet for `iv` and
+/// `hashes.sha256` — two alphabets in one object, so each is checked
+/// against its own). `url` is dropped: the attachment entry already carries
+/// the reference as `mxc_uri`, and two copies could disagree. So is
+/// `mimetype`, which the entry carries as `mime_type`. `kty`, `alg`, `ext`
+/// and `v` are fixed by the specification for the only version it defines:
+/// they are verified on the way in and re-emitted as the constants the
+/// contract pins, never copied.
+///
+/// `None` when the material is not publishable in full — a pre-specification
+/// `v1` scheme a conforming consumer could not use, a digest the sender did
+/// not supply, an encoding outside the contract's. Half an object is never
+/// published: the message still arrives, with the attachment's shape and its
+/// `mxc_uri`, and the consumer sees at a glance that no key came with it.
+pub fn attachment_encryption(file: &Value) -> Option<Value> {
+    if file.get("v").and_then(Value::as_str) != Some("v2") {
+        return None;
+    }
+    let key = file.get("key")?;
+    if key.get("kty").and_then(Value::as_str) != Some("oct")
+        || key.get("alg").and_then(Value::as_str) != Some("A256CTR")
+        || key.get("ext").and_then(Value::as_bool) != Some(true)
+    {
+        return None;
+    }
+    // The specification fixes no order and permits further operations, so
+    // the sender's list is carried over — de-duplicated, because the
+    // contract requires unique items — once it grants both operations a
+    // consumer needs.
+    let mut key_ops: Vec<String> = Vec::new();
+    for operation in key.get("key_ops")?.as_array()? {
+        let operation = operation.as_str()?;
+        if !key_ops.iter().any(|kept| kept == operation) {
+            key_ops.push(operation.to_owned());
+        }
+    }
+    if !key_ops.iter().any(|operation| operation == "encrypt")
+        || !key_ops.iter().any(|operation| operation == "decrypt")
+    {
+        return None;
+    }
+    let k = unpadded_base64(key.get("k"), 43, Alphabet::UrlSafe)?;
+    let iv = unpadded_base64(file.get("iv"), 22, Alphabet::Standard)?;
+    let sha256 = unpadded_base64(file.pointer("/hashes/sha256"), 43, Alphabet::Standard)?;
+    Some(json!({
+        "key": { "kty": "oct", "key_ops": key_ops, "alg": "A256CTR", "k": k, "ext": true },
+        "iv": iv,
+        "hashes": { "sha256": sha256 },
+        "v": "v2",
+    }))
+}
+
+/// The two base64 alphabets the Matrix attachment-encryption shape mixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Alphabet {
+    /// `key.k`, which the specification encodes URL-safe (`-` and `_`).
+    UrlSafe,
+    /// `iv` and `hashes.sha256`, in the standard alphabet (`+` and `/`).
+    Standard,
+}
+
+/// A base64 string of exactly `chars` characters in `alphabet`, unpadded —
+/// the encoding the contract pins each field to, so the length also pins the
+/// value's bit size (43 chars = 256 bits, 22 = 128).
+fn unpadded_base64(value: Option<&Value>, chars: usize, alphabet: Alphabet) -> Option<String> {
+    let value = value?.as_str()?;
+    let in_alphabet = |c: char| {
+        c.is_ascii_alphanumeric()
+            || match alphabet {
+                Alphabet::UrlSafe => matches!(c, '-' | '_'),
+                Alphabet::Standard => matches!(c, '+' | '/'),
+            }
+    };
+    (value.len() == chars && value.chars().all(in_alphabet)).then(|| value.to_owned())
 }
 
 /// Bridges without native sticker events relay stickers as `m.room.message`
 /// with msgtype `m.sticker`: the content keeps the sticker shape (`url`
-/// plus an `info` object) and never reaches a typed ruma variant. Returns
-/// None when the content has no usable mxc URI — an attachment entry
-/// without one can never be schema-valid.
+/// plus an `info` object) and never reaches a typed ruma variant. In an
+/// encrypted room the reference moves into a `file` object — an
+/// `EncryptedFile` — which is where the mxc URI and the decryption material
+/// are read from instead. Returns None when the content has no usable mxc
+/// URI — an attachment entry without one can never be schema-valid.
 pub fn attachment_from_sticker_data(data: &serde_json::Map<String, Value>) -> Option<Attachment> {
-    let mxc_uri = data.get("url")?.as_str()?;
+    let file = data.get("file");
+    let mxc_uri = match file {
+        Some(file) => file.get("url")?.as_str()?,
+        None => data.get("url")?.as_str()?,
+    };
     if !mxc_uri.starts_with("mxc://") {
         return None;
     }
@@ -189,6 +284,7 @@ pub fn attachment_from_sticker_data(data: &serde_json::Map<String, Value>) -> Op
         caption: None,
         dimensions,
         duration_ms: None,
+        encryption: file.and_then(attachment_encryption),
     })
 }
 
@@ -223,8 +319,8 @@ fn mime_type_or_default(reported: Option<&str>) -> String {
 /// shape — kind, mime type, size, pixel dimensions, duration: what the
 /// message *is* — and drops everything that is the message itself: the
 /// `mxc://` reference, which resolves to the bytes, its decryption material
-/// when the contract ever carries some (a reference plus its key is the
-/// content), and the caption, which is text the sender wrote. The contract's
+/// (a reference plus its key is the content, and the key alone is no safer
+/// to publish), and the caption, which is text the sender wrote. The contract's
 /// attachment shape carries no filename, deliberately: a filename is named
 /// by the sender and routinely says what the file holds, so for a media
 /// message it only ever reaches the bus as `data.body` or as the caption,
@@ -237,6 +333,9 @@ fn attachment_entry(attachment: &Attachment, reduced: bool) -> Value {
     });
     if !reduced {
         entry["mxc_uri"] = json!(attachment.mxc_uri);
+        if let Some(encryption) = &attachment.encryption {
+            entry["encryption"] = encryption.clone();
+        }
         if let Some(caption) = &attachment.caption {
             entry["caption"] = json!(cap_chars(caption, 1024));
         }
@@ -605,7 +704,29 @@ mod tests {
             caption: Some("regarde cette photo".to_owned()),
             dimensions: Some((800, 600)),
             duration_ms: None,
+            encryption: None,
         }
+    }
+
+    /// A Matrix `EncryptedFile` as ruma re-serialises one, with the key
+    /// material of the specification's own example: `k` exercises the
+    /// URL-safe alphabet (`-`, `_`), `iv` and the digest the standard one
+    /// (`+`, `/`).
+    fn sample_encrypted_file() -> Value {
+        json!({
+            "url": "mxc://example.com/AbCdEf0123456789",
+            "mimetype": "image/png",
+            "key": {
+                "kty": "oct",
+                "key_ops": ["decrypt", "encrypt"],
+                "alg": "A256CTR",
+                "k": "aWF6-32KGYaC3A_FEUCk1Bt0JA37zP0wrStgmdCaW-0",
+                "ext": true,
+            },
+            "iv": "w+sE15fzSc0AAAAAAAAAAA",
+            "hashes": { "sha256": "fdSLu/YkRx3Wyh3KQabP3rd6+SFiKg5lsJZQHtkSAYA" },
+            "v": "v2",
+        })
     }
 
     #[test]
@@ -737,6 +858,7 @@ mod tests {
                 caption: None,
                 dimensions: Some((512, 512)),
                 duration_ms: None,
+                encryption: None,
             })
         );
     }
@@ -748,6 +870,135 @@ mod tests {
         let mut http_url = serde_json::Map::new();
         http_url.insert("url".to_owned(), json!("https://example.com/x.png"));
         assert_eq!(attachment_from_sticker_data(&http_url), None);
+    }
+
+    #[test]
+    fn encryption_material_carries_the_key_iv_and_digest_and_nothing_else() {
+        let encryption = attachment_encryption(&sample_encrypted_file()).unwrap();
+        assert_eq!(
+            encryption,
+            json!({
+                "key": {
+                    "kty": "oct",
+                    "key_ops": ["decrypt", "encrypt"],
+                    "alg": "A256CTR",
+                    "k": "aWF6-32KGYaC3A_FEUCk1Bt0JA37zP0wrStgmdCaW-0",
+                    "ext": true,
+                },
+                "iv": "w+sE15fzSc0AAAAAAAAAAA",
+                "hashes": { "sha256": "fdSLu/YkRx3Wyh3KQabP3rd6+SFiKg5lsJZQHtkSAYA" },
+                "v": "v2",
+            }),
+            "url and mimetype stay out: the entry already carries both"
+        );
+    }
+
+    #[test]
+    fn unusable_encryption_material_is_not_published_at_all() {
+        // Each case is publishable material with exactly one thing wrong:
+        // the contract's rule is that half an object is never published.
+        /// One way a sender's material can be unusable to a consumer.
+        type Break = fn(&mut Value);
+        let cases: [(&str, Break); 10] = [
+            ("a pre-specification v1 scheme", |file| {
+                file["v"] = json!("v1")
+            }),
+            (
+                "no digest the consumer can verify",
+                |file| {
+                    file["hashes"] =
+                        json!({ "sha512": "fdSLu/YkRx3Wyh3KQabP3rd6+SFiKg5lsJZQHtkSAYA" })
+                },
+            ),
+            ("a key that is not 256 bits", |file| {
+                file["key"]["k"] = json!("aWF6-32KGYaC3A_FEUCk1Bt0JA37zP0wrStgmdCaW")
+            }),
+            ("a padded key", |file| {
+                file["key"]["k"] = json!("aWF6-32KGYaC3A_FEUCk1Bt0JA37zP0wrStgmdCaW=")
+            }),
+            ("a key in the wrong alphabet", |file| {
+                file["key"]["k"] = json!("aWF6+32KGYaC3A/FEUCk1Bt0JA37zP0wrStgmdCaW+0")
+            }),
+            ("a counter block that is not 128 bits", |file| {
+                file["iv"] = json!("w+sE15fzSc0AAAAAAAAAAAAA")
+            }),
+            ("an iv in the wrong alphabet", |file| {
+                file["iv"] = json!("w-sE15fzSc0AAAAAAAAAAA")
+            }),
+            ("another algorithm", |file| {
+                file["key"]["alg"] = json!("A128CTR")
+            }),
+            ("a non-extractable key", |file| {
+                file["key"]["ext"] = json!(false)
+            }),
+            ("a key that may not decrypt", |file| {
+                file["key"]["key_ops"] = json!(["encrypt"])
+            }),
+        ];
+        for (what, break_it) in cases {
+            let mut file = sample_encrypted_file();
+            break_it(&mut file);
+            assert_eq!(
+                attachment_encryption(&file),
+                None,
+                "{what} must yield no encryption object"
+            );
+        }
+        // Plain media carries no file object at all.
+        assert_eq!(attachment_encryption(&json!({})), None);
+    }
+
+    #[test]
+    fn encryption_material_reaches_the_attachment_entry() {
+        let mut input = sample_input();
+        input.attachments = vec![Attachment {
+            encryption: attachment_encryption(&sample_encrypted_file()),
+            ..sample_attachment()
+        }];
+        let event = build_message_received(&input);
+        let entry = &event["data"]["attachments"][0];
+        assert_eq!(
+            entry["encryption"]["key"]["k"],
+            "aWF6-32KGYaC3A_FEUCk1Bt0JA37zP0wrStgmdCaW-0"
+        );
+        assert_eq!(entry["encryption"]["v"], "v2");
+        // The reference is where it always was, not inside the material.
+        assert_eq!(entry["mxc_uri"], "mxc://example.com/AbCdEf0123456789");
+        assert!(entry["encryption"].get("url").is_none());
+    }
+
+    #[test]
+    fn a_revoked_senders_attachment_carries_neither_reference_nor_key() {
+        let mut input = sample_input();
+        input.consent = Consent::Revoked;
+        input.attachments = vec![Attachment {
+            encryption: attachment_encryption(&sample_encrypted_file()),
+            ..sample_attachment()
+        }];
+        let entry = build_message_received(&input)["data"]["attachments"][0].clone();
+        assert!(
+            entry.get("mxc_uri").is_none() && entry.get("encryption").is_none(),
+            "a reference plus its key is the content (ADR 0012): {entry}"
+        );
+        assert_eq!(entry["kind"], "image", "the shape survives");
+    }
+
+    #[test]
+    fn an_encrypted_sticker_carries_its_reference_and_material() {
+        // In an encrypted room the sticker's reference moves into `file`.
+        let mut file = sample_encrypted_file();
+        file["url"] = json!("mxc://example.com/StIcKeR0123456");
+        let data = serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+            "file": file,
+            "info": { "mimetype": "image/png", "size": 2048, "w": 512, "h": 512 },
+        }))
+        .unwrap();
+        let attachment = attachment_from_sticker_data(&data).unwrap();
+        assert_eq!(attachment.mxc_uri, "mxc://example.com/StIcKeR0123456");
+        assert_eq!(
+            attachment.encryption.as_ref().unwrap()["iv"],
+            "w+sE15fzSc0AAAAAAAAAAA"
+        );
     }
 
     #[test]

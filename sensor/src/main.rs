@@ -295,6 +295,9 @@ async fn main() -> Result<()> {
                 let body = event.content.body().to_owned();
                 let sender: OwnedUserId = event.sender.clone();
                 let bridge_contents = room_bridge_contents(&room).await;
+                // Unresolvable means a bridge marked this room but named
+                // no network this version knows: an unsupported portal, not
+                // native Matrix traffic, which resolves to `matrix`.
                 let Some(network) = network::resolve(&bridge_contents, sender.localpart()) else {
                     warn!(room = %room.room_id(), %sender, "cannot determine the network, skipping event");
                     return;
@@ -346,12 +349,13 @@ async fn main() -> Result<()> {
                     produced_at: rfc3339(std::time::SystemTime::now()),
                     // Bridge traffic carries the original network time in
                     // origin_server_ts (mautrix massages it through the
-                    // appservice ts override). The network only resolves
-                    // for bridge traffic — a portal m.bridge state event or
-                    // a ghost sender — so reaching this point means the
-                    // timestamp is the network's; plain Matrix traffic
-                    // never produces an event, and the homeserver's receive
-                    // time never masquerades as one.
+                    // appservice ts override), so for a portal room the
+                    // timestamp is the source network's. On native Matrix
+                    // traffic (ADR 0009) Matrix *is* the source network, and
+                    // origin_server_ts is its own timestamp: the same field
+                    // is the right answer for a different reason, and the
+                    // homeserver's receive time still never masquerades as
+                    // another network's.
                     network_timestamp: Some(rfc3339_ms(u64::from(event.origin_server_ts.0))),
                 };
                 let envelope = normalize::build_message_received(&input);
@@ -526,21 +530,30 @@ async fn main() -> Result<()> {
                     }
                 }
                 shared_room_ids.sort_unstable();
-                // Pick the first shared room whose network resolves: a
-                // contact may share non-portal rooms (no m.bridge state)
-                // with the Sensor; those must not shadow a real portal
+                // Pick the first shared room attributed to a bridged
+                // network; a room the contact shares as themselves (no
+                // m.bridge state, no ghost prefix) is native Matrix traffic
+                // and is the fallback, so it cannot shadow a real portal
                 // room further down the list.
                 let mut resolved = None;
+                let mut native = None;
                 for room_id in &shared_room_ids {
                     let Some(candidate) = client.get_room(room_id) else {
                         continue;
                     };
-                    if let Some(network) = resolve_network(&candidate, &sender).await {
-                        resolved = Some((candidate, network));
-                        break;
+                    let Some(network) = resolve_network(&candidate, &sender).await else {
+                        continue;
+                    };
+                    if network == network::Network::Matrix {
+                        if native.is_none() {
+                            native = Some((candidate, network));
+                        }
+                        continue;
                     }
+                    resolved = Some((candidate, network));
+                    break;
                 }
-                let Some((room, network)) = resolved else {
+                let Some((room, network)) = resolved.or(native) else {
                     if shared_room_ids.is_empty() {
                         return; // not a portal contact: shares no observed room
                     }
@@ -977,6 +990,18 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
         MediaSource::Plain(mxc) => mxc.to_string(),
         MediaSource::Encrypted(file) => file.url.to_string(),
     };
+    // The decryption material of encrypted media, taken from ruma's own
+    // serialization of the `EncryptedFile` rather than from the content JSON
+    // as it sat on the event: ruma encodes the key, the counter block and
+    // the digest in the canonical unpadded base64 the contract pins, each in
+    // its own alphabet. `normalize` decides what is publishable.
+    let encryption = |source: &MediaSource| match source {
+        MediaSource::Plain(_) => None,
+        MediaSource::Encrypted(file) => serde_json::to_value(file)
+            .ok()
+            .as_ref()
+            .and_then(normalize::attachment_encryption),
+    };
     let attachment = match msgtype {
         MessageType::Text(_) => return Some(Vec::new()),
         MessageType::Image(image) => normalize::Attachment {
@@ -993,6 +1018,7 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
                 .as_deref()
                 .and_then(|info| dimensions(info.width, info.height)),
             duration_ms: None,
+            encryption: encryption(&image.source),
         },
         MessageType::Video(video) => normalize::Attachment {
             kind: normalize::AttachmentKind::Video,
@@ -1011,6 +1037,7 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
                 .info
                 .as_deref()
                 .and_then(|info| info.duration.map(duration_ms)),
+            encryption: encryption(&video.source),
         },
         MessageType::Audio(audio) => normalize::Attachment {
             kind: normalize::AttachmentKind::Audio,
@@ -1026,6 +1053,7 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
                 .info
                 .as_deref()
                 .and_then(|info| info.duration.map(duration_ms)),
+            encryption: encryption(&audio.source),
         },
         MessageType::File(file) => normalize::Attachment {
             kind: normalize::AttachmentKind::File,
@@ -1038,6 +1066,7 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
             caption: file.caption().map(str::to_owned),
             dimensions: None,
             duration_ms: None,
+            encryption: encryption(&file.source),
         },
         // Geo messages carry no mxc URI and the contract's attachment shape
         // requires one: in v1 a location travels as the message body only.
@@ -1060,8 +1089,16 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
 /// Fetches the target of a relation from the homeserver (via the SDK's
 /// `Room::event`) and extracts a contract-capped excerpt of its body: the
 /// plain text for a text message, the caption or filename for media, the
-/// geo description for a location. An unreachable target is not an error —
-/// the event still publishes, without the excerpt.
+/// geo description for a location.
+///
+/// In an encrypted room — every portal room — the fetched event is
+/// `m.room.encrypted`, and `Room::event` decrypts it with the Megolm session
+/// the Sensor already holds, so the excerpt is the cleartext body (issue
+/// #13). When it cannot — a session the Sensor never received — the event
+/// stays typed as `m.room.encrypted` and does not match below, so the
+/// excerpt is omitted: an unreachable or unreadable target is not an error,
+/// the event still publishes, and ciphertext is never published as an
+/// excerpt.
 async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
     let timeline_event = room.event(event_id, None).await.ok()?;
     let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(

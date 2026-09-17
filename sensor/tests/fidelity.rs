@@ -539,31 +539,74 @@ fn assert_network_timestamp_near(event: &Value, sent_after: SystemTime) -> Resul
 }
 
 #[tokio::test]
-async fn a_plain_matrix_message_produces_no_event() -> Result<()> {
+async fn a_native_matrix_room_publishes_with_the_matrix_network() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
     let sensor = SensorProc::start(&sensor_env())?;
     let alpha = Bot::login("bot_alpha").await?;
 
-    // No m.bridge state, no ghost prefix: the network is unresolvable, so
-    // nothing is published — and the homeserver's receive time never
-    // masquerades as a network timestamp.
-    let room_id = alpha.create_room("plain-room", false).await?;
+    // No m.bridge state, no ghost prefix: the user's own Matrix account,
+    // which is a network of its own (ADR 0009). Until #18 this was silence.
+    let room_id = alpha.create_room("native-matrix-room", false).await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
     alpha
         .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
         .await?;
+    // A room some bridge did mark, for a network this Sensor does not
+    // support: an unsupported portal is not native traffic, and stays
+    // unpublished rather than being mislabelled `matrix`.
+    let irc_room_id = alpha.create_room("irc-portal", false).await?;
+    let (state_key, content) = harness::bridge_state(alpha.user_id(), "irc", "irc", "#irc-portal");
+    alpha
+        .send_state_event(&irc_room_id, "m.bridge", &state_key, content)
+        .await?;
+    alpha.invite(&irc_room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&irc_room_id, SENSOR_USER_ID, "join")
+        .await?;
 
-    alpha.send_message(&room_id, "un message ordinaire").await?;
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    alpha
+        .send_message(&irc_room_id, "depuis un réseau inconnu")
+        .await?;
+    let before = SystemTime::now();
+    let matrix_event_id = alpha.send_message(&room_id, "un message ordinaire").await?;
 
-    let messages = bus
-        .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id)
+    let messages = wait_for_room_events(&bus, &room_id, 1).await?;
+    let event = find_event(&messages, &room_id, &matrix_event_id);
+    validate_against_contract(event, "inbound.message.received")?;
+    assert_eq!(
+        event["network"].as_str(),
+        Some("matrix"),
+        "native Matrix traffic is published as its own network, not skipped"
+    );
+    assert_eq!(event["subject"].as_str(), Some("@bot_alpha:test.twalk"));
+    assert_eq!(event["consent"].as_str(), Some("pending"));
+    assert_eq!(event["data"]["body"].as_str(), Some("un message ordinaire"));
+    assert_eq!(
+        messages[0].header("network"),
+        Some("matrix"),
+        "the bus header carries the network for server-side filtering"
+    );
+    assert!(
+        event["data"]["contact"].get("network_identifier").is_none(),
+        "on the Matrix network the Matrix user id is the identifier, and it is the subject"
+    );
+    // Matrix is the source network here, so its own event timestamp *is* the
+    // network timestamp — no homeserver receive time masquerading as another
+    // network's.
+    assert_network_timestamp_near(event, before)?;
+
+    // The unsupported portal stayed silent. The event above was sent after
+    // the portal's, so the Sensor has already worked past it; the grace
+    // covers the two rooms landing in different sync responses.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let irc_messages = bus
+        .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &irc_room_id)
         .await?;
     assert!(
-        messages.is_empty(),
-        "a plain Matrix user in a plain room produces no inbound event"
+        irc_messages.is_empty(),
+        "a portal of an unknown network is not native Matrix traffic"
     );
 
     sensor.stop().await;
