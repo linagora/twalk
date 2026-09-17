@@ -9,6 +9,11 @@
 //! is [`crate::static_files`]. The Gateway's own API surface is the one
 //! exception: under `/api/` a 404 stays a 404, as JSON, because a client
 //! parsing an API response must never be handed an HTML page instead.
+//!
+//! Every answer this module gives is described in
+//! `companion-gateway/openapi.yaml`, which the origin also serves
+//! ([`crate::openapi`]): a route added here without a line there fails
+//! `tests/openapi.rs`.
 
 use std::sync::Arc;
 
@@ -78,6 +83,11 @@ pub fn router(gateway: Gateway) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_exposition))
+        // The Gateway's own HTTP description (ticket #63). Outside `/api`
+        // and unauthenticated: it is what the Companion's build points a
+        // client generator at, it must be readable before anyone can sign
+        // in, and it holds no secret.
+        .route("/openapi.yaml", get(crate::openapi::description))
         // The session's own routes (ticket #52). Merged, so every later
         // ticket's routes are added the same way — and every one of them is
         // behind the guard layered below without asking.
@@ -102,8 +112,8 @@ pub fn router(gateway: Gateway) -> Router {
 
 /// `GET /health` — the service's liveness and its version.
 ///
-/// Always `200 OK` with a JSON document (a description ticket #63 will
-/// formalise):
+/// Always `200 OK` with a JSON document (described, like every other answer
+/// of this origin, in `companion-gateway/openapi.yaml`):
 ///
 /// - `status` (string): `ok` while the process answers. Liveness, not
 ///   readiness — the skeleton depends on nothing to be ready for.
@@ -255,6 +265,7 @@ fn classify(path: &str) -> Route {
     match path {
         "/health" => Route::Health,
         "/metrics" => Route::Metrics,
+        "/openapi.yaml" => Route::OpenApi,
         "/api" => Route::Api,
         path if path.starts_with("/api/") => Route::Api,
         _ => Route::Companion,
@@ -269,6 +280,7 @@ mod tests {
     fn paths_are_classified_into_a_closed_set_of_routes() {
         assert_eq!(classify("/health"), Route::Health);
         assert_eq!(classify("/metrics"), Route::Metrics);
+        assert_eq!(classify("/openapi.yaml"), Route::OpenApi);
         assert_eq!(classify("/api"), Route::Api);
         assert_eq!(classify("/api/consent"), Route::Api);
         assert_eq!(classify("/"), Route::Companion);

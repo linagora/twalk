@@ -8,6 +8,13 @@
 //! [`session_http`]). Consent and the bridge facade land the same way in the
 //! remaining tickets of spec #46.
 //!
+//! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
+//! an OpenAPI 3.1 description of every answer the origin gives, served by
+//! the origin itself ([`openapi`]) and checked against the running binary by
+//! `tests/openapi.rs`. It is what the Companion generates its TypeScript
+//! client from, so every ticket that adds an endpoint extends it in the same
+//! commit — the test refuses a route that is not described.
+//!
 //! As in the Sensor, the seam-independent logic lives in these modules and
 //! the binary in `main.rs` only wires them to the network.
 
@@ -15,6 +22,7 @@ pub mod config;
 pub mod http;
 pub mod matrix_openid;
 pub mod metrics;
+pub mod openapi;
 pub mod session;
 pub mod session_http;
 pub mod static_files;

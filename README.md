@@ -89,17 +89,19 @@ Three CloudEvents extensions are used consistently: `network` (source channel), 
 
 All schemas live in [`contracts/cloudevents/v1/`](contracts/cloudevents/v1/) and are the source of truth for every component.
 
+The same principle applies to the one HTTP surface a client codes against: [`companion-gateway/openapi.yaml`](companion-gateway/openapi.yaml) describes the Companion Gateway's origin in OpenAPI 3.1 — endpoints, authentication, error codes — is served by the Gateway itself at `/openapi.yaml`, and is what the Companion generates its TypeScript client from.
+
 ---
 
 ## Repository layout
 
 ```
 twalk/
-├── contracts/           Source of truth: CloudEvents schemas, fixtures, persona spec
+├── contracts/           Source of truth for the bus: CloudEvents schemas, fixtures, persona spec
 ├── sensor/              The Sensor service (Rust): Matrix client, decrypts and publishes
 ├── hermes/              The agent platform: consumer runtime + reference personas
 ├── companion/           Twalk Companion PWA (SvelteKit static export): user-facing configuration surface
-├── companion-gateway/   Companion backend (Rust): bridge provisioning facade, consent broker, persona orchestrator
+├── companion-gateway/   Companion backend (Rust): bridge provisioning facade, consent broker, persona orchestrator; openapi.yaml describes its HTTP surface
 ├── bridges/             Mautrix bridge configurations and registrations
 ├── deploy/              Docker Compose, Kubernetes and Ansible deployment manifests
 ├── ui/                  Optional Buzz control room and admin console

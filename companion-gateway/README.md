@@ -12,6 +12,7 @@ One HTTP origin serves everything, so there is no CORS and the device token can 
 | --- | --- |
 | `/health` | `200` with `{"status":"ok","version":"…","revision":"…"}`. `version` is the server half of the Companion's version handshake: the PWA compares it with the version baked into its own build and reloads when a service worker has left it holding a stale app shell. |
 | `/metrics` | The Prometheus text exposition, in the Sensor's conventions (`twalk_companion_gateway_*`). |
+| `/openapi.yaml` | This origin's own OpenAPI 3.1 description — the bytes of `openapi.yaml`, embedded in the binary. See below. |
 | `/api/session` | `POST` signs in, `GET` reports who is signed in on which device, `DELETE` signs this device out (which revokes it). |
 | `/api/session/refresh` | `POST` exchanges the refresh cookie for a new pair of tokens, rotating both. |
 | `/api/devices` | `GET` lists the devices: name, created, last seen, revoked. |
@@ -46,6 +47,16 @@ With no `GATEWAY_OWNER` configured, nobody can sign in: the origin still serves 
 
 A `traceparent` on an inbound request is continued (and returned on the response); a request without one, or with a malformed one, gets a fresh W3C trace context. Per-request log lines (method, path, status, duration, `traceparent`) are at `debug`; the lifecycle is at `info`.
 
+### The HTTP description (ticket #63)
+
+`openapi.yaml`, next to this README, is an OpenAPI 3.1 description of the whole origin: every endpoint, its authentication, its response shapes, and — per status — the machine-readable `error` code a client branches on. The Companion is built in its own lot, by another agent, from a TypeScript client generated against it. That is the property the CloudEvents contract gives the bus, applied to this origin: components built in parallel without coordination, and a field that changes breaks a build instead of an onboarding screen.
+
+- **Where it lives.** With the component, not in `contracts/`. `contracts/` is the *bus* contract — CloudEvents schemas and fixtures, released CC0, shared by every component and consumed by third parties; this describes one component's own HTTP surface, moves with that component's code, and is embedded in its binary with `include_str!`. Putting it in `contracts/` would have widened what that directory means and coupled a crate's build to a path outside it.
+- **Which way the check runs.** The description is the source of truth and the implementation is checked against it. `tests/openapi.rs` reads the file, drives the real binary through every operation it declares, and asserts the status, the media type, the body against the response's own JSON Schema (OpenAPI 3.1 schemas *are* JSON Schema 2020-12 — that is why 3.1), the `error` code, and the authentication each operation declares against `session_http::requirement` itself. It also asserts that every route the router registers is described and every described path is a route. Generating the description from the handlers would have described whatever they happen to do, mistakes included, and the Companion's lot would generate a client from a document nobody reviewed.
+- **The obligation on later tickets.** Every ticket of spec #46 that adds an endpoint extends `openapi.yaml` in the same commit. It is not a convention to remember: an undescribed route fails the suite.
+
+`GET /openapi.yaml` serves the committed file's bytes (`application/yaml`, RFC 9512), unauthenticated — a generator must be able to read it before anyone can sign in, and it holds no secret.
+
 ## Configuration
 
 Environment variables only, like the Sensor. They are documented for an operator in `deploy/docker-compose/.env.example`.
@@ -73,8 +84,9 @@ cd companion-gateway
 cargo test                 # unit tests, the process-boundary suites, and the compose deployment test
 cargo test --test service  # the origin's own suite alone (no Docker)
 cargo test --test signin   # sign-in against the shared test stack's Synapse
+cargo test --test openapi  # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/signin.rs` does the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that); `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image. Both reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` does the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that); `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image. Both reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.

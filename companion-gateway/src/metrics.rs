@@ -37,6 +37,11 @@ pub enum Route {
     Health,
     /// The metrics endpoint itself.
     Metrics,
+    /// The Gateway's own HTTP description (`/openapi.yaml`, ticket #63).
+    /// Its own label rather than `companion`: the description is the
+    /// Gateway's surface, not a file of the Companion's build, and a
+    /// generator polling it is worth telling apart from a browser.
+    OpenApi,
     /// The Gateway's own API surface (`/api/...`), empty in this skeleton.
     Api,
     /// The Companion's static files, the app shell included.
@@ -48,6 +53,7 @@ impl Route {
         match self {
             Route::Health => "health",
             Route::Metrics => "metrics",
+            Route::OpenApi => "openapi",
             Route::Api => "api",
             Route::Companion => "companion",
         }
