@@ -1,7 +1,8 @@
-//! Consent: the data-processing agreement state of a contact or channel
-//! (CONTEXT.md). The Companion Gateway is the single writer of consent
-//! state (ADR 0006); the Sensor only labels events with the current state,
-//! served from an in-memory cache fed by `consent.state.changed` events.
+//! Consent: the data-processing agreement state of a contact or of a whole
+//! network (CONTEXT.md). The Companion Gateway is the single writer of
+//! consent state (ADR 0006); the Sensor only labels events with the current
+//! state, served from an in-memory cache fed by `consent.state.changed`
+//! events.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -71,7 +72,7 @@ pub struct ConsentChange {
 impl ConsentChange {
     /// Extracts the sender-labelling change from a `consent.state.changed`
     /// event. Returns None when the event cannot label a sender: malformed,
-    /// or scoped to a channel or persona subject rather than a contact.
+    /// or scoped to a network or persona subject rather than a contact.
     pub fn parse(event: &Value) -> Option<Self> {
         let data = event.get("data")?;
         let subject = data.get("subject")?;
@@ -308,11 +309,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_and_persona_changes_do_not_label_senders() {
+    fn network_and_persona_changes_do_not_label_senders() {
         let persona = consent_event("persona", "assistant", "granted", json!(["whatsapp"]));
         assert_eq!(ConsentChange::parse(&persona), None);
-        let channel = consent_event("channel", "family", "granted", json!(["whatsapp"]));
-        assert_eq!(ConsentChange::parse(&channel), None);
+        // A `network` subject is that network's default consent state (the
+        // contract renamed the value from `channel` in #43). The Sensor
+        // labels senders from contact-scoped decisions only, so the default
+        // is not applied here; implementing it is its own ticket.
+        let network = consent_event("network", "whatsapp", "granted", json!(["whatsapp"]));
+        assert_eq!(ConsentChange::parse(&network), None);
     }
 
     #[test]

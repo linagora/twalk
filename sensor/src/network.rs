@@ -11,6 +11,9 @@ pub enum Network {
     Signal,
     Discord,
     Sms,
+    /// Native Matrix traffic: the user's own account, reached without a
+    /// bridge in front of it (ADR 0009).
+    Matrix,
 }
 
 impl Network {
@@ -21,12 +24,15 @@ impl Network {
             Self::Signal => "signal",
             Self::Discord => "discord",
             Self::Sms => "sms",
+            Self::Matrix => "matrix",
         }
     }
 
     /// Maps a bridge-reported protocol id (from an `m.bridge` state event, or
     /// a ghost prefix) to a contract network. Transport ids like `gmessages`
-    /// fold into their user-facing network.
+    /// fold into their user-facing network. `matrix` is deliberately absent:
+    /// it is what a room with no bridge in front of it resolves to, never
+    /// something a bridge reports about itself.
     pub fn from_bridge_id(id: &str) -> Option<Self> {
         match id {
             "whatsapp" => Some(Self::Whatsapp),
@@ -60,6 +66,7 @@ impl Network {
             "signal" => Some(Self::Signal),
             "discord" => Some(Self::Discord),
             "sms" => Some(Self::Sms),
+            "matrix" => Some(Self::Matrix),
             _ => None,
         }
     }
@@ -68,17 +75,30 @@ impl Network {
 /// Resolves the network of an observed event: the room's `m.bridge` state
 /// event contents (the mautrix mechanism) win — the first, in the given
 /// order, whose `protocol.id` names a known network; the ghost naming
-/// convention is the fallback. `None` when neither yields a network.
+/// convention is the next fallback; and a room that no bridge marked at all,
+/// whose sender carries no ghost prefix, is native Matrix traffic —
+/// `Network::Matrix`, the user's own account with no bridge in front of it
+/// (ADR 0009).
+///
+/// `None` is what is left: a room some bridge *did* mark, whose markers name
+/// no network this version knows and whose sender is not a ghost. That is an
+/// unsupported bridge's portal, not native traffic, and the caller skips it
+/// rather than mislabelling bridged traffic as Matrix.
 ///
 /// Only `protocol.id` identifies the bridged network: in mautrix the
 /// `network` section describes a parent portal (a Discord guild, a Telegram
 /// forum) and never carries a network name.
 pub fn resolve(bridge_contents: &[Value], sender_localpart: &str) -> Option<Network> {
-    bridge_contents
+    let bridged = bridge_contents
         .iter()
         .filter_map(|content| content.pointer("/protocol/id").and_then(Value::as_str))
         .find_map(Network::from_bridge_id)
-        .or_else(|| Network::from_ghost_localpart(sender_localpart))
+        .or_else(|| Network::from_ghost_localpart(sender_localpart));
+    match bridged {
+        Some(network) => Some(network),
+        None if bridge_contents.is_empty() => Some(Network::Matrix),
+        None => None,
+    }
 }
 
 /// The contact's native network identifier, derived from a ghost localpart
@@ -91,7 +111,9 @@ pub fn resolve(bridge_contents: &[Value], sender_localpart: &str) -> Option<Netw
 /// numbers, and Signal ids, which mautrix-signal mints from the account's
 /// ACI UUID rather than its phone number. `None` when the localpart is not
 /// a ghost of this network — a plain Matrix user in a portal room has no
-/// derivable identifier.
+/// derivable identifier, and neither has a native Matrix contact: on that
+/// network the Matrix user id is the identifier, and it is already the
+/// event's `subject`.
 pub fn ghost_network_identifier(network: Network, localpart: &str) -> Option<String> {
     let (prefix, identifier) = localpart.split_once('_')?;
     if Network::from_bridge_id(prefix) != Some(network) || identifier.is_empty() {
@@ -133,6 +155,21 @@ mod tests {
         assert_eq!(Network::from_contract_value("sms"), Some(Network::Sms));
         assert_eq!(Network::from_contract_value("gmessages"), None);
         assert_eq!(Network::from_contract_value("irc"), None);
+    }
+
+    #[test]
+    fn matrix_is_a_contract_network_but_never_a_bridge_id() {
+        // The outbound and consent paths read the contract value (#18): a
+        // decision or an approved reply on `matrix` must parse.
+        assert_eq!(
+            Network::from_contract_value("matrix"),
+            Some(Network::Matrix)
+        );
+        assert_eq!(Network::Matrix.as_str(), "matrix");
+        // No bridge reports `matrix` about itself, and `@matrix_x:server` is
+        // a plain user, not a ghost.
+        assert_eq!(Network::from_bridge_id("matrix"), None);
+        assert_eq!(Network::from_ghost_localpart("matrix_alice"), None);
     }
 
     #[test]
@@ -215,10 +252,34 @@ mod tests {
     }
 
     #[test]
-    fn nothing_resolved_without_bridge_state_or_prefix() {
-        assert_eq!(resolve(&[], "bot_alpha"), None);
+    fn an_unmarked_room_with_a_plain_sender_is_native_matrix_traffic() {
+        // No m.bridge state event, no ghost prefix: the user's own Matrix
+        // account, published as `matrix` rather than skipped (ADR 0009).
+        assert_eq!(resolve(&[], "bot_alpha"), Some(Network::Matrix));
+    }
+
+    #[test]
+    fn a_marked_room_naming_no_known_network_resolves_to_nothing() {
+        // A bridge did mark this room, so it is a portal — of a network this
+        // version does not support. Publishing it as native Matrix traffic
+        // would mislabel bridged traffic, so it resolves to nothing and the
+        // caller skips it, exactly as before native Matrix existed.
         let junk = json!({ "unrelated": true });
         assert_eq!(resolve(&[junk], "bot_alpha"), None);
+        let irc = json!({ "protocol": { "id": "irc" } });
+        assert_eq!(resolve(&[irc], "bot_alpha"), None);
+    }
+
+    #[test]
+    fn a_marked_room_still_wins_over_native_matrix() {
+        // The bridge attribution of a portal room is untouched by #18.
+        let content = json!({ "protocol": { "id": "whatsapp" } });
+        assert_eq!(resolve(&[content], "bot_beta"), Some(Network::Whatsapp));
+        // And so is the ghost fallback in an unmarked room.
+        assert_eq!(
+            resolve(&[], "whatsapp_33612345678"),
+            Some(Network::Whatsapp)
+        );
     }
 
     #[test]
@@ -307,6 +368,17 @@ mod tests {
         // …and an empty identifier is no identifier.
         assert_eq!(
             ghost_network_identifier(Network::Whatsapp, "whatsapp_"),
+            None
+        );
+    }
+
+    #[test]
+    fn native_matrix_contacts_have_no_separate_network_identifier() {
+        // On the Matrix network the Matrix user id *is* the identifier, and
+        // it is already the event's subject: there is nothing to derive.
+        assert_eq!(ghost_network_identifier(Network::Matrix, "alice"), None);
+        assert_eq!(
+            ghost_network_identifier(Network::Matrix, "matrix_alice"),
             None
         );
     }
