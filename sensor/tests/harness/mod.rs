@@ -449,6 +449,20 @@ impl Bot {
         extract_str(&response, "event_id", "send state event")
     }
 
+    /// Reads the content of one state event of a room.
+    pub async fn get_state_event(&self, room_id: &str, event_type: &str, state_key: &str) -> Result<Value> {
+        self.send_json(
+            reqwest::Method::GET,
+            &format!(
+                "/_matrix/client/v3/rooms/{}/state/{event_type}/{state_key}",
+                esc(room_id)
+            ),
+            None,
+            "get state event",
+        )
+        .await
+    }
+
     /// Reads the membership of a user in a room (invite, join, leave, ban).
     pub async fn get_membership(&self, room_id: &str, user_id: &str) -> Result<String> {
         let response = self

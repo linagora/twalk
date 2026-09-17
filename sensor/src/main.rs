@@ -23,7 +23,8 @@ use matrix_sdk::ruma::events::room::message::{
 };
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent};
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedUserId, UInt};
+use matrix_sdk::ruma::api::error::ErrorKind;
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, UInt};
 use matrix_sdk::{Client, LoopCtrl, Room, RoomState};
 use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
@@ -1185,8 +1186,10 @@ async fn dead_letter(
 }
 
 /// A send that can never succeed (malformed target, content the Sensor cannot
-/// render) is permanent; anything else may succeed on a later attempt, e.g.
-/// once the Sensor has joined the target room.
+/// render, a request the homeserver rejects as malformed) is permanent;
+/// anything else may succeed on a later attempt, e.g. once the Sensor has
+/// joined the target room or been granted the power to post in it (see
+/// `classify_send_error`).
 enum PostError {
     Permanent(anyhow::Error),
     Transient(anyhow::Error),
@@ -1222,9 +1225,35 @@ async fn post_approved_reply(client: &Client, job: &outbound::ApprovedReply) -> 
             .map_err(|error| PostError::Permanent(anyhow!(error).context("invalid reply target")))?;
         content.relates_to = Some(Relation::Reply(Reply::with_event_id(event_id)));
     }
-    room.send_queue()
-        .send(content.into())
+    // A direct send, not the send queue: the queue only enqueues locally and
+    // sends in the background, so an ack after it would not be tied to
+    // delivery. Awaiting the homeserver's event id is what makes the ack
+    // safe. The transaction id is derived from the approval's event id, so a
+    // redelivered approval whose earlier send was accepted but whose response
+    // was lost is deduplicated by the homeserver instead of posted twice.
+    let transaction_id = OwnedTransactionId::from(format!("twalk-{}", job.event_id));
+    room.send(content)
+        .with_transaction_id(transaction_id)
         .await
-        .map_err(|error| PostError::Transient(anyhow!(error).context("matrix send failed")))?;
+        .map_err(classify_send_error)?;
     Ok(())
+}
+
+/// Maps a failed Matrix send onto the outbound retry policy. Only errors
+/// saying the request itself is malformed can never succeed and are
+/// permanent. Everything else is transient and goes through the bounded retry
+/// schedule before dead-lettering — notably `M_FORBIDDEN`, which a portal
+/// room's power levels raise and which clears once the Sensor is granted the
+/// right to post, and `M_LIMIT_EXCEEDED`, network and server errors.
+fn classify_send_error(error: matrix_sdk::Error) -> PostError {
+    let permanent = matches!(
+        error.client_api_error_kind(),
+        Some(ErrorKind::BadJson | ErrorKind::NotJson | ErrorKind::TooLarge | ErrorKind::InvalidParam)
+    );
+    let error = anyhow!(error).context("matrix send failed");
+    if permanent {
+        PostError::Permanent(error)
+    } else {
+        PostError::Transient(error)
+    }
 }
