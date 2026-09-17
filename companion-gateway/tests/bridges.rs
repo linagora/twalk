@@ -23,12 +23,12 @@ mod harness;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use harness::stub_bridge::{COOKIES_FLOW, COOKIES_STEP, PHONE_FLOW, PHONE_STEP, QR_FLOW, QR_STEP};
 use harness::{
     companion_build, ensure_stack, gateway_env_with_bridges, gateway_state_dir, owner_user_id,
     poll_until, GatewayProc, MatrixUser, StubBridge, OWNER_LOCALPART, STUB_BRIDGE_ID,
     UNREACHABLE_BRIDGE_ID,
 };
-use harness::stub_bridge::{COOKIES_FLOW, COOKIES_STEP, PHONE_FLOW, PHONE_STEP, QR_FLOW, QR_STEP};
 use serde_json::{json, Value};
 
 /// The Gateway, a stub bridge, and a signed-in device: what every test here
@@ -47,10 +47,7 @@ impl Fixture {
         ensure_stack().await?;
         let stub = StubBridge::start().await?;
         let static_dir = companion_build(test_name)?;
-        let gateway = GatewayProc::start(&gateway_env_with_bridges(
-            &static_dir,
-            &stub.base_url(),
-        ))?;
+        let gateway = GatewayProc::start(&gateway_env_with_bridges(&static_dir, &stub.base_url()))?;
         let base = gateway.base_url().await?;
         poll_until(
             || async {
@@ -131,11 +128,7 @@ impl Fixture {
     /// to answer immediately — that is the whole point of holding the
     /// blocking step server-side — so a slow answer here is a failure of the
     /// design and not of the test.
-    async fn poll_login_until(
-        &self,
-        what: &str,
-        ready: impl Fn(&Value) -> bool,
-    ) -> Result<Value> {
+    async fn poll_login_until(&self, what: &str, ready: impl Fn(&Value) -> bool) -> Result<Value> {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         loop {
             let started = std::time::Instant::now();
@@ -253,17 +246,24 @@ async fn a_whole_qr_login_runs_through_the_gateway_while_the_browser_only_polls(
         .to_owned();
     assert!(first_code.starts_with("2@"), "{first_code}");
     assert_eq!(
-        started["step"]["valid_for_seconds"], json!(20),
+        started["step"]["valid_for_seconds"],
+        json!(20),
         "the state says how long the code is worth drawing: {started}"
     );
-    assert_eq!(started["started_by"]["device_name"], json!("the scanning device"));
+    assert_eq!(
+        started["started_by"]["device_name"],
+        json!("the scanning device")
+    );
 
     // The acting user is the owner from configuration, never a value the
     // browser chose: mautrix's shared-secret auth takes it on trust.
     let starts = fixture.stub.starts();
     assert_eq!(starts.len(), 1);
     assert_eq!(starts[0].user_id.as_deref(), Some(owner_user_id().as_str()));
-    assert_eq!(starts[0].login_id, None, "this is a first login, not a repair");
+    assert_eq!(
+        starts[0].login_id, None,
+        "this is a first login, not a repair"
+    );
 
     // And the Gateway is the one sitting in the blocking step.
     poll_until(
@@ -395,7 +395,10 @@ async fn a_cancelled_login_stops_at_the_bridge_and_reads_as_cancelled() -> Resul
         )
         .await?;
     assert_eq!(status, 201, "{started}");
-    let process_id = started["process_id"].as_str().context("a process")?.to_owned();
+    let process_id = started["process_id"]
+        .as_str()
+        .context("a process")?
+        .to_owned();
     poll_until(
         || async { (fixture.stub.held() == 1).then_some(()) },
         "the gateway to be holding the step",
@@ -452,7 +455,10 @@ async fn a_second_login_is_refused_and_names_the_device_and_time_that_started_th
         )
         .await?;
     assert_eq!(status, 201, "{started}");
-    let started_at = started["started_at"].as_str().context("an instant")?.to_owned();
+    let started_at = started["started_at"]
+        .as_str()
+        .context("an instant")?
+        .to_owned();
 
     // The user's other device tries the same thing.
     let other = sign_in(&fixture.http, &fixture.base, "the other phone").await?;
@@ -614,7 +620,8 @@ async fn a_relayed_credential_reaches_the_bridge_and_neither_the_store_nor_the_l
         );
     }
     assert!(
-        logs.iter().any(|line| line.contains("relaying a bridge login step")),
+        logs.iter()
+            .any(|line| line.contains("relaying a bridge login step")),
         "the relay is logged — by shape, not by value"
     );
     // Nor does the provisioning secret, which is the powerful one.

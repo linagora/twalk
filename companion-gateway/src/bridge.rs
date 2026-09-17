@@ -458,10 +458,9 @@ impl Bridges {
         let mut bridges = Vec::with_capacity(configured.len());
         for mut config in configured {
             anyhow::ensure!(
-                !bridges.iter().any(|existing: &Arc<Bridge>| existing
-                    .config
-                    .bridge_id
-                    == config.bridge_id),
+                !bridges
+                    .iter()
+                    .any(|existing: &Arc<Bridge>| existing.config.bridge_id == config.bridge_id),
                 "two bridges are configured with the id {:?}: a bridge_id identifies one \
                  instance (CONTEXT.md)",
                 config.bridge_id
@@ -514,7 +513,11 @@ impl Bridges {
         self.bridges
             .iter()
             .map(|bridge| {
-                let login = match &*bridge.slot.lock().expect("the slot mutex is never poisoned") {
+                let login = match &*bridge
+                    .slot
+                    .lock()
+                    .expect("the slot mutex is never poisoned")
+                {
                     Slot::Idle => None,
                     Slot::Active(active) => Some(active.read()),
                 };
@@ -534,7 +537,11 @@ impl Bridges {
 
     /// `GET /_matrix/provision/v3/login/flows` — the flows this bridge
     /// offers, for the screen that asks "how do you want to connect?".
-    pub async fn flows(&self, bridge_id: &str, acting_as: &str) -> Result<Vec<Flow>, BridgeRefusal> {
+    pub async fn flows(
+        &self,
+        bridge_id: &str,
+        acting_as: &str,
+    ) -> Result<Vec<Flow>, BridgeRefusal> {
         let bridge = self.bridge(bridge_id)?;
         let body = self
             .call(
@@ -546,12 +553,11 @@ impl Bridges {
                 None,
             )
             .await?;
-        let flows = body
-            .get("flows")
-            .and_then(Value::as_array)
-            .ok_or_else(|| BridgeRefusal::BridgeUnreachable {
+        let flows = body.get("flows").and_then(Value::as_array).ok_or_else(|| {
+            BridgeRefusal::BridgeUnreachable {
                 detail: "the bridge's flows answer names no flows".to_owned(),
-            })?;
+            }
+        })?;
         Ok(flows
             .iter()
             .filter_map(|flow| {
@@ -622,7 +628,11 @@ impl Bridges {
     /// The login in flight on this bridge, as the Companion polls it.
     pub fn login(&self, bridge_id: &str) -> Result<LoginView, BridgeRefusal> {
         let bridge = self.bridge(bridge_id)?;
-        match &*bridge.slot.lock().expect("the slot mutex is never poisoned") {
+        match &*bridge
+            .slot
+            .lock()
+            .expect("the slot mutex is never poisoned")
+        {
             Slot::Idle => Err(BridgeRefusal::NoLoginInFlight),
             Slot::Active(active) => Ok(active.read()),
         }
@@ -710,8 +720,10 @@ impl Bridges {
             "a bridge login started"
         );
         apply(&self.clients, bridge, &active, step);
-        *bridge.slot.lock().expect("the slot mutex is never poisoned") =
-            Slot::Active(active.clone());
+        *bridge
+            .slot
+            .lock()
+            .expect("the slot mutex is never poisoned") = Slot::Active(active.clone());
         Ok(active.read())
     }
 
@@ -760,13 +772,7 @@ impl Bridges {
                 bridge,
                 &self.clients.http,
                 reqwest::Method::POST,
-                &[
-                    "login",
-                    "step",
-                    &process_id,
-                    &step_id,
-                    step_type.as_str(),
-                ],
+                &["login", "step", &process_id, &step_id, step_type.as_str()],
                 &[],
                 Some(data),
             )
@@ -883,15 +889,7 @@ impl Bridges {
         query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<Value, BridgeRefusal> {
-        call_bridge(
-            &bridge.config,
-            http,
-            method,
-            segments,
-            query,
-            body,
-        )
-        .await
+        call_bridge(&bridge.config, http, method, segments, query, body).await
     }
 }
 
@@ -1020,13 +1018,13 @@ fn hold(clients: &Clients, bridge: Arc<Bridge>, active: Arc<ActiveLogin>, step_i
             &bridge.config,
             &clients.blocking_http,
             reqwest::Method::POST,
-                &[
-                    "login",
-                    "step",
-                    &process_id,
-                    &step_id,
-                    StepType::DisplayAndWait.as_str(),
-                ],
+            &[
+                "login",
+                "step",
+                &process_id,
+                &step_id,
+                StepType::DisplayAndWait.as_str(),
+            ],
             &[("txn_id", txn_id.as_str())],
             Some(json!({})),
         )
@@ -1062,8 +1060,7 @@ fn record_refusal(active: &Arc<ActiveLogin>, refusal: &BridgeRefusal) {
         ),
         BridgeRefusal::TooManyLogins => (
             LoginFailure::BridgeRefused,
-            "the network will not accept another login (FI.MAU.BRIDGE.TOO_MANY_LOGINS)"
-                .to_owned(),
+            "the network will not accept another login (FI.MAU.BRIDGE.TOO_MANY_LOGINS)".to_owned(),
         ),
         BridgeRefusal::BridgeUnreachable { detail } => (
             LoginFailure::LoginLost,
@@ -1118,7 +1115,11 @@ fn fail(active: &Arc<ActiveLogin>, failure: LoginFailure, detail: String) {
 /// terminal login still counts as present: the Companion has to be able to
 /// read how its login ended.
 fn active_login(bridge: &Arc<Bridge>) -> Result<Arc<ActiveLogin>, BridgeRefusal> {
-    match &*bridge.slot.lock().expect("the slot mutex is never poisoned") {
+    match &*bridge
+        .slot
+        .lock()
+        .expect("the slot mutex is never poisoned")
+    {
         Slot::Idle => Err(BridgeRefusal::NoLoginInFlight),
         Slot::Active(active) => Ok(active.clone()),
     }
@@ -1128,7 +1129,10 @@ fn active_login(bridge: &Arc<Bridge>) -> Result<Arc<ActiveLogin>, BridgeRefusal>
 /// `None` when the slot is free — a login that has completed, failed or been
 /// cancelled does not stand in the way of the next one.
 fn in_flight(bridge: &Arc<Bridge>) -> Option<(StartedBy, SystemTime)> {
-    let slot = bridge.slot.lock().expect("the slot mutex is never poisoned");
+    let slot = bridge
+        .slot
+        .lock()
+        .expect("the slot mutex is never poisoned");
     match &*slot {
         Slot::Idle => None,
         Slot::Active(active) => {
