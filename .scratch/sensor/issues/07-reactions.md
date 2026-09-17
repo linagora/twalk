@@ -6,9 +6,9 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A reaction in an observed room produces a schema-valid `inbound.reaction.added.v1`
-- [ ] The event carries the reaction, the target event id and an excerpt of the target message
-- [ ] The reactor is resolved to a contact with the same rules as message senders
-- [ ] Removing a reaction produces no event
+- [x] A reaction in an observed room produces a schema-valid `inbound.reaction.added.v1`
+- [x] The event carries the reaction, the target event id and an excerpt of the target message
+- [x] The reactor is resolved to a contact with the same rules as message senders
+- [x] Removing a reaction produces no event

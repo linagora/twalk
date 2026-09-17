@@ -15,6 +15,10 @@ pub const REACTION_ADDED_TYPE: &str = "fr.linagora.twalk.inbound.reaction.added.
 pub const REACTION_ADDED_DATASCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/inbound.reaction.added.schema.json";
 
+pub const PRESENCE_UPDATED_TYPE: &str = "fr.linagora.twalk.inbound.presence.updated.v1";
+pub const PRESENCE_UPDATED_DATASCHEMA: &str =
+    "https://schemas.twalk.dev/cloudevents/v1/inbound.presence.updated.schema.json";
+
 pub const STREAM_NAME: &str = "twalk";
 pub const STREAM_SUBJECTS: [&str; 1] = ["twalk.>"];
 
@@ -35,6 +39,24 @@ pub fn cloud_event_id(matrix_event_id: &str, matrix_room_id: &str) -> String {
     hasher.update(matrix_event_id.as_bytes());
     hasher.update(b":");
     hasher.update(matrix_room_id.as_bytes());
+    hex_encode(hasher.finalize())
+}
+
+/// Deterministic CloudEvents id for presence updates:
+/// sha256(matrix_user_id + ':' + presence + ':' + receipt_timestamp_ms), the
+/// contract's natural key. Presence EDUs carry no Matrix event id; the
+/// receipt timestamp is what keeps bus replays idempotent.
+pub fn presence_event_id(
+    matrix_user_id: &str,
+    presence: Presence,
+    receipt_timestamp_ms: u64,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(matrix_user_id.as_bytes());
+    hasher.update(b":");
+    hasher.update(presence.as_str().as_bytes());
+    hasher.update(b":");
+    hasher.update(receipt_timestamp_ms.to_string().as_bytes());
     hex_encode(hasher.finalize())
 }
 
@@ -149,6 +171,80 @@ pub fn build_reaction_added(input: &InboundReaction) -> Value {
         "subject": input.reactor,
         "datacontenttype": "application/json",
         "dataschema": REACTION_ADDED_DATASCHEMA,
+        "network": input.network.as_str(),
+        "consent": input.consent.as_str(),
+        "data": data,
+    })
+}
+
+/// A contact's connectivity on a network, normalized across networks (the
+/// contract's `data.presence` enum).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    Online,
+    Offline,
+    Unavailable,
+}
+
+impl Presence {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Everything needed to build an `inbound.presence.updated.v1` envelope,
+/// already resolved at the seam.
+pub struct InboundPresence {
+    /// Matrix user ID of the contact whose presence changed (the CloudEvents
+    /// `subject`).
+    pub matrix_user_id: String,
+    pub presence: Presence,
+    /// Server name of the Sensor's homeserver (the `source` authority).
+    pub server_name: String,
+    /// The observed portal room chosen as the event's `source`. Matrix
+    /// presence updates are not room-scoped, so the binary picks one
+    /// observed room shared with the contact.
+    pub matrix_room_id: String,
+    pub network: Network,
+    pub consent: Consent,
+    pub display_name: String,
+    /// RFC 3339 timestamp of when the Sensor produced the event: the same
+    /// instant as `receipt_timestamp_ms`, so consumers can recompute the id.
+    pub produced_at: String,
+    /// Receipt time of the presence update in milliseconds since the epoch.
+    /// Presence EDUs carry no server timestamp, so the Sensor's receipt
+    /// instant is the natural key's receipt timestamp.
+    pub receipt_timestamp_ms: u64,
+    /// RFC 3339 timestamp of when the contact was last active, when the
+    /// observed presence update reports it.
+    pub last_active_at: Option<String>,
+}
+
+pub fn build_presence_updated(input: &InboundPresence) -> Value {
+    let mut data = json!({
+        "presence": input.presence.as_str(),
+        "contact": { "display_name": cap_chars(&input.display_name, 256) },
+    });
+    if let Some(last_active_at) = &input.last_active_at {
+        data["last_active_at"] = json!(last_active_at);
+    }
+    json!({
+        "specversion": "1.0",
+        "id": presence_event_id(
+            &input.matrix_user_id,
+            input.presence,
+            input.receipt_timestamp_ms
+        ),
+        "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
+        "type": PRESENCE_UPDATED_TYPE,
+        "time": input.produced_at,
+        "subject": input.matrix_user_id,
+        "datacontenttype": "application/json",
+        "dataschema": PRESENCE_UPDATED_DATASCHEMA,
         "network": input.network.as_str(),
         "consent": input.consent.as_str(),
         "data": data,
@@ -283,6 +379,21 @@ mod tests {
         }
     }
 
+    fn sample_presence() -> InboundPresence {
+        InboundPresence {
+            matrix_user_id: "@whatsapp_33612345678:example.com".to_owned(),
+            presence: Presence::Online,
+            server_name: "example.com".to_owned(),
+            matrix_room_id: "!abcXYZ123:example.com".to_owned(),
+            network: Network::Whatsapp,
+            consent: Consent::Pending,
+            display_name: "Aïcha".to_owned(),
+            produced_at: "2026-09-17T10:00:00.000Z".to_owned(),
+            receipt_timestamp_ms: 1758000000000,
+            last_active_at: None,
+        }
+    }
+
     #[test]
     fn reaction_envelope_matches_the_contract_shape() {
         let event = build_reaction_added(&sample_reaction());
@@ -314,5 +425,58 @@ mod tests {
         let event = build_reaction_added(&input);
         assert_eq!(event["data"]["target"]["matrix_event_id"], "$AbCdEfGh1234");
         assert!(event["data"]["target"].get("excerpt").is_none());
+    }
+
+    #[test]
+    fn presence_states_match_the_contract_strings() {
+        assert_eq!(Presence::Online.as_str(), "online");
+        assert_eq!(Presence::Offline.as_str(), "offline");
+        assert_eq!(Presence::Unavailable.as_str(), "unavailable");
+    }
+
+    #[test]
+    fn derives_presence_id_from_the_natural_key() {
+        // Known vector, computed independently from the contract formula:
+        // sha256("@whatsapp_33612345678:example.com:online:1758000000000").
+        assert_eq!(
+            presence_event_id(
+                "@whatsapp_33612345678:example.com",
+                Presence::Online,
+                1758000000000
+            ),
+            "89a9e3a32a9df41c5d7eb2c9e17b6f5c67fc307fcbfd35721108d88621993c87"
+        );
+    }
+
+    #[test]
+    fn presence_envelope_matches_the_contract_shape() {
+        let event = build_presence_updated(&sample_presence());
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(
+            event["id"],
+            "89a9e3a32a9df41c5d7eb2c9e17b6f5c67fc307fcbfd35721108d88621993c87"
+        );
+        assert_eq!(
+            event["source"],
+            "matrix://example.com/!abcXYZ123:example.com"
+        );
+        assert_eq!(event["type"], PRESENCE_UPDATED_TYPE);
+        assert_eq!(event["subject"], "@whatsapp_33612345678:example.com");
+        assert_eq!(event["network"], "whatsapp");
+        assert_eq!(event["consent"], "pending");
+        assert_eq!(event["data"]["presence"], "online");
+        assert_eq!(event["data"]["contact"]["display_name"], "Aïcha");
+        assert!(
+            event["data"].get("last_active_at").is_none(),
+            "last_active_at is omitted when the update does not report it"
+        );
+    }
+
+    #[test]
+    fn last_active_at_is_included_when_known() {
+        let mut input = sample_presence();
+        input.last_active_at = Some("2026-09-17T09:59:58Z".to_owned());
+        let event = build_presence_updated(&input);
+        assert_eq!(event["data"]["last_active_at"], "2026-09-17T09:59:58Z");
     }
 }

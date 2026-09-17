@@ -241,6 +241,33 @@ impl Bot {
         Ok(())
     }
 
+    /// Lists the rooms the bot is currently joined to. The stack persists
+    /// across runs, so tests sensitive to stale memberships (presence is
+    /// not room-scoped) use this to drop them.
+    pub async fn joined_rooms(&self) -> Result<Vec<String>> {
+        let response = self
+            .send_json(reqwest::Method::GET, "/_matrix/client/v3/joined_rooms", None, "joined rooms")
+            .await?;
+        response
+            .get("joined_rooms")
+            .and_then(Value::as_array)
+            .map(|rooms| {
+                rooms.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+            })
+            .ok_or_else(|| anyhow!("no joined_rooms in joined rooms response"))
+    }
+
+    pub async fn leave_room(&self, room_id: &str) -> Result<()> {
+        self.send_json(
+            reqwest::Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/leave", esc(room_id)),
+            Some(&serde_json::json!({})),
+            "leave",
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Sends a message-like event and returns its event id.
     pub async fn send_event(&self, room_id: &str, event_type: &str, content: Value) -> Result<String> {
         let txn = format!(
