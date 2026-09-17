@@ -24,6 +24,10 @@ pub struct Config {
     pub allowed_inviters: Vec<String>,
     /// Log level filter, e.g. `info` or `info,twalk_sensor=debug`.
     pub log_level: String,
+    /// Listen address of the Prometheus metrics endpoint
+    /// (SENSOR_METRICS_LISTEN, e.g. `0.0.0.0:9090`). Unset (the default): no
+    /// metrics server at all — an operator who does not scrape pays nothing.
+    pub metrics_listen: Option<std::net::SocketAddr>,
     /// Directory the Sensor persists its session, sync token and crypto
     /// store in (SENSOR_STATE_DIR). Set on a volume so a restart resumes the
     /// sync instead of re-syncing (and re-emitting) recent traffic. Unset:
@@ -61,6 +65,15 @@ impl Config {
                 .map(str::to_owned)
                 .collect(),
             log_level: std::env::var("SENSOR_LOG_LEVEL").unwrap_or_else(|_| "info".to_owned()),
+            metrics_listen: std::env::var("SENSOR_METRICS_LISTEN")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    value.parse().with_context(|| {
+                        "environment variable SENSOR_METRICS_LISTEN has an invalid value"
+                    })
+                })
+                .transpose()?,
             state_dir: std::env::var("SENSOR_STATE_DIR")
                 .ok()
                 .filter(|value| !value.is_empty())

@@ -64,6 +64,24 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The W3C Trace Context `traceparent` the Sensor originates for an event:
+/// `00-<32 hex trace id>-<16 hex span id>-01` (sampled). The ids are carved
+/// out of the event's deterministic id — a SHA-256 hex digest — so replaying
+/// or resynchronizing the same occurrence keeps the same trace instead of
+/// forking a new one. The Sensor has no trace backend: the field exists so
+/// downstream consumers (Hermes, then anything after it) can continue the
+/// trace, per the contract's optional extension.
+pub fn originate_traceparent(event_id: &str) -> String {
+    let hex = if event_id.len() >= 48 && event_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        event_id.to_ascii_lowercase()
+    } else {
+        // Defensive: every id the builders pass is a SHA-256 hex digest, but
+        // a traceparent must exist whatever the caller hands over.
+        hex_encode(Sha256::digest(event_id.as_bytes()))
+    };
+    format!("00-{}-{}-01", &hex[0..32], &hex[32..48])
+}
+
 /// The contract caps several strings (reaction at 64, display_name at 256,
 /// excerpt at 512, ...): truncate on a char boundary so every published
 /// event stays schema-valid whatever the network sends.
@@ -274,15 +292,17 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
     }
+    let id = cloud_event_id(&input.matrix_event_id, &input.matrix_room_id);
     json!({
         "specversion": "1.0",
-        "id": cloud_event_id(&input.matrix_event_id, &input.matrix_room_id),
+        "id": id,
         "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
         "type": MESSAGE_RECEIVED_TYPE,
         "time": input.produced_at,
         "subject": input.sender,
         "datacontenttype": "application/json",
         "dataschema": MESSAGE_RECEIVED_DATASCHEMA,
+        "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
         "consent": input.consent.as_str(),
         "data": data,
@@ -331,15 +351,17 @@ pub fn build_reaction_added(input: &InboundReaction) -> Value {
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
     }
+    let id = cloud_event_id(&input.matrix_event_id, &input.matrix_room_id);
     json!({
         "specversion": "1.0",
-        "id": cloud_event_id(&input.matrix_event_id, &input.matrix_room_id),
+        "id": id,
         "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
         "type": REACTION_ADDED_TYPE,
         "time": input.produced_at,
         "subject": input.reactor,
         "datacontenttype": "application/json",
         "dataschema": REACTION_ADDED_DATASCHEMA,
+        "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
         "consent": input.consent.as_str(),
         "data": data,
@@ -404,19 +426,21 @@ pub fn build_presence_updated(input: &InboundPresence) -> Value {
     if let Some(last_active_at) = &input.last_active_at {
         data["last_active_at"] = json!(last_active_at);
     }
+    let id = presence_event_id(
+        &input.matrix_user_id,
+        input.presence,
+        input.receipt_timestamp_ms,
+    );
     json!({
         "specversion": "1.0",
-        "id": presence_event_id(
-            &input.matrix_user_id,
-            input.presence,
-            input.receipt_timestamp_ms
-        ),
+        "id": id,
         "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
         "type": PRESENCE_UPDATED_TYPE,
         "time": input.produced_at,
         "subject": input.matrix_user_id,
         "datacontenttype": "application/json",
         "dataschema": PRESENCE_UPDATED_DATASCHEMA,
+        "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
         "consent": input.consent.as_str(),
         "data": data,
@@ -426,6 +450,44 @@ pub fn build_presence_updated(input: &InboundPresence) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_traceparent_is_a_valid_w3c_value_derived_from_the_event_id() {
+        // The id below is the known vector of derives_deterministic_id_from_the_natural_key.
+        let id = "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0";
+        let traceparent = originate_traceparent(id);
+        assert_eq!(
+            traceparent,
+            "00-20be32e73506b9104a6a1bf76fc2d2a1-5cbd2b8a0a421833-01"
+        );
+        // Origination is deterministic: a replay keeps the same trace.
+        assert_eq!(originate_traceparent(id), traceparent);
+        // Every inbound builder stamps it.
+        assert_eq!(
+            build_message_received(&sample_input())["traceparent"],
+            json!(traceparent)
+        );
+        assert!(
+            build_reaction_added(&sample_reaction())["traceparent"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("00-") && value.ends_with("-01"))
+        );
+        assert!(
+            build_presence_updated(&sample_presence())["traceparent"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("00-") && value.ends_with("-01"))
+        );
+    }
+
+    #[test]
+    fn the_traceparent_fallback_hashes_an_unexpected_id() {
+        let traceparent = originate_traceparent("not-hex");
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(parts[0], "00");
+        assert_eq!(parts[1].len(), 32);
+        assert_eq!(parts[2].len(), 16);
+        assert_eq!(parts[3], "01");
+    }
 
     #[test]
     fn derives_deterministic_id_from_the_natural_key() {

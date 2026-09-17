@@ -42,6 +42,14 @@ pub struct ApprovedReply {
     pub body: String,
     /// Contract content type of `body` (text/plain, text/markdown, text/html).
     pub format: String,
+    /// The approval's W3C Trace Context `traceparent`, when it carries one
+    /// (Hermes normally continues it from the trigger event). The Sensor
+    /// POSTs to Matrix, which has no trace context to inject into, so the
+    /// trace does not travel with the send itself: the Sensor carries the
+    /// value in its send logs, and the bridge echo closes the loop by
+    /// re-entering as a fresh inbound event. Continuing the trace through
+    /// Hermes and its downstream services is Hermes's job.
+    pub traceparent: Option<String>,
 }
 
 impl ApprovedReply {
@@ -65,6 +73,10 @@ impl ApprovedReply {
                 .map(str::to_owned),
             body: required_str(data, "/final/body")?,
             format: required_str(data, "/final/format")?,
+            traceparent: event
+                .get("traceparent")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         })
     }
 }
@@ -140,6 +152,20 @@ mod tests {
         event["data"]["target"].as_object_mut().unwrap().remove("reply_to_event_id");
         let job = ApprovedReply::parse(&event).unwrap();
         assert_eq!(job.reply_to_event_id, None);
+    }
+
+    #[test]
+    fn the_traceparent_is_carried_when_present() {
+        let job = ApprovedReply::parse(&sample_event()).unwrap();
+        assert_eq!(job.traceparent, None);
+        let mut event = sample_event();
+        event["traceparent"] =
+            json!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+        let job = ApprovedReply::parse(&event).unwrap();
+        assert_eq!(
+            job.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
     }
 
     #[test]

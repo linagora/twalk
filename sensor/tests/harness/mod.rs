@@ -754,31 +754,78 @@ pub fn contract_fixture_types() -> Result<Vec<String>> {
 }
 
 /// The Sensor under test, running as the real binary it ships as — the
-/// agreed seam is the process boundary.
-pub struct SensorProc(tokio::process::Child);
+/// agreed seam is the process boundary. Log lines (stdout and stderr) are
+/// captured and forwarded to the test's own output, so tests can assert on
+/// the Sensor's structured logs without reaching inside the process.
+pub struct SensorProc {
+    child: tokio::process::Child,
+    log_lines: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+}
 
 impl SensorProc {
     pub fn start(env: &[(String, String)]) -> Result<Self> {
-        let child = Command::new(env!("CARGO_BIN_EXE_twalk-sensor"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_twalk-sensor"))
             .envs(env.iter().cloned())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .context("failed to start the sensor binary")?;
-        Ok(Self(child))
+        let log_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        fn forward<S>(stream: S, is_stderr: bool, store: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>)
+        where
+            S: tokio::io::AsyncRead + Unpin + Send + 'static,
+        {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stream).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if is_stderr {
+                        eprintln!("{line}");
+                    } else {
+                        println!("{line}");
+                    }
+                    store.lock().await.push(line);
+                }
+            });
+        }
+        forward(child.stdout.take().expect("stdout is piped"), false, log_lines.clone());
+        forward(child.stderr.take().expect("stderr is piped"), true, log_lines.clone());
+        Ok(Self { child, log_lines })
     }
 
     pub async fn stop(mut self) {
-        let _ = self.0.kill().await;
-        let _ = self.0.wait().await;
+        let _ = self.child.kill().await;
+        let _ = self.child.wait().await;
+    }
+
+    /// Sends SIGTERM — as an operator's process manager would — and waits for
+    /// the process to exit. (`Child::kill` only sends SIGKILL, which cannot
+    /// exercise a graceful shutdown.)
+    pub async fn terminate(mut self) -> Result<std::process::ExitStatus> {
+        let pid = self.child.id().context("the sensor has already exited")?;
+        let status = Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .await
+            .context("failed to run kill(1)")?;
+        anyhow::ensure!(status.success(), "kill(1) failed with {status}");
+        let status = tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .context("the sensor did not exit within 10s of SIGTERM")??;
+        Ok(status)
+    }
+
+    /// A snapshot of the Sensor's captured log lines so far.
+    pub async fn logs(&self) -> Vec<String> {
+        self.log_lines.lock().await.clone()
     }
 
     /// True while the Sensor process is still running (i.e. it has not
     /// crashed or exited): decryption-failure tests assert the pipeline
     /// survives an undecryptable room.
     pub fn is_running(&mut self) -> bool {
-        matches!(self.0.try_wait(), Ok(None))
+        matches!(self.child.try_wait(), Ok(None))
     }
 }
 
