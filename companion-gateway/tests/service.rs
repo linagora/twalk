@@ -296,8 +296,7 @@ async fn the_crypto_webassembly_is_served_as_application_wasm() -> Result<()> {
 }
 
 #[tokio::test]
-async fn an_unknown_app_path_loads_the_companion_and_an_unknown_api_path_is_a_json_404(
-) -> Result<()> {
+async fn an_unknown_app_path_loads_the_companion_and_the_api_answers_as_an_api() -> Result<()> {
     let (gateway, base) = start("client-routing").await?;
     poll_until(
         || async {
@@ -334,13 +333,17 @@ async fn an_unknown_app_path_loads_the_companion_and_an_unknown_api_path_is_a_js
         "the fallback is 200.html, not the prerendered index.html"
     );
 
-    // The Gateway's own API surface keeps its status codes: a client parsing
-    // an API response must never be handed an HTML page instead.
+    // The Gateway's own API surface answers as an API and never with the app
+    // shell: a client parsing an API response must never be handed an HTML
+    // page instead. Since ticket #52 the session guard answers first, so an
+    // unauthenticated call is a 401 whether or not the route exists — what an
+    // unknown path looks like to a *signed-in* caller is asserted in
+    // tests/signin.rs, which has a device token to ask with.
     let api = reqwest::get(format!("{base}/api/consent")).await?;
     assert_eq!(
         api.status(),
-        reqwest::StatusCode::NOT_FOUND,
-        "an unknown API path is a 404, not the app shell"
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the API requires a device token, and says so before saying anything else"
     );
     assert_eq!(
         api.headers()
@@ -351,8 +354,7 @@ async fn an_unknown_app_path_loads_the_companion_and_an_unknown_api_path_is_a_js
         "an API error is JSON the Companion can parse"
     );
     let body: serde_json::Value = serde_json::from_str(&api.text().await?)?;
-    assert_eq!(body["error"].as_str(), Some("not_found"));
-    assert_eq!(body["path"].as_str(), Some("/api/consent"));
+    assert_eq!(body["error"].as_str(), Some("unauthenticated"));
 
     gateway.stop().await;
     Ok(())

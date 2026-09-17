@@ -59,17 +59,23 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system gateway
+    && useradd --system gateway \
+    && mkdir -p /data \
+    && chown gateway:gateway /data
 COPY --from=build /usr/local/bin/twalk-companion-gateway /usr/local/bin/twalk-companion-gateway
 # The Companion's origin content. An operator serving their own build mounts
 # it over this path (or points GATEWAY_STATIC_DIR elsewhere); an empty or
 # absent directory is not fatal — the origin answers a clear 404 while health
 # and metrics stay up.
 COPY --from=companion /companion-dist /srv/companion
+# /data is the default GATEWAY_STATE_DIR — the session store's home. A fresh
+# named volume mounted there inherits the ownership set above, so the
+# non-root user can write it (the Sensor's image does the same).
 # Defaults for a container: the origin listens on all interfaces inside the
 # container's own network namespace, and serves the files above.
 ENV GATEWAY_LISTEN=0.0.0.0:8080 \
-    GATEWAY_STATIC_DIR=/srv/companion
+    GATEWAY_STATIC_DIR=/srv/companion \
+    GATEWAY_STATE_DIR=/data
 EXPOSE 8080
 USER gateway
 ENTRYPOINT ["twalk-companion-gateway"]

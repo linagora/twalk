@@ -17,7 +17,22 @@ anyhow = "1"
 # graph through matrix-sdk and reqwest, so this adds a router, not a second
 # web framework.
 axum = "0.8"
+# Sign-in talks to the homeserver over plain outbound HTTPS: the OpenID
+# userinfo endpoint is the unauthenticated corner of the federation API, so
+# no federation identity and no signing keys are needed (ADR 0011). rustls,
+# not native-tls, so the image needs no OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The session store: devices, their token digests and the OpenID replay
+# ledger. SQLite is the Gateway's record of truth (ADR 0010); `bundled`
+# compiles it in, so the runtime image needs no libsqlite3.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Device and refresh tokens are 256 bits straight from the OS CSPRNG.
+getrandom = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 # Trace ids are carved out of a SHA-256 digest, as the Sensor's are
@@ -29,7 +44,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 anyhow = "1"
-reqwest = { version = "0.12", features = ["rustls-tls"] }
+# reqwest is a runtime dependency since ticket #52 (the OpenID verification
+# call), and a package's dependencies are available to its test targets too:
+# the tests drive the Gateway over HTTP with the same client.
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 # The shared test harness: the test stack's lifecycle, the bus, contract

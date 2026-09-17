@@ -15,6 +15,13 @@ pub struct Metrics {
     /// of a closed set (see [`Route`]), so the label cardinality is bounded
     /// however many paths the Companion has.
     http_requests: Mutex<BTreeMap<(Route, u16), u64>>,
+    /// Sign-in attempts by outcome (`accepted`, `not_the_owner`, `replayed`,
+    /// …). The outcomes are a closed set of static labels — the refusal
+    /// labels of `session::SignInRefusal` and `matrix_openid::Refusal` — so
+    /// the cardinality is bounded, and a burst of refusals is the one signal
+    /// an operator would want to see here: nobody but the owner should ever
+    /// be trying.
+    sign_ins: Mutex<BTreeMap<&'static str, u64>>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -53,6 +60,7 @@ impl Metrics {
     pub fn started_at(now_unix_seconds: u64) -> Self {
         Self {
             http_requests: Mutex::new(BTreeMap::new()),
+            sign_ins: Mutex::new(BTreeMap::new()),
             started_unix_seconds: now_unix_seconds,
         }
     }
@@ -63,6 +71,18 @@ impl Metrics {
             .lock()
             .expect("the metrics mutex is never poisoned")
             .entry((route, status))
+            .or_insert(0) += 1;
+    }
+
+    /// Counts one sign-in attempt. `outcome` is `accepted` or a refusal's
+    /// own label — never anything derived from a request, so no caller can
+    /// grow the label set.
+    pub fn record_sign_in(&self, outcome: &'static str) {
+        *self
+            .sign_ins
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
             .or_insert(0) += 1;
     }
 
@@ -81,6 +101,20 @@ impl Metrics {
             out.push_str(&format!(
                 "twalk_companion_gateway_http_requests_total{{route=\"{}\",status=\"{status}\"}} {count}\n",
                 route.label()
+            ));
+        }
+        out.push_str(
+            "# HELP twalk_companion_gateway_sign_ins_total Sign-in attempts, by outcome.\n",
+        );
+        out.push_str("# TYPE twalk_companion_gateway_sign_ins_total counter\n");
+        for (outcome, count) in self
+            .sign_ins
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .iter()
+        {
+            out.push_str(&format!(
+                "twalk_companion_gateway_sign_ins_total{{outcome=\"{outcome}\"}} {count}\n"
             ));
         }
         out.push_str(
@@ -109,7 +143,19 @@ mod tests {
         metrics.record_request(Route::Api, 404);
         metrics.record_request(Route::Metrics, 200);
 
+        metrics.record_sign_in("accepted");
+        metrics.record_sign_in("not_the_owner");
+        metrics.record_sign_in("not_the_owner");
+
         let body = metrics.render(1_030);
+        assert!(
+            body.contains("twalk_companion_gateway_sign_ins_total{outcome=\"not_the_owner\"} 2\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_companion_gateway_sign_ins_total{outcome=\"accepted\"} 1\n"),
+            "{body}"
+        );
         assert!(
             body.contains(
                 "twalk_companion_gateway_http_requests_total{route=\"health\",status=\"200\"} 2\n"

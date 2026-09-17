@@ -1,16 +1,22 @@
 //! The Twalk Companion Gateway: the backend serving the Companion PWA on its
-//! own origin. This ticket (#48) is the service skeleton — environment
+//! own origin. Ticket #48 built the service skeleton — environment
 //! configuration, the Companion's static files, a health endpoint, metrics,
-//! structured logs with `traceparent` propagation, and a graceful shutdown.
-//! Consent, authentication and the bridge facade land on top of it in the
-//! later tickets of spec #46.
+//! structured logs with `traceparent` propagation, and a graceful shutdown;
+//! ticket #52 added the user's session on top of it — sign-in through a
+//! Matrix OpenID token ([`matrix_openid`]), the owner check and the
+//! per-device tokens every other endpoint requires ([`session`],
+//! [`session_http`]). Consent and the bridge facade land the same way in the
+//! remaining tickets of spec #46.
 //!
 //! As in the Sensor, the seam-independent logic lives in these modules and
 //! the binary in `main.rs` only wires them to the network.
 
 pub mod config;
 pub mod http;
+pub mod matrix_openid;
 pub mod metrics;
+pub mod session;
+pub mod session_http;
 pub mod static_files;
 pub mod trace;
 

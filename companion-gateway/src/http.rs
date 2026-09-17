@@ -24,6 +24,8 @@ use tower_http::services::ServeFile;
 use tracing::{debug, warn};
 
 use crate::metrics::{Metrics, Route};
+use crate::session::Sessions;
+use crate::session_http;
 use crate::static_files::{Resolution, Resolver};
 use crate::trace;
 
@@ -33,6 +35,10 @@ pub struct Gateway {
     /// How a request path resolves to a file of the Companion's build.
     companion: Arc<Resolver>,
     metrics: Arc<Metrics>,
+    /// The user's session: the device list and the per-device tokens
+    /// ([`crate::session`]). `None` when sign-in is not configured — the
+    /// origin still serves the Companion, and its API is closed.
+    sessions: Option<Arc<Sessions>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -44,8 +50,25 @@ impl Gateway {
         Self {
             companion: Arc::new(companion),
             metrics,
+            sessions: None,
             now_unix_seconds,
         }
+    }
+
+    /// Adds the session half (ticket #52). A separate step rather than a
+    /// constructor argument, so that a Gateway with no sign-in configured is
+    /// still a Gateway and later tickets add their own halves the same way.
+    pub fn with_sessions(mut self, sessions: Option<Arc<Sessions>>) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    pub fn sessions(&self) -> Option<Arc<Sessions>> {
+        self.sessions.clone()
+    }
+
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 }
 
@@ -55,6 +78,10 @@ pub fn router(gateway: Gateway) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics_exposition))
+        // The session's own routes (ticket #52). Merged, so every later
+        // ticket's routes are added the same way — and every one of them is
+        // behind the guard layered below without asking.
+        .merge(session_http::routes())
         // The Gateway's API surface is empty in this skeleton (consent,
         // session and bridge routes land in the later tickets of spec #46),
         // but the prefix already answers as an API: a JSON 404, never the
@@ -62,6 +89,13 @@ pub fn router(gateway: Gateway) -> Router {
         .route("/api", any(api_not_found))
         .route("/api/{*rest}", any(api_not_found))
         .fallback(companion)
+        // Inner: what each API route requires (a device token unless the
+        // guard's table says otherwise — see [`crate::session_http`]).
+        .layer(middleware::from_fn_with_state(
+            gateway.clone(),
+            session_http::guard,
+        ))
+        // Outer: so a refusal is counted and logged like any other answer.
         .layer(middleware::from_fn_with_state(gateway.clone(), observe))
         .with_state(gateway)
 }

@@ -173,9 +173,34 @@ services:
       # link reloaded cold) is served with.
       GATEWAY_FALLBACK_FILE: ${GATEWAY_FALLBACK_FILE:-200.html}
       GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-info}
-    # volumes:
+      # The single human this deployment serves, as a full Matrix ID
+      # (ADR 0011). Sign-in verifies the Companion's OpenID token at the
+      # homeserver and refuses every other identity. Left empty, nobody can
+      # sign in: the origin still serves the Companion and every /api
+      # endpoint answers 503 — deliberately, so that an operator who has not
+      # set it yet keeps the page that can say so.
+      GATEWAY_OWNER: ${GATEWAY_OWNER:-}
+      # Where the Gateway verifies an OpenID token: the homeserver's own
+      # federation API, on this compose network. Pinned rather than resolved
+      # from the server name — one deployment, one homeserver.
+      GATEWAY_HOMESERVER_FEDERATION_URL: ${GATEWAY_HOMESERVER_FEDERATION_URL:-http://synapse:8008}
+      # Where the Gateway keeps its SQLite stores (the session store today).
+      # Must stay on the gateway-data volume mounted below.
+      GATEWAY_STATE_DIR: ${GATEWAY_STATE_DIR:-/data}
+      # Session lifetimes in seconds; empty means the Gateway's defaults
+      # (15 minutes for a device token, 30 days for its refresh token).
+      GATEWAY_DEVICE_TOKEN_TTL: ${GATEWAY_DEVICE_TOKEN_TTL:-}
+      GATEWAY_REFRESH_TOKEN_TTL: ${GATEWAY_REFRESH_TOKEN_TTL:-}
+    volumes:
+      # The device list and the session tokens' digests: a restart keeps the
+      # user signed in on every device they signed in on.
+      - gateway-data:/data
     #   # Serve a Companion build from the host instead of the image's.
     #   - ${GATEWAY_STATIC_SOURCE:-./companion}:/srv/companion:ro
+    # No depends_on the homeserver: the Gateway talks to it only while
+    # somebody is signing in, and the Companion's origin must come up even
+    # when the homeserver is down — that is when the user most needs a page
+    # that explains itself.
     ports:
       # Localhost only by default: in production the Companion's origin is
       # fronted by the operator's TLS reverse proxy on the same host. The
@@ -194,3 +219,4 @@ volumes:
   synapse-data:
   nats-data:
   sensor-data:
+  gateway-data:
