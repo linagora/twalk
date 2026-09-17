@@ -4,10 +4,11 @@
 
 `twalk` is the monorepo for Twalk, a sovereign, open-source, self-hosted event hub for personal multi-channel messaging (WhatsApp, Signal, SMS, Telegram, Discord). Messaging traffic lands in Matrix portal rooms via Mautrix bridges, is normalised by the Sensor into versioned CloudEvents on a NATS JetStream bus, and is consumed by Hermes-hosted personas under human oversight. See `README.md` for the full picture and `CONTEXT.md` for the domain vocabulary.
 
-As of 2026-09-17 the repository contains documentation and the directory scaffold only — no source code yet:
+As of 2026-09-17 the repository contains documentation, the directory scaffold and the complete event contract — no source code yet:
 
-- `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/adr/` (ADRs 0005+; numbers 0001–0004 are referenced from the docs but not yet written)
-- `contracts/cloudevents/v1/` (1 of the 8 v1 schemas so far)
+- `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/adr/` (ADRs 0005–0008 written; numbers 0001–0004 are referenced from the docs but not yet written)
+- `contracts/cloudevents/v1/` — the complete v1 contract: 8 CloudEvents schemas plus one validated fixture per type
+- `.scratch/sensor/spec.md` — the Sensor spec, labelled `ready-for-agent` (local tracker convention until `/setup-matt-pocock-skills` is run)
 - Empty component directories with stub READMEs: `sensor/`, `hermes/`, `companion/`, `companion-gateway/`, `bridges/`, `deploy/`, `ui/`, `sdk/`, `examples/`, `tools/`, `tests/`
 
 ## Build and test commands
