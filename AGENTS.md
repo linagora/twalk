@@ -38,3 +38,17 @@ Tests live at the agreed seam: the Sensor process boundary (real Synapse + real 
 ## Security considerations
 
 Never commit secrets, credentials, or `.env` files (`.gitignore` covers `.env`). The only secrets in the repo are the throwaway constants in `sensor/tests/synapse/homeserver.yaml` and the test-bot passwords — local, ephemeral test stack only; never reuse them elsewhere. Message content is highly sensitive by design: no message may leave the user's infrastructure without explicit consent — keep that invariant in mind for any code that touches event payloads.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on [linagora/twalk](https://github.com/linagora/twalk/issues), with parent `spec` issues, native dependencies and one PR per ticket. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label named after its role, plus this repo's own `spec`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` at the root, ADRs in `docs/architecture/adr/`. See `docs/agents/domain.md`.
