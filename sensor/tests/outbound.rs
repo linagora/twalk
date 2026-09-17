@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 09, outbound — approved replies: a `persona.reply.approved.v1`
 //! event on the bus makes the Sensor post the final, approved content into
 //! the target portal room, threaded under the original message. Sends that

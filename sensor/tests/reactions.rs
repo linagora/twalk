@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 07, reactions: a reaction added in an observed room becomes a
 //! schema-valid `inbound.reaction.added.v1` CloudEvent on the bus, carrying
 //! the reaction key, the target message's event id and excerpt, and the

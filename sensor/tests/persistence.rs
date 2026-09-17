@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 03, persistence — resume without replay. With SENSOR_STATE_DIR
 //! set, the Sensor keeps its session, sync token and crypto store on disk,
 //! so a restarted process resumes the sync instead of re-syncing from

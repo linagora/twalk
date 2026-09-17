@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 08, presence: when a bridge puppet sharing an observed portal
 //! room changes presence, the Sensor publishes a schema-valid
 //! `inbound.presence.updated.v1` CloudEvent on the bus, with the

@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 02, lifecycle: the Sensor joins rooms on invitation from an
 //! allowed inviter, ignores everyone else, and stops observing a room
 //! after being removed from it.

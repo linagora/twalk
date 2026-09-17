@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 06, message shape fidelity: rich messages arrive contract-complete.
 //! A reply carries `reply_to` with the parent's event id and a capped excerpt,
 //! a threaded message carries `thread_root`, a media message carries an
