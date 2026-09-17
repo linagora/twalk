@@ -6,10 +6,10 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A reply message produces `reply_to` with parent event id and excerpt
-- [ ] A threaded message produces `thread_root`
-- [ ] An image message produces a schema-valid attachment entry with no binary on the bus
-- [ ] `network_timestamp` is preserved when the bridge provides it
-- [ ] Every produced event validates against the contract schema
+- [x] A reply message produces `reply_to` with parent event id and excerpt
+- [x] A threaded message produces `thread_root`
+- [x] An image message produces a schema-valid attachment entry with no binary on the bus
+- [x] `network_timestamp` is preserved when the bridge provides it
+- [x] Every produced event validates against the contract schema
