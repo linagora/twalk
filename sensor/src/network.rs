@@ -79,17 +79,22 @@ pub fn resolve(bridge_content: Option<&Value>, sender_localpart: &str) -> Option
 
 /// The contact's native network identifier, derived from a ghost localpart
 /// `@<network>_<id>:<server>` whose prefix matches the event's network.
-/// Mautrix strips the leading `+` of phone-style ids when minting the
-/// ghost: all-digit ids get it restored (`whatsapp_33612345678` →
-/// `+33612345678`); other ids pass through unchanged. `None` when the
-/// localpart is not a ghost of this network — a plain Matrix user in a
-/// portal room has no derivable identifier.
+/// On phone-based networks (WhatsApp, SMS) mautrix mints the ghost from
+/// the phone number with its leading `+` stripped, so an all-digit id gets
+/// it restored (`whatsapp_33612345678` → `+33612345678`). Every other id
+/// passes through unchanged — in particular numeric Telegram and Discord
+/// user ids (`telegram_123456789` → `123456789`), which are not phone
+/// numbers, and Signal ids, which mautrix-signal mints from the account's
+/// ACI UUID rather than its phone number. `None` when the localpart is not
+/// a ghost of this network — a plain Matrix user in a portal room has no
+/// derivable identifier.
 pub fn ghost_network_identifier(network: Network, localpart: &str) -> Option<String> {
     let (prefix, identifier) = localpart.split_once('_')?;
     if Network::from_bridge_id(prefix) != Some(network) || identifier.is_empty() {
         return None;
     }
-    if identifier.bytes().all(|byte| byte.is_ascii_digit()) {
+    let phone_based = matches!(network, Network::Whatsapp | Network::Sms);
+    if phone_based && identifier.bytes().all(|byte| byte.is_ascii_digit()) {
         Some(format!("+{identifier}"))
     } else {
         Some(identifier.to_owned())
@@ -190,10 +195,60 @@ mod tests {
     }
 
     #[test]
+    fn sms_ghost_identifiers_restore_the_stripped_phone_prefix() {
+        assert_eq!(
+            ghost_network_identifier(Network::Sms, "sms_33612345678"),
+            Some("+33612345678".to_owned())
+        );
+    }
+
+    #[test]
+    fn numeric_telegram_ids_are_not_phone_numbers() {
+        assert_eq!(
+            ghost_network_identifier(Network::Telegram, "telegram_123456789"),
+            Some("123456789".to_owned())
+        );
+    }
+
+    #[test]
+    fn numeric_discord_ids_are_not_phone_numbers() {
+        assert_eq!(
+            ghost_network_identifier(Network::Discord, "discord_80351110224678912"),
+            Some("80351110224678912".to_owned())
+        );
+    }
+
+    #[test]
+    fn signal_ids_are_never_given_a_phone_prefix() {
+        // mautrix-signal mints ghosts from the account's ACI UUID…
+        assert_eq!(
+            ghost_network_identifier(
+                Network::Signal,
+                "signal_1b3e8a4c-2d5f-4c6a-9e7b-0f1a2b3c4d5e"
+            ),
+            Some("1b3e8a4c-2d5f-4c6a-9e7b-0f1a2b3c4d5e".to_owned())
+        );
+        // …so an all-digit id is not a phone number the bridge stripped.
+        assert_eq!(
+            ghost_network_identifier(Network::Signal, "signal_33612345678"),
+            Some("33612345678".to_owned())
+        );
+    }
+
+    #[test]
     fn non_phone_ghost_identifiers_pass_through_unchanged() {
         assert_eq!(
             ghost_network_identifier(Network::Signal, "signal_abc-def"),
             Some("abc-def".to_owned())
+        );
+        assert_eq!(
+            ghost_network_identifier(Network::Telegram, "telegram_alice"),
+            Some("alice".to_owned())
+        );
+        // A non-digit id on a phone-based network is not a phone number.
+        assert_eq!(
+            ghost_network_identifier(Network::Whatsapp, "whatsapp_lid-12345"),
+            Some("lid-12345".to_owned())
         );
     }
 
