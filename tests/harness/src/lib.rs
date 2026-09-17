@@ -21,7 +21,10 @@ pub mod stub_llm;
 mod wait;
 
 pub use bus::{Bus, StoredMessage};
-pub use contract::{contract_fixture, contract_fixture_types, validate_against_contract};
+pub use contract::{
+    contract_fixture, contract_fixture_types, contract_variant_fixture, contract_variant_fixtures,
+    validate_against_contract,
+};
 pub use stack::{ensure_stack, nats_url, synapse_url, SERVER_NAME};
 pub use stub_llm::{StubLlm, StubRequest};
 pub use wait::poll_until;

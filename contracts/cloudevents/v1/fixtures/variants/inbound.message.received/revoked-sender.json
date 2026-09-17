@@ -1,0 +1,32 @@
+{
+  "specversion": "1.0",
+  "id": "7a4f1cdd0e5b44b9d1ed6a0d90a1f7a36d1cdd3b5a1f9ee3c0a7b6d4e2f10987",
+  "source": "matrix://matrix.example.com/!abcXYZ123:example.com",
+  "type": "fr.linagora.twalk.inbound.message.received.v1",
+  "time": "2026-09-17T10:07:00Z",
+  "subject": "@whatsapp_33612345678:example.com",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
+  "traceparent": "00-7a4f1cdd0e5b44b9d1ed6a0d90a1f7a3-6d1cdd3b5a1f9ee3-01",
+  "network": "whatsapp",
+  "consent": "revoked",
+  "data": {
+    "format": "text/plain",
+    "reply_to": {
+      "matrix_event_id": "$PaReNt9876"
+    },
+    "attachments": [
+      {
+        "kind": "image",
+        "mime_type": "image/jpeg",
+        "size_bytes": 184320,
+        "dimensions": { "width": 1600, "height": 1200 }
+      }
+    ],
+    "contact": {
+      "display_name": "Aïcha Benali"
+    },
+    "network_timestamp": "2026-09-17T10:06:58Z",
+    "thread_root": "$RoOtThReAd1"
+  }
+}

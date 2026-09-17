@@ -12,8 +12,10 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    contract_fixture, contract_fixture_types, ensure_stack, validate_against_contract, Bot, Bus,
+    contract_fixture, contract_fixture_types, contract_variant_fixture, contract_variant_fixtures,
+    ensure_stack, validate_against_contract, Bot, Bus,
 };
+use serde_json::{json, Value};
 
 #[tokio::test]
 async fn bots_can_create_invite_post_and_read_on_synapse() -> Result<()> {
@@ -180,4 +182,106 @@ async fn every_contract_fixture_validates_against_its_schema() -> Result<()> {
         validate_against_contract(&fixture, &type_name)?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn every_contract_variant_fixture_validates_against_its_type() -> Result<()> {
+    ensure_stack().await?;
+    // A variant demonstrates one conditional shape of a type — a shape the
+    // schema allows only under a condition — and validates against the same
+    // schema as the type's canonical fixture.
+    let variants = contract_variant_fixtures()?;
+    assert!(
+        variants.contains(&(
+            "inbound.message.received".to_owned(),
+            "revoked-sender".to_owned()
+        )),
+        "the reduced shape of a revoked sender's message must stay demonstrated by a fixture (ADR 0012); found {variants:?}"
+    );
+    for (type_name, variant) in variants {
+        let fixture = contract_variant_fixture(&type_name, &variant)?;
+        validate_against_contract(&fixture, &type_name)?;
+    }
+    Ok(())
+}
+
+/// The contract does not merely describe the reduction (ADR 0012), it
+/// enforces it: an event labelled `revoked` that still carries content is
+/// invalid, and one labelled `granted` or `pending` that dropped it is
+/// invalid too. That is what makes a third-party producer reduce like the
+/// Sensor.
+#[tokio::test]
+async fn the_contract_enforces_the_two_shapes_of_a_received_message() -> Result<()> {
+    ensure_stack().await?;
+    const TYPE: &str = "inbound.message.received";
+    let revoked = || contract_variant_fixture(TYPE, "revoked-sender");
+    let full = || contract_fixture(TYPE);
+    validate_against_contract(&revoked()?, TYPE)?;
+    validate_against_contract(&full()?, TYPE)?;
+
+    // Content on a revoked sender's event: rejected, field by field.
+    for (what, leak) in [
+        ("/data/body", json!("on décale à 20h ?")),
+        ("/data/reply_to/excerpt", json!("et le cadeau ?")),
+        (
+            "/data/attachments/0/mxc_uri",
+            json!("mxc://matrix.example.com/QWxpY2VQaG90bzIwMjYwOTE3"),
+        ),
+        ("/data/attachments/0/caption", json!("regarde cette photo")),
+    ] {
+        let mut event = revoked()?;
+        plant(&mut event, what, leak);
+        assert!(
+            validate_against_contract(&event, TYPE).is_err(),
+            "a revoked sender's event must not be allowed to carry {what}"
+        );
+    }
+
+    // The full shape keeps every requirement it had before the rule, for a
+    // granted and for a pending sender alike.
+    for consent in ["granted", "pending"] {
+        let mut event = full()?;
+        event["consent"] = json!(consent);
+        if consent != "granted" {
+            // Only a granted contact's identifier is ever published.
+            event["data"]["contact"]
+                .as_object_mut()
+                .unwrap()
+                .remove("network_identifier");
+        }
+        validate_against_contract(&event, TYPE)?;
+        for what in ["/data/body", "/data/attachments/0/mxc_uri"] {
+            let mut stripped = event.clone();
+            let (parent, field) = what.rsplit_once('/').unwrap();
+            stripped
+                .pointer_mut(parent)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(
+                validate_against_contract(&stripped, TYPE).is_err(),
+                "a {consent} sender's event must still carry {what}"
+            );
+        }
+        let mut without_excerpt = event.clone();
+        without_excerpt["data"]["reply_to"] = json!({ "matrix_event_id": "$PaReNt9876" });
+        assert!(
+            validate_against_contract(&without_excerpt, TYPE).is_err(),
+            "a {consent} sender's reply must still quote its parent"
+        );
+    }
+    Ok(())
+}
+
+/// Sets the field a JSON pointer names, creating it when the fixture does
+/// not have it — which is the point for a reduced fixture.
+fn plant(event: &mut Value, pointer: &str, value: Value) {
+    let (parent, field) = pointer.rsplit_once('/').expect("a rooted JSON pointer");
+    event
+        .pointer_mut(parent)
+        .expect("the parent object exists in the fixture")
+        .as_object_mut()
+        .expect("the parent is an object")
+        .insert(field.to_owned(), value);
 }

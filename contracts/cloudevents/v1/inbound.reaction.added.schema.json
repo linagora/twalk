@@ -106,7 +106,7 @@
             "excerpt": {
               "type": "string",
               "maxLength": 512,
-              "description": "A short excerpt of the target message, so consumers do not need to look it up to reason about the reaction."
+              "description": "A short excerpt of the target message, so consumers do not need to look it up to reason about the reaction. Already optional, and omitted for two distinct reasons: the producer could not fetch the target, or the reactor's consent is 'revoked' — an excerpt is message content whoever quotes it, so a revoked reactor's event carries the reaction and the target's event id and nothing more (ADR 0012). A reaction key itself is not content and is published as usual."
             }
           },
           "description": "Structured reference to the message the reaction applies to."

@@ -33,6 +33,15 @@ impl Consent {
         }
     }
 
+    /// Whether this state reduces what the Sensor publishes about the
+    /// subject: a `revoked` contact's events keep their identity, labels,
+    /// timestamps, references and relations, and carry no content at all —
+    /// no body, no excerpt, no media reference (ADR 0012). `pending` is
+    /// unchanged: the Sensor labels, and consumers refuse.
+    pub fn reduces_publication(&self) -> bool {
+        matches!(self, Self::Revoked)
+    }
+
     /// Parses a contract consent label. An unknown label cannot be trusted:
     /// it logs and degrades to `pending`, the safe default.
     pub fn from_label(label: &str) -> Self {
@@ -161,6 +170,16 @@ mod tests {
         assert_eq!(Consent::Granted.as_str(), "granted");
         assert_eq!(Consent::Pending.as_str(), "pending");
         assert_eq!(Consent::Revoked.as_str(), "revoked");
+    }
+
+    #[test]
+    fn only_revocation_reduces_what_is_published() {
+        assert!(Consent::Revoked.reduces_publication());
+        assert!(!Consent::Granted.reduces_publication());
+        assert!(
+            !Consent::Pending.reduces_publication(),
+            "pending behaviour is unchanged: the Sensor labels, consumers refuse"
+        );
     }
 
     #[test]
