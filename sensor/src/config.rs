@@ -1,6 +1,7 @@
 //! Environment-driven configuration. The Sensor runs from environment
 //! variables alone, so it deploys with the rest of the compose stack.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -22,6 +23,12 @@ pub struct Config {
     pub allowed_inviters: Vec<String>,
     /// Log level filter, e.g. `info` or `info,twalk_sensor=debug`.
     pub log_level: String,
+    /// Directory the Sensor persists its session, sync token and crypto
+    /// store in (SENSOR_STATE_DIR). Set on a volume so a restart resumes the
+    /// sync instead of re-syncing (and re-emitting) recent traffic. Unset:
+    /// everything stays in memory and every start is a fresh login followed
+    /// by an initial sync.
+    pub state_dir: Option<PathBuf>,
     /// Base delay of the outbound send retry backoff; doubles with each
     /// redelivery (SENSOR_SEND_RETRY_BASE_MS, default 1000).
     pub send_retry_base: Duration,
@@ -44,6 +51,10 @@ impl Config {
                 .map(str::to_owned)
                 .collect(),
             log_level: std::env::var("SENSOR_LOG_LEVEL").unwrap_or_else(|_| "info".to_owned()),
+            state_dir: std::env::var("SENSOR_STATE_DIR")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             send_retry_base: Duration::from_millis(optional("SENSOR_SEND_RETRY_BASE_MS", 1000)?),
             send_retry_max_attempts: optional("SENSOR_SEND_RETRY_MAX_ATTEMPTS", 5)?,
         })

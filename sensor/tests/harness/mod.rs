@@ -513,6 +513,7 @@ pub async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
 
 /// The bus side of the seam: NATS JetStream, as the Sensor will use it.
 pub struct Bus {
+    client: async_nats::Client,
     jetstream: async_nats::jetstream::Context,
 }
 
@@ -525,7 +526,8 @@ impl Bus {
             match async_nats::connect(nats_url().as_str()).await {
                 Ok(client) => {
                     return Ok(Self {
-                        jetstream: async_nats::jetstream::new(client),
+                        jetstream: async_nats::jetstream::new(client.clone()),
+                        client,
                     })
                 }
                 Err(e) if attempt < 29 => {
@@ -656,6 +658,32 @@ impl Bus {
         )
         .await
     }
+
+    /// Subscribes to a subject with core NATS, bypassing JetStream dedup:
+    /// the returned receiver observes EVERY publish, including a republish
+    /// that the stream later deduplicates on storage. This is how tests
+    /// prove the Sensor never re-emits an event, instead of relying on the
+    /// bus to absorb replays. Subscribe before the traffic under test.
+    pub async fn subscribe_raw(
+        &self,
+        subject: &str,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Value>> {
+        let mut subscription = self
+            .client
+            .subscribe(subject.to_owned())
+            .await
+            .context("subscribe failed")?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            while let Some(message) = subscription.next().await {
+                if let Ok(payload) = serde_json::from_slice::<Value>(&message.payload) {
+                    let _ = tx.send(payload);
+                }
+            }
+        });
+        Ok(rx)
+    }
 }
 
 /// A message as stored on the bus: payload plus NATS headers.
@@ -772,4 +800,18 @@ pub fn sensor_env() -> Vec<(String, String)> {
             "info,twalk_sensor=debug".to_owned(),
         ),
     ]
+}
+
+/// `sensor_env` with per-test overrides: an existing key is replaced, a new
+/// key is appended (e.g. a per-test SENSOR_STATE_DIR for persistence tests).
+pub fn sensor_env_with(overrides: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut env = sensor_env();
+    for (key, value) in overrides {
+        if let Some(entry) = env.iter_mut().find(|(existing, _)| existing == key) {
+            entry.1 = value.to_string();
+        } else {
+            env.push((key.to_string(), value.to_string()));
+        }
+    }
+    env
 }
