@@ -62,6 +62,7 @@ pub struct Bot {
     http: reqwest::Client,
     access_token: String,
     user_id: String,
+    device_id: String,
     base_url: String,
 }
 
@@ -107,16 +108,30 @@ impl Bot {
             .await?;
         let access_token = extract_str(&response, "access_token", "login")?;
         let user_id = extract_str(&response, "user_id", "login")?;
+        let device_id = extract_str(&response, "device_id", "login")?;
         Ok(Self {
             http,
             access_token,
             user_id,
+            device_id,
             base_url: base_url.to_owned(),
         })
     }
 
     pub fn user_id(&self) -> &str {
         &self.user_id
+    }
+
+    /// The credentials this login produced, for a test that has to hand them
+    /// to the Sensor: a homeserver with password login disabled leaves an
+    /// access token as the only way in (#72), so the Sensor must be able to
+    /// start from one.
+    pub fn access_token(&self) -> &str {
+        &self.access_token
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.device_id
     }
 
     fn authed(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {

@@ -63,3 +63,43 @@ async fn leaves_the_room_after_being_removed() -> Result<()> {
     sensor.stop().await;
     Ok(())
 }
+
+/// A homeserver whose password login is disabled (`password_config.enabled:
+/// false`, the normal SSO-only configuration) leaves an operator with no
+/// password to give the Sensor: the only way in is a token for a
+/// pre-provisioned device (#72). The test stack does allow password login,
+/// so it stands in for the operator's out-of-band step — Synapse's admin
+/// registration API returns the same pair — and then starts the Sensor with
+/// no password at all.
+#[tokio::test]
+async fn starts_from_a_configured_access_token_without_a_password() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let credentials = Bot::login("sensor").await?;
+    let sensor = SensorProc::start(&harness::sensor_env_with(&[
+        ("SENSOR_PASSWORD", ""),
+        ("SENSOR_ACCESS_TOKEN", credentials.access_token()),
+        ("SENSOR_DEVICE_ID", credentials.device_id()),
+    ]))?;
+    let alpha = Bot::login("bot_alpha").await?;
+
+    // Joining an invited room proves the session is real: the token was
+    // accepted by the homeserver and the sync loop is running.
+    let portal = alpha.create_room("portal-token-start", false).await?;
+    alpha.invite(&portal, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&portal, SENSOR_USER_ID, "join")
+        .await?;
+
+    assert!(
+        sensor
+            .logs()
+            .await
+            .iter()
+            .any(|line| line.contains("started from the configured access token")),
+        "the Sensor must start from the token, not fall back to a password login"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
