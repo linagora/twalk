@@ -23,8 +23,8 @@ use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedUserId, UInt};
 use matrix_sdk::{Client, Room, RoomState};
 use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
-use twalk_sensor::consent::Consent;
-use twalk_sensor::{network, normalize, outbound};
+use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
+use twalk_sensor::{consent, network, normalize, outbound};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -100,6 +100,25 @@ async fn main() -> Result<()> {
         .context("failed to ensure the twalk stream")?;
     info!(stream = normalize::STREAM_NAME, "bus ready");
 
+    // Consent labelling (ticket 05): every published event carries the
+    // sender's current consent state from this cache, fed by the durable
+    // consent.state.changed consumer spawned below. The initial snapshot
+    // fetch sits behind the ConsentSnapshotSource trait; no Companion
+    // Gateway exists yet (ADR 0006), so the no-op source is wired in and
+    // every sender starts out pending. The Sensor never writes consent
+    // state.
+    let consent_cache = ConsentCache::default();
+    for change in consent::NoConsentSnapshot.fetch_snapshot().await {
+        consent_cache.apply(&change);
+    }
+    {
+        let jetstream = jetstream.clone();
+        let consent_cache = consent_cache.clone();
+        tokio::spawn(async move {
+            consume_consent_changes(jetstream, consent_cache).await;
+        });
+    }
+
     let own_user = client.user_id().unwrap().to_owned();
 
     // Observation scope is invitation-driven: join when the inviter is a
@@ -138,9 +157,11 @@ async fn main() -> Result<()> {
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
+        let consent_cache = consent_cache.clone();
         client.add_event_handler(move |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
+            let consent_cache = consent_cache.clone();
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
@@ -162,9 +183,12 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| sender.localpart().to_owned());
-                // Consent labelling arrives with ticket 05; unknown senders
-                // default to pending, per the contract.
-                let consent = Consent::Pending;
+                let consent = consent_cache.state(sender.as_str(), network);
+                // The native network identifier is contact PII: derived
+                // here, but published only for a granted contact (the
+                // builders enforce the gate).
+                let network_identifier =
+                    network::ghost_network_identifier(network, sender.localpart());
                 let (reply_target, thread_root) = relation_targets(&event.content);
                 let reply_to = match reply_target {
                     Some(parent_id) => Some(normalize::ReplyTo {
@@ -184,6 +208,7 @@ async fn main() -> Result<()> {
                     network,
                     consent,
                     display_name,
+                    network_identifier,
                     reply_to,
                     thread_root: thread_root.map(|event_id| event_id.to_string()),
                     attachments,
@@ -217,9 +242,11 @@ async fn main() -> Result<()> {
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
+        let consent_cache = consent_cache.clone();
         client.add_event_handler(move |event: OriginalSyncReactionEvent, room: Room, _client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
+            let consent_cache = consent_cache.clone();
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
@@ -236,9 +263,9 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| reactor.localpart().to_owned());
-                // Consent labelling arrives with ticket 05; unknown senders
-                // default to pending, per the contract.
-                let consent = Consent::Pending;
+                let consent = consent_cache.state(reactor.as_str(), network);
+                let network_identifier =
+                    network::ghost_network_identifier(network, reactor.localpart());
                 let target_event_id = event.content.relates_to.event_id.clone();
                 let excerpt = target_excerpt(&room, &target_event_id).await;
                 let input = normalize::InboundReaction {
@@ -252,6 +279,7 @@ async fn main() -> Result<()> {
                     network,
                     consent,
                     display_name,
+                    network_identifier,
                     produced_at: rfc3339(std::time::SystemTime::now()),
                     // Bridges report network timestamps in bridge-specific
                     // fields; mapping them arrives with the enrichment work.
@@ -284,9 +312,11 @@ async fn main() -> Result<()> {
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
+        let consent_cache = consent_cache.clone();
         client.add_event_handler(move |event: PresenceEvent, client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
+            let consent_cache = consent_cache.clone();
             async move {
                 let sender: OwnedUserId = event.sender.clone();
                 if sender == own_user {
@@ -351,9 +381,9 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| sender.localpart().to_owned());
-                // Consent labelling arrives with ticket 05; unknown contacts
-                // default to pending, per the contract.
-                let consent = Consent::Pending;
+                let consent = consent_cache.state(sender.as_str(), network);
+                let network_identifier =
+                    network::ghost_network_identifier(network, sender.localpart());
                 let last_active_at = event
                     .content
                     .last_active_ago
@@ -366,6 +396,7 @@ async fn main() -> Result<()> {
                     network,
                     consent,
                     display_name,
+                    network_identifier,
                     produced_at: rfc3339_ms(receipt_timestamp_ms),
                     receipt_timestamp_ms,
                     last_active_at,
@@ -639,8 +670,7 @@ async fn publish_envelope(
     }
 }
 
-/// How long to wait before rebuilding a failed or ended approved-reply
-/// consumer.
+/// How long to wait before rebuilding a failed or ended durable consumer.
 const CONSUMER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// Durably consumes `twalk.persona.reply.approved.v1` and posts each approved
@@ -755,6 +785,101 @@ async fn run_approved_reply_consumer(
                     error!(id = %job.event_id, %error, "nak failed, the message will be redelivered at the ack deadline");
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Durably consumes `twalk.consent.state.changed.v1` and applies each
+/// contact-scoped decision to the consent cache, so subsequent events label
+/// the sender with the current state. Applying a decision is idempotent, so
+/// an event is acked as soon as it is applied; a malformed or non-contact
+/// event is acked and skipped — it can never become applicable, and
+/// redelivering it would poison the consumer.
+///
+/// Never returns: if the consumer fails to build or its message stream
+/// ends, it is rebuilt after a short delay — consent changes must keep
+/// flowing for as long as the Sensor runs.
+async fn consume_consent_changes(
+    jetstream: async_nats::jetstream::Context,
+    consent_cache: ConsentCache,
+) {
+    loop {
+        match run_consent_consumer(&jetstream, &consent_cache).await {
+            Ok(()) => error!("the consent-change message stream ended; rebuilding the consumer"),
+            Err(error) => error!(%error, "the consent-change consumer failed; rebuilding it"),
+        }
+        tokio::time::sleep(CONSUMER_RECONNECT_DELAY).await;
+    }
+}
+
+/// One incarnation of the consent-change consumer: builds the durable pull
+/// consumer and applies its messages until the stream ends. A freshly
+/// created consumer replays the whole consent history (the default
+/// deliver-all policy); an existing one resumes from its ack position.
+async fn run_consent_consumer(
+    jetstream: &async_nats::jetstream::Context,
+    consent_cache: &ConsentCache,
+) -> Result<()> {
+    let stream = jetstream
+        .get_stream(normalize::STREAM_NAME)
+        .await
+        .context("failed to get the twalk stream")?;
+    let consumer = stream
+        .get_or_create_consumer(
+            consent::CONSENT_CONSUMER,
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(consent::CONSENT_CONSUMER.to_owned()),
+                filter_subject: normalize::bus_subject(consent::CONSENT_CHANGED_TYPE),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ..Default::default()
+            },
+        )
+        .await
+        .context("failed to ensure the consent-change consumer")?;
+    info!(consumer = consent::CONSENT_CONSUMER, "consuming consent changes");
+
+    let mut messages = consumer
+        .messages()
+        .await
+        .context("failed to open the consent-change message stream")?;
+    while let Some(message) = messages.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(%error, "consent-change stream error, continuing");
+                continue;
+            }
+        };
+        match serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
+            Ok(event) => match consent::ConsentChange::parse(&event) {
+                Some(change) => {
+                    consent_cache.apply(&change);
+                    info!(
+                        subject = %change.subject_id,
+                        state = change.new_state.as_str(),
+                        networks = ?change.networks,
+                        "applied a consent change"
+                    );
+                }
+                // A channel- or persona-scoped decision is well-formed
+                // traffic that simply never labels a sender; a malformed
+                // contact change is worth a warning.
+                None => match event.pointer("/data/subject/type").and_then(serde_json::Value::as_str) {
+                    Some("contact") | None => warn!(
+                        id = event
+                            .get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("<none>"),
+                        "unusable consent.state.changed event, skipping"
+                    ),
+                    Some(_) => {}
+                },
+            },
+            Err(error) => warn!(%error, "consent.state.changed payload is not valid JSON, skipping"),
+        }
+        if let Err(error) = message.ack().await {
+            warn!(%error, "consent-change ack failed, the event will be redelivered");
         }
     }
     Ok(())

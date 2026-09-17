@@ -76,6 +76,19 @@ pub fn excerpt(body: &str) -> String {
     cap_chars(body, 512)
 }
 
+/// The contract's `data.contact` object. The native network identifier is
+/// contact PII the consent state gates: it is published only for a
+/// `granted` contact, whoever resolved it upstream.
+fn contact_entry(display_name: &str, consent: Consent, network_identifier: Option<&str>) -> Value {
+    let mut contact = json!({ "display_name": cap_chars(display_name, 256) });
+    if consent == Consent::Granted {
+        if let Some(identifier) = network_identifier {
+            contact["network_identifier"] = json!(cap_chars(identifier, 256));
+        }
+    }
+    contact
+}
+
 /// A structured reply reference: the parent event id plus an excerpt of its
 /// body, so consumers never need a bus lookup to reason about a reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +235,9 @@ pub struct InboundMessage {
     pub network: Network,
     pub consent: Consent,
     pub display_name: String,
+    /// The sender's native network identifier, derived from the ghost
+    /// localpart; published only when `consent` is `granted`.
+    pub network_identifier: Option<String>,
     /// Structured reply reference, when the message replies to a parent.
     pub reply_to: Option<ReplyTo>,
     /// Thread root event id, when the message is part of a Matrix thread.
@@ -250,7 +266,7 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
         "format": "text/plain",
         "reply_to": reply_to,
         "attachments": attachments,
-        "contact": { "display_name": cap_chars(&input.display_name, 256) },
+        "contact": contact_entry(&input.display_name, input.consent, input.network_identifier.as_deref()),
     });
     if let Some(thread_root) = &input.thread_root {
         data["thread_root"] = json!(thread_root);
@@ -292,6 +308,9 @@ pub struct InboundReaction {
     pub network: Network,
     pub consent: Consent,
     pub display_name: String,
+    /// The reactor's native network identifier, derived from the ghost
+    /// localpart; published only when `consent` is `granted`.
+    pub network_identifier: Option<String>,
     /// RFC 3339 timestamp of when the Sensor produced the event.
     pub produced_at: String,
     /// RFC 3339 timestamp reported by the source network, when the bridge
@@ -307,7 +326,7 @@ pub fn build_reaction_added(input: &InboundReaction) -> Value {
     let mut data = json!({
         "reaction": cap_chars(&input.reaction, 64),
         "target": target,
-        "contact": { "display_name": cap_chars(&input.display_name, 256) },
+        "contact": contact_entry(&input.display_name, input.consent, input.network_identifier.as_deref()),
     });
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
@@ -362,6 +381,9 @@ pub struct InboundPresence {
     pub network: Network,
     pub consent: Consent,
     pub display_name: String,
+    /// The contact's native network identifier, derived from the ghost
+    /// localpart; published only when `consent` is `granted`.
+    pub network_identifier: Option<String>,
     /// RFC 3339 timestamp of when the Sensor produced the event: the same
     /// instant as `receipt_timestamp_ms`, so consumers can recompute the id.
     pub produced_at: String,
@@ -377,7 +399,7 @@ pub struct InboundPresence {
 pub fn build_presence_updated(input: &InboundPresence) -> Value {
     let mut data = json!({
         "presence": input.presence.as_str(),
-        "contact": { "display_name": cap_chars(&input.display_name, 256) },
+        "contact": contact_entry(&input.display_name, input.consent, input.network_identifier.as_deref()),
     });
     if let Some(last_active_at) = &input.last_active_at {
         data["last_active_at"] = json!(last_active_at);
@@ -437,6 +459,7 @@ mod tests {
             network: Network::Whatsapp,
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
+            network_identifier: None,
             reply_to: None,
             thread_root: None,
             attachments: Vec::new(),
@@ -700,6 +723,7 @@ mod tests {
             network: Network::Whatsapp,
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
+            network_identifier: None,
             produced_at: "2026-09-17T10:12:00Z".to_owned(),
             network_timestamp: None,
         }
@@ -714,6 +738,7 @@ mod tests {
             network: Network::Whatsapp,
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
+            network_identifier: None,
             produced_at: "2026-09-17T10:00:00.000Z".to_owned(),
             receipt_timestamp_ms: 1758000000000,
             last_active_at: None,
@@ -804,5 +829,55 @@ mod tests {
         input.last_active_at = Some("2026-09-17T09:59:58Z".to_owned());
         let event = build_presence_updated(&input);
         assert_eq!(event["data"]["last_active_at"], "2026-09-17T09:59:58Z");
+    }
+
+    #[test]
+    fn the_network_identifier_is_published_only_for_granted_contacts() {
+        // Granted: the identifier is part of the contact on all three paths.
+        let mut message = sample_input();
+        message.consent = Consent::Granted;
+        message.network_identifier = Some("+33612345678".to_owned());
+        assert_eq!(
+            build_message_received(&message)["data"]["contact"]["network_identifier"],
+            "+33612345678"
+        );
+        let mut reaction = sample_reaction();
+        reaction.consent = Consent::Granted;
+        reaction.network_identifier = Some("+33612345678".to_owned());
+        assert_eq!(
+            build_reaction_added(&reaction)["data"]["contact"]["network_identifier"],
+            "+33612345678"
+        );
+        let mut presence = sample_presence();
+        presence.consent = Consent::Granted;
+        presence.network_identifier = Some("+33612345678".to_owned());
+        assert_eq!(
+            build_presence_updated(&presence)["data"]["contact"]["network_identifier"],
+            "+33612345678"
+        );
+
+        // Pending or revoked: the identifier never leaves the Sensor, even
+        // when one was resolved.
+        for consent in [Consent::Pending, Consent::Revoked] {
+            let mut input = sample_input();
+            input.consent = consent;
+            input.network_identifier = Some("+33612345678".to_owned());
+            assert!(
+                build_message_received(&input)["data"]["contact"]
+                    .get("network_identifier")
+                    .is_none(),
+                "consent {} must not expose the identifier",
+                consent.as_str()
+            );
+        }
+
+        // Granted but underivable: the field is omitted, not null.
+        let mut input = sample_input();
+        input.consent = Consent::Granted;
+        assert!(
+            build_message_received(&input)["data"]["contact"]
+                .get("network_identifier")
+                .is_none()
+        );
     }
 }
