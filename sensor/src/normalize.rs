@@ -42,11 +42,16 @@ fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The contract caps `target.excerpt` at 512 characters: truncate the target
-/// message body on a char boundary so every event stays schema-valid.
+/// The contract caps several strings (reaction at 64, display_name at 256,
+/// excerpt at 512, ...): truncate on a char boundary so every published
+/// event stays schema-valid whatever the network sends.
+pub fn cap_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+/// The contract caps `target.excerpt` at 512 characters.
 pub fn excerpt(body: &str) -> String {
-    const MAX_CHARS: usize = 512;
-    body.chars().take(MAX_CHARS).collect()
+    cap_chars(body, 512)
 }
 
 /// Everything needed to build an `inbound.message.received.v1` envelope,
@@ -76,7 +81,7 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
         "format": "text/plain",
         "reply_to": Value::Null,
         "attachments": [],
-        "contact": { "display_name": input.display_name },
+        "contact": { "display_name": cap_chars(&input.display_name, 256) },
     });
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
@@ -128,9 +133,9 @@ pub fn build_reaction_added(input: &InboundReaction) -> Value {
         target["excerpt"] = json!(excerpt);
     }
     let mut data = json!({
-        "reaction": input.reaction,
+        "reaction": cap_chars(&input.reaction, 64),
         "target": target,
-        "contact": { "display_name": input.display_name },
+        "contact": { "display_name": cap_chars(&input.display_name, 256) },
     });
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
@@ -238,6 +243,27 @@ mod tests {
         let excerpted = excerpt(&long);
         assert_eq!(excerpted.chars().count(), 512);
         assert_eq!(excerpt("x".repeat(513).as_str()).chars().count(), 512);
+    }
+
+    #[test]
+    fn contract_string_caps_are_enforced() {
+        // Reaction keys are capped at 64 chars by the contract.
+        let mut input = sample_reaction();
+        input.reaction = "👍".repeat(100);
+        let event = build_reaction_added(&input);
+        assert_eq!(event["data"]["reaction"].as_str().unwrap().chars().count(), 64);
+        // Display names are capped at 256 chars.
+        let mut message = sample_input();
+        message.display_name = "x".repeat(300);
+        let event = build_message_received(&message);
+        assert_eq!(
+            event["data"]["contact"]["display_name"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            256
+        );
     }
 
     fn sample_reaction() -> InboundReaction {
