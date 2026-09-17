@@ -293,6 +293,26 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
         Some("text/html; charset=utf-8")
     );
 
+    // The image carries its own HTTP description (ticket #63): the Companion
+    // lot generates its client from it, and a build that shipped without it
+    // — a `.dockerignore` rule, a build context narrowed to `src/` — would
+    // leave a deployed Gateway no client can be generated against.
+    let described = reqwest::get(format!("{base}/openapi.yaml")).await?;
+    assert_eq!(described.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        described
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/yaml"),
+    );
+    let described = described.text().await?;
+    assert_eq!(
+        described,
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("openapi.yaml"))?,
+        "the deployed image must serve the description committed in the repository"
+    );
+
     // Sign-in is configured from the environment file, and the guard is live
     // in the deployed image: every API endpoint refuses a caller with no
     // device token. (The sign-in flow itself is exercised against a real

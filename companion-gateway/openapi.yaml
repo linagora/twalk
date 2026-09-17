@@ -1,0 +1,732 @@
+# The Companion Gateway's HTTP description (ticket #63).
+#
+# This file is the source of truth for the Gateway's HTTP surface, the way
+# `contracts/cloudevents/v1/` is the source of truth for the bus: the
+# Companion generates its TypeScript client from it, and
+# `tests/openapi.rs` fails when the running binary and this document
+# disagree. If a handler and this file disagree, one of the two is a bug —
+# the test says which side moved.
+#
+# The Gateway serves these bytes at `GET /openapi.yaml`: the binary embeds
+# the file with `include_str!` (`src/openapi.rs`), so the served description
+# is this file and cannot drift from it.
+#
+# Every later ticket of spec #46 that adds an endpoint extends this document
+# in the same commit — consent decisions and the snapshot (#49, #50), the
+# registration relay (#53), the bridge facade. The conformance test makes
+# that an obligation rather than a habit: a route registered in the router
+# and absent here fails the suite.
+openapi: 3.1.1
+
+info:
+  title: Twalk Companion Gateway
+  # The version of the Gateway this document describes: the crate version,
+  # which is also what `GET /health` reports. The conformance test asserts
+  # the two are equal, so a released binary always carries a description of
+  # itself.
+  version: 0.1.0
+  summary: The origin serving the Twalk Companion PWA, its session and its consent state.
+  description: |
+    One HTTP origin serves everything the Companion needs, so there is no
+    CORS and the device token can be an `HttpOnly` cookie (ADR 0011).
+
+    ## What is on this origin
+
+    - the Gateway's own API, under `/api/`;
+    - the operator's endpoints, `/health` and `/metrics`;
+    - this description, at `/openapi.yaml`;
+    - everything else: the Companion's own build, a SvelteKit static export
+      served with the adapter's own path-resolution order.
+
+    ## Authentication
+
+    Every endpoint under `/api/` requires a live device token unless it is
+    declared otherwise here — that is the implementation's default too, so a
+    route added by a later ticket is protected before its author writes a
+    line of authentication code. The exceptions are the sign-in itself
+    (where a device gets its first token), the refresh (which authenticates
+    the refresh token and rotates it) and, from ticket #50, the consent
+    snapshot, whose caller is the Sensor and not a device: it takes the
+    `serviceToken` scheme declared below.
+
+    The device token travels as the `twalk_device` cookie
+    (`HttpOnly`, `SameSite=Lax`, `Secure` off localhost) set by the
+    sign-in and the refresh; the refresh token as `twalk_refresh`, scoped to
+    `/api/session`. A browser sends both on its own — a generated client
+    needs no `Authorization` header and must not try to read the cookies,
+    which `HttpOnly` hides from JavaScript. `Set-Cookie` is deliberately not
+    described per response: OpenAPI ignores that header by design, and the
+    cookies' attributes are asserted by `tests/signin.rs`.
+
+    ## Errors
+
+    Every refusal the Gateway itself produces is a JSON document with an
+    `error` member: a stable, machine-readable code a client branches on,
+    never a sentence to parse. The codes are enumerated per status on each
+    operation below. Some carry a human-readable `detail` for an operator's
+    logs; a client must not display it to the user or match on it.
+
+    Three answers are the same for every `/api` endpoint and are not
+    repeated in prose on each one:
+
+    - `401 unauthenticated` — no device token, or one that is unknown,
+      expired or revoked. One answer for all three, so a probe learns
+      nothing from the difference. Because the guard answers before routing,
+      an unknown `/api` path also answers `401` to a caller with no device
+      token: an unauthenticated client learns nothing about the API's shape.
+      A signed-in client gets `404 not_found` with the path it asked for.
+    - `405` with an `Allow` header and an empty body, for a described path
+      requested with a method it does not have.
+    - `503 sign_in_not_configured` — the deployment has no `GATEWAY_OWNER`,
+      so nobody can sign in and the whole API is closed. The origin stays
+      up, and the Companion can say what is wrong.
+
+servers:
+  - url: /
+    description: |
+      The Gateway's own origin — the origin the Companion was served from.
+      There is no other: same-origin is what makes the cookie work.
+
+tags:
+  - name: session
+    description: Signing in, the session's lifetime, and the user's devices.
+  - name: operations
+    description: What an operator and a deployment's probes read.
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [operations]
+      summary: Liveness, and the version handshake's server half.
+      description: |
+        Always `200` while the process answers. Liveness, not readiness.
+
+        `version` is the stable half of the Companion's version handshake:
+        the PWA is installed, so a service worker may hold an app shell built
+        against an older Gateway. The client compares this value with the
+        version baked into its own build and reloads when they differ.
+        `revision` is provenance for an operator, not an input to the
+        handshake.
+      security: []
+      responses:
+        "200":
+          description: The service is answering.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [operations]
+      summary: The Prometheus text exposition.
+      description: |
+        The `twalk_companion_gateway_*` metrics, in the Sensor's conventions,
+        as Prometheus text exposition format 0.0.4 — served with
+        `Content-Type: text/plain; version=0.0.4; charset=utf-8`. Not for the
+        Companion: for the operator's scrape.
+      security: []
+      responses:
+        "200":
+          description: The exposition, as a text document.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /openapi.yaml:
+    get:
+      operationId: getOpenApiDescription
+      tags: [operations]
+      summary: This description, as the running binary carries it.
+      description: |
+        The bytes of `companion-gateway/openapi.yaml`, embedded in the binary
+        at build time. What a client generator points at to be sure it is
+        describing the Gateway it is talking to, rather than a file from
+        another revision of the repository.
+      security: []
+      responses:
+        "200":
+          description: The OpenAPI 3.1 description of this Gateway.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /api/session:
+    post:
+      operationId: signIn
+      tags: [session]
+      summary: Sign this device in with a Matrix OpenID token.
+      description: |
+        The Companion asks its homeserver for an OpenID token
+        (`POST /_matrix/client/v3/user/{userId}/openid/request_token`) and
+        forwards that document here, unchanged. The Gateway verifies it at
+        the homeserver's federation `openid/userinfo` endpoint, checks the
+        resulting Matrix ID against the deployment's single owner, refuses a
+        token it has already accepted, and issues its own pair of tokens.
+
+        The Gateway never receives, stores or logs the Matrix access token
+        that minted the OpenID token (ADR 0011).
+
+        On success, two `Set-Cookie` headers carry the credentials: the
+        device token (`twalk_device`, `Path=/`) and the refresh token
+        (`twalk_refresh`, `Path=/api/session`). The response body names
+        `expires_in` so the client refreshes on time instead of discovering
+        the expiry as a `401`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignInRequest"
+      responses:
+        "200":
+          description: |
+            Signed in. The device token and the refresh token are set as
+            cookies; the body describes the session.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedSession"
+        "400":
+          description: |
+            The request body is not a sign-in document
+            (`invalid_request`), or the OpenID token says it was minted by
+            another homeserver than this deployment's — refused before any
+            outbound call (`foreign_homeserver`).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [invalid_request, foreign_homeserver]
+        "401":
+          description: |
+            The homeserver does not know this token — never minted, expired
+            or simply wrong (`openid_token_rejected`) — or the Gateway has
+            already accepted it once (`openid_token_replayed`). Verification
+            does not consume a token at the homeserver, so the Gateway keeps
+            its own ledger and a second sign-in with the same token is
+            refused.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [openid_token_rejected, openid_token_replayed]
+        "403":
+          description: |
+            The token resolved to a Matrix ID that is not this deployment's
+            owner — including when the homeserver answered with an ID it
+            cannot speak for. One deployment serves one owner (ADR 0011),
+            and the homeserver has other accounts, the Sensor's among them.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [not_the_owner]
+        "500":
+          $ref: "#/components/responses/StoreFailed"
+        "502":
+          description: |
+            The homeserver could not be reached, or answered something that
+            is not a userinfo document. An operator's problem, not the
+            user's: the client should offer to retry rather than send the
+            user back to a sign-in screen.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [homeserver_unverifiable]
+        "503":
+          $ref: "#/components/responses/SignInNotConfigured"
+    get:
+      operationId: getSession
+      tags: [session]
+      summary: Who is signed in, on which device.
+      description: |
+        What the Companion asks on boot to know whether it must show the
+        sign-in screen: a `200` means the cookie it already holds is live.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The session this device's token belongs to.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          $ref: "#/components/responses/SignInNotConfigured"
+    delete:
+      operationId: signOut
+      tags: [session]
+      summary: Sign this device out, revoking it.
+      description: |
+        Signing out revokes the device: a device the user signed out of is a
+        device that should stop working, and signing in again is a silent
+        round trip for the Companion. Both cookies are cleared.
+      security:
+        - deviceToken: []
+      responses:
+        "204":
+          description: |
+            Signed out. The device is revoked, and both session cookies are
+            cleared.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/StoreFailed"
+        "503":
+          $ref: "#/components/responses/SignInNotConfigured"
+
+  /api/session/refresh:
+    post:
+      operationId: refreshSession
+      tags: [session]
+      summary: Exchange the refresh token for a new pair.
+      description: |
+        Authenticated by the refresh cookie rather than the device cookie —
+        the device token is short-lived by design. Both tokens are rotated,
+        so a device token that leaked dies at the next refresh instead of
+        living out its lifetime; the previous refresh token stops working
+        immediately.
+
+        The refresh cookie is scoped to `/api/session`, so it is not sent
+        with every static file and every API call.
+      security:
+        - refreshToken: []
+      responses:
+        "200":
+          description: |
+            A new device token and a new refresh token, set as cookies, with
+            the session document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IssuedSession"
+        "401":
+          description: |
+            No refresh cookie, or one that is unknown, expired, already
+            rotated, or belongs to a revoked device. The client's answer is
+            to sign in again.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [unauthenticated]
+        "503":
+          $ref: "#/components/responses/SignInNotConfigured"
+
+  /api/devices:
+    get:
+      operationId: listDevices
+      tags: [session]
+      summary: The devices that have signed in.
+      description: |
+        Every device, revoked ones included and dated, so that "I revoked
+        that phone" stays visible. The device the request came from is
+        flagged `current`.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The device list, newest activity first is not implied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceList"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/StoreFailed"
+        "503":
+          $ref: "#/components/responses/SignInNotConfigured"
+
+  /api/devices/{id}:
+    delete:
+      operationId: revokeDevice
+      tags: [session]
+      summary: Revoke one device.
+      description: |
+        The device's token stops working on its very next request, including
+        when that device is the caller's own — nothing is cached. The row
+        stays in the list with its revocation date; its token digests are
+        dropped.
+      security:
+        - deviceToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: The device's id, as the device list reports it.
+          schema:
+            type: string
+      responses:
+        "204":
+          description: The device is revoked.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          description: |
+            No device of this deployment has that id, or it was already
+            revoked. One answer for both: the caller asked for that device
+            to stop working, and it does not work.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [not_found]
+        "500":
+          $ref: "#/components/responses/StoreFailed"
+        "503":
+          $ref: "#/components/responses/SignInNotConfigured"
+
+  /{companionPath}:
+    get:
+      operationId: getCompanionFile
+      tags: [operations]
+      summary: The Companion's own build.
+      description: |
+        Every path the Gateway's own routes do not claim is the Companion's.
+        One templated segment stands here for the whole remaining path,
+        however many segments it has: OpenAPI path templating cannot express
+        a wildcard, and this operation is documentation for a human and a
+        conformance test, not something a generated client calls — the
+        browser fetches these paths by navigating.
+
+        The resolution order is SvelteKit's static-adapter preview server's:
+        the exact file; else the path plus `index.html` (trailing slash) or
+        plus `.html`; else a `307` to whichever trailing-slash spelling the
+        build does have; else the SPA fallback (`200.html`) with `200`, so a
+        deep link reloaded cold loads the app instead of a `404`.
+
+        The `/api/` prefix is the one exception to that fallback: under it a
+        `404` stays a `404`, as JSON, because a client parsing an API
+        response must never be handed an HTML page instead.
+      security: []
+      parameters:
+        - name: companionPath
+          in: path
+          required: true
+          description: The request path, standing for any number of segments.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: |
+            The file the build has for this path, or — for a route that
+            exists only in the client-side router — the SPA fallback. The
+            content type is the one the path's extension calls for, and
+            `text/html` when it has none; `.wasm` is exactly
+            `application/wasm`, with no parameters, or
+            `WebAssembly.instantiateStreaming` refuses it. A pre-compressed
+            sibling (`.br`, `.gz`) is served with the matching
+            `Content-Encoding` to a client that accepts it.
+          content:
+            text/html:
+              schema:
+                type: string
+            application/wasm:
+              schema:
+                type: string
+                contentMediaType: application/wasm
+            "*/*":
+              schema:
+                type: string
+                description: Any other asset of the build.
+        "307":
+          description: |
+            The build has this page under its other trailing-slash spelling;
+            `Location` names it, with the query string preserved.
+        "404":
+          description: |
+            There is no build to serve at all — not even a fallback file — so
+            `GATEWAY_STATIC_DIR` points at nothing the Gateway can serve.
+            A plain-text message naming the directory, for the operator who
+            will read it in a browser. The origin stays up: `/health` and
+            `/metrics` keep answering.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    deviceToken:
+      type: apiKey
+      in: cookie
+      name: twalk_device
+      description: |
+        The Gateway's own per-device credential, issued once a Matrix OpenID
+        token has proved the owner's identity: `HttpOnly`, `SameSite=Lax`,
+        `Secure` off localhost, short-lived, revocable per device, and never
+        a Matrix access token (ADR 0011). The browser sends it on its own; a
+        generated client cannot read it and must not try.
+    refreshToken:
+      type: apiKey
+      in: cookie
+      name: twalk_refresh
+      description: |
+        The long-lived half of the pair, scoped to `/api/session` and
+        accepted by the refresh endpoint alone, which rotates it.
+    serviceToken:
+      type: http
+      scheme: bearer
+      description: |
+        A token from the Gateway's own configuration, for a caller that is
+        not a device and has no OpenID token to sign in with: the Sensor
+        reading the consent snapshot. No endpoint uses it yet — ticket #50
+        brings the snapshot and is the ticket that references this scheme.
+        Declared here so that the distinction a client must not guess at is
+        already written down: a device cookie grants no access to a
+        service-token route, and a service token grants no access to a
+        device route.
+
+  responses:
+    Unauthenticated:
+      description: |
+        No device token, or one that is unknown, expired or revoked — one
+        answer for all three. Also what an unknown `/api` path answers to a
+        caller with no device token.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - properties:
+                  error:
+                    enum: [unauthenticated]
+    StoreFailed:
+      description: |
+        The Gateway's own store (SQLite, its record of truth) failed. Not
+        the client's fault and not retryable by changing the request.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - properties:
+                  error:
+                    enum: [store_failed]
+    SignInNotConfigured:
+      description: |
+        This deployment has no owner (`GATEWAY_OWNER` is unset), so nobody
+        can sign in and the whole API is closed. The origin still serves the
+        Companion, `/health` and `/metrics`, so the app can tell the
+        operator what is missing — `detail` names the variables.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - properties:
+                  error:
+                    enum: [sign_in_not_configured]
+
+  schemas:
+    Error:
+      type: object
+      description: |
+        Every refusal the Gateway produces. `error` is the stable code a
+        client branches on; the operations above enumerate which codes each
+        status carries.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          description: The machine-readable code. Stable; never a sentence.
+        detail:
+          type: string
+          description: |
+            A human-readable explanation, for an operator reading logs. Not
+            for display to the user, and never matched on.
+        path:
+          type: string
+          description: |
+            The path that matched no endpoint. Set on the `/api` catch-all's
+            `404` alone.
+
+    Health:
+      type: object
+      required: [status, version, revision]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: |
+            `ok` while the process answers. Liveness, not readiness.
+        version:
+          type: string
+          minLength: 1
+          description: |
+            The Gateway's version — the same value as this description's
+            `info.version`. The Companion compares it with the version baked
+            into its own build and reloads on a mismatch.
+        revision:
+          type: string
+          minLength: 1
+          description: |
+            The revision the binary was built from, or `unknown`.
+            Provenance, not part of the handshake.
+
+    SignInRequest:
+      type: object
+      required: [matrix_openid_token]
+      additionalProperties: false
+      properties:
+        matrix_openid_token:
+          $ref: "#/components/schemas/MatrixOpenIdToken"
+        device_name:
+          type: string
+          description: |
+            How this device should appear in the device list — the user's
+            own words ("Pixel 8", "the laptop"). Optional; the Gateway names
+            an unnamed device itself.
+
+    MatrixOpenIdToken:
+      type: object
+      description: |
+        The homeserver's OpenID token document, forwarded unchanged. The
+        Gateway reads `access_token` and `matrix_server_name`; the rest of
+        the homeserver's answer (`token_type`, `expires_in`) is accepted and
+        ignored, so a client can forward the document as it received it.
+      required: [access_token]
+      properties:
+        access_token:
+          type: string
+          description: |
+            The OpenID token itself. Not a Matrix access token: it proves an
+            identity to a third party and nothing more.
+        matrix_server_name:
+          type: string
+          description: |
+            The homeserver that minted the token. Checked against this
+            deployment's homeserver before any outbound call; absent, the
+            Gateway asks its own homeserver, the only one it would ask.
+
+    Session:
+      type: object
+      description: Who is signed in, on which device.
+      required: [owner, homeserver, device]
+      additionalProperties: false
+      properties:
+        owner:
+          type: string
+          description: |
+            The Matrix ID of the single human this deployment serves
+            (`GATEWAY_OWNER`).
+        homeserver:
+          type: string
+          description: The homeserver name that identity belongs to.
+        device:
+          $ref: "#/components/schemas/Device"
+
+    IssuedSession:
+      type: object
+      description: |
+        A session whose tokens were just issued or rotated: the session
+        document plus the device token's lifetime, so the client refreshes
+        on time rather than discovering the expiry as a `401`.
+
+        Spelled out rather than an `allOf` over [`Session`]: a closed object
+        (`additionalProperties: false`) is what makes the conformance test
+        catch a response member nobody described, and that keyword cannot
+        see through an `allOf`.
+      required: [owner, homeserver, device, expires_in]
+      additionalProperties: false
+      properties:
+        owner:
+          type: string
+          description: |
+            The Matrix ID of the single human this deployment serves
+            (`GATEWAY_OWNER`).
+        homeserver:
+          type: string
+          description: The homeserver name that identity belongs to.
+        device:
+          $ref: "#/components/schemas/Device"
+        expires_in:
+          type: integer
+          minimum: 1
+          description: |
+            Seconds the device token stays valid from now. The refresh
+            token lives longer; its lifetime is not reported, because
+            the client's only move when it expires is to sign in again.
+
+    Device:
+      type: object
+      description: |
+        One device in the list. Dates are seconds since the epoch: the
+        Gateway carries no date library, and a client renders local time
+        from a number as readily as from a string.
+      required:
+        - id
+        - name
+        - created_unix_seconds
+        - last_seen_unix_seconds
+        - revoked_unix_seconds
+        - current
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: The device's id — what `DELETE /api/devices/{id}` takes.
+        name:
+          type: string
+          description: |
+            The name the device was signed in under, or the one the Gateway
+            gave it.
+        created_unix_seconds:
+          type: integer
+          description: When this device first signed in.
+        last_seen_unix_seconds:
+          type: integer
+          description: |
+            When a request last authenticated with this device's token.
+        revoked_unix_seconds:
+          type: [integer, "null"]
+          description: |
+            When the device was revoked, or `null` while it is live. Present
+            either way: an absent member would be indistinguishable from a
+            client that failed to read it.
+        current:
+          type: boolean
+          description: Whether this is the device the request came from.
+
+    DeviceList:
+      type: object
+      required: [devices]
+      additionalProperties: false
+      properties:
+        devices:
+          type: array
+          description: |
+            Every device, revoked ones included, so that a revocation stays
+            visible to the user who made it.
+          items:
+            $ref: "#/components/schemas/Device"

@@ -44,6 +44,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 anyhow = "1"
+# Reading `openapi.yaml` in the conformance test (ticket #63). Test-only:
+# the binary serves the description's bytes and never parses them. A
+# maintained fork of serde_yaml, which is deprecated and unmaintained.
+serde_yaml_ng = "0.10"
+# Validating the Gateway's real responses against the response schemas of
+# that description. OpenAPI 3.1 schemas *are* JSON Schema 2020-12, which is
+# the whole reason the description is 3.1 and not 3.0 — the same validator
+# the shared harness checks CloudEvents with (`tests/harness/src/contract.rs`).
+jsonschema = "0.56"
 # reqwest is a runtime dependency since ticket #52 (the OpenID verification
 # call), and a package's dependencies are available to its test targets too:
 # the tests drive the Gateway over HTTP with the same client.
