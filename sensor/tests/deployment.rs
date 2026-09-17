@@ -13,8 +13,16 @@
 //! The deploy stack runs under its own compose project and host ports, next
 //! to the harness's own stack: TWALK_DEPLOY_TEST_STACK (default
 //! twalk-deploy-test), TWALK_DEPLOY_TEST_SYNAPSE_PORT (default 18218),
-//! TWALK_DEPLOY_TEST_NATS_PORT (default 14418). The stack stays up between
-//! runs; `docker compose -p twalk-deploy-test down -v` resets it to fresh.
+//! TWALK_DEPLOY_TEST_NATS_PORT (default 14418). The Sensor image is tagged
+//! per compose project (`twalk/sensor:<stack>`, issue #38) so that parallel
+//! worktrees never overwrite each other's build; the operator default,
+//! twalk/sensor:local, is untouched.
+//!
+//! The stack and its image stay up between runs: that is what makes a warm
+//! run fast. Set TWALK_DEPLOY_TEST_TEARDOWN=1 to drop both at the end of a
+//! passing run instead, leaving the Docker daemon as the test found it —
+//! by hand, `docker compose -p <stack> down -v` followed by
+//! `docker image rm twalk/sensor:<stack>`.
 //!
 //! The credentials below are throwaway constants for the local, ephemeral
 //! deploy-test stack (same category as the test-bot passwords) — the env
@@ -52,6 +60,18 @@ fn nats_url() -> String {
     format!("nats://localhost:{port}")
 }
 
+/// The tag the deploy stack's Sensor image is built and run under. One tag
+/// per compose project, so that two worktrees on two stacks each rebuild
+/// their own image instead of overwriting a shared one (issue #38); compose
+/// project names are already restricted to the characters a Docker tag
+/// accepts. TWALK_SENSOR_IMAGE overrides it, as it does for an operator.
+fn sensor_image() -> String {
+    std::env::var("TWALK_SENSOR_IMAGE")
+        .ok()
+        .filter(|image| !image.is_empty())
+        .unwrap_or_else(|| format!("twalk/sensor:{}", deploy_stack()))
+}
+
 fn deploy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deploy/docker-compose")
 }
@@ -69,6 +89,7 @@ fn write_env_file() -> Result<PathBuf> {
     ));
     let synapse_port = synapse_url().rsplit(':').next().unwrap().to_owned();
     let nats_port = nats_url().rsplit(':').next().unwrap().to_owned();
+    let sensor_image = sensor_image();
     let contents = format!(
         "MATRIX_DOMAIN={SERVER_NAME}\n\
          MATRIX_HTTP_PORT={synapse_port}\n\
@@ -80,7 +101,8 @@ fn write_env_file() -> Result<PathBuf> {
          SENSOR_ALLOWED_INVITERS=@{BRIDGE_LOCALPART}:{SERVER_NAME}\n\
          SENSOR_STATE_DIR=/data\n\
          SENSOR_LOG_LEVEL=info,twalk_sensor=debug\n\
-         NATS_PORT={nats_port}\n"
+         NATS_PORT={nats_port}\n\
+         TWALK_SENSOR_IMAGE={sensor_image}\n"
     );
     std::fs::write(&path, contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -111,6 +133,39 @@ async fn compose(env_file: &Path, args: &[&str], what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether the run asked for the stack to be torn down at the end
+/// (TWALK_DEPLOY_TEST_TEARDOWN=1). Off by default: the stack and its image
+/// stay up, and the next run reuses them warm.
+fn teardown_requested() -> bool {
+    matches!(
+        std::env::var("TWALK_DEPLOY_TEST_TEARDOWN").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Removes everything this run created: the stack's containers, networks and
+/// volumes, its per-stack Sensor image, and the generated env file.
+async fn teardown(env_file: &Path) -> Result<()> {
+    compose(env_file, &["down", "-v"], "down").await?;
+    let image = sensor_image();
+    let output = Command::new("docker")
+        .args(["image", "rm", &image])
+        .output()
+        .await
+        .context("failed to run docker image rm")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Tolerate an already-removed image: teardown stays idempotent.
+    if !output.status.success() && !stderr.contains("No such image") {
+        bail!(
+            "docker image rm {image} failed with {}:\n{stderr}",
+            output.status
+        );
+    }
+    std::fs::remove_file(env_file)
+        .with_context(|| format!("failed to remove {}", env_file.display()))?;
+    Ok(())
+}
+
 /// The documented ad-hoc provisioning step (deploy/docker-compose/
 /// provision.sh), used here for the test bot standing in for a bridge —
 /// operator-side setup. The Sensor account itself is NOT provisioned by the
@@ -133,9 +188,9 @@ async fn provision(env_file: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Asserts the stack's provision one-shot ran and exited successfully:
-/// `docker compose ps --format json` prints one JSON object per service.
-async fn assert_sensor_account_provisioned(env_file: &Path) -> Result<()> {
+/// The stack's containers as `docker compose ps --format json` reports them:
+/// one JSON object per line, one line per service.
+async fn compose_ps(env_file: &Path) -> Result<Vec<serde_json::Value>> {
     let output = Command::new("docker")
         .arg("compose")
         .arg("-p")
@@ -155,15 +210,40 @@ async fn assert_sensor_account_provisioned(env_file: &Path) -> Result<()> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let entry = String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect())
+}
+
+/// Asserts the stack's provision one-shot ran and exited successfully.
+async fn assert_sensor_account_provisioned(env_file: &Path) -> Result<()> {
+    let entries = compose_ps(env_file).await?;
+    let entry = entries
+        .iter()
         .find(|entry| entry["Service"].as_str() == Some("provision"))
         .context("the provision one-shot service has no container")?;
     assert_eq!(
         entry["ExitCode"].as_i64(),
         Some(0),
         "the provision one-shot must have created the Sensor account: {entry}"
+    );
+    Ok(())
+}
+
+/// Asserts the running sensor container is this stack's own image, not a
+/// shared tag another stack (another worktree's checkout) may have rebuilt
+/// under it (issue #38).
+async fn assert_sensor_runs_its_own_image(env_file: &Path) -> Result<()> {
+    let entries = compose_ps(env_file).await?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry["Service"].as_str() == Some("sensor"))
+        .context("the sensor service has no container")?;
+    assert_eq!(
+        entry["Image"].as_str(),
+        Some(sensor_image().as_str()),
+        "the sensor container must run this stack's own image: {entry}"
     );
     Ok(())
 }
@@ -210,6 +290,7 @@ async fn a_fresh_compose_up_produces_events_without_manual_steps() -> Result<()>
     // one-shot created it on the way up. The Sensor reaching its sync loop
     // is the proof the account exists — its first act is a password login.
     assert_sensor_account_provisioned(&env_file).await?;
+    assert_sensor_runs_its_own_image(&env_file).await?;
     wait_for_sensor_running(&env_file).await?;
 
     // Operator-side setup only: the test bot standing in for a bridge.
@@ -254,5 +335,12 @@ async fn a_fresh_compose_up_produces_events_without_manual_steps() -> Result<()>
         event["data"]["body"].as_str(),
         Some("deployment, no manual steps")
     );
+
+    // Only on request: a stack left up (with its image) is what makes the
+    // next run warm. Deliberately after the assertions, so a failure leaves
+    // the stack and its logs in place to inspect.
+    if teardown_requested() {
+        teardown(&env_file).await?;
+    }
     Ok(())
 }
