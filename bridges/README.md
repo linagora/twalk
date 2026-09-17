@@ -32,6 +32,8 @@ Two files, and the split matters.
 
 `generate-registration.sh` puts the two together at provisioning time: it copies the base config into the bridge's data volume, renders the environment onto it with `yq`, runs `mautrix-<network> -g` — which is what actually builds a valid registration, with its id, url, namespaces and MSC2409 flags — and then pins the two tokens and the sender localpart back to the operator's values, because `-g` regenerates all three on every run. That pinning is what makes the script idempotent, and it is why `.env` stays the single source of both halves of the appservice's identity: the Companion Gateway needs the same `as_token` in its own configuration to verify this bridge's status webhook ([#56](https://github.com/linagora/twalk/issues/56)).
 
+One consequence is worth stating before it surprises someone: `/data/config.yaml` inside a bridge's volume is **generated, not authoritative**. Every provisioning run overwrites it from the base config plus `.env`, so an edit made in place survives exactly until the next `./provision-bridges.sh`. Change the base config or `.env` instead — that is the whole point of the split.
+
 The generated registration is world-readable inside its volume, because Synapse reads it as its own user and not as the bridge's. It holds both appservice tokens; the volume is reachable only by root on the host, and protecting that host is the operator's job.
 
 ## The two HTTP surfaces a bridge exposes
