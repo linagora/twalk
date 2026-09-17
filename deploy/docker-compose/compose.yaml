@@ -274,7 +274,10 @@ services:
       BRIDGE_NETWORK: whatsapp
       MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
       MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
-      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-}
+      # The single owner whose login this bridge accepts. Defaults to
+      # GATEWAY_OWNER: it is the same human, and one deployment has one
+      # (ADR 0011).
+      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-${GATEWAY_OWNER:-}}
       BRIDGE_AS_TOKEN: ${WHATSAPP_AS_TOKEN:-}
       BRIDGE_HS_TOKEN: ${WHATSAPP_HS_TOKEN:-}
       BRIDGE_PROVISIONING_SECRET: ${WHATSAPP_PROVISIONING_SECRET:-}
@@ -336,7 +339,10 @@ services:
       BRIDGE_NETWORK: signal
       MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
       MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
-      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-}
+      # The single owner whose login this bridge accepts. Defaults to
+      # GATEWAY_OWNER: it is the same human, and one deployment has one
+      # (ADR 0011).
+      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-${GATEWAY_OWNER:-}}
       BRIDGE_AS_TOKEN: ${SIGNAL_AS_TOKEN:-}
       BRIDGE_HS_TOKEN: ${SIGNAL_HS_TOKEN:-}
       BRIDGE_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
