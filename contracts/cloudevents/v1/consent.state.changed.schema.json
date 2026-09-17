@@ -73,7 +73,7 @@
     },
     "network": {
       "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
       "description": "Twalk extension. Optional on this operational event: only set when the consent change targets exactly one network; the authoritative scope is data.scope.networks."
     },
     "consent": {
@@ -125,7 +125,7 @@
               "uniqueItems": true,
               "items": {
                 "type": "string",
-                "enum": ["whatsapp", "telegram", "signal", "discord", "sms"]
+                "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"]
               },
               "description": "Networks the decision applies to. A contact reachable on several networks gets one decision per scope."
             }

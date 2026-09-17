@@ -72,7 +72,7 @@
     },
     "network": {
       "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
       "description": "Twalk extension. Network the reply will be sent to, copied from the trigger event for server-side filtering on NATS."
     },
     "consent": {
