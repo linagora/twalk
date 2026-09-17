@@ -53,6 +53,8 @@ pub fn contract_fixture(type_name: &str) -> Result<Value> {
 
 /// Lists every contract type that has a fixture, straight from the fixtures
 /// directory: a new fixture is automatically covered, never silently skipped.
+/// The `variants/` subdirectory is not a type — it holds the conditional
+/// shapes listed by [`contract_variant_fixtures`].
 pub fn contract_fixture_types() -> Result<Vec<String>> {
     let mut types = Vec::new();
     for entry in std::fs::read_dir(contract_dir().join("fixtures"))? {
@@ -63,4 +65,49 @@ pub fn contract_fixture_types() -> Result<Vec<String>> {
     }
     types.sort();
     Ok(types)
+}
+
+/// Lists the contract's variant fixtures — `fixtures/variants/<type
+/// name>/<variant>.json` — as (type name, variant) pairs. A variant
+/// demonstrates one conditional shape of a type whose canonical fixture
+/// stays in `fixtures/`, so that a shape the schema only allows under a
+/// condition (a revoked sender's reduced message, ADR 0012) has a worked
+/// example a producer can copy. Every variant validates against its type's
+/// schema, like the canonical fixture.
+pub fn contract_variant_fixtures() -> Result<Vec<(String, String)>> {
+    let variants_dir = contract_dir().join("fixtures").join("variants");
+    let mut variants = Vec::new();
+    if !variants_dir.exists() {
+        return Ok(variants);
+    }
+    for type_entry in std::fs::read_dir(&variants_dir)? {
+        let type_dir = type_entry?.path();
+        if !type_dir.is_dir() {
+            continue;
+        }
+        let type_name = type_dir.file_name().unwrap().to_string_lossy().into_owned();
+        for entry in std::fs::read_dir(&type_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let variant = path.file_stem().unwrap().to_string_lossy().into_owned();
+                variants.push((type_name.clone(), variant));
+            }
+        }
+    }
+    variants.sort();
+    Ok(variants)
+}
+
+/// Loads one variant fixture by type name and variant, e.g.
+/// `contract_variant_fixture("inbound.message.received", "revoked-sender")`.
+pub fn contract_variant_fixture(type_name: &str, variant: &str) -> Result<Value> {
+    let path = contract_dir()
+        .join("fixtures")
+        .join("variants")
+        .join(type_name)
+        .join(format!("{variant}.json"));
+    let fixture = serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
+    )?;
+    Ok(fixture)
 }

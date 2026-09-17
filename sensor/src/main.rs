@@ -316,9 +316,17 @@ async fn main() -> Result<()> {
                 let reply_to = match reply_target {
                     Some(parent_id) => Some(normalize::ReplyTo {
                         matrix_event_id: parent_id.to_string(),
-                        // An unreachable parent is not an error: the reply
-                        // still publishes, with an empty excerpt.
-                        excerpt: target_excerpt(&room, &parent_id).await.unwrap_or_default(),
+                        // A revoked sender's event keeps the relation and
+                        // publishes no excerpt (ADR 0012), so the quoted
+                        // message is not even fetched: the Sensor collects
+                        // nothing it would not publish. Otherwise an
+                        // unreachable parent is not an error either: the
+                        // reply still publishes, with an empty excerpt.
+                        excerpt: if consent.reduces_publication() {
+                            String::new()
+                        } else {
+                            target_excerpt(&room, &parent_id).await.unwrap_or_default()
+                        },
                     }),
                     None => None,
                 };
@@ -420,7 +428,13 @@ async fn main() -> Result<()> {
                 let network_identifier =
                     network::ghost_network_identifier(network, reactor.localpart());
                 let target_event_id = event.content.relates_to.event_id.clone();
-                let excerpt = target_excerpt(&room, &target_event_id).await;
+                // An excerpt quotes a message: for a revoked reactor it is
+                // neither published nor fetched (ADR 0012).
+                let excerpt = if consent.reduces_publication() {
+                    None
+                } else {
+                    target_excerpt(&room, &target_event_id).await
+                };
                 let input = normalize::InboundReaction {
                     matrix_event_id: event.event_id.to_string(),
                     matrix_room_id: room.room_id().to_string(),

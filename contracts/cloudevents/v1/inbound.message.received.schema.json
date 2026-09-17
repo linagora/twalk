@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
   "title": "fr.linagora.twalk.inbound.message.received.v1",
-  "description": "A message received from an external messaging network, decrypted by the Sensor and normalized as a CloudEvents 1.0 envelope. Produced by the Sensor after successful Megolm decryption of an m.room.message event in a Matrix portal room. Consumed by Hermes personas subscribed to the inbound.message.received.* subject on NATS JetStream.",
+  "description": "A message received from an external messaging network, decrypted by the Sensor and normalized as a CloudEvents 1.0 envelope. Produced by the Sensor after successful Megolm decryption of an m.room.message event in a Matrix portal room. Consumed by Hermes personas subscribed to the inbound.message.received.* subject on NATS JetStream. One event of this type has two shapes, selected by the sender's consent state: the full shape, and the reduced shape a 'revoked' sender's message is published in — same envelope, same relations, no content (see the 'A revoked sender's message carries no content' rule at the end of this schema, and ADR 0012).",
   "type": "object",
   "required": [
     "specversion",
@@ -85,17 +85,17 @@
     "consent": {
       "type": "string",
       "enum": ["granted", "pending", "revoked"],
-      "description": "Twalk extension. Current consent state of the sender's data-processing agreement, as tracked by the Companion Gateway, the single writer of consent state. Personas MUST refuse to process events where consent is not 'granted', unless they are explicitly authorized to handle consent-management workflows."
+      "description": "Twalk extension. Current consent state of the sender's data-processing agreement, as tracked by the Companion Gateway, the single writer of consent state. Personas MUST refuse to process events where consent is not 'granted', unless they are explicitly authorized to handle consent-management workflows. The value also selects which shape of this event type the producer publishes: 'revoked' means the reduced shape, carrying no content at all (ADR 0012); 'granted' and 'pending' mean the full shape — a pending sender's message is labelled, never reduced."
     },
     "data": {
       "type": "object",
-      "required": ["body", "format", "reply_to", "attachments", "contact"],
+      "required": ["format", "reply_to", "attachments", "contact"],
       "additionalProperties": false,
       "properties": {
         "body": {
           "type": "string",
           "maxLength": 65536,
-          "description": "The message content in its canonical text form. For messages with rich formatting, the plain-text fallback."
+          "description": "The message content in its canonical text form. For messages with rich formatting, the plain-text fallback. Required unless the sender's consent is 'revoked', in which case a producer MUST omit it: the field is what carries the message, and a revoked contact's content is not collected (ADR 0012). For a media message the canonical text form is the caption, or the filename when there is none, so omitting the body is also what keeps a revoked sender's filenames off the bus."
         },
         "format": {
           "type": "string",
@@ -109,7 +109,7 @@
             },
             {
               "type": "object",
-              "required": ["matrix_event_id", "excerpt"],
+              "required": ["matrix_event_id"],
               "additionalProperties": false,
               "properties": {
                 "matrix_event_id": {
@@ -120,7 +120,7 @@
                 "excerpt": {
                   "type": "string",
                   "maxLength": 512,
-                  "description": "A short excerpt of the replied-to message for context, so consumers do not need to look it up to reason about the reply."
+                  "description": "A short excerpt of the replied-to message for context, so consumers do not need to look it up to reason about the reply. Required unless the sender's consent is 'revoked', in which case a producer MUST omit it: an excerpt is message content, quoted rather than sent, and the relation alone (matrix_event_id) is what the reduced event keeps."
                 }
               }
             }
@@ -132,7 +132,7 @@
           "maxItems": 16,
           "items": {
             "type": "object",
-            "required": ["kind", "mxc_uri", "mime_type", "size_bytes"],
+            "required": ["kind", "mime_type", "size_bytes"],
             "additionalProperties": false,
             "properties": {
               "kind": {
@@ -143,7 +143,7 @@
               "mxc_uri": {
                 "type": "string",
                 "pattern": "^mxc://[^/]+/[A-Za-z0-9]+$",
-                "description": "Matrix content URI, resolvable via the homeserver media API."
+                "description": "Matrix content URI, resolvable via the homeserver media API. Required unless the sender's consent is 'revoked', in which case a producer MUST omit it, together with encryption and caption: a reference to the bytes, and the key that opens them, is the content — what a reduced attachment keeps is its shape (kind, mime_type, size_bytes, dimensions, duration_ms), which describes the message without carrying it (ADR 0012)."
               },
               "mime_type": {
                 "type": "string",
@@ -158,7 +158,7 @@
               "caption": {
                 "type": "string",
                 "maxLength": 1024,
-                "description": "Optional caption provided with the attachment."
+                "description": "Optional caption provided with the attachment. Text the sender wrote, so it is content: never published when the sender's consent is 'revoked'."
               },
               "dimensions": {
                 "type": "object",
@@ -242,7 +242,7 @@
                     "description": "Version of the attachment encryption scheme. v2 is the only version the Matrix specification defines; material from the pre-specification v1 scheme is not usable by consumers and is not published."
                   }
                 },
-                "description": "Optional decryption material for an attachment whose ciphertext is what mxc_uri resolves to. Mirrors the Matrix EncryptedFile object (key, iv, hashes, v) defined under 'Sending encrypted attachments' in the client-server specification, minus its url field, which mxc_uri already carries, and minus a mimetype, which the specification keeps in info and the contract keeps in mime_type. Present when the media itself is encrypted, which is the normal case in an end-to-end encrypted room and therefore in every bridge portal room; absent for media served in the clear. Producers re-serialize the values in the canonical encodings below rather than copying the sender's JSON through, so consumers handle exactly one encoding; a producer that cannot fill this object completely (an unsupported protocol version, or no sha256 digest) publishes the attachment without it rather than publishing unusable material. Either way the message is delivered and never silently dropped, but without this object a consumer can fetch the bytes and not read them."
+                "description": "Optional decryption material for an attachment whose ciphertext is what mxc_uri resolves to. Mirrors the Matrix EncryptedFile object (key, iv, hashes, v) defined under 'Sending encrypted attachments' in the client-server specification, minus its url field, which mxc_uri already carries, and minus a mimetype, which the specification keeps in info and the contract keeps in mime_type. Present when the media itself is encrypted, which is the normal case in an end-to-end encrypted room and therefore in every bridge portal room; absent for media served in the clear. Producers re-serialize the values in the canonical encodings below rather than copying the sender's JSON through, so consumers handle exactly one encoding; a producer that cannot fill this object completely (an unsupported protocol version, or no sha256 digest) publishes the attachment without it rather than publishing unusable material. Either way the message is delivered and never silently dropped, but without this object a consumer can fetch the bytes and not read them. Never published when the sender's consent is 'revoked': decryption material is what turns a reference into content, so it goes where mxc_uri goes."
               }
             }
           },
@@ -283,5 +283,53 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "title": "A revoked sender's message carries no content",
+      "description": "The two shapes of this event type, made checkable so a third-party producer reduces exactly like the Sensor (ADR 0012). When consent is 'revoked', every field that carries the message is forbidden: data.body, data.reply_to.excerpt, and each attachment's mxc_uri, encryption and caption. What stays is the evidence that a message arrived — the deterministic id, the network, both timestamps, the room and sender references, the reply and thread relations, the contact's display name — plus each attachment's shape. Otherwise ('granted' or 'pending') the full shape applies and those fields are required as they were in v1 before this rule: a pending sender's message is labelled, never reduced.",
+      "if": {
+        "required": ["consent"],
+        "properties": { "consent": { "const": "revoked" } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "body": false,
+              "reply_to": {
+                "if": { "type": "object" },
+                "then": { "properties": { "excerpt": false } }
+              },
+              "attachments": {
+                "items": {
+                  "properties": {
+                    "mxc_uri": false,
+                    "encryption": false,
+                    "caption": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "data": {
+            "required": ["body"],
+            "properties": {
+              "reply_to": {
+                "if": { "type": "object" },
+                "then": { "required": ["excerpt"] }
+              },
+              "attachments": {
+                "items": { "required": ["mxc_uri"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

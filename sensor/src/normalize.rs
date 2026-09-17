@@ -219,15 +219,27 @@ fn mime_type_or_default(reported: Option<&str>) -> String {
     }
 }
 
-fn attachment_entry(attachment: &Attachment) -> Value {
+/// One attachment entry. `reduced` (a revoked sender, ADR 0012) keeps the
+/// shape — kind, mime type, size, pixel dimensions, duration: what the
+/// message *is* — and drops everything that is the message itself: the
+/// `mxc://` reference, which resolves to the bytes, its decryption material
+/// when the contract ever carries some (a reference plus its key is the
+/// content), and the caption, which is text the sender wrote. The contract's
+/// attachment shape carries no filename, deliberately: a filename is named
+/// by the sender and routinely says what the file holds, so for a media
+/// message it only ever reaches the bus as `data.body` or as the caption,
+/// both dropped here.
+fn attachment_entry(attachment: &Attachment, reduced: bool) -> Value {
     let mut entry = json!({
         "kind": attachment.kind.as_str(),
-        "mxc_uri": attachment.mxc_uri,
         "mime_type": mime_type_or_default(attachment.mime_type.as_deref()),
         "size_bytes": attachment.size_bytes.unwrap_or(0),
     });
-    if let Some(caption) = &attachment.caption {
-        entry["caption"] = json!(cap_chars(caption, 1024));
+    if !reduced {
+        entry["mxc_uri"] = json!(attachment.mxc_uri);
+        if let Some(caption) = &attachment.caption {
+            entry["caption"] = json!(cap_chars(caption, 1024));
+        }
     }
     if let Some((width, height)) = attachment.dimensions {
         entry["dimensions"] = json!({ "width": width, "height": height });
@@ -268,22 +280,40 @@ pub struct InboundMessage {
     pub network_timestamp: Option<String>,
 }
 
+/// Builds the `inbound.message.received.v1` envelope. A revoked sender's
+/// message is published in the contract's reduced shape (ADR 0012): the
+/// event still proves that a message arrived — deterministic id, network,
+/// consent label, both timestamps, room and sender references, reply and
+/// thread relations, attachment shapes — and carries no content: no body,
+/// no excerpt of the quoted message, nothing that resolves to media. The
+/// reduction lives here, at the single point every published message goes
+/// through, so no call site can forget it; `pending` is unchanged.
 pub fn build_message_received(input: &InboundMessage) -> Value {
+    let reduced = input.consent.reduces_publication();
     let reply_to = match &input.reply_to {
+        // The relation is what the reduced event keeps: an excerpt quotes a
+        // message, and a quote of a revoked contact's message is content too.
+        Some(reply) if reduced => json!({ "matrix_event_id": reply.matrix_event_id }),
         Some(reply) => json!({
             "matrix_event_id": reply.matrix_event_id,
             "excerpt": excerpt(&reply.excerpt),
         }),
         None => Value::Null,
     };
-    let attachments: Vec<Value> = input.attachments.iter().map(attachment_entry).collect();
+    let attachments: Vec<Value> = input
+        .attachments
+        .iter()
+        .map(|attachment| attachment_entry(attachment, reduced))
+        .collect();
     let mut data = json!({
-        "body": cap_chars(&input.body, 65536),
         "format": "text/plain",
         "reply_to": reply_to,
         "attachments": attachments,
         "contact": contact_entry(&input.display_name, input.consent, input.network_identifier.as_deref()),
     });
+    if !reduced {
+        data["body"] = json!(cap_chars(&input.body, 65536));
+    }
     if let Some(thread_root) = &input.thread_root {
         data["thread_root"] = json!(thread_root);
     }
@@ -336,10 +366,17 @@ pub struct InboundReaction {
     pub network_timestamp: Option<String>,
 }
 
+/// Builds the `inbound.reaction.added.v1` envelope. A reaction key is the
+/// reactor's own gesture, not the message it points at, so it is published
+/// whatever the consent label. The target's excerpt is not: it quotes a
+/// message, so a revoked reactor's event carries the target's event id
+/// alone (ADR 0012).
 pub fn build_reaction_added(input: &InboundReaction) -> Value {
     let mut target = json!({ "matrix_event_id": input.target_event_id });
     if let Some(excerpt) = &input.target_excerpt {
-        target["excerpt"] = json!(excerpt);
+        if !input.consent.reduces_publication() {
+            target["excerpt"] = json!(excerpt);
+        }
     }
     let mut data = json!({
         "reaction": cap_chars(&input.reaction, 64),
@@ -879,6 +916,107 @@ mod tests {
         input.last_active_at = Some("2026-09-17T09:59:58Z".to_owned());
         let event = build_presence_updated(&input);
         assert_eq!(event["data"]["last_active_at"], "2026-09-17T09:59:58Z");
+    }
+
+    #[test]
+    fn a_revoked_senders_message_is_published_without_its_content() {
+        let mut input = sample_input();
+        input.consent = Consent::Revoked;
+        input.body = "on décale à 20h ?".to_owned();
+        input.reply_to = Some(ReplyTo {
+            matrix_event_id: "$PaReNt9876".to_owned(),
+            excerpt: "et le cadeau ?".to_owned(),
+        });
+        input.thread_root = Some("$RoOtThReAd1".to_owned());
+        input.network_timestamp = Some("2026-09-17T09:59:58Z".to_owned());
+        input.attachments = vec![Attachment {
+            duration_ms: Some(4200),
+            ..sample_attachment()
+        }];
+        let event = build_message_received(&input);
+
+        // What the event is, and where it sits in the conversation, survives:
+        // the user keeps the evidence that a message arrived (ADR 0012).
+        assert_eq!(
+            event["id"],
+            "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0"
+        );
+        assert_eq!(
+            event["source"],
+            "matrix://example.com/!abcXYZ123:example.com"
+        );
+        assert_eq!(event["subject"], "@whatsapp_33612345678:example.com");
+        assert_eq!(event["network"], "whatsapp");
+        assert_eq!(event["consent"], "revoked");
+        assert_eq!(event["time"], "2026-09-17T10:00:00Z");
+        assert_eq!(event["data"]["network_timestamp"], "2026-09-17T09:59:58Z");
+        assert_eq!(event["data"]["format"], "text/plain");
+        assert_eq!(event["data"]["thread_root"], "$RoOtThReAd1");
+        assert_eq!(event["data"]["reply_to"]["matrix_event_id"], "$PaReNt9876");
+        assert_eq!(event["data"]["contact"]["display_name"], "Aïcha");
+
+        // Nothing that IS content does.
+        assert!(
+            event["data"].get("body").is_none(),
+            "a revoked sender's body never reaches the bus"
+        );
+        assert!(
+            event["data"]["reply_to"].get("excerpt").is_none(),
+            "an excerpt of the quoted message is content too"
+        );
+        assert_eq!(
+            event["data"]["attachments"][0],
+            json!({
+                "kind": "image",
+                "mime_type": "image/png",
+                "size_bytes": 53201,
+                "dimensions": { "width": 800, "height": 600 },
+                "duration_ms": 4200,
+            }),
+            "an attachment keeps its shape and loses its reference and caption"
+        );
+    }
+
+    #[test]
+    fn pending_and_granted_senders_keep_their_message_content() {
+        for consent in [Consent::Pending, Consent::Granted] {
+            let mut input = sample_input();
+            input.consent = consent;
+            input.reply_to = Some(ReplyTo {
+                matrix_event_id: "$PaReNt9876".to_owned(),
+                excerpt: "et le cadeau ?".to_owned(),
+            });
+            input.attachments = vec![sample_attachment()];
+            let event = build_message_received(&input);
+            let label = consent.as_str();
+            assert_eq!(event["data"]["body"], "hello", "consent {label}");
+            assert_eq!(
+                event["data"]["reply_to"]["excerpt"], "et le cadeau ?",
+                "consent {label}"
+            );
+            assert_eq!(
+                event["data"]["attachments"][0]["mxc_uri"], "mxc://example.com/AbCdEf0123456789",
+                "consent {label}"
+            );
+            assert_eq!(
+                event["data"]["attachments"][0]["caption"], "regarde cette photo",
+                "consent {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_revoked_reactors_reaction_keeps_its_key_and_loses_the_target_excerpt() {
+        let mut input = sample_reaction();
+        input.consent = Consent::Revoked;
+        let event = build_reaction_added(&input);
+        // A reaction key is not the contact's message content, so it stays.
+        assert_eq!(event["data"]["reaction"], "👍");
+        assert_eq!(event["data"]["target"]["matrix_event_id"], "$AbCdEfGh1234");
+        assert!(
+            event["data"]["target"].get("excerpt").is_none(),
+            "an excerpt of the reacted-to message is content"
+        );
     }
 
     #[test]
