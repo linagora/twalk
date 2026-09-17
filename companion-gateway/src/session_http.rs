@@ -12,8 +12,18 @@
 //!
 //! - sign-in itself, which is where a device gets its first token;
 //! - refresh, which authenticates the refresh token instead and rotates it;
+//! - the registration relay (ticket #53), which runs before any account
+//!   exists and therefore before anyone can sign in. What stands in for
+//!   authentication there is the one-account rule and the operator's decision
+//!   to set `GATEWAY_REGISTRATION_SHARED_SECRET` at all — see
+//!   [`crate::bootstrap`];
 //! - the consent snapshot (ticket #50), which takes a service token — the
 //!   Sensor is not a device and has no OpenID token to sign in with.
+//!
+//! Note what is *not* in that table: the Sensor's invitation
+//! (`POST /api/bootstrap/rooms`, ticket #53) takes a device token like
+//! everything else, because it added no row. That is the direction working as
+//! intended.
 //!
 //! The snapshot's row is not in the table yet, because the route is not
 //! either. When #50 lands it adds one line to [`requirement`] —
@@ -85,6 +95,9 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
     match (method, path) {
         (&Method::POST, "/api/session") => Requirement::Open,
         (&Method::POST, "/api/session/refresh") => Requirement::RefreshToken,
+        // The registration relay: there is no account yet, so there is no
+        // device token to have (ticket #53).
+        (&Method::POST, "/api/bootstrap/account") => Requirement::Open,
         // Ticket #50 adds its snapshot route here; see the module docs.
         _ => Requirement::DeviceToken,
     }
@@ -383,8 +396,9 @@ fn refused(status: StatusCode, error: &str) -> Response {
 }
 
 /// Sign-in is not configured: the API is closed, and the answer says which
-/// variable would open it.
-fn not_configured() -> Response {
+/// variable would open it. Shared with [`crate::bootstrap_http`], whose
+/// endpoints are equally meaningless without an owner.
+pub(crate) fn not_configured() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
@@ -474,6 +488,11 @@ mod tests {
             requirement(&Method::POST, "/api/session/refresh"),
             Requirement::RefreshToken
         );
+        assert_eq!(
+            requirement(&Method::POST, "/api/bootstrap/account"),
+            Requirement::Open,
+            "registration runs before any account exists, so before any sign-in"
+        );
         // Everything else, including routes that do not exist yet: a device
         // token. This is the property that makes forgetting the guard
         // impossible for a later ticket.
@@ -487,6 +506,13 @@ mod tests {
             (Method::GET, "/api/anything/at/all"),
             // Not the sign-in route under another method.
             (Method::GET, "/api/session/refresh"),
+            // Inviting the Sensor added no row, so it is behind the guard
+            // without asking (ticket #53).
+            (Method::POST, "/api/bootstrap/rooms"),
+            // And neither the registration route under another method, nor a
+            // path that merely starts like it.
+            (Method::GET, "/api/bootstrap/account"),
+            (Method::POST, "/api/bootstrap/accounts"),
         ] {
             assert_eq!(
                 requirement(&method, path),

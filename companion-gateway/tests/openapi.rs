@@ -45,9 +45,9 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use harness::{
-    companion_build, ensure_stack, gateway_env, gateway_env_with, gateway_env_without_sign_in,
-    missing_static_dir, owner_user_id, poll_until, GatewayProc, MatrixUser, FALLBACK_HTML,
-    INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME,
+    companion_build, ensure_stack, fresh_owner_user_id, gateway_env, gateway_env_with,
+    gateway_env_without_sign_in, missing_static_dir, owner_user_id, poll_until, GatewayProc,
+    MatrixUser, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -979,6 +979,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/devices/a-device-id",
         ),
         (Method::POST, "/api/session/refresh", "/api/session/refresh"),
+        (Method::POST, "/api/bootstrap/rooms", "/api/bootstrap/rooms"),
     ] {
         call.check(
             method,
@@ -1045,6 +1046,113 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some(json!({ "matrix_openid_token": other.openid_token().await? })),
         403,
         Some("not_the_owner"),
+    )
+    .await?;
+
+    // --- bootstrap: the registration relay's refusals, on a Gateway whose
+    // owner already has an account (every test bot is provisioned), and the
+    // Sensor's invitation.
+    call.check(
+        Method::POST,
+        &base,
+        "/api/bootstrap/account",
+        "/api/bootstrap/account",
+        &[],
+        Some(json!({ "username": OWNER_LOCALPART, "password": "test-only-password-g53" })),
+        409,
+        Some("account_already_exists"),
+    )
+    .await?;
+    call.check(
+        Method::POST,
+        &base,
+        "/api/bootstrap/account",
+        "/api/bootstrap/account",
+        &[],
+        Some(json!({ "username": OTHER_LOCALPART, "password": "test-only-password-g53" })),
+        403,
+        Some("not_the_owner"),
+    )
+    .await?;
+    call.check(
+        Method::POST,
+        &base,
+        "/api/bootstrap/account",
+        "/api/bootstrap/account",
+        &[],
+        Some(json!({ "not": "a registration document" })),
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    // The promise screen 2 makes to the user, as an API property: there is no
+    // member a recovery key can arrive in (ADR 0014).
+    call.check(
+        Method::POST,
+        &base,
+        "/api/bootstrap/account",
+        "/api/bootstrap/account",
+        &[],
+        Some(json!({
+            "username": OWNER_LOCALPART,
+            "password": "test-only-password-g53",
+            "recovery_key": "EsTx abcd efgh ijkl mnop qrst uvwx yz23 4567",
+        })),
+        400,
+        Some("recovery_key_refused"),
+    )
+    .await?;
+
+    // Its own device, because the refresh above rotated the driving one.
+    let (bootstrapping, _) = sign_in_cookies(&http, &base, &owner, "the bootstrap device").await?;
+    let bootstrap_cookie = [("twalk_device", bootstrapping.as_str())];
+    let room = owner.create_room("the conformance room").await?;
+    let invited = call
+        .check(
+            Method::POST,
+            &base,
+            "/api/bootstrap/rooms",
+            "/api/bootstrap/rooms",
+            &bootstrap_cookie,
+            Some(json!({
+                "matrix_access_token": owner.matrix_access_token(),
+                "rooms": [room],
+            })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        invited.body["rooms"][0]["status"].as_str(),
+        Some("invited"),
+        "the Sensor is invited into the room the user selected: {}",
+        invited.body
+    );
+    call.check(
+        Method::POST,
+        &base,
+        "/api/bootstrap/rooms",
+        "/api/bootstrap/rooms",
+        &bootstrap_cookie,
+        Some(json!({ "rooms": [] })),
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    // A Matrix token the homeserver does not know: the whole request is
+    // refused, because nothing was attempted in any room.
+    call.check(
+        Method::POST,
+        &base,
+        "/api/bootstrap/rooms",
+        "/api/bootstrap/rooms",
+        &bootstrap_cookie,
+        Some(json!({
+            "matrix_access_token": "syt_not_a_token_this_homeserver_minted",
+            "rooms": ["!a-room:test.twalk"],
+        })),
+        401,
+        Some("matrix_token_rejected"),
     )
     .await?;
 
@@ -1122,6 +1230,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/devices/{id}",
             "/api/devices/a-device-id",
         ),
+        (
+            Method::POST,
+            "/api/bootstrap/account",
+            "/api/bootstrap/account",
+        ),
+        (Method::POST, "/api/bootstrap/rooms", "/api/bootstrap/rooms"),
     ] {
         call.check(
             method,
@@ -1176,6 +1290,90 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
     unreachable.stop().await;
+
+    // --- a Gateway whose owner has no account yet: the one registration a
+    // deployment ever does (ticket #53).
+    let fresh_static = companion_build("openapi-bootstrap-created")?;
+    let fresh_owner = fresh_owner_user_id("openapi");
+    let fresh = GatewayProc::start(&gateway_env_with(
+        &fresh_static,
+        &[("GATEWAY_OWNER", fresh_owner.as_str())],
+    ))?;
+    let fresh_base = fresh.base_url().await?;
+    wait_until_answering(&fresh_base).await?;
+    let fresh_localpart = fresh_owner
+        .trim_start_matches('@')
+        .split_once(':')
+        .expect("a Matrix ID")
+        .0
+        .to_owned();
+    let created = call
+        .check(
+            Method::POST,
+            &fresh_base,
+            "/api/bootstrap/account",
+            "/api/bootstrap/account",
+            &[],
+            Some(json!({
+                "username": fresh_localpart,
+                "password": "test-only-password-g53-openapi",
+            })),
+            201,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        created.body["user_id"].as_str(),
+        Some(fresh_owner.as_str()),
+        "the relay creates the owner's account: {}",
+        created.body
+    );
+    fresh.stop().await;
+
+    // --- a Gateway whose homeserver *client* API is out of reach, while its
+    // federation API (where sign-in verifies) still answers: the one shape
+    // that can exercise both bootstrap calls' 502 while still signing a
+    // device in.
+    let unreachable_client_static = companion_build("openapi-bootstrap-unreachable")?;
+    let unreachable_client = GatewayProc::start(&gateway_env_with(
+        &unreachable_client_static,
+        &[("GATEWAY_HOMESERVER_URL", "http://127.0.0.1:1")],
+    ))?;
+    let unreachable_client_base = unreachable_client.base_url().await?;
+    wait_until_answering(&unreachable_client_base).await?;
+    call.check(
+        Method::POST,
+        &unreachable_client_base,
+        "/api/bootstrap/account",
+        "/api/bootstrap/account",
+        &[],
+        Some(json!({ "username": OWNER_LOCALPART, "password": "test-only-password-g53" })),
+        502,
+        Some("homeserver_unreachable"),
+    )
+    .await?;
+    let (stranded, _) = sign_in_cookies(
+        &http,
+        &unreachable_client_base,
+        &owner,
+        "the stranded device",
+    )
+    .await?;
+    call.check(
+        Method::POST,
+        &unreachable_client_base,
+        "/api/bootstrap/rooms",
+        "/api/bootstrap/rooms",
+        &[("twalk_device", stranded.as_str())],
+        Some(json!({
+            "matrix_access_token": owner.matrix_access_token(),
+            "rooms": ["!a-room:test.twalk"],
+        })),
+        502,
+        Some("homeserver_unreachable"),
+    )
+    .await?;
+    unreachable_client.stop().await;
 
     // --- and now the coverage assertion: everything the description
     // declares was either exercised above, or is listed with its reason.

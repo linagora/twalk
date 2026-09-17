@@ -218,6 +218,24 @@ services:
       # (15 minutes for a device token, 30 days for its refresh token).
       GATEWAY_DEVICE_TOKEN_TTL: ${GATEWAY_DEVICE_TOKEN_TTL:-}
       GATEWAY_REFRESH_TOKEN_TTL: ${GATEWAY_REFRESH_TOKEN_TTL:-}
+      # The homeserver's client API, where the Gateway relays account
+      # registration and sends the Sensor's invitations. Empty: the federation
+      # URL above is used, which is the same host and port in this stack.
+      GATEWAY_HOMESERVER_URL: ${GATEWAY_HOMESERVER_URL:-}
+      # Bootstrap (ticket #53). Left empty, both halves are off and their
+      # endpoints answer 503 naming the variable that would open them.
+      #
+      # The registration shared secret lets the Gateway create ONE account —
+      # the owner's above, once — while Synapse's own open registration stays
+      # off. Set it to the same value as MATRIX_REGISTRATION_SHARED_SECRET to
+      # let the Companion's screen 2 create that account; leave it empty if you
+      # provisioned the account yourself with ./provision.sh.
+      GATEWAY_REGISTRATION_SHARED_SECRET: ${GATEWAY_REGISTRATION_SHARED_SECRET:-}
+      # Who the Gateway invites into the rooms the user selects: the Sensor's
+      # own account, the same value as SENSOR_USER_ID. The Sensor's account
+      # stays provisioned by the provision one-shot above — this is who to
+      # invite, never how to create it.
+      GATEWAY_SENSOR_USER_ID: ${GATEWAY_SENSOR_USER_ID:-${SENSOR_USER_ID:-}}
     volumes:
       # The device list and the session tokens' digests: a restart keeps the
       # user signed in on every device they signed in on.

@@ -30,6 +30,12 @@
 //! request reads the device row, so a revoked device's very next request is
 //! refused, in this process and in any other sharing the store.
 //!
+//! Ticket #53 added one more row to the same store: that the registration
+//! relay has created this deployment's one account. It lives here rather than
+//! in a file of its own because it is a fact about the same subject — who this
+//! deployment serves — and because the relay's owner check and sign-in's owner
+//! check must never be able to disagree.
+//!
 //! The store is SQLite in the Gateway's state directory, in its own file
 //! (`sessions.db`) next to the consent journal's (`consent.db`, ticket #49):
 //! the session store is the user's login state and the journal is the record
@@ -129,6 +135,10 @@ pub struct Sessions {
     verifier: Verifier,
     /// The Matrix ID allowed to sign in, from configuration.
     owner: String,
+    /// The localpart of [`Self::owner`]: the only account the registration
+    /// relay may create (ticket #53). Derived once at open, so the relay and
+    /// the owner check can never disagree about who this deployment serves.
+    owner_localpart: String,
     device_token_ttl_seconds: u64,
     refresh_token_ttl_seconds: u64,
     now_unix_seconds: fn() -> u64,
@@ -154,10 +164,12 @@ impl Sessions {
         let store = Connection::open(&path)
             .with_context(|| format!("failed to open the session store {}", path.display()))?;
         migrate(&store).with_context(|| format!("failed to migrate {}", path.display()))?;
+        let owner_localpart = crate::bootstrap::owner_localpart(&owner)?.to_owned();
         Ok(Self {
             store: Mutex::new(store),
             verifier,
             owner,
+            owner_localpart,
             device_token_ttl_seconds,
             refresh_token_ttl_seconds,
             now_unix_seconds,
@@ -166,6 +178,12 @@ impl Sessions {
 
     pub fn owner(&self) -> &str {
         &self.owner
+    }
+
+    /// The owner's localpart: the one account the registration relay may
+    /// create (ticket #53).
+    pub fn owner_localpart(&self) -> &str {
+        &self.owner_localpart
     }
 
     pub fn device_token_ttl_seconds(&self) -> u64 {
@@ -321,6 +339,47 @@ impl Sessions {
         Ok(changed > 0)
     }
 
+    /// When this deployment's one account was created through the
+    /// registration relay, or `None` when no account has been (ticket #53).
+    ///
+    /// This is the Gateway's own memory of the refusal ADR 0011 promises:
+    /// one owner per deployment, so one account ever. It is deliberately not
+    /// the only check — the homeserver's `M_USER_IN_USE` is honoured as the
+    /// same refusal, so losing this store cannot re-open the window.
+    pub fn owner_account_created(&self) -> Result<Option<u64>> {
+        let created = self
+            .store
+            .lock()
+            .expect("the session store is not poisoned")
+            .query_row(
+                "SELECT created_unix_seconds FROM owner_account WHERE id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|created| created as u64);
+        Ok(created)
+    }
+
+    /// Records that the relay created the owner's account. `false` when a row
+    /// was already there — the table admits exactly one (`CHECK (id = 1)`), so
+    /// "one account per deployment" is a constraint of the schema and not only
+    /// of the code above it.
+    pub fn record_owner_account_created(&self, user_id: &str) -> Result<bool> {
+        let now = (self.now_unix_seconds)();
+        let inserted = self
+            .store
+            .lock()
+            .expect("the session store is not poisoned")
+            .execute(
+                "INSERT OR IGNORE INTO owner_account (id, user_id, created_unix_seconds) \
+                 VALUES (1, ?1, ?2)",
+                (user_id, seconds(now)),
+            )
+            .context("failed to record the owner's account")?;
+        Ok(inserted > 0)
+    }
+
     /// Records an accepted OpenID token's digest, refusing one already in the
     /// ledger. Prunes digests older than the retention window on the way
     /// through: the ledger is a few rows on a personal deployment, and this
@@ -442,6 +501,24 @@ fn migrate(store: &Connection) -> Result<()> {
                accepted_unix_seconds  INTEGER NOT NULL
              );
              PRAGMA user_version = 1;
+             COMMIT;",
+        )?;
+    }
+    if version < 2 {
+        // Ticket #53: that the registration relay has created this
+        // deployment's one account. `CHECK (id = 1)` is the point — the table
+        // holds one row by construction, so the "one owner per deployment"
+        // rule of ADR 0011 is a constraint of the schema and not only of the
+        // code that writes it. No token and no password: the user id and the
+        // date, which is all a refusal needs.
+        store.execute_batch(
+            "BEGIN;
+             CREATE TABLE owner_account (
+               id                    INTEGER PRIMARY KEY CHECK (id = 1),
+               user_id               TEXT NOT NULL,
+               created_unix_seconds  INTEGER NOT NULL
+             );
+             PRAGMA user_version = 2;
              COMMIT;",
         )?;
     }
@@ -650,6 +727,41 @@ mod tests {
     }
 
     #[test]
+    fn the_owners_account_can_be_recorded_once_and_only_once() {
+        let (sessions, _dir) = sessions(900, 9_000);
+        assert_eq!(
+            sessions.owner_account_created().expect("the store reads"),
+            None,
+            "nothing has been created yet"
+        );
+        assert!(sessions
+            .record_owner_account_created("@owner:test.twalk")
+            .expect("the first record is written"));
+        assert_eq!(
+            sessions.owner_account_created().expect("the store reads"),
+            Some(1_000)
+        );
+        assert!(
+            !sessions
+                .record_owner_account_created("@somebody_else:test.twalk")
+                .expect("a second record is not an error"),
+            "the table holds exactly one account: one owner per deployment"
+        );
+        assert_eq!(
+            sessions.owner_account_created().expect("the store reads"),
+            Some(1_000),
+            "the first account stays the account"
+        );
+    }
+
+    #[test]
+    fn the_owner_localpart_is_derived_from_the_configured_owner() {
+        let (sessions, _dir) = sessions(900, 9_000);
+        assert_eq!(sessions.owner(), "@owner:test.twalk");
+        assert_eq!(sessions.owner_localpart(), "owner");
+    }
+
+    #[test]
     fn the_store_survives_being_reopened() {
         let dir = tempdir::TempDir::new();
         let open = || {
@@ -663,12 +775,21 @@ mod tests {
             )
             .expect("the store opens")
         };
-        let issued = open().issue(Some("Laptop"), 1_000).expect("a device");
+        let first = open();
+        let issued = first.issue(Some("Laptop"), 1_000).expect("a device");
+        first
+            .record_owner_account_created("@owner:test.twalk")
+            .expect("the account is recorded");
         // A restart keeps the device list and the tokens it issued: the
         // migration is idempotent and the rows are on disk.
         let reopened = open();
         assert!(reopened.authenticate(&issued.device_token).is_some());
         assert_eq!(reopened.devices().expect("the list reads").len(), 1);
+        assert_eq!(
+            reopened.owner_account_created().expect("the store reads"),
+            Some(1_000),
+            "a restart still refuses a second account"
+        );
     }
 
     /// A throwaway directory, as `static_files`'s tests use: the crate has no
