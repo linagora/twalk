@@ -13,10 +13,14 @@
 //! The deploy stack runs under its own compose project and host ports, next
 //! to the harness's own stack: TWALK_DEPLOY_TEST_STACK (default
 //! twalk-deploy-test), TWALK_DEPLOY_TEST_SYNAPSE_PORT (default 18218),
-//! TWALK_DEPLOY_TEST_NATS_PORT (default 14418). The Sensor image is tagged
-//! per compose project (`twalk/sensor:<stack>`, issue #38) so that parallel
-//! worktrees never overwrite each other's build; the operator default,
-//! twalk/sensor:local, is untouched.
+//! TWALK_DEPLOY_TEST_NATS_PORT (default 14418),
+//! TWALK_DEPLOY_TEST_GATEWAY_PORT (default 18328 — deliberately distinct
+//! from the 18318 default of companion-gateway/tests/deployment.rs, so two
+//! default-configured deploy stacks do not collide on it). The stack's
+//! images are tagged per compose project (`twalk/sensor:<stack>`,
+//! `twalk/companion-gateway:<stack>`, issue #38) so that parallel worktrees
+//! never overwrite each other's build; the operator defaults,
+//! twalk/sensor:local and twalk/companion-gateway:local, are untouched.
 //!
 //! The stack and its image stay up between runs: that is what makes a warm
 //! run fast. Set TWALK_DEPLOY_TEST_TEARDOWN=1 to drop both at the end of a
@@ -60,6 +64,14 @@ fn nats_url() -> String {
     format!("nats://localhost:{port}")
 }
 
+/// Host port the stack's Companion Gateway is published on. The Sensor's
+/// pipeline does not touch it, but the whole stack comes up here, and the
+/// operator default (8080) is a busy port on a developer's machine — and the
+/// port two deploy stacks would collide on.
+fn gateway_port() -> String {
+    std::env::var("TWALK_DEPLOY_TEST_GATEWAY_PORT").unwrap_or_else(|_| "18328".to_owned())
+}
+
 /// The tag the deploy stack's Sensor image is built and run under. One tag
 /// per compose project, so that two worktrees on two stacks each rebuild
 /// their own image instead of overwriting a shared one (issue #38); compose
@@ -70,6 +82,11 @@ fn sensor_image() -> String {
         .ok()
         .filter(|image| !image.is_empty())
         .unwrap_or_else(|| format!("twalk/sensor:{}", deploy_stack()))
+}
+
+/// [`sensor_image`] for the stack's Companion Gateway image.
+fn gateway_image() -> String {
+    format!("twalk/companion-gateway:{}", deploy_stack())
 }
 
 fn deploy_dir() -> PathBuf {
@@ -90,6 +107,8 @@ fn write_env_file() -> Result<PathBuf> {
     let synapse_port = synapse_url().rsplit(':').next().unwrap().to_owned();
     let nats_port = nats_url().rsplit(':').next().unwrap().to_owned();
     let sensor_image = sensor_image();
+    let gateway_port = gateway_port();
+    let gateway_image = gateway_image();
     let contents = format!(
         "MATRIX_DOMAIN={SERVER_NAME}\n\
          MATRIX_HTTP_PORT={synapse_port}\n\
@@ -102,7 +121,9 @@ fn write_env_file() -> Result<PathBuf> {
          SENSOR_STATE_DIR=/data\n\
          SENSOR_LOG_LEVEL=info,twalk_sensor=debug\n\
          NATS_PORT={nats_port}\n\
-         TWALK_SENSOR_IMAGE={sensor_image}\n"
+         TWALK_SENSOR_IMAGE={sensor_image}\n\
+         GATEWAY_HTTP_PORT={gateway_port}\n\
+         TWALK_GATEWAY_IMAGE={gateway_image}\n"
     );
     std::fs::write(&path, contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -144,22 +165,23 @@ fn teardown_requested() -> bool {
 }
 
 /// Removes everything this run created: the stack's containers, networks and
-/// volumes, its per-stack Sensor image, and the generated env file.
+/// volumes, its per-stack images, and the generated env file.
 async fn teardown(env_file: &Path) -> Result<()> {
     compose(env_file, &["down", "-v"], "down").await?;
-    let image = sensor_image();
-    let output = Command::new("docker")
-        .args(["image", "rm", &image])
-        .output()
-        .await
-        .context("failed to run docker image rm")?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // Tolerate an already-removed image: teardown stays idempotent.
-    if !output.status.success() && !stderr.contains("No such image") {
-        bail!(
-            "docker image rm {image} failed with {}:\n{stderr}",
-            output.status
-        );
+    for image in [sensor_image(), gateway_image()] {
+        let output = Command::new("docker")
+            .args(["image", "rm", &image])
+            .output()
+            .await
+            .context("failed to run docker image rm")?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Tolerate an already-removed image: teardown stays idempotent.
+        if !output.status.success() && !stderr.contains("No such image") {
+            bail!(
+                "docker image rm {image} failed with {}:\n{stderr}",
+                output.status
+            );
+        }
     }
     std::fs::remove_file(env_file)
         .with_context(|| format!("failed to remove {}", env_file.display()))?;

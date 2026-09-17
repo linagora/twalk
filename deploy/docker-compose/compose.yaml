@@ -1,6 +1,7 @@
 # Twalk reference deployment: Synapse (the Matrix hub), NATS JetStream (the
-# bus) and the Sensor, wired together with named volumes and configured only
-# through the environment file — copy .env.example to .env and edit it first.
+# bus), the Sensor and the Companion Gateway, wired together with named
+# volumes and configured only through the environment file — copy
+# .env.example to .env and edit it first.
 #
 #   docker compose up -d --wait
 #
@@ -143,6 +144,50 @@ services:
     # The sensor exits on an unreachable homeserver or bus and on a missing
     # account (should provisioning have been skipped or failed); compose
     # restarts it until both are there.
+    restart: unless-stopped
+
+  # The Companion Gateway: the origin that serves the Companion PWA, and (in
+  # the later tickets of spec #46) the single writer of consent state. The
+  # skeleton depends on no other service — it talks to neither the homeserver
+  # nor the bus yet — so it comes up on its own; the depends_on edges arrive
+  # with the features that need them.
+  companion-gateway:
+    build:
+      # The repository root, for the same reason as the sensor's: cargo needs
+      # every path dependency present to resolve the graph at all. See
+      # companion-gateway.Dockerfile.
+      context: ../..
+      dockerfile: deploy/docker-compose/companion-gateway.Dockerfile
+    # Name the local build is tagged with, and the image the service runs.
+    # Overridable (issue #38) so that several stacks built from different
+    # checkouts on one Docker daemon never overwrite each other's image.
+    image: ${TWALK_GATEWAY_IMAGE:-twalk/companion-gateway:local}
+    environment:
+      # The container-internal origin; the host-side port is published below.
+      GATEWAY_LISTEN: 0.0.0.0:8080
+      # The Companion's static files. The image ships them at /srv/companion;
+      # point this elsewhere (with a matching volume below) to serve your own
+      # build.
+      GATEWAY_STATIC_DIR: ${GATEWAY_STATIC_DIR:-/srv/companion}
+      # The Companion's SPA fallback file: what a client-side route (a deep
+      # link reloaded cold) is served with.
+      GATEWAY_FALLBACK_FILE: ${GATEWAY_FALLBACK_FILE:-200.html}
+      GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-info}
+    # volumes:
+    #   # Serve a Companion build from the host instead of the image's.
+    #   - ${GATEWAY_STATIC_SOURCE:-./companion}:/srv/companion:ro
+    ports:
+      # Localhost only by default: in production the Companion's origin is
+      # fronted by the operator's TLS reverse proxy on the same host. The
+      # health and metrics endpoints live on this same origin — block
+      # /metrics at the proxy if it should not be public.
+      - "127.0.0.1:${GATEWAY_HTTP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
     restart: unless-stopped
 
 volumes:

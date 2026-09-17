@@ -12,14 +12,15 @@ As of 2026-09-17 the repository contains documentation, the complete event contr
 - `sensor/` — the Sensor Cargo package: library modules (`config`, `consent`, `metrics`, `network`, `normalize`, `outbound` — pure logic) plus the binary wiring to matrix-sdk and NATS in `src/main.rs`; integration tests in `sensor/tests/` (`smoke.rs`, `sensor_lifecycle.rs`, `message_to_event.rs`, `consent.rs`, `reactions.rs`, `presence.rs`, `outbound.rs`, `persistence.rs`, `fidelity.rs`, `encryption.rs`, `observability.rs`, `deployment.rs`) over the Sensor-specific half of the harness in `sensor/tests/harness/` (the Matrix `Bot`, the portal helpers, `SensorProc`, `crypto.rs` for Megolm-capable bots)
 - `tests/harness/` — the `twalk-test-harness` Cargo package, shared by every component's suite: the test stack's lifecycle (`compose.test.yaml`, Synapse config, bot provisioning), the `Bus`, contract validation, `poll_until`, and a stub OpenAI-compatible LLM for persona tests. A dev dependency of `sensor/` and `hermes/`
 - `hermes/` — the `twalk-hermes` Cargo package: the runtime is not implemented yet; `tests/smoke.rs` exercises the shared harness against the real stack
-- `deploy/docker-compose/` — the reference deployment: Synapse + NATS JetStream + the Sensor wired together (`compose.yaml`, documented `.env.example`, `provision.sh` account provisioning, Synapse config template, Sensor Dockerfile), covered end-to-end by `sensor/tests/deployment.rs`
+- `companion-gateway/` — the `twalk-companion-gateway` Cargo package: the service skeleton (ticket #48) — `config`, `http`, `metrics`, `trace` plus the binary in `src/main.rs`; the origin that serves the Companion's static files, `/health`, `/metrics`; integration tests in `companion-gateway/tests/` (`service.rs` at the process boundary, `deployment.rs` against the compose service)
+- `deploy/docker-compose/` — the reference deployment: Synapse + NATS JetStream + the Sensor + the Companion Gateway wired together (`compose.yaml`, documented `.env.example`, `provision.sh` account provisioning, Synapse config template, one Dockerfile per component), covered end-to-end by `sensor/tests/deployment.rs` and `companion-gateway/tests/deployment.rs`
 - Other component directories hold stub READMEs only: `companion/`, `companion-gateway/`, `bridges/`, `ui/`, `sdk/`, `examples/`, `tools/`
 
 ## Build and test commands
 
 Requires Docker (the harness brings up its own Synapse + NATS stack) and a Rust toolchain.
 
-Three Cargo packages, each with its own lockfile and target directory — there is no workspace, so build and test each from its own directory:
+Four Cargo packages, each with its own lockfile and target directory — there is no workspace, so build and test each from its own directory:
 
 ```bash
 cd sensor
@@ -29,11 +30,14 @@ cargo test            # full suite: boots the stack itself, ~15s cold, ~3s warm
 cd ../hermes
 cargo test            # Hermes suite: shares the same test stack
 
+cd ../companion-gateway
+cargo test            # Gateway suite: the binary at its process boundary, plus its compose service
+
 cd ../tests/harness
 cargo test            # the shared harness's own unit tests (no Docker)
 ```
 
-The Sensor and Hermes suites bring up the same test stack (one Synapse, one NATS JetStream), each on its own bus subjects; `TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT` and `TWALK_TEST_NATS_PORT` move a stack aside for a parallel worktree.
+The Sensor and Hermes suites bring up the same test stack (one Synapse, one NATS JetStream), each on its own bus subjects; `TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT` and `TWALK_TEST_NATS_PORT` move a stack aside for a parallel worktree. The Companion Gateway's suite needs no homeserver and no bus yet: its process-boundary tests ask the kernel for a free port, and its deployment test uses the deploy-stack variables (`TWALK_DEPLOY_TEST_STACK`, `TWALK_DEPLOY_TEST_GATEWAY_PORT`) the Sensor's deployment test established.
 
 ## Code organization
 
