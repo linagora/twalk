@@ -30,7 +30,7 @@ What each step does:
 
 One line in `.env` ties the two together and `provision-bridges.sh` checks it before it generates anything: `MATRIX_APPSERVICE_REGISTRATIONS` must name exactly the bridges you provision. Synapse refuses to start on a registration path that does not exist, so a list that is ahead of reality is a homeserver that will not boot.
 
-If you skip step 1, the symptom is specific: the bridge container crash-loops with an appservice authentication error in its log, because it asserts its own registration against the homeserver at startup and Synapse has never heard of it.
+If you skip step 1 the failure is loud but its shape depends on what `.env` says, so both are worth recognising. With `MATRIX_APPSERVICE_REGISTRATIONS` still empty, Synapse comes up happily and each bridge crash-loops instead, with an appservice authentication error in its log: it asserts its own registration against the homeserver at startup, and Synapse has never heard of it. With the line already set, Synapse itself may refuse to start, because the registration path it is told to read does not exist yet — `up` does start the registration one-shots, but nothing orders them before Synapse, and that ordering is not something a compose dependency can express without dragging the whole profile back into a bridgeless stack. Either way the fix is the same: run step 1.
 
 ### What is still a human's job
 

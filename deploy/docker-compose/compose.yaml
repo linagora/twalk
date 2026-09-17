@@ -18,6 +18,9 @@
 #   ./provision-bridges.sh                      # registrations, then Synapse
 #   docker compose --profile bridges up -d --wait
 #
+# Running only the second is a loud failure, not a subtle one — ../README.md
+# names both shapes it takes.
+#
 # Hermes and the other planes join this stack as they land (see the repository
 # roadmap).
 
