@@ -155,11 +155,6 @@ a {
 	border-color: var(--color-warning);
 }
 
-.card--danger {
-	background: var(--color-danger-surface);
-	border-color: var(--color-danger);
-}
-
 .card__title {
 	display: flex;
 	align-items: center;
@@ -246,23 +241,6 @@ a {
 }
 
 /* --- Status ---------------------------------------------------------- */
-
-.dot {
-	width: 10px;
-	height: 10px;
-	border-radius: var(--radius-pill);
-	flex: none;
-}
-
-.dot--ok {
-	background: var(--color-success);
-}
-.dot--warn {
-	background: var(--color-warning);
-}
-.dot--bad {
-	background: var(--color-danger);
-}
 
 /* A field's error micro-copy, announced through an `aria-live` region the
    component owns. */

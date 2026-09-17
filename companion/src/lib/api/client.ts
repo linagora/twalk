@@ -21,23 +21,11 @@ import createClient from 'openapi-fetch';
 
 import type { paths } from './schema';
 
+// One rule for the screens that will use this client, written here because
+// there is nowhere better: branch on a refusal's `error` code, which the
+// description guarantees is stable, and never on its `detail`, which is an
+// operator's sentence and is not for display.
 export const gateway = createClient<paths>({
 	baseUrl: '',
 	credentials: 'same-origin'
 });
-
-/**
- * The stable error code the Gateway puts in every refusal, or `null` when the
- * body is not one of its error documents.
- *
- * The description is explicit that `error` is what a client branches on and
- * `detail` is for an operator's logs — never displayed, never matched on. This
- * is the one place that reads it, so that rule has somewhere to live.
- */
-export function errorCode(body: unknown): string | null {
-	if (typeof body !== 'object' || body === null) {
-		return null;
-	}
-	const code = (body as { error?: unknown }).error;
-	return typeof code === 'string' ? code : null;
-}

@@ -23,7 +23,6 @@
 
 	"gate.title": "Ce navigateur ne peut pas encore faire fonctionner Twalk",
 	"gate.intro": "{count, plural, one {Il manque un élément indispensable à ce navigateur.} other {Il manque # éléments indispensables à ce navigateur.}} Twalk réalise ses opérations cryptographiques ici, dans la page, pour que votre clé de récupération ne quitte jamais votre appareil — et cela exige tous ces éléments.",
-	"gate.degraded.title": "Twalk fonctionnera, avec des limites",
 	"gate.degraded.intro": "Tout ce qu'exige l'installation est présent. Ces éléments complémentaires ne le sont pas : certains conforts vous manqueront.",
 	"gate.recheck": "Vérifier à nouveau",
 	"gate.diagnostics": "Diagnostics",

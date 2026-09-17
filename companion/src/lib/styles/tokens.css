@@ -66,7 +66,6 @@
 	--color-text: var(--color-gray-900);
 	--color-text-muted: var(--color-gray-700);
 	--color-text-subtle: var(--color-gray-600);
-	--color-text-on-accent: #ffffff;
 
 	--color-focus-ring: var(--color-teal);
 	--color-overlay: rgb(18 20 23 / 45%);

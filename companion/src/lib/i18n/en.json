@@ -23,7 +23,6 @@
 
 	"gate.title": "This browser cannot run Twalk yet",
 	"gate.intro": "{count, plural, one {One thing this browser needs is missing.} other {# things this browser needs are missing.}} Twalk does its cryptography here, in the page, so your recovery key never leaves your device — and that needs all of them.",
-	"gate.degraded.title": "Twalk will work, with limits",
 	"gate.degraded.intro": "Everything onboarding needs is here. These extras are not, so some conveniences will be missing.",
 	"gate.recheck": "Check again",
 	"gate.diagnostics": "Diagnostics",
