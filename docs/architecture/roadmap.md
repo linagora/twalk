@@ -22,10 +22,11 @@ Last reviewed: 2026-09-17.
 | Contract — CloudEvents v1 | v0.1 | — (landed with the docs seed) | done — 8 schemas, one validated fixture each |
 | Sensor | v0.1 | [#1](https://github.com/linagora/twalk/issues/1) | done — tickets 01–11 merged, reviewed 2026-09-17 |
 | Reference deployment (Compose) | v0.1 | part of the Sensor lot (ticket 11) | done for Synapse + NATS + Sensor; grows with each component |
-| Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) started |
-| Matrix as a network | v0.1 | — (standalone tickets) | in progress — contract [#17](https://github.com/linagora/twalk/issues/17), Sensor [#18](https://github.com/linagora/twalk/issues/18) |
+| Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) merged, H2 [#21](https://github.com/linagora/twalk/issues/21) is the frontier |
+| Matrix as a network | v0.1 | — (standalone tickets) | in progress — contract [#17](https://github.com/linagora/twalk/issues/17) merged, Sensor [#18](https://github.com/linagora/twalk/issues/18) open |
 | Bridges | v0.1 | — | planned |
-| Companion Gateway | v0.1 | — | planned |
+| Companion Gateway — consent and auth | v0.1 | [#46](https://github.com/linagora/twalk/issues/46) | specced — tickets #48–#54 |
+| Bridge provisioning facade | v0.1 | [#47](https://github.com/linagora/twalk/issues/47) | specced — tickets #55–#57 |
 | Companion (PWA) | v0.1 | — (wireframes exist) | planned |
 | Buzz Control Room integration | v0.1 | — | planned |
 | Sovereign SMS (Twake SMS Companion) | v0.2 | — | planned |
@@ -68,11 +69,21 @@ The runtime is Rust, personas are separate processes talking to the bus, and the
 
 Configurations and appservice registrations for mautrix-whatsapp, mautrix-signal and mautrix-gmessages, wired into the reference deployment so a Sensor sees real portal rooms. Twalk maintains no forks: improvements go upstream, configurations come back as documentation or fixtures. The v0.1 SMS path through mautrix-gmessages is knowingly non-sovereign (Google account cookie) and is v0.2's debt to pay.
 
-### Companion Gateway · planned
+### Companion Gateway · specced
 
 The Companion's backend, in Rust: bridge provisioning facade, persona orchestrator, and **sole writer of consent state** ([ADR 0006](adr/0006-consent-state-owned-by-companion-gateway.md)). It produces two of the eight event types — `consent.state.changed.v1` and `bridge.status.changed.v1` — and it owns the consent snapshot the Sensor needs to label events correctly after a restart, which is the real fix for [#16](https://github.com/linagora/twalk/issues/16).
 
 It blocks the Companion lot: the PWA is a client of this API and has nothing to call without it.
+
+Spec [#46](https://github.com/linagora/twalk/issues/46), tickets #48–#54, mostly sequential: **G1** service skeleton with the Sensor's operational parity → **G2** consent store, journal and outbox → **G3** snapshot endpoint naming its stream position → **G4** the Sensor reading it, which closes [#16](https://github.com/linagora/twalk/issues/16); **G5** sign-in and per-device tokens → **G6** registration relay and Sensor invitation; **G7** the pending-contact projection.
+
+The design decisions behind it: [ADR 0010](adr/0010-consent-snapshot-then-deltas.md) (snapshot then deltas, arbitrated by the stream sequence), [ADR 0011](adr/0011-gateway-authenticates-with-matrix-openid.md) (Matrix OpenID, no access token held, one owner per deployment) and [ADR 0013](adr/0013-persona-activation-is-a-consent-decision.md) (persona activation is a consent decision).
+
+### Bridge provisioning facade · specced
+
+Spec [#47](https://github.com/linagora/twalk/issues/47), tickets #55–#57: **B1** the login proxy, which holds mautrix's blocking QR step server-side and exposes a pollable state (a phone that sleeps mid-scan must not lose the login) → **B2** bridge status by webhook, reconciled at startup, the sole producer of `bridge.status.changed`; **B3** the SMS preview path and its Google cookie relay.
+
+It stays a thin facade: no container control, and no appservice registration generation, because installing one requires a homeserver config edit and a restart. Its network side is never proven by the test suite — a real bridge needs a live WhatsApp or Signal account — which the spec states rather than hides.
 
 ### Companion (PWA) · planned
 
@@ -106,23 +117,31 @@ Oversight for what the personas do: suggestions surfaced for approval, approvals
 
 - **Contract freeze.** The 8 v1 types frozen, JSON Schemas published at a stable URL, a hosted validator for third-party persona authors.
 - **Companion.** Consent policies with time windows, audit log export, guided bridge recovery flows.
+- **Erasing history.** Deleting a contact's past events, an explicit action distinct from revoking consent ([ADR 0012](adr/0012-revoked-consent-reduces-publication.md)), alongside the audit export and the import that has to come with it.
 
 ---
 
 ## Build order
 
 ```
-Contract v1 ─┬─▶ Sensor ──────────────┬─▶ Matrix as a network (#17 ─▶ #18)
+Contract v1 ─┬─▶ Sensor ──────────────┬─▶ Matrix as a network (#17 done ─▶ #18)
              │                        │
              ├─▶ Hermes H1 ─▶ H2 ─┬─▶ H3 ─────────────┐
              │                    └─▶ H4 ─▶ H5 ─▶ H6 ─┴─▶ Buzz Control Room
              │
-             └─▶ Companion Gateway ─▶ Companion (PWA)
+             └─▶ Gateway G1 ─┬─▶ G2 ─┬─▶ G3 ─▶ G4 (closes #16)
+                             │       └─▶ G7
+                             └─▶ G5 ─┬─▶ G6
+                                     ├─▶ Companion (PWA)
+                                     └─▶ Bridge facade B1 ─┬─▶ B2
+                                                           └─▶ B3
 
 Bridges ─────▶ (independent; needed for a real end-to-end v0.1 demo)
 ```
 
-What this says in practice: the contract gated everything and is done; the Sensor gated the inbound path and is done; Hermes is the current critical path to a working persona loop; the Companion Gateway is the critical path to a user-installable v0.1 and is not started. Bridges and the Gateway can both start in parallel with Hermes — they share no files with it.
+What this says in practice: the contract gated everything and is done; the Sensor gated the inbound path and is done; Hermes is the current critical path to a working persona loop; the Companion Gateway is the critical path to a user-installable v0.1, and since 2026-09-17 it is specced and its first ticket is startable. Bridges and the Gateway can both start in parallel with Hermes — they share no files with it.
+
+Three tickets sit outside every lot: [#58](https://github.com/linagora/twalk/issues/58) (a revoked sender's message is published without its body — [ADR 0012](adr/0012-revoked-consent-reduces-publication.md), a contract change to make before the v1.0 freeze), [#59](https://github.com/linagora/twalk/issues/59) (write the security model the README already links) and [#60](https://github.com/linagora/twalk/issues/60) (the Hermes runtime gates each persona on its own consent state, the counterpart of ADR 0013).
 
 ## Keeping this document honest
 

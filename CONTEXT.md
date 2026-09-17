@@ -29,6 +29,9 @@ The agent platform: hosts personas, consumes events from the bus, reasons with a
 A named agentic identity hosted by Hermes (e.g. `assistant`, `watch`, `archive`, `writing`) that observes events and produces suggestions or replies under human oversight. Contract event types live in the `persona.*` domain.
 _Avoid_: bot, agent (as a product term; "agent" stays acceptable for the generic concept)
 
+**Persona activation**:
+The user's decision that a persona may read a given network, recorded as a consent decision on that persona and nothing else (ADR 0013). A paused persona is one whose consent was revoked: it still runs, and receives no events. Activation never spreads to a newly connected network on its own.
+
 ### Contract
 
 **Contract**:
@@ -40,7 +43,10 @@ A messaging service a conversation comes from, as the user experiences it: Whats
 _Avoid_: channel (user-facing copy only), gmessages (a bridge, not a network)
 
 **Consent**:
-The data-processing agreement state of a contact or channel: `granted`, `pending`, or `revoked`. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
+The data-processing agreement state of a contact or a whole network: `granted`, `pending`, or `revoked`. A network-level decision is the default for that network; a per-contact decision always overrides it. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
+
+**Consent snapshot**:
+The consent state of every known subject at one point in the event stream, served by the Companion Gateway and read by a consumer whose cache is cold (ADR 0010). It names the stream position it reflects, and states revocations explicitly: an absent subject means no decision was ever recorded, never a revoked one.
 
 **Event families**:
 The contract's two groups of event types. Message-flow events (`inbound.*`, `persona.*`) always carry the `network` and `consent` extensions; operational events (`consent.state.changed`, `bridge.status.changed`) declare them optional.

@@ -1,0 +1,5 @@
+# Activating a persona is a consent decision, not a control API
+
+Activating or pausing a persona is a `consent.state.changed` event whose subject is that persona, scoped to the networks it may read. The Hermes runtime keeps its environment-provided persona list and its own supervision; it follows the consent stream from the beginning to learn which personas are active, and a paused persona runs but receives nothing. No control API is added, and the Gateway never manages persona processes. Activation does not spread: connecting a new network leaves every persona inactive on it until the user says otherwise.
+
+Rationale: the wireframes and the contract already describe activation as exactly this event, so honouring it costs nothing and adds no surface. The asymmetry with contact consent is deliberate — persona decisions are a handful over a deployment's life, so replaying them needs no snapshot, and Hermes stays out of the Gateway's startup path. Automatic spread to new networks was rejected as the precise behaviour the project exists to prevent: an agent that starts reading a network the user just connected, without being asked.
