@@ -1,0 +1,121 @@
+# mautrix-whatsapp base configuration for the Twalk reference deployment.
+#
+# This file holds the deployment's *decisions* and no secrets. Everything
+# that depends on the operator's environment — the homeserver domain and URL,
+# the appservice tokens, the provisioning secret, the status endpoint and the
+# owner's permission — is rendered on top of it at provisioning time by
+# ../generate-registration.sh, from the variables documented in
+# deploy/docker-compose/.env.example. The rendered result lives in the
+# bridge's own data volume as /data/config.yaml, next to its database.
+#
+# Only the keys below are set: mautrix merges a partial config onto its own
+# example config on load, so every key absent here keeps the upstream default
+# of the pinned bridge version. That is deliberate — it keeps this file
+# reviewable and keeps us from freezing upstream defaults we have no opinion
+# about.
+#
+# Twalk maintains no fork of the bridges (see ../README.md); this is a
+# configuration, and the field names are upstream's.
+
+network:
+    # The device name the user sees in WhatsApp's "Linked devices" list. It
+    # is how they recognise this bridge on their phone, so it names the
+    # product rather than the software.
+    os_name: Twalk
+
+bridge:
+    # `bridge_status_notices` is deliberately NOT set here: the upstream
+    # default (errors) is what the bridge facade spec (#47) assumes. Twalk
+    # never parses those management-room notices — bridge status reaches the
+    # Companion Gateway through homeserver.status_endpoint below — but
+    # silencing them would also take away the one signal a human has when
+    # the Gateway is down.
+
+    # Overwritten at provisioning time with the single owner of this
+    # deployment (MATRIX_OWNER_USER_ID). A deployment serves one human
+    # (ADR 0011), so no wildcard and no domain-wide entry: an account that
+    # is not the owner has no business driving this bridge.
+    permissions: {}
+
+database:
+    # SQLite, like the rest of the reference stack: one personal hub, one
+    # login per bridge instance. `sqlite3-fk-wal` is upstream's name for
+    # SQLite with foreign keys and WAL enabled.
+    type: sqlite3-fk-wal
+    uri: file:/data/mautrix-whatsapp.db?_txlock=immediate
+
+homeserver:
+    # Both rendered at provisioning time (MATRIX_INTERNAL_URL, MATRIX_DOMAIN).
+    address: http://synapse:8008
+    domain: localhost
+    software: standard
+    # Rendered at provisioning time from WHATSAPP_STATUS_ENDPOINT: the
+    # Companion Gateway's bridge-status webhook. The bridge POSTs its
+    # connection state there, authenticated with its own as_token — the only
+    # push channel mautrix offers, and the producer behind
+    # `bridge.status.changed` (#56). Left empty, the bridge simply pushes
+    # nowhere.
+    status_endpoint:
+
+appservice:
+    # Where Synapse reaches this bridge: the compose service name, and the
+    # port mautrix-whatsapp uses by convention. This value is what lands in
+    # the registration's `url`.
+    address: http://bridge-whatsapp:29318
+    # 0.0.0.0 rather than upstream's 127.0.0.1: inside a container the
+    # listener has to be reachable from the compose network.
+    hostname: 0.0.0.0
+    port: 29318
+
+    id: whatsapp
+    bot:
+        username: whatsappbot
+        displayname: WhatsApp bridge bot
+
+    # Both rendered at provisioning time (WHATSAPP_AS_TOKEN,
+    # WHATSAPP_HS_TOKEN) and written into the generated registration, so
+    # that the operator's .env stays the single source of both halves of the
+    # appservice's identity — the Companion Gateway needs the same as_token
+    # in its own configuration to verify this bridge's status webhook.
+    as_token: ""
+    hs_token: ""
+
+matrix:
+    # The reference stack does not federate (Synapse exposes the client API
+    # only), so portal rooms have nothing to federate to.
+    federate_rooms: false
+
+provisioning:
+    # Rendered at provisioning time from WHATSAPP_PROVISIONING_SECRET. Under
+    # 16 characters and mautrix answers M_FORBIDDEN to the whole
+    # provisioning API, so the generator refuses a short one outright.
+    shared_secret: disable
+    # The Companion Gateway is the only caller of this API and authenticates
+    # with the shared secret above (#55). Matrix-access-token auth would let
+    # anything holding a user token drive a login; it buys us nothing.
+    allow_matrix_auth: false
+
+encryption:
+    # A portal room is an end-to-end encrypted Matrix room (CONTEXT.md), and
+    # the Sensor is built to decrypt Megolm. `allow` lets the bridge work in
+    # encrypted rooms at all; `default` makes the portals it creates
+    # encrypted.
+    #
+    # Not exercised by the deployment test: proving it needs a real WhatsApp
+    # account sending a real message. What the test does prove is that the
+    # bridge starts with this configuration and that Synapse accepts it.
+    allow: true
+    default: true
+    # Never drop an unencrypted message: an unencrypted portal (one created
+    # before this setting, or by a client that refuses encryption) should
+    # still reach the Sensor.
+    require: false
+
+logging:
+    # One writer, to stdout, as JSON: `docker compose logs` is where an
+    # operator reads this, and the upstream default's second writer logs to
+    # a file inside the container that nobody will ever read.
+    min_level: info
+    writers:
+        - type: stdout
+          format: json

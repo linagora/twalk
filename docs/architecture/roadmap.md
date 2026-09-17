@@ -24,7 +24,7 @@ Last reviewed: 2026-09-17.
 | Reference deployment (Compose) | v0.1 | part of the Sensor lot (ticket 11) | done for Synapse + NATS + Sensor; grows with each component |
 | Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) merged, H2 [#21](https://github.com/linagora/twalk/issues/21) is the frontier |
 | Matrix as a network | v0.1 | — (standalone tickets) | in progress — contract [#17](https://github.com/linagora/twalk/issues/17) merged, Sensor [#18](https://github.com/linagora/twalk/issues/18) open |
-| Bridges | v0.1 | — (standalone ticket) | in progress — deployment [#73](https://github.com/linagora/twalk/issues/73) |
+| Bridges | v0.1 | — (standalone ticket) | in progress — WhatsApp and Signal in the reference deployment ([#73](https://github.com/linagora/twalk/issues/73)); mautrix-gmessages (SMS) still planned |
 | Companion Gateway — consent and auth | v0.1 | [#46](https://github.com/linagora/twalk/issues/46) | specced — tickets #48–#54 |
 | Bridge provisioning facade | v0.1 | [#47](https://github.com/linagora/twalk/issues/47) | specced — tickets #55–#57 |
 | Companion (PWA) | v0.1 | [#65](https://github.com/linagora/twalk/issues/65) | specced — tickets #66–#70 |
@@ -65,9 +65,9 @@ Spec [#19](https://github.com/linagora/twalk/issues/19), tickets H1–H6, mostly
 
 The runtime is Rust, personas are separate processes talking to the bus, and the reference persona `assistant` is Python against the SDK ([ADR 0008](adr/0008-hermes-rust-runtime-personas-as-processes.md)).
 
-### Bridges · planned
+### Bridges · in progress
 
-Configurations and appservice registrations for mautrix-whatsapp, mautrix-signal and mautrix-gmessages, wired into the reference deployment so a Sensor sees real portal rooms. Twalk maintains no forks: improvements go upstream, configurations come back as documentation or fixtures. The v0.1 SMS path through mautrix-gmessages is knowingly non-sovereign (Google account cookie) and is v0.2's debt to pay.
+Configurations and appservice registrations for mautrix-whatsapp, mautrix-signal and mautrix-gmessages, wired into the reference deployment so a Sensor sees real portal rooms. WhatsApp and Signal landed with [#73](https://github.com/linagora/twalk/issues/73): pinned images behind the `bridges` compose profile, registrations generated at provisioning time, and a deployment test that proves the stack without ever attempting a login — pairing a phone is a human act. mautrix-gmessages follows. Twalk maintains no forks: improvements go upstream, configurations come back as documentation or fixtures. The v0.1 SMS path through mautrix-gmessages is knowingly non-sovereign (Google account cookie) and is v0.2's debt to pay.
 
 ### Companion Gateway · specced
 
