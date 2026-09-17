@@ -141,10 +141,22 @@ mod tests {
             body.contains("twalk_sensor_events_published_total{type=\"fr.linagora.twalk.inbound.reaction.added.v1\"} 1\n"),
             "{body}"
         );
-        assert!(body.contains("twalk_sensor_decryption_failures_total 1\n"), "{body}");
-        assert!(body.contains("twalk_sensor_outbound_send_failures_total 1\n"), "{body}");
-        assert!(body.contains("twalk_sensor_dead_lettered_events_total 1\n"), "{body}");
-        assert!(body.contains("twalk_sensor_last_sync_age_seconds 30\n"), "{body}");
+        assert!(
+            body.contains("twalk_sensor_decryption_failures_total 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_outbound_send_failures_total 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_dead_lettered_events_total 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_last_sync_age_seconds 30\n"),
+            "{body}"
+        );
         // Every sample line is `name[labels] value` with an integer value.
         for line in body.lines().filter(|line| !line.starts_with('#')) {
             let (name, value) = line.rsplit_once(' ').expect("a sample line has a value");
@@ -157,7 +169,9 @@ mod tests {
     fn the_sync_age_is_omitted_until_the_first_sync() {
         let metrics = Metrics::new();
         assert!(
-            !metrics.render(1_000).contains("twalk_sensor_last_sync_age_seconds"),
+            !metrics
+                .render(1_000)
+                .contains("twalk_sensor_last_sync_age_seconds"),
             "a Sensor that never synced renders no sync age"
         );
     }

@@ -126,7 +126,10 @@ mod tests {
 
     #[test]
     fn contract_values_reject_transports() {
-        assert_eq!(Network::from_contract_value("whatsapp"), Some(Network::Whatsapp));
+        assert_eq!(
+            Network::from_contract_value("whatsapp"),
+            Some(Network::Whatsapp)
+        );
         assert_eq!(Network::from_contract_value("sms"), Some(Network::Sms));
         assert_eq!(Network::from_contract_value("gmessages"), None);
         assert_eq!(Network::from_contract_value("irc"), None);
@@ -166,7 +169,10 @@ mod tests {
 
     #[test]
     fn ghost_prefix_is_the_fallback() {
-        assert_eq!(resolve(&[], "whatsapp_33612345678"), Some(Network::Whatsapp));
+        assert_eq!(
+            resolve(&[], "whatsapp_33612345678"),
+            Some(Network::Whatsapp)
+        );
     }
 
     #[test]
@@ -294,8 +300,14 @@ mod tests {
             None
         );
         // …a plain Matrix user has no derivable identifier…
-        assert_eq!(ghost_network_identifier(Network::Whatsapp, "bot_alpha"), None);
+        assert_eq!(
+            ghost_network_identifier(Network::Whatsapp, "bot_alpha"),
+            None
+        );
         // …and an empty identifier is no identifier.
-        assert_eq!(ghost_network_identifier(Network::Whatsapp, "whatsapp_"), None);
+        assert_eq!(
+            ghost_network_identifier(Network::Whatsapp, "whatsapp_"),
+            None
+        );
     }
 }

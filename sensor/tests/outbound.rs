@@ -44,7 +44,12 @@ fn unique_event_id() -> String {
         .as_nanos();
     let mut hasher = Sha256::new();
     hasher.update(nanos.to_string().as_bytes());
-    hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_string().as_bytes());
+    hasher.update(
+        COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string()
+            .as_bytes(),
+    );
     hasher
         .finalize()
         .iter()
@@ -73,7 +78,9 @@ async fn an_approved_reply_is_posted_as_a_threaded_reply_and_echoes_back() -> Re
 
     let room_id = make_whatsapp_portal(&alpha, "outbound-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
 
     let original_event_id = alpha.send_message(&room_id, "on décale à 20h ?").await?;
 
@@ -91,8 +98,7 @@ async fn an_approved_reply_is_posted_as_a_threaded_reply_and_echoes_back() -> Re
             &room_id,
             |event| {
                 event.get("sender").and_then(|s| s.as_str()) == Some(SENSOR_USER_ID)
-                    && event.pointer("/content/msgtype").and_then(|t| t.as_str())
-                        == Some("m.text")
+                    && event.pointer("/content/msgtype").and_then(|t| t.as_str()) == Some("m.text")
             },
             "the approved reply posted by the sensor",
         )
@@ -140,7 +146,10 @@ async fn an_approved_reply_is_posted_as_a_threaded_reply_and_echoes_back() -> Re
                     == Some(final_body.as_str())
         })
         .count();
-    assert_eq!(sensor_posts, 1, "the approved reply must be posted exactly once");
+    assert_eq!(
+        sensor_posts, 1,
+        "the approved reply must be posted exactly once"
+    );
 
     sensor.stop().await;
     Ok(())
@@ -177,7 +186,9 @@ async fn a_permanently_unpostable_reply_lands_on_the_dead_letter_subject() -> Re
 
     let room_id = make_whatsapp_portal(&alpha, "outbound-markdown").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     let original_event_id = alpha.send_message(&room_id, "tu peux confirmer ?").await?;
 
     // Markdown is a contract format the Sensor does not render yet.
@@ -198,7 +209,10 @@ async fn a_permanently_unpostable_reply_lands_on_the_dead_letter_subject() -> Re
         "the markdown reply on the dead-letter subject",
     )
     .await?;
-    assert_eq!(dead.payload, approved, "the dead-letter copy is the approved reply, unchanged");
+    assert_eq!(
+        dead.payload, approved,
+        "the dead-letter copy is the approved reply, unchanged"
+    );
     assert_dead_letter_headers(&dead, &approved_id);
 
     // The Sensor is a member here (its join is in the timeline): check that
@@ -254,9 +268,9 @@ async fn an_undeliverable_reply_lands_on_the_dead_letter_subject() -> Result<()>
     // And nothing was ever posted to the room.
     let events = alpha.room_events(&room_id, 50).await?;
     assert!(
-        events.iter().all(|event| {
-            event.get("sender").and_then(|s| s.as_str()) != Some(SENSOR_USER_ID)
-        }),
+        events
+            .iter()
+            .all(|event| { event.get("sender").and_then(|s| s.as_str()) != Some(SENSOR_USER_ID) }),
         "the Sensor must never post into a room it is not a member of"
     );
 
@@ -277,7 +291,9 @@ async fn a_reply_the_homeserver_rejects_is_retried_then_dead_lettered() -> Resul
     // homeserver refuses the send.
     let room_id = make_whatsapp_portal(&alpha, "outbound-forbidden").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     let mut power_levels = alpha
         .get_state_event(&room_id, "m.room.power_levels", "")
         .await?;

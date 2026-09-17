@@ -13,6 +13,7 @@ use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
+use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::OriginalSyncReactionEvent;
 use matrix_sdk::ruma::events::relation::Reply;
@@ -22,8 +23,9 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
 };
 use matrix_sdk::ruma::events::room::MediaSource;
-use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent};
-use matrix_sdk::ruma::api::error::ErrorKind;
+use matrix_sdk::ruma::events::{
+    AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
+};
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, UInt};
 use matrix_sdk::{Client, LoopCtrl, Room, RoomState};
 use tracing::{error, info, warn};
@@ -93,7 +95,10 @@ async fn main() -> Result<()> {
     // login mints. So when the session is missing, unparseable or its token
     // was revoked, the stale crypto store is moved aside first and the client
     // starts on a clean one (the state store and its sync token are kept).
-    let session_file = config.state_dir.as_ref().map(|dir| dir.join("session.json"));
+    let session_file = config
+        .state_dir
+        .as_ref()
+        .map(|dir| dir.join("session.json"));
     let mut session = session_file.as_deref().and_then(load_session);
     if let Some(persisted) = &session {
         if access_token_revoked(&config.homeserver_url, &persisted.tokens.access_token).await {
@@ -111,17 +116,21 @@ async fn main() -> Result<()> {
     }
 
     let client = match &config.state_dir {
-        Some(state_dir) => Client::builder()
-            .homeserver_url(&config.homeserver_url)
-            .sqlite_store(state_dir, None)
-            .with_encryption_settings(encryption_settings)
-            .build()
-            .await?,
-        None => Client::builder()
-            .homeserver_url(&config.homeserver_url)
-            .with_encryption_settings(encryption_settings)
-            .build()
-            .await?,
+        Some(state_dir) => {
+            Client::builder()
+                .homeserver_url(&config.homeserver_url)
+                .sqlite_store(state_dir, None)
+                .with_encryption_settings(encryption_settings)
+                .build()
+                .await?
+        }
+        None => {
+            Client::builder()
+                .homeserver_url(&config.homeserver_url)
+                .with_encryption_settings(encryption_settings)
+                .build()
+                .await?
+        }
     };
 
     // A session that parses but fails to restore is fatal: it points at
@@ -163,7 +172,10 @@ async fn main() -> Result<()> {
     // failed recovery (wrong key, no secret storage on the account) is
     // logged loudly but is not fatal: live traffic still decrypts, senders
     // share Megolm keys with the new device directly.
-    client.encryption().wait_for_e2ee_initialization_tasks().await;
+    client
+        .encryption()
+        .wait_for_e2ee_initialization_tasks()
+        .await;
     if let Some(recovery_key) = &config.recovery_key {
         let recovery = client.encryption().recovery();
         match recovery.recover_and_fix_backup(recovery_key).await {
@@ -358,21 +370,19 @@ async fn main() -> Result<()> {
     // share keys at send time, so live traffic does not hit this.
     {
         let metrics = metrics.clone();
-        client.add_event_handler(
-            move |event: OriginalSyncRoomEncryptedEvent, room: Room| {
-                let metrics = metrics.clone();
-                async move {
-                    let failures = metrics.record_decryption_failure();
-                    warn!(
-                        room = %room.room_id(),
-                        event_id = %event.event_id,
-                        sender = %event.sender,
-                        failures,
-                        "cannot decrypt event, skipping it"
-                    );
-                }
-            },
-        );
+        client.add_event_handler(move |event: OriginalSyncRoomEncryptedEvent, room: Room| {
+            let metrics = metrics.clone();
+            async move {
+                let failures = metrics.record_decryption_failure();
+                warn!(
+                    room = %room.room_id(),
+                    event_id = %event.event_id,
+                    sender = %event.sender,
+                    failures,
+                    "cannot decrypt event, skipping it"
+                );
+            }
+        });
     }
 
     // Inbound reactions: normalize and publish. Reaction removals arrive as
@@ -584,10 +594,12 @@ async fn main() -> Result<()> {
     // sync-age gauge (the operator's lag signal). Boxed so the shutdown path
     // can drop the loop itself, not just a pinned reference to it.
     let sync_metrics = metrics.clone();
-    let mut sync = Box::pin(client.sync_with_callback(SyncSettings::default(), move |_response| {
-        sync_metrics.record_sync(now_unix_seconds());
-        async { LoopCtrl::Continue }
-    }));
+    let mut sync = Box::pin(
+        client.sync_with_callback(SyncSettings::default(), move |_response| {
+            sync_metrics.record_sync(now_unix_seconds());
+            async { LoopCtrl::Continue }
+        }),
+    );
     tokio::select! {
         result = &mut sync => {
             result.context("sync loop failed")?;
@@ -687,7 +699,10 @@ impl PublishTracker {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
         let tracker = self.clone();
         let task = tokio::spawn(async move {
-            publish_envelope(&jetstream, event_type, &envelope, network, consent, &metrics).await;
+            publish_envelope(
+                &jetstream, event_type, &envelope, network, consent, &metrics,
+            )
+            .await;
             if tracker.in_flight.fetch_sub(1, Ordering::Relaxed) == 1 {
                 tracker.idle.notify_waiters();
             }
@@ -726,7 +741,10 @@ fn load_session(session_file: &Path) -> Option<MatrixSession> {
     match session {
         Ok(session) => Some(session),
         Err(error) => {
-            warn!(error = format!("{error:#}"), "persisted session is unusable, falling back to a fresh login");
+            warn!(
+                error = format!("{error:#}"),
+                "persisted session is unusable, falling back to a fresh login"
+            );
             None
         }
     }
@@ -787,7 +805,9 @@ fn set_stale_store_aside(state_dir: &Path) -> Result<()> {
     let entries = match std::fs::read_dir(state_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error).with_context(|| format!("failed to list {}", state_dir.display())),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to list {}", state_dir.display()))
+        }
     };
     let mut stale = Vec::new();
     for entry in entries {
@@ -797,7 +817,10 @@ fn set_stale_store_aside(state_dir: &Path) -> Result<()> {
             stale.push(name);
         }
     }
-    if !stale.iter().any(|name| name.to_string_lossy().starts_with(CRYPTO_STORE_FILE)) {
+    if !stale
+        .iter()
+        .any(|name| name.to_string_lossy().starts_with(CRYPTO_STORE_FILE))
+    {
         return Ok(()); // no crypto store yet: a first start, nothing to set aside
     }
     let stamp = now_unix_seconds();
@@ -906,7 +929,9 @@ async fn resolve_network(room: &Room, sender: &OwnedUserId) -> Option<network::N
 /// Splits `m.relates_to` into the contract's reply target and thread root.
 /// A threaded message's fallback `m.in_reply_to` (`is_falling_back: true`)
 /// exists only for thread-unaware clients and is not a real reply.
-fn relation_targets(content: &RoomMessageEventContent) -> (Option<OwnedEventId>, Option<OwnedEventId>) {
+fn relation_targets(
+    content: &RoomMessageEventContent,
+) -> (Option<OwnedEventId>, Option<OwnedEventId>) {
     match &content.relates_to {
         Some(Relation::Reply(reply)) => (Some(reply.in_reply_to.event_id.clone()), None),
         Some(Relation::Thread(thread)) => {
@@ -944,7 +969,10 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
             kind: normalize::AttachmentKind::Image,
             mxc_uri: mxc_uri(&image.source),
             mime_type: image.info.as_deref().and_then(|info| info.mimetype.clone()),
-            size_bytes: image.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            size_bytes: image
+                .info
+                .as_deref()
+                .and_then(|info| info.size.map(u64::from)),
             caption: image.caption().map(str::to_owned),
             dimensions: image
                 .info
@@ -956,7 +984,10 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
             kind: normalize::AttachmentKind::Video,
             mxc_uri: mxc_uri(&video.source),
             mime_type: video.info.as_deref().and_then(|info| info.mimetype.clone()),
-            size_bytes: video.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            size_bytes: video
+                .info
+                .as_deref()
+                .and_then(|info| info.size.map(u64::from)),
             caption: video.caption().map(str::to_owned),
             dimensions: video
                 .info
@@ -971,7 +1002,10 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
             kind: normalize::AttachmentKind::Audio,
             mxc_uri: mxc_uri(&audio.source),
             mime_type: audio.info.as_deref().and_then(|info| info.mimetype.clone()),
-            size_bytes: audio.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            size_bytes: audio
+                .info
+                .as_deref()
+                .and_then(|info| info.size.map(u64::from)),
             caption: audio.caption().map(str::to_owned),
             dimensions: None,
             duration_ms: audio
@@ -983,7 +1017,10 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
             kind: normalize::AttachmentKind::File,
             mxc_uri: mxc_uri(&file.source),
             mime_type: file.info.as_deref().and_then(|info| info.mimetype.clone()),
-            size_bytes: file.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            size_bytes: file
+                .info
+                .as_deref()
+                .and_then(|info| info.size.map(u64::from)),
             caption: file.caption().map(str::to_owned),
             dimensions: None,
             duration_ms: None,
@@ -1038,7 +1075,10 @@ async fn publish_envelope(
     headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
     headers.insert("network", network.as_str());
     headers.insert("consent", consent.as_str());
-    if let Some(traceparent) = envelope.get("traceparent").and_then(serde_json::Value::as_str) {
+    if let Some(traceparent) = envelope
+        .get("traceparent")
+        .and_then(serde_json::Value::as_str)
+    {
         headers.insert("traceparent", traceparent);
     }
     let payload = serde_json::to_vec(envelope).expect("the envelope is serializable");
@@ -1079,7 +1119,9 @@ async fn consume_approved_replies(
     metrics: Arc<Metrics>,
 ) {
     loop {
-        match run_approved_reply_consumer(&client, &jetstream, retry_base, max_attempts, &metrics).await {
+        match run_approved_reply_consumer(&client, &jetstream, retry_base, max_attempts, &metrics)
+            .await
+        {
             Ok(()) => error!("the approved-reply message stream ended; rebuilding the consumer"),
             Err(error) => error!(%error, "the approved-reply consumer failed; rebuilding it"),
         }
@@ -1235,7 +1277,10 @@ async fn run_consent_consumer(
         )
         .await
         .context("failed to ensure the consent-change consumer")?;
-    info!(consumer = consent::CONSENT_CONSUMER, "consuming consent changes");
+    info!(
+        consumer = consent::CONSENT_CONSUMER,
+        "consuming consent changes"
+    );
 
     let mut messages = consumer
         .messages()
@@ -1263,7 +1308,10 @@ async fn run_consent_consumer(
                 // A channel- or persona-scoped decision is well-formed
                 // traffic that simply never labels a sender; a malformed
                 // contact change is worth a warning.
-                None => match event.pointer("/data/subject/type").and_then(serde_json::Value::as_str) {
+                None => match event
+                    .pointer("/data/subject/type")
+                    .and_then(serde_json::Value::as_str)
+                {
                     Some("contact") | None => warn!(
                         id = event
                             .get("id")
@@ -1274,7 +1322,9 @@ async fn run_consent_consumer(
                     Some(_) => {}
                 },
             },
-            Err(error) => warn!(%error, "consent.state.changed payload is not valid JSON, skipping"),
+            Err(error) => {
+                warn!(%error, "consent.state.changed payload is not valid JSON, skipping")
+            }
         }
         if let Err(error) = message.ack().await {
             warn!(%error, "consent-change ack failed, the event will be redelivered");
@@ -1340,7 +1390,10 @@ async fn dead_letter(
                     // copy: a duplicate means an earlier attempt already
                     // stored (and counted) it, but its ack of the original
                     // was lost. The copy is safe; just ack the original.
-                    warn!(id = event_id.as_deref(), "dead-letter copy already stored, acking the redelivered original");
+                    warn!(
+                        id = event_id.as_deref(),
+                        "dead-letter copy already stored, acking the redelivered original"
+                    );
                 } else {
                     metrics.record_dead_lettered();
                 }
@@ -1348,7 +1401,9 @@ async fn dead_letter(
                     error!(%error, "ack failed after dead-lettering, a duplicate may be dead-lettered again");
                 }
             }
-            Err(error) => error!(%error, "dead-letter publish ack failed, leaving the message unacked"),
+            Err(error) => {
+                error!(%error, "dead-letter publish ack failed, leaving the message unacked")
+            }
         },
         Err(error) => error!(%error, "dead-letter publish failed, leaving the message unacked"),
     }
@@ -1366,7 +1421,10 @@ enum PostError {
 
 /// Posts one approved reply into its target room, as a native reply to the
 /// original message when the approval names one.
-async fn post_approved_reply(client: &Client, job: &outbound::ApprovedReply) -> Result<(), PostError> {
+async fn post_approved_reply(
+    client: &Client,
+    job: &outbound::ApprovedReply,
+) -> Result<(), PostError> {
     // Deliberate v1 limitation, mirroring the inbound text-only skeleton:
     // only text/plain is posted; markdown and HTML dead-letter as permanent
     // failures until rich formatting is specced for outbound.
@@ -1390,8 +1448,9 @@ async fn post_approved_reply(client: &Client, job: &outbound::ApprovedReply) -> 
     }
     let mut content = RoomMessageEventContent::text_plain(job.body.clone());
     if let Some(reply_to) = &job.reply_to_event_id {
-        let event_id = matrix_sdk::ruma::EventId::parse(reply_to)
-            .map_err(|error| PostError::Permanent(anyhow!(error).context("invalid reply target")))?;
+        let event_id = matrix_sdk::ruma::EventId::parse(reply_to).map_err(|error| {
+            PostError::Permanent(anyhow!(error).context("invalid reply target"))
+        })?;
         content.relates_to = Some(Relation::Reply(Reply::with_event_id(event_id)));
     }
     // A direct send, not the send queue: the queue only enqueues locally and
@@ -1417,7 +1476,9 @@ async fn post_approved_reply(client: &Client, job: &outbound::ApprovedReply) -> 
 fn classify_send_error(error: matrix_sdk::Error) -> PostError {
     let permanent = matches!(
         error.client_api_error_kind(),
-        Some(ErrorKind::BadJson | ErrorKind::NotJson | ErrorKind::TooLarge | ErrorKind::InvalidParam)
+        Some(
+            ErrorKind::BadJson | ErrorKind::NotJson | ErrorKind::TooLarge | ErrorKind::InvalidParam
+        )
     );
     let error = anyhow!(error).context("matrix send failed");
     if permanent {

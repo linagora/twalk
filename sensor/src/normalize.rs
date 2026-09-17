@@ -184,9 +184,7 @@ pub fn attachment_from_sticker_data(data: &serde_json::Map<String, Value>) -> Op
     Some(Attachment {
         kind: AttachmentKind::Sticker,
         mxc_uri: mxc_uri.to_owned(),
-        mime_type: field("mimetype")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        mime_type: field("mimetype").and_then(Value::as_str).map(str::to_owned),
         size_bytes: field("size").and_then(Value::as_u64),
         caption: None,
         dimensions,
@@ -467,16 +465,12 @@ mod tests {
             build_message_received(&sample_input())["traceparent"],
             json!(traceparent)
         );
-        assert!(
-            build_reaction_added(&sample_reaction())["traceparent"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("00-") && value.ends_with("-01"))
-        );
-        assert!(
-            build_presence_updated(&sample_presence())["traceparent"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("00-") && value.ends_with("-01"))
-        );
+        assert!(build_reaction_added(&sample_reaction())["traceparent"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("00-") && value.ends_with("-01")));
+        assert!(build_presence_updated(&sample_presence())["traceparent"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("00-") && value.ends_with("-01")));
     }
 
     #[test]
@@ -585,10 +579,7 @@ mod tests {
             excerpt: "é".repeat(600),
         });
         let event = build_message_received(&input);
-        assert_eq!(
-            event["data"]["reply_to"]["matrix_event_id"],
-            "$PaReNt9876"
-        );
+        assert_eq!(event["data"]["reply_to"]["matrix_event_id"], "$PaReNt9876");
         assert_eq!(
             event["data"]["reply_to"]["excerpt"]
                 .as_str()
@@ -652,14 +643,8 @@ mod tests {
 
     #[test]
     fn mime_types_are_lower_cased_and_invalid_ones_defaulted() {
-        assert_eq!(
-            mime_type_or_default(Some("IMAGE/PNG")),
-            "image/png"
-        );
-        assert_eq!(
-            mime_type_or_default(Some("image/svg+xml")),
-            "image/svg+xml"
-        );
+        assert_eq!(mime_type_or_default(Some("IMAGE/PNG")), "image/png");
+        assert_eq!(mime_type_or_default(Some("image/svg+xml")), "image/svg+xml");
         assert_eq!(
             mime_type_or_default(Some("not a mime type")),
             "application/octet-stream"
@@ -758,7 +743,10 @@ mod tests {
         let mut input = sample_reaction();
         input.reaction = "👍".repeat(100);
         let event = build_reaction_added(&input);
-        assert_eq!(event["data"]["reaction"].as_str().unwrap().chars().count(), 64);
+        assert_eq!(
+            event["data"]["reaction"].as_str().unwrap().chars().count(),
+            64
+        );
         // Display names are capped at 256 chars.
         let mut message = sample_input();
         message.display_name = "x".repeat(300);
@@ -936,10 +924,8 @@ mod tests {
         // Granted but underivable: the field is omitted, not null.
         let mut input = sample_input();
         input.consent = Consent::Granted;
-        assert!(
-            build_message_received(&input)["data"]["contact"]
-                .get("network_identifier")
-                .is_none()
-        );
+        assert!(build_message_received(&input)["data"]["contact"]
+            .get("network_identifier")
+            .is_none());
     }
 }

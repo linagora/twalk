@@ -51,7 +51,8 @@ fn assert_valid_traceparent(value: &str) {
     assert_eq!(parts[3], "01", "trace flags (sampled): {value}");
     for hex in [&parts[1], &parts[2]] {
         assert!(
-            hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "ids are lowercase hex: {value}"
         );
     }
@@ -62,12 +63,17 @@ async fn the_metrics_endpoint_reports_sensor_health() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
-    let sensor = SensorProc::start(&sensor_env_with(&[("SENSOR_METRICS_LISTEN", METRICS_LISTEN)]))?;
+    let sensor = SensorProc::start(&sensor_env_with(&[(
+        "SENSOR_METRICS_LISTEN",
+        METRICS_LISTEN,
+    )]))?;
     let alpha = Bot::login("bot_alpha").await?;
 
     let room_id = make_whatsapp_portal(&alpha, "metrics-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     alpha.send_message(&room_id, "on décale à 20h ?").await?;
 
     bus.wait_for_room_message(STREAM, MESSAGE_SUBJECT, &room_id)
@@ -117,7 +123,9 @@ async fn inbound_events_originate_a_valid_traceparent() -> Result<()> {
 
     let room_id = make_whatsapp_portal(&alpha, "traceparent-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     alpha.send_message(&room_id, "on décale à 20h ?").await?;
 
     let stored = bus
@@ -187,7 +195,11 @@ async fn the_log_level_env_is_honored() -> Result<()> {
     ]))?;
     poll_until(
         || async {
-            reqwest::get(METRICS_URL).await.ok()?.error_for_status().ok()?;
+            reqwest::get(METRICS_URL)
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?;
             Some(())
         },
         "the quiet sensor's metrics endpoint",

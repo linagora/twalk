@@ -215,8 +215,13 @@ async fn a_fresh_compose_up_produces_events_without_manual_steps() -> Result<()>
     // Operator-side setup only: the test bot standing in for a bridge.
     provision(&env_file, &[BRIDGE_LOCALPART, BRIDGE_PASSWORD]).await?;
 
-    let alpha = Bot::login_with(&synapse_url(), SERVER_NAME, BRIDGE_LOCALPART, BRIDGE_PASSWORD)
-        .await?;
+    let alpha = Bot::login_with(
+        &synapse_url(),
+        SERVER_NAME,
+        BRIDGE_LOCALPART,
+        BRIDGE_PASSWORD,
+    )
+    .await?;
     let room_id = make_whatsapp_portal(&alpha, "deploy-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
     alpha
