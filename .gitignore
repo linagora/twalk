@@ -1,0 +1,3 @@
+/target/
+/sensor/target/
+.env

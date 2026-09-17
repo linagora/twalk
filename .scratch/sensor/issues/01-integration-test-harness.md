@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] One command brings up Synapse and NATS JetStream for tests, with bot users provisioned
-- [ ] Helpers exist for: create room (encrypted or unencrypted), invite, send message, send reaction, set presence, consume a subject, validate an event against a contract schema
-- [ ] A smoke test passes using only the harness: bot posts to Synapse, NATS round-trip works
-- [ ] Every contract fixture validates against its schema in the harness
-- [ ] No Sensor implementation code exists in this ticket
+- [x] One command brings up Synapse and NATS JetStream for tests, with bot users provisioned
+- [x] Helpers exist for: create room (encrypted or unencrypted), invite, send message, send reaction, set presence, consume a subject, validate an event against a contract schema
+- [x] A smoke test passes using only the harness: bot posts to Synapse, NATS round-trip works
+- [x] Every contract fixture validates against its schema in the harness
+- [x] No Sensor implementation code exists in this ticket

@@ -1,0 +1,42 @@
+# Test-only stack for the Sensor integration harness. NOT the reference
+# deployment (that lives in deploy/). Brings up a real Synapse and a real
+# NATS JetStream; test-side bots play the role of bridges.
+#
+# Usage: docker compose -p twalk-sensor-test -f compose.test.yaml up -d --wait
+# (the Rust harness does this for you; see tests/harness/mod.rs)
+
+services:
+  synapse:
+    image: matrixdotorg/synapse:v1.161.0
+    # Run as root: the entrypoint otherwise drops to uid 991 without chowning
+    # /data in run mode, and the fresh named volume is root-owned. Throwaway
+    # test stack, so root is fine.
+    environment:
+      UID: "0"
+      GID: "0"
+    command: ["run", "-m", "synapse.app.homeserver", "--config-path", "/config/homeserver.yaml"]
+    volumes:
+      # Config comes from the repo (read-only); the database, media store
+      # and the auto-generated signing key live in the named volume.
+      - ./synapse:/config:ro
+      - synapse-data:/data
+    ports:
+      - "18008:8008"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health').read()"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+  nats:
+    image: nats:2
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    ports:
+      - "14222:4222"
+
+volumes:
+  synapse-data:
+  nats-data:

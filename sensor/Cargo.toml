@@ -1,0 +1,19 @@
+[package]
+name = "twalk-sensor"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The Twalk Sensor: a Matrix client that decrypts portal-room events and publishes typed CloudEvents on the bus."
+
+[lib]
+path = "src/lib.rs"
+
+# The Sensor implementation arrives with ticket 02; [dependencies] stays empty
+# until then. Everything below serves the integration-test harness (ticket 01).
+[dev-dependencies]
+anyhow = "1"
+async-nats = "0.50"
+jsonschema = "0.56"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }

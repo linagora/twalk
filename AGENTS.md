@@ -4,29 +4,36 @@
 
 `twalk` is the monorepo for Twalk, a sovereign, open-source, self-hosted event hub for personal multi-channel messaging (WhatsApp, Signal, SMS, Telegram, Discord). Messaging traffic lands in Matrix portal rooms via Mautrix bridges, is normalised by the Sensor into versioned CloudEvents on a NATS JetStream bus, and is consumed by Hermes-hosted personas under human oversight. See `README.md` for the full picture and `CONTEXT.md` for the domain vocabulary.
 
-As of 2026-09-17 the repository contains documentation, the directory scaffold and the complete event contract — no source code yet:
+As of 2026-09-17 the repository contains documentation, the complete event contract, and the Sensor's integration-test harness — no component implementation yet:
 
 - `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/adr/` (ADRs 0005–0008 written; numbers 0001–0004 are referenced from the docs but not yet written)
 - `contracts/cloudevents/v1/` — the complete v1 contract: 8 CloudEvents schemas plus one validated fixture per type
-- `.scratch/sensor/spec.md` — the Sensor spec, labelled `ready-for-agent` (local tracker convention until `/setup-matt-pocock-skills` is run)
-- Empty component directories with stub READMEs: `sensor/`, `hermes/`, `companion/`, `companion-gateway/`, `bridges/`, `deploy/`, `ui/`, `sdk/`, `examples/`, `tools/`, `tests/`
+- `.scratch/sensor/` — the Sensor spec and tickets 01–11 (local tracker convention until `/setup-matt-pocock-skills` is run); ticket 01 is done
+- `sensor/` — Cargo package with the integration-test harness (`tests/compose.test.yaml`: Synapse + NATS JetStream; `tests/harness/`: bot, bus and contract helpers; `tests/smoke.rs`). `src/lib.rs` is a placeholder; the implementation starts at ticket 02
+- Other component directories hold stub READMEs only: `hermes/`, `companion/`, `companion-gateway/`, `bridges/`, `deploy/`, `ui/`, `sdk/`, `examples/`, `tools/`, `tests/`
 
 ## Build and test commands
 
-None yet. No build system or package manifest exists (no `Cargo.toml`, `package.json`, etc.).
+Requires Docker (the harness brings up its own Synapse + NATS stack) and a Rust toolchain.
+
+```bash
+cd sensor
+cargo build --tests   # compile / typecheck
+cargo test            # full suite: boots the stack itself, ~15s cold, ~3s warm
+```
 
 ## Code organization
 
-Monorepo with 13 top-level directories — see the "Repository layout" section of `README.md`. Planned stacks per the docs: Rust for `sensor/` and `companion-gateway/`, SvelteKit (static export) for `companion/`.
+Monorepo with 13 top-level directories — see the "Repository layout" section of `README.md`. Stacks: Rust for `sensor/` and `companion-gateway/`, SvelteKit (static export) for `companion/`. The Sensor test harness speaks the Matrix client-server API over plain HTTP — it deliberately does not depend on matrix-sdk.
 
 ## Code style guidelines
 
-No code yet. In all naming and prose, follow the `CONTEXT.md` vocabulary: **network** (never "channel" outside user-facing copy, never a bridge name like `gmessages`), **persona** (never "bot"), **the Companion** means the PWA only, **Companion Gateway** always in full.
+In all naming and prose, follow the `CONTEXT.md` vocabulary: **network** (never "channel" outside user-facing copy, never a bridge name like `gmessages`), **persona** (never "bot" for agent identities — test Matrix users standing in for bridges are "test bots"), **the Companion** means the PWA only, **Companion Gateway** always in full.
 
 ## Testing instructions
 
-No test framework or suite yet. `tests/` is reserved for end-to-end and CloudEvents conformance tests.
+Tests live at the agreed seam: the Sensor process boundary (real Synapse + real NATS JetStream). Helpers are in `sensor/tests/harness/`; new test files go beside `smoke.rs`. Every event-producing behaviour must assert schema validity via `validate_against_contract`. Keep tests isolated from persisted stack state (unique rooms and bus subjects per run).
 
 ## Security considerations
 
-Never commit secrets, credentials, or `.env` files. Message content is highly sensitive by design: no message may leave the user's infrastructure without explicit consent — keep that invariant in mind for any code that touches event payloads.
+Never commit secrets, credentials, or `.env` files (`.gitignore` covers `.env`). The only secrets in the repo are the throwaway constants in `sensor/tests/synapse/homeserver.yaml` and the test-bot passwords — local, ephemeral test stack only; never reuse them elsewhere. Message content is highly sensitive by design: no message may leave the user's infrastructure without explicit consent — keep that invariant in mind for any code that touches event payloads.
