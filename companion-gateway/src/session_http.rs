@@ -25,14 +25,15 @@
 //! everything else, because it added no row. That is the direction working as
 //! intended.
 //!
-//! The snapshot's row is not in the table yet, because the route is not
-//! either. When #50 lands it adds one line to [`requirement`] —
-//! `(&Method::GET, "/api/consent/snapshot") => Requirement::ServiceToken` —
-//! and the guard then stops asking for a device cookie on that path and
-//! injects no device identity into the request, leaving the snapshot handler
-//! to compare the caller's bearer token with the service token from its own
-//! configuration. Nothing else about the guard changes, and no other route
-//! becomes reachable without a device token.
+//! The snapshot's row (ticket #50) is the one line that arrived that way:
+//! `(&Method::GET, "/api/consent/snapshot") => Requirement::ServiceToken`.
+//! The guard asks for no device cookie on that path and injects no device
+//! identity into the request, leaving [`crate::consent_snapshot`] to compare
+//! the caller's bearer token with the service token from its own
+//! configuration. Nothing else about the guard changed, and no other route
+//! became reachable without a device token — a service token opens that one
+//! path and nothing else, exactly as a device token opens everything else and
+//! not that path.
 //!
 //! # The cookie
 //!
@@ -98,7 +99,10 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
         // The registration relay: there is no account yet, so there is no
         // device token to have (ticket #53).
         (&Method::POST, "/api/bootstrap/account") => Requirement::Open,
-        // Ticket #50 adds its snapshot route here; see the module docs.
+        // The consent snapshot (ticket #50): its caller is the Sensor, which
+        // is not a device and has no OpenID token to sign in with, so it
+        // presents a service token the handler checks itself.
+        (&Method::GET, "/api/consent/snapshot") => Requirement::ServiceToken,
         _ => Requirement::DeviceToken,
     }
 }
@@ -493,6 +497,17 @@ mod tests {
             Requirement::Open,
             "registration runs before any account exists, so before any sign-in"
         );
+        assert_eq!(
+            requirement(&Method::GET, "/api/consent/snapshot"),
+            Requirement::ServiceToken,
+            "the snapshot's caller is the Sensor, which is not a device"
+        );
+        // And only under that method: a write to the snapshot's path is not
+        // a route, and the service token must not be the way to reach one.
+        assert_eq!(
+            requirement(&Method::POST, "/api/consent/snapshot"),
+            Requirement::DeviceToken
+        );
         // Everything else, including routes that do not exist yet: a device
         // token. This is the property that makes forgetting the guard
         // impossible for a later ticket.
@@ -502,7 +517,6 @@ mod tests {
             (Method::GET, "/api/devices"),
             (Method::DELETE, "/api/devices/abc"),
             (Method::POST, "/api/consent/decisions"),
-            (Method::GET, "/api/consent/snapshot"),
             (Method::GET, "/api/anything/at/all"),
             // Not the sign-in route under another method.
             (Method::GET, "/api/session/refresh"),

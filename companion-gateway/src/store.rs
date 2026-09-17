@@ -19,6 +19,14 @@
 //!   republishes (deduplicated on the bus by `Nats-Msg-Id`) rather than
 //!   losing the decision.
 //!
+//! Ticket #50 added a fourth, which is what makes a cold consumer's hand-off
+//! safe: **the snapshot's position is consistent with its content**
+//! ([`Store::snapshot`]). The journal remembers where on the bus each
+//! published decision landed (`stream_sequence`), and the snapshot is the
+//! state of the *published prefix* of the journal, read in one transaction
+//! with the position of its last decision. See that method for why the
+//! prefix, and not the journal's head, is the only honest answer.
+//!
 //! The schema migrations are embedded in the binary ([`MIGRATIONS`]) and
 //! applied at open, so an operator upgrades the image and nothing else.
 //!
@@ -45,7 +53,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 1] = [
+pub const MIGRATIONS: [&str; 2] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -132,6 +140,64 @@ pub const MIGRATIONS: [&str; 1] = [
         SELECT RAISE(ABORT, 'the consent decision journal is append-only');
     END;
     "#,
+    // v2 — where on the bus each published decision landed, and the snapshot
+    // a cold consumer reads (ticket #50).
+    r#"
+    -- The JetStream sequence the bus stored this decision at, written by the
+    -- outbox when the publication is acked; NULL until then. It is not part
+    -- of the decision — the append-only trigger above deliberately does not
+    -- list it — but it is what lets the snapshot name a position a consumer
+    -- can start a stream consumer at (ADR 0010).
+    ALTER TABLE consent_decision ADD COLUMN stream_sequence INTEGER;
+
+    CREATE INDEX consent_decision_unpositioned
+        ON consent_decision (sequence) WHERE stream_sequence IS NULL;
+
+    -- How far into the journal the snapshot may read: the last decision such
+    -- that every decision up to it has a known position on the bus.
+    --
+    -- The outbox publishes in journal order and awaits each ack before the
+    -- next, so the positioned rows are a prefix of the journal and the bus's
+    -- order is the journal's. This horizon is that prefix's end: the first
+    -- row with no position, minus one; the whole journal when every row has
+    -- one; zero when the journal is empty or nothing has reached the bus yet.
+    --
+    -- A row an older build marked published without recording a position
+    -- (schema v1 kept only `published_at`) counts as unpositioned, which is
+    -- the safe direction: it holds the horizon back rather than naming a
+    -- sequence nobody knows.
+    CREATE VIEW consent_snapshot_horizon AS
+    SELECT COALESCE(
+        (SELECT MIN(sequence) - 1 FROM consent_decision WHERE stream_sequence IS NULL),
+        (SELECT MAX(sequence) FROM consent_decision),
+        0
+    ) AS decision_sequence;
+
+    -- The snapshot: the current state of the journal's published prefix, one
+    -- entry per (subject, network), revocations as explicit as grants,
+    -- network defaults included, `persona` subjects excluded — persona
+    -- activation is a consent decision (ADR 0013) but it is not part of the
+    -- consent state a Sensor labels senders by, and #60 is what writes those.
+    --
+    -- Excluded in SQL rather than in Rust so that the snapshot never even
+    -- reads a persona row: this is the projection a consumer's whole cold
+    -- start rests on.
+    CREATE VIEW consent_snapshot AS
+    SELECT subject_type, subject_id, network, state, decided_at, decision_sequence
+    FROM (
+        SELECT d.subject_type, d.subject_id, n.network, d.new_state AS state,
+               d.occurred_at AS decided_at, d.sequence AS decision_sequence,
+               ROW_NUMBER() OVER (
+                   PARTITION BY d.subject_type, d.subject_id, n.network
+                   ORDER BY d.sequence DESC
+               ) AS recency
+        FROM consent_decision d
+        JOIN consent_decision_network n ON n.sequence = d.sequence
+        WHERE d.subject_type <> 'persona'
+          AND d.sequence <= (SELECT decision_sequence FROM consent_snapshot_horizon)
+    )
+    WHERE recency = 1;
+    "#,
 ];
 
 /// The consent store. One connection behind a mutex: a decision is a handful
@@ -174,6 +240,51 @@ pub struct Unpublished {
     pub sequence: i64,
     pub event_id: String,
     pub envelope: Value,
+}
+
+/// The consent state a cold consumer starts from, and the bus position it
+/// reflects (ticket #50, ADR 0010). Read as one unit — see
+/// [`Store::snapshot`].
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    /// One entry per (subject, network), `persona` subjects excluded.
+    pub entries: Vec<Entry>,
+    /// The journal position the snapshot reflects — the end of the published
+    /// prefix. `0` when no decision has reached the bus yet.
+    pub decision_sequence: i64,
+    /// The JetStream sequence of that decision: what a consumer adds one to.
+    /// `0` when no decision has reached the bus yet, so that a consumer
+    /// starts at `1` and sees the whole stream.
+    pub stream_sequence: u64,
+}
+
+/// Why a snapshot could not be served. Two very different failures, kept
+/// apart because the answers a client branches on are different codes: one
+/// is a store the Gateway could not read, the other is a snapshot the
+/// operator has capped below its own size.
+#[derive(Debug)]
+pub enum SnapshotRefusal {
+    /// The current state holds more entries than the configured cap. The
+    /// snapshot is refused whole: truncating it silently would hand a
+    /// consumer a state in which contacts the user granted look never
+    /// decided, which is exactly the confusion ADR 0010's explicit
+    /// revocations exist to prevent.
+    TooLarge {
+        max_entries: usize,
+    },
+    Store(anyhow::Error),
+}
+
+impl std::fmt::Display for SnapshotRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SnapshotRefusal::TooLarge { max_entries } => write!(
+                formatter,
+                "the consent state holds more than {max_entries} entries"
+            ),
+            SnapshotRefusal::Store(error) => write!(formatter, "{error}"),
+        }
+    }
 }
 
 impl Store {
@@ -408,21 +519,120 @@ impl Store {
         for row in rows {
             let (kind, id, network, state, decided_at, decision_sequence) =
                 row.context("failed to read a current-state row")?;
-            entries.push(Entry {
-                subject: Subject {
-                    kind: SubjectType::parse(&kind)
-                        .with_context(|| format!("the journal holds the subject type {kind:?}"))?,
-                    id,
-                },
-                network: Network::parse(&network)
-                    .with_context(|| format!("the journal holds the network {network:?}"))?,
-                state: State::parse(&state)
-                    .with_context(|| format!("the journal holds the state {state:?}"))?,
+            entries.push(entry(
+                kind,
+                id,
+                network,
+                state,
                 decided_at,
                 decision_sequence,
-            });
+            )?);
         }
         Ok(entries)
+    }
+
+    /// The snapshot a consumer with a cold cache starts from: the current
+    /// state, and the JetStream sequence it reflects (ticket #50, ADR 0010).
+    ///
+    /// # Why the published prefix, and not the journal's head
+    ///
+    /// Only a decision that has reached the bus has a position on it. A
+    /// snapshot that included the decisions still waiting in the outbox
+    /// would have to name the position of the last *published* one — and a
+    /// consumer starting there would then be handed those decisions a second
+    /// time when the outbox drains, applying them twice. So the snapshot
+    /// stops where the bus's knowledge stops: `decision_sequence` is the end
+    /// of the positioned prefix (`consent_snapshot_horizon`), the entries
+    /// are that prefix's state, and every decision the snapshot does not
+    /// know about is, by construction, a decision the consumer will be told
+    /// about from `stream_sequence + 1`. No overlap, no gap.
+    ///
+    /// A bus outage therefore delays the snapshot's content rather than
+    /// corrupting it: the decisions accumulate as unpositioned rows, the
+    /// snapshot keeps naming the last position it can vouch for, and the
+    /// consumer receives the backlog in order once the outbox drains.
+    ///
+    /// # Why the position cannot disagree with the content
+    ///
+    /// Both are read inside one transaction, and every write goes through
+    /// the same single connection behind this store's mutex — so no decision
+    /// can be committed, and none can be marked published, between the read
+    /// of the state and the read of the position. Whatever a concurrent
+    /// caller does, it lands entirely inside this snapshot or entirely after
+    /// it.
+    ///
+    /// # The cap
+    ///
+    /// `max_entries` is a bound, not a page size: there is no pagination,
+    /// and a state larger than the cap is refused with
+    /// [`SnapshotRefusal::TooLarge`] rather than truncated. The query asks
+    /// for one row more than the cap, so a refusal costs one extra row and
+    /// never materialises a state nobody may have.
+    pub fn snapshot(&self, max_entries: usize) -> Result<Snapshot, SnapshotRefusal> {
+        let mut connection = self.connection();
+        // Deferred: the whole of this is a read, and in WAL mode the first
+        // statement fixes the snapshot every later one sees. The mutex above
+        // already serialises this against a decision being recorded; the
+        // transaction is what keeps that true if this store ever grows a
+        // second connection.
+        let transaction = connection
+            .transaction()
+            .context("failed to open the snapshot transaction")
+            .map_err(SnapshotRefusal::Store)?;
+
+        let (decision_sequence, stream_sequence) = transaction
+            .query_row(
+                "SELECT h.decision_sequence, \
+                        COALESCE((SELECT d.stream_sequence FROM consent_decision d \
+                                  WHERE d.sequence = h.decision_sequence), 0) \
+                 FROM consent_snapshot_horizon h",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .context("failed to read the snapshot's stream position")
+            .map_err(SnapshotRefusal::Store)?;
+
+        let mut statement = transaction
+            .prepare(
+                "SELECT subject_type, subject_id, network, state, decided_at, decision_sequence \
+                 FROM consent_snapshot ORDER BY subject_type, subject_id, network LIMIT ?1",
+            )
+            .context("failed to prepare the snapshot query")
+            .map_err(SnapshotRefusal::Store)?;
+        // One more than the cap: enough to know the state is over it, and
+        // never the whole of an oversized state.
+        let ceiling = i64::try_from(max_entries.saturating_add(1)).unwrap_or(i64::MAX);
+        let rows = statement
+            .query_map([ceiling], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .context("failed to read the snapshot")
+            .map_err(SnapshotRefusal::Store)?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (kind, id, network, state, decided_at, decision_sequence) = row
+                .context("failed to read a snapshot row")
+                .map_err(SnapshotRefusal::Store)?;
+            if entries.len() == max_entries {
+                return Err(SnapshotRefusal::TooLarge { max_entries });
+            }
+            entries.push(
+                entry(kind, id, network, state, decided_at, decision_sequence)
+                    .map_err(SnapshotRefusal::Store)?,
+            );
+        }
+        Ok(Snapshot {
+            entries,
+            decision_sequence,
+            stream_sequence: u64::try_from(stream_sequence).unwrap_or(0),
+        })
     }
 
     /// The effective consent state of a contact on one network, with the
@@ -510,15 +720,32 @@ impl Store {
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
-    /// Marks a decision as published. The only mutation the journal allows,
-    /// and the one whose loss is survivable: a row published but not marked
-    /// is republished, and the bus deduplicates it on `Nats-Msg-Id`.
-    pub fn mark_published(&self, sequence: i64, published_at: &str) -> Result<()> {
+    /// Marks a decision as published, at the position the bus stored it at.
+    /// The only mutation the journal allows, and the one whose loss is
+    /// survivable: a row published but not marked is republished, and the bus
+    /// deduplicates it on `Nats-Msg-Id` — answering with the sequence of the
+    /// message it already holds, so the position this records is the same one
+    /// either way.
+    ///
+    /// The position is what the snapshot names ([`Store::snapshot`]), so it
+    /// is written in the same statement as the mark: a row that counts as
+    /// published and has no position would hold the snapshot's horizon back
+    /// forever.
+    pub fn mark_published(
+        &self,
+        sequence: i64,
+        published_at: &str,
+        stream_sequence: u64,
+    ) -> Result<()> {
         self.connection()
             .execute(
-                "UPDATE consent_decision SET published_at = ? \
-                 WHERE sequence = ? AND published_at IS NULL",
-                rusqlite::params![published_at, sequence],
+                "UPDATE consent_decision SET published_at = ?1, stream_sequence = ?2 \
+                 WHERE sequence = ?3 AND published_at IS NULL",
+                rusqlite::params![
+                    published_at,
+                    i64::try_from(stream_sequence).unwrap_or(i64::MAX),
+                    sequence
+                ],
             )
             .with_context(|| format!("failed to mark decision {sequence} published"))?;
         Ok(())
@@ -529,6 +756,34 @@ impl Store {
             .lock()
             .expect("the consent store mutex is never poisoned")
     }
+}
+
+/// One state row as the domain reads it. Shared by the current-state
+/// projection and the snapshot, so the two can never disagree about what a
+/// stored value means — and so an unknown value is the same loud failure in
+/// both: the journal is the record of truth, and a row nobody can read is a
+/// bug to see, not a row to skip.
+fn entry(
+    kind: String,
+    id: String,
+    network: String,
+    state: String,
+    decided_at: String,
+    decision_sequence: i64,
+) -> Result<Entry> {
+    Ok(Entry {
+        subject: Subject {
+            kind: SubjectType::parse(&kind)
+                .with_context(|| format!("the journal holds the subject type {kind:?}"))?,
+            id,
+        },
+        network: Network::parse(&network)
+            .with_context(|| format!("the journal holds the network {network:?}"))?,
+        state: State::parse(&state)
+            .with_context(|| format!("the journal holds the state {state:?}"))?,
+        decided_at,
+        decision_sequence,
+    })
 }
 
 /// Narrows a path to its owner. Best effort: a store on a filesystem that
@@ -782,7 +1037,7 @@ mod tests {
         assert_eq!(store.unpublished_count().unwrap(), 1);
 
         store
-            .mark_published(committed.sequence, "2026-09-17T10:00:01.000Z")
+            .mark_published(committed.sequence, "2026-09-17T10:00:01.000Z", 42)
             .unwrap();
         assert!(store.unpublished(10).unwrap().is_empty());
         assert_eq!(store.unpublished_count().unwrap(), 0);
@@ -837,5 +1092,273 @@ mod tests {
         assert_eq!(envelope["network"].as_str(), Some("whatsapp"));
         assert_eq!(envelope["data"]["scope"]["networks"], json!(["whatsapp"]));
         assert_eq!(envelope["id"].as_str(), Some(committed.event_id.as_str()));
+    }
+
+    // -----------------------------------------------------------------
+    // The snapshot (ticket #50)
+    // -----------------------------------------------------------------
+
+    /// Publishes a committed decision the way the outbox does, at the bus
+    /// position the bus would have answered with.
+    fn publish(store: &Store, sequence: i64, stream_sequence: u64) {
+        store
+            .mark_published(sequence, "2026-09-17T11:00:00.000Z", stream_sequence)
+            .expect("the decision is marked published");
+    }
+
+    #[test]
+    fn an_empty_journal_snapshots_to_nothing_at_position_zero() {
+        let snapshot = store("snapshot-empty").snapshot(100).unwrap();
+        assert!(snapshot.entries.is_empty());
+        assert_eq!(snapshot.decision_sequence, 0);
+        // Zero, so that a consumer's "position plus one" is the start of the
+        // stream: with nothing decided there is nothing to have missed.
+        assert_eq!(snapshot.stream_sequence, 0);
+    }
+
+    #[test]
+    fn the_snapshot_reflects_the_published_prefix_and_names_its_position() {
+        let store = store("snapshot-prefix");
+        let granted = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:00:00.000Z",
+        );
+        let default = record(
+            &store,
+            &decision(
+                SubjectType::Network,
+                "signal",
+                State::Granted,
+                &[Network::Signal],
+            ),
+            "2026-09-17T10:01:00.000Z",
+        );
+        publish(&store, granted.sequence, 100);
+        publish(&store, default.sequence, 101);
+
+        let snapshot = store.snapshot(100).unwrap();
+        assert_eq!(snapshot.decision_sequence, default.sequence);
+        assert_eq!(snapshot.stream_sequence, 101);
+        // The network default is in it, as much an entry as the contact's
+        // own decision.
+        assert_eq!(snapshot.entries.len(), 2, "{:?}", snapshot.entries);
+        assert!(snapshot.entries.iter().any(
+            |entry| entry.subject.kind == SubjectType::Network && entry.subject.id == "signal"
+        ));
+
+        // A third decision, committed but not yet on the bus: the snapshot
+        // keeps naming the position it can vouch for, and keeps the state
+        // that position produced. Anything else would hand a consumer a
+        // revocation it is about to be told about again.
+        let revoked = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Revoked,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:02:00.000Z",
+        );
+        let waiting = store.snapshot(100).unwrap();
+        assert_eq!(waiting.decision_sequence, default.sequence);
+        assert_eq!(waiting.stream_sequence, 101);
+        assert_eq!(
+            waiting
+                .entries
+                .iter()
+                .find(|entry| entry.subject.id == "@a:example.com")
+                .map(|entry| entry.state),
+            Some(State::Granted),
+            "an unpublished revocation is not in the snapshot: the consumer \
+             will hear it on the bus after this position"
+        );
+
+        // Once it reaches the bus, the snapshot moves with it — and the
+        // revocation is explicit, not an absence.
+        publish(&store, revoked.sequence, 107);
+        let moved = store.snapshot(100).unwrap();
+        assert_eq!(moved.decision_sequence, revoked.sequence);
+        assert_eq!(moved.stream_sequence, 107);
+        assert_eq!(
+            moved
+                .entries
+                .iter()
+                .find(|entry| entry.subject.id == "@a:example.com")
+                .map(|entry| entry.state),
+            Some(State::Revoked)
+        );
+    }
+
+    #[test]
+    fn the_horizon_stops_at_the_first_decision_the_bus_has_not_taken() {
+        let store = store("snapshot-horizon");
+        let first = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:00:00.000Z",
+        );
+        let second = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@b:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:01:00.000Z",
+        );
+        let third = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@c:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:02:00.000Z",
+        );
+        // The outbox publishes in order, so this cannot happen — but if a
+        // future change ever left a hole, the snapshot must stop at it
+        // rather than name a position with a decision missing underneath.
+        publish(&store, first.sequence, 10);
+        publish(&store, third.sequence, 12);
+
+        let snapshot = store.snapshot(100).unwrap();
+        assert_eq!(snapshot.decision_sequence, first.sequence);
+        assert_eq!(snapshot.stream_sequence, 10);
+        assert_eq!(
+            snapshot.entries.len(),
+            1,
+            "only the decisions before the hole: {:?}",
+            snapshot.entries
+        );
+        let _ = second;
+    }
+
+    #[test]
+    fn a_persona_decision_is_kept_in_the_journal_and_left_out_of_the_snapshot() {
+        let store = store("snapshot-persona");
+        let contact = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:00:00.000Z",
+        );
+        publish(&store, contact.sequence, 5);
+        // A persona activation, written straight into the journal: the write
+        // API refuses `persona` until #60 opens it (ADR 0013), and this test
+        // is what says the snapshot is ready for it — the exclusion is in
+        // SQL, so the snapshot never even reads the row.
+        {
+            let connection = store.connection();
+            connection
+                .execute(
+                    "INSERT INTO consent_decision \
+                     (event_id, subject_type, subject_id, old_state, new_state, scope_key, \
+                      occurred_at, actor, reason, envelope, published_at, stream_sequence) \
+                     VALUES ('f0'||hex(randomblob(31)), 'persona', 'assistant', 'unset', \
+                             'granted', 'whatsapp', '2026-09-17T10:03:00.000Z', ?1, NULL, '{}', \
+                             '2026-09-17T11:00:00.000Z', 6)",
+                    [OWNER],
+                )
+                .expect("a persona decision is appended");
+            let sequence = connection.last_insert_rowid();
+            connection
+                .execute(
+                    "INSERT INTO consent_decision_network (sequence, network) VALUES (?1, 'whatsapp')",
+                    [sequence],
+                )
+                .expect("its scope is appended");
+        }
+
+        let snapshot = store.snapshot(100).unwrap();
+        assert_eq!(
+            snapshot.entries.len(),
+            1,
+            "the persona is not consent state a consumer labels senders by: {:?}",
+            snapshot.entries
+        );
+        assert_eq!(snapshot.entries[0].subject.kind, SubjectType::Contact);
+        // Its position still counts: the persona decision is on the bus, so
+        // a consumer starting after it is not told about it twice.
+        assert_eq!(snapshot.stream_sequence, 6);
+    }
+
+    #[test]
+    fn a_state_over_the_cap_is_refused_whole_rather_than_truncated() {
+        let store = store("snapshot-cap");
+        for (index, contact) in ["@a:example.com", "@b:example.com", "@c:example.com"]
+            .into_iter()
+            .enumerate()
+        {
+            let committed = record(
+                &store,
+                &decision(
+                    SubjectType::Contact,
+                    contact,
+                    State::Granted,
+                    &[Network::Whatsapp],
+                ),
+                &format!("2026-09-17T10:0{index}:00.000Z"),
+            );
+            publish(&store, committed.sequence, 20 + index as u64);
+        }
+        // At the cap: served.
+        assert_eq!(store.snapshot(3).unwrap().entries.len(), 3);
+        // Over it: refused, and the refusal names the cap rather than
+        // handing back the first two entries.
+        match store.snapshot(2) {
+            Err(SnapshotRefusal::TooLarge { max_entries }) => assert_eq!(max_entries, 2),
+            other => panic!("an oversized snapshot must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_store_from_the_previous_schema_holds_its_horizon_back() {
+        let store = store("snapshot-migrated");
+        let committed = record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:00:00.000Z",
+        );
+        // What schema v1 left behind: published, with no position recorded.
+        store
+            .connection()
+            .execute(
+                "UPDATE consent_decision SET published_at = '2026-09-17T11:00:00.000Z', \
+                 stream_sequence = NULL WHERE sequence = ?1",
+                [committed.sequence],
+            )
+            .unwrap();
+        let snapshot = store.snapshot(100).unwrap();
+        assert_eq!(
+            snapshot.decision_sequence, 0,
+            "a decision whose position nobody recorded cannot be vouched for"
+        );
+        assert!(snapshot.entries.is_empty());
+        // And the safe direction it fails in: the consumer starts at the
+        // beginning of the stream and applies that decision from the bus.
+        assert_eq!(snapshot.stream_sequence, 0);
     }
 }

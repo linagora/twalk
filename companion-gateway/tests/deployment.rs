@@ -59,6 +59,10 @@ const OWNER_LOCALPART: &str = "owner";
 /// Throwaway constants for the local, ephemeral deploy-test stack.
 const OWNER_PASSWORD: &str = "deploy-test-only-password-owner";
 const REGISTRATION_SHARED_SECRET: &str = "deploy-test-only-registration-shared-secret";
+/// The service token the deployed Gateway serves its consent snapshot to
+/// (ticket #50) — long enough for the Gateway's own minimum, and throwaway
+/// like the rest of this stack's credentials.
+const SERVICE_TOKEN: &str = "deploy-test-only-gateway-service-token";
 
 fn owner_user_id() -> String {
     format!("@{OWNER_LOCALPART}:{SERVER_NAME}")
@@ -173,6 +177,7 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_REGISTRATION_SHARED_SECRET={REGISTRATION_SHARED_SECRET}\n\
          GATEWAY_SENSOR_USER_ID=@sensor:{SERVER_NAME}\n\
          GATEWAY_NATS_URL=nats://nats:4222\n\
+         GATEWAY_SERVICE_TOKEN={SERVICE_TOKEN}\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n\
          TWALK_SENSOR_IMAGE={sensor_image}\n"
     );
@@ -456,6 +461,40 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
         Some(0),
         "the deployed Gateway must have opened its consent journal and drained its outbox: \
          no gauge at all means GATEWAY_NATS_URL or GATEWAY_STATE_DIR never reached the container"
+    );
+
+    // The consent snapshot (#50) is wired in the deployed image, and its
+    // credential is not the device cookie: the service token from the
+    // environment file opens it, and nothing else does. This is what a
+    // Sensor with a cold cache will call (#51), so the variable reaching the
+    // container is the property worth pinning here — an empty state is the
+    // right answer on a stack where nobody has decided anything.
+    let client = reqwest::Client::new();
+    let snapshot = client
+        .get(format!("{base}/api/consent/snapshot"))
+        .bearer_auth(SERVICE_TOKEN)
+        .send()
+        .await?;
+    assert_eq!(
+        snapshot.status(),
+        reqwest::StatusCode::OK,
+        "the deployed Gateway must serve its consent snapshot to the service token: \
+         a 503 here means GATEWAY_SERVICE_TOKEN never reached the container"
+    );
+    let snapshot: serde_json::Value = snapshot.json().await?;
+    assert_eq!(snapshot["stream"].as_str(), Some("twalk"));
+    assert_eq!(
+        snapshot["next_stream_sequence"].as_u64(),
+        snapshot["stream_sequence"]
+            .as_u64()
+            .map(|sequence| sequence + 1),
+        "the snapshot names the sequence a consumer starts at: {snapshot}"
+    );
+    let unauthenticated = reqwest::get(format!("{base}/api/consent/snapshot")).await?;
+    assert_eq!(
+        unauthenticated.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the deployed Gateway's snapshot must refuse a caller with no service token"
     );
 
     // Only on request: a service left up (with its image) is what makes the

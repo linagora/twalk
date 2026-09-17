@@ -274,6 +274,17 @@ services:
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL: ${GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL:-http://bridge-signal:29328}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_NETWORK: signal
+      # The consent snapshot (ticket #50): the token a consumer reads
+      # GET /api/consent/snapshot with — the whole consent state and the bus
+      # sequence it reflects, which is how a component with a cold cache
+      # recovers consent (ADR 0010). Its caller is a service and not a
+      # browser, so it is a token in configuration and not a sign-in. Empty:
+      # the endpoint answers 503 and nothing else changes.
+      GATEWAY_SERVICE_TOKEN: ${GATEWAY_SERVICE_TOKEN:-}
+      # The largest snapshot this Gateway serves, in (subject, network)
+      # entries; empty means its default. There is no pagination — a state
+      # over the cap is an error naming this variable, never a truncation.
+      GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES: ${GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES:-}
     volumes:
       # The device list and the session tokens' digests — a restart keeps the
       # user signed in on every device they signed in on — and the consent

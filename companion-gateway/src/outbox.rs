@@ -11,6 +11,13 @@
 //! the worse failure: the audit trail would claim a grant the Gateway does
 //! not have.
 //!
+//! Marking a row published also records **where** on the bus it landed: the
+//! ack's stream sequence goes into the journal beside it, because that is the
+//! position the consent snapshot names for a cold consumer to start from
+//! (ticket #50, [`crate::store::Store::snapshot`]). A decision is therefore
+//! either unpublished, or published with a known position — never published
+//! and nowhere.
+//!
 //! The request path never waits for the bus. Recording notifies this
 //! module's loop and answers; the loop drains the outbox, and while the bus
 //! is unreachable the decisions simply accumulate as unpublished rows. That
@@ -225,9 +232,16 @@ async fn drain(
         let ack = ack
             .await
             .with_context(|| format!("the bus did not ack decision {}", decision.sequence))?;
-        outbox
-            .store
-            .mark_published(decision.sequence, &consent::rfc3339_millis((outbox.now)()))?;
+        // The ack's sequence is where the bus stored the event, and it is
+        // what the snapshot names as its position (#50). On a republish the
+        // bus deduplicates and answers with the sequence of the message it
+        // already holds, so the position recorded is the same whichever
+        // attempt won.
+        outbox.store.mark_published(
+            decision.sequence,
+            &consent::rfc3339_millis((outbox.now)()),
+            ack.sequence,
+        )?;
         outbox.metrics.record_consent_published();
         info!(
             event_id = %decision.event_id,

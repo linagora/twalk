@@ -17,8 +17,10 @@
 //! with that bridge's secret, **holds the blocking step of a QR login
 //! itself**, and exposes a pollable state the Companion reads ([`bridge`],
 //! [`bridge_http`]), so a phone that sleeps mid-scan loses a poll and not
-//! the login. The consent snapshot (#50) lands the same way in a remaining
-//! ticket of spec #46.
+//! the login; ticket #50 added the consent snapshot ([`consent_snapshot`]) —
+//! the whole current state with the JetStream sequence it reflects,
+//! authenticated by a service token, which is how a consumer whose cache is
+//! cold recovers consent and then follows the bus (ADR 0010).
 //!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
@@ -37,6 +39,7 @@ pub mod bridge_http;
 pub mod config;
 pub mod consent;
 pub mod consent_http;
+pub mod consent_snapshot;
 pub mod http;
 pub mod matrix_openid;
 pub mod metrics;

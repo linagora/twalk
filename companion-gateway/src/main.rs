@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 use twalk_companion_gateway::bootstrap::Bootstrap;
 use twalk_companion_gateway::config::{Config, Consent};
+use twalk_companion_gateway::consent_snapshot::Snapshots;
 use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
@@ -176,6 +177,35 @@ async fn main() -> Result<()> {
             );
         }
     }
+    // The consent snapshot (ticket #50): the service token that
+    // authenticates the Sensor's read, and the cap that makes an oversized
+    // snapshot an error instead of a truncation. Independent of the bus
+    // above, so that an operator who set one and not the other gets an
+    // answer naming what is actually missing.
+    let snapshots = match &config.snapshot {
+        Some(snapshot) => {
+            info!(
+                max_entries = snapshot.max_entries,
+                "the consent snapshot is enabled: GET /api/consent/snapshot serves the whole \
+                 consent state with the stream sequence it reflects, to a caller presenting \
+                 the service token"
+            );
+            Some(Arc::new(Snapshots::new(
+                &snapshot.service_token,
+                snapshot.max_entries,
+            )))
+        }
+        None => {
+            if config.consent.is_some() {
+                warn!(
+                    "GATEWAY_SERVICE_TOKEN is not set: GET /api/consent/snapshot answers 503, so \
+                     a consumer with a cold cache cannot recover consent state and will label \
+                     every sender pending until it hears a decision on the bus"
+                );
+            }
+            None
+        }
+    };
 
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
@@ -195,7 +225,8 @@ async fn main() -> Result<()> {
             .with_sessions(sessions)
             .with_bootstrap(bootstrap)
             .with_consent(consent)
-            .with_bridges(bridges),
+            .with_bridges(bridges)
+            .with_snapshots(snapshots),
     );
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(

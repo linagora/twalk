@@ -397,6 +397,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/consent/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The whole consent state, with the stream position it reflects.
+         * @description What a consumer whose cache is cold reads before it follows the bus
+         *     (ADR 0010). A durable consumer resumes at its ack floor, so decisions
+         *     it has already applied are never redelivered; this endpoint answers
+         *     the question directly, and names the JetStream sequence its content
+         *     reflects so the consumer can carry on from there.
+         *
+         *     **The hand-off.** Apply `entries`, then create the stream consumer at
+         *     `next_stream_sequence` — which is `stream_sequence + 1`, spelled out
+         *     because that off-by-one is the one mistake that would skip a
+         *     decision. Every decision ever taken is then in exactly one of the
+         *     two: in this snapshot, or on the stream after `stream_sequence`.
+         *     Never both, never neither.
+         *
+         *     That holds because the snapshot reflects the journal's **published
+         *     prefix**: a decision still waiting in the Gateway's outbox has no
+         *     position on the bus yet, so it is left out of the content and
+         *     arrives, in order, after the position named here. A bus outage
+         *     therefore delays what the snapshot knows rather than corrupting the
+         *     hand-off. With nothing published yet, `stream_sequence` is `0` and
+         *     the consumer starts at `1`: the whole stream.
+         *
+         *     **What is in `entries`.** One entry per (subject, network):
+         *     `network` entries are that network's default and `contact` entries
+         *     override them, exactly as `GET /api/consent/state` reports them and
+         *     with the precedence resolved by `GET /api/consent/effective`.
+         *     Revocations are as explicit as grants — an absent subject means
+         *     "never decided", never "revoked", which is the distinction the shape
+         *     exists to keep. `persona` subjects are excluded: activating a persona
+         *     is a consent decision (ADR 0013), but it is not state a consumer
+         *     labels senders by.
+         *
+         *     **Not paginated.** A cursor would be a second ordering to get wrong,
+         *     and a half-applied snapshot is worse than none. Instead there is a
+         *     cap (`GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES`, 100000 by default) and a
+         *     state over it is refused with `snapshot_too_large` rather than
+         *     truncated.
+         *
+         *     **Authentication.** A service token from the Gateway's own
+         *     configuration (`GATEWAY_SERVICE_TOKEN`), as `Authorization: Bearer`.
+         *     Its caller is the Sensor: a service, not one of the owner's browsers,
+         *     with no Matrix OpenID token to sign in with and no cookie to send.
+         *     The two credentials are disjoint — a device token is not accepted
+         *     here, and this token opens no other endpoint. There is no timestamp
+         *     and no version in the answer: the stream sequence is the only
+         *     ordering this design trusts.
+         */
+        get: operations["getConsentSnapshot"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/consent/state": {
         parameters: {
             query?: never;
@@ -416,10 +480,11 @@ export interface paths {
          *     explicit as grants, and an absent subject means "never decided",
          *     never "revoked".
          *
-         *     Ticket #50 adds the snapshot a cold consumer reads: the same state
-         *     plus the JetStream sequence it reflects, authenticated by the
-         *     Sensor's service token. This endpoint names no stream position and
-         *     is not paginated.
+         *     This endpoint is the owner's own read, behind a device token, and it
+         *     names no stream position. The snapshot a cold consumer reads is
+         *     `GET /api/consent/snapshot`: the same entries plus the JetStream
+         *     sequence they reflect, authenticated by the Sensor's service token,
+         *     and with `persona` subjects excluded. Neither is paginated.
          */
         get: operations["getConsentState"];
         put?: never;
@@ -851,10 +916,57 @@ export interface components {
              */
             networks: components["schemas"]["Network"][];
         };
+        /**
+         * @description The whole consent state, and the bus position it reflects. The two
+         *     are read together, so no decision can be committed and published
+         *     between them without appearing in one of the two.
+         */
+        ConsentSnapshot: {
+            /**
+             * @description The position in the Gateway's own decision journal this snapshot
+             *     reflects — the same counter as a recorded decision's `sequence`.
+             *     Not what a consumer starts from (that is the stream sequence
+             *     above): this is for an operator comparing the two.
+             */
+            decision_sequence: number;
+            /**
+             * @description One entry per (subject, network), ordered by subject type,
+             *     subject and network. Revocations are explicit; `persona`
+             *     subjects are excluded.
+             */
+            entries: components["schemas"]["ConsentStateEntry"][];
+            /**
+             * @description `stream_sequence + 1`: where a consumer starts its stream
+             *     consumer after applying `entries`. Spelled out rather than left
+             *     to the client to compute, because that off-by-one would silently
+             *     skip or re-apply one decision.
+             */
+            next_stream_sequence: number;
+            /**
+             * @description The JetStream stream `stream_sequence` is a sequence of — the
+             *     deployment's one stream, `twalk`. Named here so a consumer does
+             *     not have to agree with the Gateway about it out of band.
+             * @example twalk
+             */
+            stream: string;
+            /**
+             * @description The sequence of the last decision this snapshot reflects, as the
+             *     bus stored it. `0` when no decision has reached the bus yet.
+             */
+            stream_sequence: number;
+            /**
+             * @description The subject the decisions in this state were published on, which
+             *     is what a consumer filters its stream consumer by.
+             * @example twalk.consent.state.changed.v1
+             */
+            subject: string;
+        };
         ConsentState: {
             /**
              * @description Every recorded entry, ordered by subject type, subject and
-             *     network. Not paginated: the snapshot's documented cap is #50's.
+             *     network. Not paginated, and uncapped: the cap belongs to the
+             *     snapshot, where the entries are a consumer's whole starting
+             *     state.
              */
             entries: components["schemas"]["ConsentStateEntry"][];
         };
@@ -1150,7 +1262,8 @@ export interface components {
             /**
              * @description The decision's position in the journal, which is the only
              *     ordering the Gateway trusts. Not the bus's sequence — that is
-             *     the snapshot's business (#50).
+             *     `decision_sequence` against `stream_sequence` in
+             *     `GET /api/consent/snapshot`.
              */
             sequence: number;
             subject: components["schemas"]["ConsentSubject"];
@@ -2137,6 +2250,84 @@ export interface operations {
             401: components["responses"]["Unauthenticated"];
             500: components["responses"]["ConsentStoreUnavailable"];
             503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    getConsentSnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The whole consent state, and the position it reflects. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentSnapshot"];
+                };
+            };
+            /**
+             * @description `unauthenticated` — no `Authorization: Bearer` header, one the
+             *     Gateway cannot read, or a token that is not this Gateway's
+             *     service token. One answer for all of them, so a probe learns
+             *     nothing from the difference; a device token is one of the things
+             *     refused here.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unauthenticated";
+                    };
+                };
+            };
+            /**
+             * @description - `snapshot_too_large` — the consent state holds more entries
+             *       than this Gateway serves in one snapshot. The snapshot is
+             *       refused whole and `detail` names the cap: a silently truncated
+             *       snapshot would tell a consumer that contacts the user granted
+             *       were never decided about.
+             *     - `store_unavailable` — the consent journal could not be read.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "snapshot_too_large" | "store_unavailable";
+                    };
+                };
+            };
+            /**
+             * @description - `service_token_not_configured` — `GATEWAY_SERVICE_TOKEN` is
+             *       unset, so this Gateway serves no snapshot to anyone. Answered
+             *       before authentication, so an unauthenticated caller learns
+             *       nothing about the deployment's consent configuration beyond
+             *       this.
+             *     - `consent_not_configured` — the token is configured and
+             *       correct, but `GATEWAY_NATS_URL` is not set, so there is no
+             *       consent journal to snapshot.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "service_token_not_configured" | "consent_not_configured";
+                    };
+                };
+            };
         };
     };
     getConsentState: {
