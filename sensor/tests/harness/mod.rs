@@ -288,6 +288,30 @@ impl Bot {
         .await
     }
 
+    /// Redacts an event (e.g. to remove a reaction). A user may always
+    /// redact their own events.
+    pub async fn redact(&self, room_id: &str, event_id: &str) -> Result<()> {
+        let txn = format!(
+            "{}{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
+            TXN_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        self.send_json(
+            reqwest::Method::PUT,
+            &format!(
+                "/_matrix/client/v3/rooms/{}/redact/{}/{txn}",
+                esc(room_id),
+                esc(event_id)
+            ),
+            Some(&serde_json::json!({})),
+            "redact",
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Sets the bot's own presence (online, offline, unavailable).
     pub async fn set_presence(&self, presence: &str) -> Result<()> {
         self.send_json(

@@ -11,6 +11,10 @@ pub const MESSAGE_RECEIVED_TYPE: &str = "fr.linagora.twalk.inbound.message.recei
 pub const MESSAGE_RECEIVED_DATASCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json";
 
+pub const REACTION_ADDED_TYPE: &str = "fr.linagora.twalk.inbound.reaction.added.v1";
+pub const REACTION_ADDED_DATASCHEMA: &str =
+    "https://schemas.twalk.dev/cloudevents/v1/inbound.reaction.added.schema.json";
+
 pub const STREAM_NAME: &str = "twalk";
 pub const STREAM_SUBJECTS: [&str; 1] = ["twalk.>"];
 
@@ -36,6 +40,18 @@ pub fn cloud_event_id(matrix_event_id: &str, matrix_room_id: &str) -> String {
 
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The contract caps several strings (reaction at 64, display_name at 256,
+/// excerpt at 512, ...): truncate on a char boundary so every published
+/// event stays schema-valid whatever the network sends.
+pub fn cap_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+/// The contract caps `target.excerpt` at 512 characters.
+pub fn excerpt(body: &str) -> String {
+    cap_chars(body, 512)
 }
 
 /// Everything needed to build an `inbound.message.received.v1` envelope,
@@ -65,7 +81,7 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
         "format": "text/plain",
         "reply_to": Value::Null,
         "attachments": [],
-        "contact": { "display_name": input.display_name },
+        "contact": { "display_name": cap_chars(&input.display_name, 256) },
     });
     if let Some(network_timestamp) = &input.network_timestamp {
         data["network_timestamp"] = json!(network_timestamp);
@@ -79,6 +95,60 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
         "subject": input.sender,
         "datacontenttype": "application/json",
         "dataschema": MESSAGE_RECEIVED_DATASCHEMA,
+        "network": input.network.as_str(),
+        "consent": input.consent.as_str(),
+        "data": data,
+    })
+}
+
+/// Everything needed to build an `inbound.reaction.added.v1` envelope,
+/// already resolved at the seam.
+pub struct InboundReaction {
+    /// Event id of the `m.reaction` event itself (the natural key).
+    pub matrix_event_id: String,
+    pub matrix_room_id: String,
+    /// Server name of the Sensor's homeserver (the `source` authority).
+    pub server_name: String,
+    /// Matrix user ID of the reactor (the CloudEvents `subject`).
+    pub reactor: String,
+    /// The reaction key (a Unicode emoji or a network-specific key).
+    pub reaction: String,
+    /// Event id of the message the reaction applies to.
+    pub target_event_id: String,
+    /// Excerpt of the target message, when it could be fetched.
+    pub target_excerpt: Option<String>,
+    pub network: Network,
+    pub consent: Consent,
+    pub display_name: String,
+    /// RFC 3339 timestamp of when the Sensor produced the event.
+    pub produced_at: String,
+    /// RFC 3339 timestamp reported by the source network, when the bridge
+    /// provides one.
+    pub network_timestamp: Option<String>,
+}
+
+pub fn build_reaction_added(input: &InboundReaction) -> Value {
+    let mut target = json!({ "matrix_event_id": input.target_event_id });
+    if let Some(excerpt) = &input.target_excerpt {
+        target["excerpt"] = json!(excerpt);
+    }
+    let mut data = json!({
+        "reaction": cap_chars(&input.reaction, 64),
+        "target": target,
+        "contact": { "display_name": cap_chars(&input.display_name, 256) },
+    });
+    if let Some(network_timestamp) = &input.network_timestamp {
+        data["network_timestamp"] = json!(network_timestamp);
+    }
+    json!({
+        "specversion": "1.0",
+        "id": cloud_event_id(&input.matrix_event_id, &input.matrix_room_id),
+        "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
+        "type": REACTION_ADDED_TYPE,
+        "time": input.produced_at,
+        "subject": input.reactor,
+        "datacontenttype": "application/json",
+        "dataschema": REACTION_ADDED_DATASCHEMA,
         "network": input.network.as_str(),
         "consent": input.consent.as_str(),
         "data": data,
@@ -159,5 +229,90 @@ mod tests {
         input.network_timestamp = Some("2026-09-17T09:59:58Z".to_owned());
         let event = build_message_received(&input);
         assert_eq!(event["data"]["network_timestamp"], "2026-09-17T09:59:58Z");
+    }
+
+    #[test]
+    fn excerpt_keeps_short_bodies_intact() {
+        assert_eq!(excerpt("on décale à 20h ?"), "on décale à 20h ?");
+        assert_eq!(excerpt(""), "");
+    }
+
+    #[test]
+    fn excerpt_truncates_at_the_contract_limit_on_a_char_boundary() {
+        let long = "é".repeat(600);
+        let excerpted = excerpt(&long);
+        assert_eq!(excerpted.chars().count(), 512);
+        assert_eq!(excerpt("x".repeat(513).as_str()).chars().count(), 512);
+    }
+
+    #[test]
+    fn contract_string_caps_are_enforced() {
+        // Reaction keys are capped at 64 chars by the contract.
+        let mut input = sample_reaction();
+        input.reaction = "👍".repeat(100);
+        let event = build_reaction_added(&input);
+        assert_eq!(event["data"]["reaction"].as_str().unwrap().chars().count(), 64);
+        // Display names are capped at 256 chars.
+        let mut message = sample_input();
+        message.display_name = "x".repeat(300);
+        let event = build_message_received(&message);
+        assert_eq!(
+            event["data"]["contact"]["display_name"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            256
+        );
+    }
+
+    fn sample_reaction() -> InboundReaction {
+        InboundReaction {
+            matrix_event_id: "$ReAcTiOn5678".to_owned(),
+            matrix_room_id: "!abcXYZ123:example.com".to_owned(),
+            server_name: "example.com".to_owned(),
+            reactor: "@whatsapp_33612345678:example.com".to_owned(),
+            reaction: "👍".to_owned(),
+            target_event_id: "$AbCdEfGh1234".to_owned(),
+            target_excerpt: Some("On décale à 20h ?".to_owned()),
+            network: Network::Whatsapp,
+            consent: Consent::Pending,
+            display_name: "Aïcha".to_owned(),
+            produced_at: "2026-09-17T10:12:00Z".to_owned(),
+            network_timestamp: None,
+        }
+    }
+
+    #[test]
+    fn reaction_envelope_matches_the_contract_shape() {
+        let event = build_reaction_added(&sample_reaction());
+        assert_eq!(event["specversion"], "1.0");
+        assert_eq!(
+            event["id"],
+            cloud_event_id("$ReAcTiOn5678", "!abcXYZ123:example.com")
+        );
+        assert_eq!(
+            event["source"],
+            "matrix://example.com/!abcXYZ123:example.com"
+        );
+        assert_eq!(event["type"], REACTION_ADDED_TYPE);
+        assert_eq!(event["dataschema"], REACTION_ADDED_DATASCHEMA);
+        assert_eq!(event["subject"], "@whatsapp_33612345678:example.com");
+        assert_eq!(event["network"], "whatsapp");
+        assert_eq!(event["consent"], "pending");
+        assert_eq!(event["data"]["reaction"], "👍");
+        assert_eq!(event["data"]["target"]["matrix_event_id"], "$AbCdEfGh1234");
+        assert_eq!(event["data"]["target"]["excerpt"], "On décale à 20h ?");
+        assert_eq!(event["data"]["contact"]["display_name"], "Aïcha");
+        assert!(event["data"].get("network_timestamp").is_none());
+    }
+
+    #[test]
+    fn reaction_target_omits_the_excerpt_when_unknown() {
+        let mut input = sample_reaction();
+        input.target_excerpt = None;
+        let event = build_reaction_added(&input);
+        assert_eq!(event["data"]["target"]["matrix_event_id"], "$AbCdEfGh1234");
+        assert!(event["data"]["target"].get("excerpt").is_none());
     }
 }
