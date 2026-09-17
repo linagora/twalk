@@ -17,8 +17,9 @@ use matrix_sdk::ruma::events::room::member::{MembershipState, StrippedRoomMember
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
 };
+use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent};
-use matrix_sdk::ruma::{EventId, OwnedUserId};
+use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedUserId, UInt};
 use matrix_sdk::{Client, Room, RoomState};
 use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
@@ -130,7 +131,10 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Inbound messages: normalize and publish.
+    // Inbound messages: normalize and publish. Text, media (image, video,
+    // audio, file), sticker (relayed by some bridges as an m.room.message
+    // msgtype) and location shapes produce events; other msgtypes (notices,
+    // emotes, verification requests, ...) have no v1 shape and are skipped.
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
@@ -141,12 +145,13 @@ async fn main() -> Result<()> {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
                 }
-                let body = match &event.content.msgtype {
-                    MessageType::Text(text) => text.body.clone(),
-                    _ => return, // v1 skeleton: plain text only
+                let Some(attachments) = attachments_for(&event.content.msgtype) else {
+                    return; // no v1 shape for this msgtype
                 };
+                let body = event.content.body().to_owned();
                 let sender: OwnedUserId = event.sender.clone();
-                let Some(network) = resolve_network(&room, &sender).await else {
+                let bridge_content = room_bridge_content(&room).await;
+                let Some(network) = network::resolve(bridge_content.as_ref(), sender.localpart()) else {
                     warn!(room = %room.room_id(), %sender, "cannot determine the network, skipping event");
                     return;
                 };
@@ -160,6 +165,16 @@ async fn main() -> Result<()> {
                 // Consent labelling arrives with ticket 05; unknown senders
                 // default to pending, per the contract.
                 let consent = Consent::Pending;
+                let (reply_target, thread_root) = relation_targets(&event.content);
+                let reply_to = match reply_target {
+                    Some(parent_id) => Some(normalize::ReplyTo {
+                        matrix_event_id: parent_id.to_string(),
+                        // An unreachable parent is not an error: the reply
+                        // still publishes, with an empty excerpt.
+                        excerpt: target_excerpt(&room, &parent_id).await.unwrap_or_default(),
+                    }),
+                    None => None,
+                };
                 let input = normalize::InboundMessage {
                     matrix_event_id: event.event_id.to_string(),
                     matrix_room_id: room.room_id().to_string(),
@@ -169,11 +184,19 @@ async fn main() -> Result<()> {
                     network,
                     consent,
                     display_name,
+                    reply_to,
+                    thread_root: thread_root.map(|event_id| event_id.to_string()),
+                    attachments,
                     produced_at: rfc3339(std::time::SystemTime::now()),
-                    // Bridges report network timestamps in bridge-specific
-                    // fields; the homeserver's origin_server_ts is not one.
-                    // Mapping bridge fields arrives with the enrichment work.
-                    network_timestamp: None,
+                    // Bridge traffic carries the original network time in
+                    // origin_server_ts (mautrix massages it through the
+                    // appservice ts override). The network only resolves
+                    // for bridge traffic — a portal m.bridge state event or
+                    // a ghost sender — so reaching this point means the
+                    // timestamp is the network's; plain Matrix traffic
+                    // never produces an event, and the homeserver's receive
+                    // time never masquerades as one.
+                    network_timestamp: Some(rfc3339_ms(u64::from(event.origin_server_ts.0))),
                 };
                 let envelope = normalize::build_message_received(&input);
                 publish_envelope(
@@ -446,11 +469,10 @@ fn rfc3339_ms(ms: u64) -> String {
         .expect("RFC 3339 formatting is infallible")
 }
 
-/// Reads the room's `m.bridge` state event (the IO) and defers to the pure
-/// attribution policy in `network::resolve`.
-async fn resolve_network(room: &Room, sender: &OwnedUserId) -> Option<network::Network> {
-    let bridge_content = room
-        .get_state_event("m.bridge".into(), "")
+/// Reads the room's `m.bridge` state event content (the IO), the mautrix
+/// portal marker identifying the network.
+async fn room_bridge_content(room: &Room) -> Option<serde_json::Value> {
+    room.get_state_event("m.bridge".into(), "")
         .await
         .ok()
         .flatten()
@@ -461,14 +483,122 @@ async fn resolve_network(room: &Room, sender: &OwnedUserId) -> Option<network::N
             };
             serde_json::from_str::<serde_json::Value>(json).ok()
         })
-        .and_then(|event| event.get("content").cloned());
-    network::resolve(bridge_content.as_ref(), sender.localpart())
+        .and_then(|event| event.get("content").cloned())
 }
 
-/// Fetches the target of a reaction from the homeserver (via the SDK's
-/// `Room::event`) and extracts a contract-capped excerpt of its body.
-/// Only plain text messages yield an excerpt; an unreachable target is not
-/// an error — the event still publishes, without the excerpt.
+/// Defers to the pure attribution policy in `network::resolve`.
+async fn resolve_network(room: &Room, sender: &OwnedUserId) -> Option<network::Network> {
+    network::resolve(room_bridge_content(room).await.as_ref(), sender.localpart())
+}
+
+/// Splits `m.relates_to` into the contract's reply target and thread root.
+/// A threaded message's fallback `m.in_reply_to` (`is_falling_back: true`)
+/// exists only for thread-unaware clients and is not a real reply.
+fn relation_targets(content: &RoomMessageEventContent) -> (Option<OwnedEventId>, Option<OwnedEventId>) {
+    match &content.relates_to {
+        Some(Relation::Reply(reply)) => (Some(reply.in_reply_to.event_id.clone()), None),
+        Some(Relation::Thread(thread)) => {
+            let reply = match (&thread.in_reply_to, thread.is_falling_back) {
+                (Some(in_reply_to), false) => Some(in_reply_to.event_id.clone()),
+                _ => None,
+            };
+            (reply, Some(thread.event_id.clone()))
+        }
+        _ => (None, None),
+    }
+}
+
+/// The contract requires both pixel dimensions, each at least 1 pixel.
+fn dimensions(width: Option<UInt>, height: Option<UInt>) -> Option<(u64, u64)> {
+    let (width, height) = (u64::from(width?), u64::from(height?));
+    (width >= 1 && height >= 1).then_some((width, height))
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Maps an observed msgtype to its contract attachments, or None when the
+/// msgtype produces no v1 event. Attachments are `mxc://` references into
+/// Matrix media storage: the binary is never downloaded.
+fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> {
+    let mxc_uri = |source: &MediaSource| match source {
+        MediaSource::Plain(mxc) => mxc.to_string(),
+        MediaSource::Encrypted(file) => file.url.to_string(),
+    };
+    let attachment = match msgtype {
+        MessageType::Text(_) => return Some(Vec::new()),
+        MessageType::Image(image) => normalize::Attachment {
+            kind: normalize::AttachmentKind::Image,
+            mxc_uri: mxc_uri(&image.source),
+            mime_type: image.info.as_deref().and_then(|info| info.mimetype.clone()),
+            size_bytes: image.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            caption: image.caption().map(str::to_owned),
+            dimensions: image
+                .info
+                .as_deref()
+                .and_then(|info| dimensions(info.width, info.height)),
+            duration_ms: None,
+        },
+        MessageType::Video(video) => normalize::Attachment {
+            kind: normalize::AttachmentKind::Video,
+            mxc_uri: mxc_uri(&video.source),
+            mime_type: video.info.as_deref().and_then(|info| info.mimetype.clone()),
+            size_bytes: video.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            caption: video.caption().map(str::to_owned),
+            dimensions: video
+                .info
+                .as_deref()
+                .and_then(|info| dimensions(info.width, info.height)),
+            duration_ms: video
+                .info
+                .as_deref()
+                .and_then(|info| info.duration.map(duration_ms)),
+        },
+        MessageType::Audio(audio) => normalize::Attachment {
+            kind: normalize::AttachmentKind::Audio,
+            mxc_uri: mxc_uri(&audio.source),
+            mime_type: audio.info.as_deref().and_then(|info| info.mimetype.clone()),
+            size_bytes: audio.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            caption: audio.caption().map(str::to_owned),
+            dimensions: None,
+            duration_ms: audio
+                .info
+                .as_deref()
+                .and_then(|info| info.duration.map(duration_ms)),
+        },
+        MessageType::File(file) => normalize::Attachment {
+            kind: normalize::AttachmentKind::File,
+            mxc_uri: mxc_uri(&file.source),
+            mime_type: file.info.as_deref().and_then(|info| info.mimetype.clone()),
+            size_bytes: file.info.as_deref().and_then(|info| info.size.map(u64::from)),
+            caption: file.caption().map(str::to_owned),
+            dimensions: None,
+            duration_ms: None,
+        },
+        // Geo messages carry no mxc URI and the contract's attachment shape
+        // requires one: in v1 a location travels as the message body only.
+        MessageType::Location(_) => return Some(Vec::new()),
+        // Some bridges relay stickers as m.room.message with an m.sticker
+        // msgtype; ruma leaves unknown msgtypes as raw content.
+        MessageType::_Custom(_) if msgtype.msgtype() == "m.sticker" => {
+            match normalize::attachment_from_sticker_data(msgtype.data().as_ref()) {
+                Some(attachment) => attachment,
+                // A sticker without a usable mxc URI still publishes as a
+                // message (its body is the alt text), without an entry.
+                None => return Some(Vec::new()),
+            }
+        }
+        _ => return None,
+    };
+    Some(vec![attachment])
+}
+
+/// Fetches the target of a relation from the homeserver (via the SDK's
+/// `Room::event`) and extracts a contract-capped excerpt of its body: the
+/// plain text for a text message, the caption or filename for media, the
+/// geo description for a location. An unreachable target is not an error —
+/// the event still publishes, without the excerpt.
 async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
     let timeline_event = room.event(event_id, None).await.ok()?;
     let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
@@ -477,10 +607,7 @@ async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
     else {
         return None;
     };
-    match message.content.msgtype {
-        MessageType::Text(text) => Some(normalize::excerpt(&text.body)),
-        _ => None,
-    }
+    Some(normalize::excerpt(message.content.body()))
 }
 
 /// Publishes a CloudEvents envelope on the bus with the contract's headers:
