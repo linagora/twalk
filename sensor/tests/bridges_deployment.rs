@@ -23,16 +23,20 @@
 //! The stack runs under its own compose project and host ports, next to the
 //! harness's stack and to the other two deploy-stack tests:
 //! TWALK_BRIDGES_TEST_STACK (default twalk-bridges-test),
-//! TWALK_BRIDGES_TEST_SYNAPSE_PORT (default 18528),
-//! TWALK_BRIDGES_TEST_NATS_PORT (default 14728),
-//! TWALK_BRIDGES_TEST_GATEWAY_PORT (default 18538),
-//! TWALK_BRIDGES_TEST_WHATSAPP_PORT (default 18548) and
-//! TWALK_BRIDGES_TEST_SIGNAL_PORT (default 18558) — all distinct from the
+//! TWALK_BRIDGES_TEST_SYNAPSE_PORT (default 18568),
+//! TWALK_BRIDGES_TEST_NATS_PORT (default 14778),
+//! TWALK_BRIDGES_TEST_GATEWAY_PORT (default 18578),
+//! TWALK_BRIDGES_TEST_WHATSAPP_PORT (default 18588) and
+//! TWALK_BRIDGES_TEST_SIGNAL_PORT (default 18598) — all distinct from the
 //! defaults of `deployment.rs` (18218 / 14418 / 18328) and of
 //! `companion-gateway/tests/deployment.rs` (18318), so several
-//! default-configured deploy stacks can sit on one Docker daemon. The bridge
-//! images are upstream and pinned by tag in `compose.yaml`, so unlike the
-//! Sensor's and the Gateway's there is no per-stack image tag to keep apart.
+//! default-configured deploy stacks can sit on one Docker daemon. They sit at
+//! the top of their ranges on purpose: an ad-hoc stack in another worktree
+//! took 18548 while this test was being written, and a default that loses a
+//! race to a neighbour is a default worth moving. Every one of them is
+//! overridable for exactly that reason. The bridge images are upstream and
+//! pinned by tag in `compose.yaml`, so unlike the Sensor's and the Gateway's
+//! there is no per-stack image tag to keep apart.
 //!
 //! The stack stays up between runs: that is what makes a warm run fast. Set
 //! TWALK_BRIDGES_TEST_TEARDOWN=1 to drop it at the end of a passing run
@@ -80,7 +84,7 @@ const BRIDGES: [Bridge; 2] = [
         provisioning_secret: "bridges-test-only-whatsapp-provisioning-secret",
         status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-whatsapp/status",
         port_var: "TWALK_BRIDGES_TEST_WHATSAPP_PORT",
-        default_port: "18548",
+        default_port: "18588",
     },
     Bridge {
         network: "signal",
@@ -91,7 +95,7 @@ const BRIDGES: [Bridge; 2] = [
         provisioning_secret: "bridges-test-only-signal-provisioning-secret",
         status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-signal/status",
         port_var: "TWALK_BRIDGES_TEST_SIGNAL_PORT",
-        default_port: "18558",
+        default_port: "18598",
     },
 ];
 
@@ -124,7 +128,7 @@ fn env_port(name: &str, default: &str) -> String {
 fn synapse_url() -> String {
     format!(
         "http://localhost:{}",
-        env_port("TWALK_BRIDGES_TEST_SYNAPSE_PORT", "18528")
+        env_port("TWALK_BRIDGES_TEST_SYNAPSE_PORT", "18568")
     )
 }
 
@@ -144,9 +148,9 @@ fn write_env_file() -> Result<PathBuf> {
         "twalk-bridges-deploy-test-{}-{unique}.env",
         std::process::id()
     ));
-    let synapse_port = env_port("TWALK_BRIDGES_TEST_SYNAPSE_PORT", "18528");
-    let nats_port = env_port("TWALK_BRIDGES_TEST_NATS_PORT", "14728");
-    let gateway_port = env_port("TWALK_BRIDGES_TEST_GATEWAY_PORT", "18538");
+    let synapse_port = env_port("TWALK_BRIDGES_TEST_SYNAPSE_PORT", "18568");
+    let nats_port = env_port("TWALK_BRIDGES_TEST_NATS_PORT", "14778");
+    let gateway_port = env_port("TWALK_BRIDGES_TEST_GATEWAY_PORT", "18578");
     let registrations = BRIDGES
         .iter()
         .map(|bridge| format!("/registrations/{}.yaml", bridge.network))
