@@ -6,8 +6,8 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A puppet presence change produces a schema-valid `inbound.presence.updated.v1`
-- [ ] The event id follows the deterministic natural key defined in the schema
-- [ ] A bridge without presence support leaves the rest of the pipeline unaffected
+- [x] A puppet presence change produces a schema-valid `inbound.presence.updated.v1`
+- [x] The event id follows the deterministic natural key defined in the schema
+- [x] A bridge without presence support leaves the rest of the pipeline unaffected

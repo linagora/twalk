@@ -11,6 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 async-nats = "0.50"
+futures = "0.3"
 matrix-sdk = { version = "0.19", features = ["e2e-encryption"] }
 serde_json = "1"
 sha2 = "0.10"

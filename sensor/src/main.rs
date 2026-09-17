@@ -1,20 +1,27 @@
 //! The Twalk Sensor binary. All the decision logic lives in the library
 //! modules; this file only wires them to matrix-sdk and NATS JetStream.
 
-use anyhow::{Context, Result};
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use async_nats::jetstream::AckKind;
+use futures::StreamExt;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::OriginalSyncReactionEvent;
+use matrix_sdk::ruma::events::relation::Reply;
 use matrix_sdk::ruma::events::room::member::{MembershipState, StrippedRoomMemberEvent};
-use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
+use matrix_sdk::ruma::events::room::message::{
+    MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
+};
 use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent};
 use matrix_sdk::ruma::{EventId, OwnedUserId};
-use matrix_sdk::{Client, Room};
-use tracing::{info, warn};
+use matrix_sdk::{Client, Room, RoomState};
+use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
 use twalk_sensor::consent::Consent;
-use twalk_sensor::{network, normalize};
+use twalk_sensor::{network, normalize, outbound};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -342,6 +349,19 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Outbound: approved replies flow back from the bus into the portal
+    // rooms. Runs concurrently with the sync loop, which feeds the client
+    // the room knowledge the send path needs.
+    {
+        let client = client.clone();
+        let jetstream = jetstream.clone();
+        let retry_base = config.send_retry_base;
+        let max_attempts = config.send_retry_max_attempts;
+        tokio::spawn(async move {
+            consume_approved_replies(client, jetstream, retry_base, max_attempts).await;
+        });
+    }
+
     info!("sensor running");
     client
         .sync(SyncSettings::default())
@@ -401,4 +421,208 @@ async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
         MessageType::Text(text) => Some(normalize::excerpt(&text.body)),
         _ => None,
     }
+}
+
+/// How long to wait before rebuilding a failed or ended approved-reply
+/// consumer.
+const CONSUMER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
+/// Durably consumes `twalk.persona.reply.approved.v1` and posts each approved
+/// reply into its target portal room. A message is acked only after a
+/// successful post; a failed send is redelivered with an exponential backoff
+/// (NAK with delay, driven by the JetStream delivered count), and once the
+/// delivery attempts are exhausted the event moves to the dead-letter
+/// subject — an approved reply is never silently dropped.
+///
+/// Never returns: if the consumer fails to build or its message stream ends,
+/// it is rebuilt after a short delay — approved replies must keep flowing
+/// for as long as the Sensor runs.
+async fn consume_approved_replies(
+    client: Client,
+    jetstream: async_nats::jetstream::Context,
+    retry_base: Duration,
+    max_attempts: i64,
+) {
+    loop {
+        match run_approved_reply_consumer(&client, &jetstream, retry_base, max_attempts).await {
+            Ok(()) => error!("the approved-reply message stream ended; rebuilding the consumer"),
+            Err(error) => error!(%error, "the approved-reply consumer failed; rebuilding it"),
+        }
+        tokio::time::sleep(CONSUMER_RECONNECT_DELAY).await;
+    }
+}
+
+/// One incarnation of the approved-reply consumer: builds the durable pull
+/// consumer and processes its messages until the stream ends.
+async fn run_approved_reply_consumer(
+    client: &Client,
+    jetstream: &async_nats::jetstream::Context,
+    retry_base: Duration,
+    max_attempts: i64,
+) -> Result<()> {
+    let stream = jetstream
+        .get_stream(normalize::STREAM_NAME)
+        .await
+        .context("failed to get the twalk stream")?;
+    let consumer = stream
+        .get_or_create_consumer(
+            outbound::REPLY_CONSUMER,
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(outbound::REPLY_CONSUMER.to_owned()),
+                filter_subject: normalize::bus_subject(outbound::REPLY_APPROVED_TYPE),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                ..Default::default()
+            },
+        )
+        .await
+        .context("failed to ensure the approved-reply consumer")?;
+    let dead_letter_subject = outbound::dead_letter_subject();
+    info!(
+        consumer = outbound::REPLY_CONSUMER,
+        "consuming approved replies"
+    );
+
+    let mut messages = consumer
+        .messages()
+        .await
+        .context("failed to open the approved-reply message stream")?;
+    while let Some(message) = messages.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(%error, "approved-reply stream error, continuing");
+                continue;
+            }
+        };
+        let delivered = match message.info() {
+            Ok(info) => info.delivered,
+            Err(error) => {
+                // The backoff schedule is driven by the delivered count;
+                // without it, assume the first attempt — and say so, so the
+                // restart of the schedule is never silent.
+                warn!(%error, "no delivery info on an approved reply, assuming the first attempt");
+                1
+            }
+        };
+        let job = match serde_json::from_slice::<serde_json::Value>(&message.message.payload)
+            .context("payload is not valid JSON")
+            .and_then(|event| outbound::ApprovedReply::parse(&event))
+        {
+            Ok(job) => job,
+            Err(error) => {
+                // A malformed event can never be delivered: dead-letter it
+                // on the spot instead of burning retries.
+                error!(%error, "unusable persona.reply.approved event, dead-lettering");
+                dead_letter(&jetstream, &dead_letter_subject, &message).await;
+                continue;
+            }
+        };
+        match post_approved_reply(&client, &job).await {
+            Ok(()) => {
+                if let Err(error) = message.ack().await {
+                    warn!(id = %job.event_id, %error, "ack failed after a successful post");
+                }
+                info!(id = %job.event_id, room = %job.room_id, "posted approved reply");
+            }
+            Err(PostError::Permanent(error)) => {
+                error!(id = %job.event_id, room = %job.room_id, %error, "approved reply can never be posted, dead-lettering");
+                dead_letter(&jetstream, &dead_letter_subject, &message).await;
+            }
+            Err(PostError::Transient(error)) if delivered >= max_attempts => {
+                error!(id = %job.event_id, room = %job.room_id, %error, %delivered, "approved reply exhausted its retries, dead-lettering");
+                dead_letter(&jetstream, &dead_letter_subject, &message).await;
+            }
+            Err(PostError::Transient(error)) => {
+                let delay = outbound::retry_delay(retry_base, delivered);
+                warn!(id = %job.event_id, room = %job.room_id, %error, %delivered, ?delay, "approved reply send failed, scheduling a retry");
+                if let Err(error) = message.ack_with(AckKind::Nak(Some(delay))).await {
+                    error!(id = %job.event_id, %error, "nak failed, the message will be redelivered at the ack deadline");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Publishes an undeliverable event to the dead-letter subject and acks the
+/// original. The dead-letter copy keeps the event id as `NATS-Msg-Id` so
+/// bus-level dedup still works, and duplicates the event's `network` and
+/// `consent` extensions as headers, like the inbound path does. If the
+/// publish itself fails the message stays unacked, so it is redelivered
+/// while attempts remain rather than disappearing.
+async fn dead_letter(
+    jetstream: &async_nats::jetstream::Context,
+    subject: &str,
+    message: &async_nats::jetstream::Message,
+) {
+    let mut headers = async_nats::header::HeaderMap::new();
+    if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
+        if let Some(id) = event.get("id").and_then(serde_json::Value::as_str) {
+            headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
+        }
+        for extension in ["network", "consent"] {
+            if let Some(value) = event.get(extension).and_then(serde_json::Value::as_str) {
+                headers.insert(extension, value);
+            }
+        }
+    }
+    match jetstream
+        .publish_with_headers(subject.to_owned(), headers, message.message.payload.clone())
+        .await
+    {
+        Ok(ack) => match ack.await {
+            Ok(_) => {
+                if let Err(error) = message.ack().await {
+                    error!(%error, "ack failed after dead-lettering, a duplicate may be dead-lettered again");
+                }
+            }
+            Err(error) => error!(%error, "dead-letter publish ack failed, leaving the message unacked"),
+        },
+        Err(error) => error!(%error, "dead-letter publish failed, leaving the message unacked"),
+    }
+}
+
+/// A send that can never succeed (malformed target, content the Sensor cannot
+/// render) is permanent; anything else may succeed on a later attempt, e.g.
+/// once the Sensor has joined the target room.
+enum PostError {
+    Permanent(anyhow::Error),
+    Transient(anyhow::Error),
+}
+
+/// Posts one approved reply into its target room, as a native reply to the
+/// original message when the approval names one.
+async fn post_approved_reply(client: &Client, job: &outbound::ApprovedReply) -> Result<(), PostError> {
+    // Deliberate v1 limitation, mirroring the inbound text-only skeleton:
+    // only text/plain is posted; markdown and HTML dead-letter as permanent
+    // failures until rich formatting is specced for outbound.
+    if job.format != "text/plain" {
+        return Err(PostError::Permanent(anyhow!(
+            "unsupported final format {}",
+            job.format
+        )));
+    }
+    let room_id = matrix_sdk::ruma::RoomId::parse(&job.room_id)
+        .map_err(|error| PostError::Permanent(anyhow!(error).context("invalid target room id")))?;
+    let Some(room) = client.get_room(&room_id) else {
+        return Err(PostError::Transient(anyhow!(
+            "the sensor is not a member of the target room"
+        )));
+    };
+    if room.state() != RoomState::Joined {
+        return Err(PostError::Transient(anyhow!(
+            "the sensor has not joined the target room"
+        )));
+    }
+    let mut content = RoomMessageEventContent::text_plain(job.body.clone());
+    if let Some(reply_to) = &job.reply_to_event_id {
+        let event_id = matrix_sdk::ruma::EventId::parse(reply_to)
+            .map_err(|error| PostError::Permanent(anyhow!(error).context("invalid reply target")))?;
+        content.relates_to = Some(Relation::Reply(Reply::with_event_id(event_id)));
+    }
+    room.send_queue()
+        .send(content.into())
+        .await
+        .map_err(|error| PostError::Transient(anyhow!(error).context("matrix send failed")))?;
+    Ok(())
 }
