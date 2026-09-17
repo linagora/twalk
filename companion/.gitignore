@@ -14,5 +14,6 @@ node_modules
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-# What tests/real-stack.mjs writes about the stack it brought up
+# What tests/real-stack.mjs writes about the stacks it brought up
 /tests/.real-stack.json
+/tests/.bridge-stack.json

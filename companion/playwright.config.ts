@@ -20,6 +20,18 @@ import { defineConfig, devices } from '@playwright/test';
 const port = Number(process.env.TWALK_TEST_PORT ?? 4319);
 
 /**
+ * The second origin, for the network journeys of ticket #68. Same server, same
+ * orchestrator, same proxy — a *second* Companion Gateway behind it, with the
+ * stub bridge configured and an owner whose account already exists.
+ *
+ * Two origins because there are two owners, and that is not incidental: the
+ * bootstrap journey (#67) has to start from an account that does **not** exist,
+ * since the Gateway creates this deployment's one account and refuses a second.
+ * A bridge login has to start from one that does. One Gateway cannot be both.
+ */
+const bridgePort = Number(process.env.TWALK_TEST_BRIDGE_PORT ?? port + 1);
+
+/**
  * `TWALK_TEST_REAL_STACK=1` puts a real Companion Gateway and a real Synapse
  * behind the test server (`tests/real-stack.mjs`), which is what the bootstrap
  * journey of ticket #67 needs: cross-signing, secret storage and a key backup
@@ -44,6 +56,7 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
+			testIgnore: 'networks/**',
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',
@@ -51,20 +64,59 @@ export default defineConfig({
 				// asserted at the narrow end, where it has to work.
 				viewport: { width: 390, height: 844 }
 			}
+		},
+		{
+			// Screens 3 and 3a–3d, against the real Gateway and the stub
+			// bridge. These specs skip themselves without the stack, like
+			// every other spec that needs it.
+			name: 'networks',
+			testMatch: 'networks/**/*.spec.ts',
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
 		}
 	],
 
-	webServer: {
-		command: 'node tests/serve-like-gateway.mjs',
-		url: `http://127.0.0.1:${port}/health`,
-		// Never reuse when a real stack is wanted: a server already listening
-		// is one with no Gateway behind it, and the journey would fail
-		// obscurely instead of not running.
-		reuseExistingServer: !process.env.CI && !realStack,
-		// Long enough for `docker compose up --wait` on a cold Synapse and a
-		// cold `cargo build`; the default 60 s is not.
-		timeout: realStack ? 900_000 : 60_000,
-		stdout: 'pipe',
-		stderr: 'pipe'
-	}
+	// One server, run twice when a real stack is wanted: once in front of the
+	// bootstrap Gateway, once in front of the bridge Gateway. Without the
+	// stack there is one static origin and every spec that needs more skips.
+	webServer: realStack
+		? [
+				{
+					command: 'node tests/serve-like-gateway.mjs',
+					url: `http://127.0.0.1:${port}/health`,
+					// Never reuse when a real stack is wanted: a server already
+					// listening is one with no Gateway behind it, and the
+					// journey would fail obscurely instead of not running.
+					reuseExistingServer: false,
+					// Long enough for `docker compose up --wait` on a cold
+					// Synapse and a cold `cargo build`; the default 60 s is not.
+					timeout: 900_000,
+					stdout: 'pipe',
+					stderr: 'pipe'
+				},
+				{
+					command: 'node tests/serve-like-gateway.mjs',
+					url: `http://127.0.0.1:${bridgePort}/health`,
+					env: {
+						TWALK_TEST_PORT: String(bridgePort),
+						TWALK_TEST_BRIDGE_STACK: '1'
+					},
+					reuseExistingServer: false,
+					timeout: 900_000,
+					stdout: 'pipe',
+					stderr: 'pipe'
+				}
+			]
+		: {
+				command: 'node tests/serve-like-gateway.mjs',
+				url: `http://127.0.0.1:${port}/health`,
+				reuseExistingServer: !process.env.CI,
+				timeout: 60_000,
+				stdout: 'pipe',
+				stderr: 'pipe'
+			}
 });

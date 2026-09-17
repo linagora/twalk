@@ -23,7 +23,8 @@
 		"events": "^3.3.0",
 		"intl-messageformat": "^12.1.0",
 		"matrix-js-sdk": "^42.4.0",
-		"openapi-fetch": "^0.17.0"
+		"openapi-fetch": "^0.17.0",
+		"qrcode-generator": "^2.0.4"
 	},
 	"devDependencies": {
 		"@playwright/test": "^1.63.0",

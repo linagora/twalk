@@ -50,7 +50,6 @@ const PORT = Number(process.env.TWALK_TEST_PORT ?? 4319);
 const GATEWAY_VERSION = process.env.TWALK_TEST_GATEWAY_VERSION ?? '0.1.0';
 const GATEWAY_REVISION = process.env.TWALK_TEST_GATEWAY_REVISION ?? 'test';
 const OPENAPI = resolve(join(here, '..', '..', 'companion-gateway', 'openapi.yaml'));
-
 /**
  * With `TWALK_TEST_REAL_STACK=1` this server stops standing in for the API and
  * puts the **real Companion Gateway** behind `/api` — with a real Synapse
@@ -65,7 +64,16 @@ const OPENAPI = resolve(join(here, '..', '..', 'companion-gateway', 'openapi.yam
  * deployment.
  */
 const REAL_STACK = process.env.TWALK_TEST_REAL_STACK === '1';
+/**
+ * `TWALK_TEST_BRIDGE_STACK=1` asks for the same thing with the bridge journeys'
+ * Gateway instead (ticket #68): an owner whose account already exists, and a
+ * stub bridge whose control surface this origin also exposes, under
+ * `/stub-control`. Two origins because there are two owners — see
+ * `playwright.config.ts`.
+ */
+const BRIDGE_STACK = process.env.TWALK_TEST_BRIDGE_STACK === '1';
 let gatewayOrigin = process.env.TWALK_TEST_GATEWAY_PROXY ?? null;
+let stubOrigin = process.env.TWALK_TEST_STUB_PROXY ?? null;
 
 /** `companion-gateway/src/static_files.rs::content_type_for`, value for value. */
 function contentTypeFor(requestPath) {
@@ -236,8 +244,12 @@ async function serveFile(request, response, path, contentType) {
 }
 
 /**
- * Hands one `/api` request to the real Gateway and streams its answer back,
- * headers included — `Set-Cookie` above all, since the session is a cookie.
+ * Hands one request to a real backend and streams its answer back, headers
+ * included — `Set-Cookie` above all, since the session is a cookie.
+ *
+ * Two backends use it: the real Companion Gateway under `/api`, and the stub
+ * bridge's control surface under `/stub-control` (ticket #68), which is how a
+ * browser journey drives both sides of a bridge login from one origin.
  *
  * The `Host` header is forwarded unchanged on purpose: the Gateway decides
  * whether its session cookies carry `Secure` from it
@@ -309,6 +321,14 @@ const server = createServer((request, response) => {
 			return;
 		}
 
+		// The stub bridge's control surface, when one is running: a test drives
+		// both sides of a login — the browser and the bridge — from this one
+		// origin. Never present unless the bridge stack started one.
+		if (stubOrigin !== null && path.startsWith('/stub-control/')) {
+			proxyToGateway(request, response, stubOrigin);
+			return;
+		}
+
 		// The one exception to the fallback: under `/api` a refusal stays
 		// JSON, because a client parsing an API response must never be handed
 		// an HTML page. A browser with no device cookie gets 401 — unless a
@@ -347,12 +367,16 @@ const server = createServer((request, response) => {
 // The real stack, when asked for, comes up *before* the origin answers
 // anything: Playwright waits on `/health`, so a server that is listening is a
 // server whose Gateway and Synapse are ready.
-if (REAL_STACK && gatewayOrigin === null) {
-	const { startRealStack } = await import('./real-stack.mjs');
-	const stack = await startRealStack();
+if ((REAL_STACK || BRIDGE_STACK) && gatewayOrigin === null) {
+	const { startBridgeStack, startRealStack } = await import('./real-stack.mjs');
+	const stack = BRIDGE_STACK ? await startBridgeStack() : await startRealStack();
 	gatewayOrigin = stack.gatewayOrigin;
+	stubOrigin = stack.stubOrigin ?? null;
 	console.log(`the real Gateway answers /api at ${gatewayOrigin}`);
 	console.log(`the real Synapse is ${stack.synapseUrl}, owner ${stack.ownerId}`);
+	if (stubOrigin !== null) {
+		console.log(`the stub bridge answers /stub-control at ${stubOrigin}`);
+	}
 }
 
 server.listen(PORT, '127.0.0.1', () => {
