@@ -1,5 +1,7 @@
 # 06: Message shape fidelity
 
+**GitHub:** [linagora/twalk#7](https://github.com/linagora/twalk/issues/7) — canonical on the tracker; this file is the local mirror.
+
 **What to build:** rich messages arrive contract-complete, so personas never need a bus lookup to reason about them. A reply produces `reply_to` with the parent's event id and an excerpt. Participation in a thread produces `thread_root`. An image or file produces an attachment entry — kind, `mxc://` URI, MIME type, size, optional caption and dimensions — with no binary ever transiting the bus. The original network timestamp is preserved alongside the Sensor's production timestamp.
 
 **Blocked by:** 02 — Walking skeleton.

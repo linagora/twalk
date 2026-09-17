@@ -1,5 +1,7 @@
 # 02: Walking skeleton — message in, event out
 
+**GitHub:** [linagora/twalk#3](https://github.com/linagora/twalk/issues/3) — canonical on the tracker; this file is the local mirror.
+
 **What to build:** the thinnest complete path through the Sensor. An operator starts the process from environment configuration alone (homeserver, credentials, NATS URL, allowed inviters). The Sensor auto-joins a room when the inviter is allowed (a known bridge provisioning user or the operator's own account), ignores every other invitation, and stops observing a room after leaving it. When a bot sends a plain text message in an unencrypted room, a schema-valid `inbound.message.received.v1` CloudEvent appears on the bus: deterministic id, `matrix://` source URI, `network` extension, and a consent label defaulting to `pending` for unknown senders. Publishing sets `NATS-Msg-Id` to the CloudEvents id so JetStream deduplication works from day one.
 
 **Blocked by:** 01 — Integration test harness.

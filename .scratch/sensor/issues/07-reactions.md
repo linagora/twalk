@@ -1,5 +1,7 @@
 # 07: Reactions
 
+**GitHub:** [linagora/twalk#8](https://github.com/linagora/twalk/issues/8) — canonical on the tracker; this file is the local mirror.
+
 **What to build:** a 👍 on a message becomes a first-class event. When a bot adds a reaction in an observed room, a schema-valid `inbound.reaction.added.v1` appears on the bus carrying the reaction itself, the target message's event id with an excerpt, and the resolved contact. Reaction removals produce no v1 event, per the contract.
 
 **Blocked by:** 02 — Walking skeleton.

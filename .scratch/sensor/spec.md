@@ -6,6 +6,8 @@ labels: [ready-for-agent]
 
 # Sensor — Spec
 
+**GitHub:** [linagora/twalk#1](https://github.com/linagora/twalk/issues/1) — canonical on the tracker; this file is the local mirror.
+
 ## Problem Statement
 
 A Twalk operator's messages already land in Matrix portal rooms through the Mautrix bridges — but they sit there, encrypted and invisible. Nothing turns them into typed, replayable events on the bus. Without the Sensor there is no inbound path at all: personas cannot observe anything, oversight interfaces show nothing, and approved replies have no way back out to the networks. The Sensor is the single chokepoint of the entire inbound pipeline.

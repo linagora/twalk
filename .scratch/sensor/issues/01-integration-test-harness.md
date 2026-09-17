@@ -1,5 +1,7 @@
 # 01: Integration test harness
 
+**GitHub:** [linagora/twalk#2](https://github.com/linagora/twalk/issues/2) — canonical on the tracker; this file is the local mirror.
+
 **What to build:** the testing seam the whole component will be verified through. A single command brings up a real Synapse and a real NATS JetStream for tests, with Matrix bot users provisioned to play the role of bridges. Test helpers cover the actions every later ticket needs: create a room (encrypted or not), invite a user, send a message, a reaction, a presence update, consume a bus subject, and assert that a received event validates against a contract schema. This ticket contains no Sensor code at all — it delivers the instrument, and proves it with a smoke test: a bot posts to Synapse, a NATS round-trip works, and every fixture in the contract validates against its schema. If Synapse proves too heavy to boot in CI, a lighter Matrix homeserver is an acceptable fallback as long as the client-server API surface used by the tests stays identical.
 
 **Blocked by:** None (can start immediately).
