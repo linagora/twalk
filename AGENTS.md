@@ -6,7 +6,7 @@
 
 As of 2026-09-17 the repository contains documentation, the complete event contract, and the Sensor's integration-test harness — no component implementation yet:
 
-- `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/adr/` (ADRs 0005–0008 written; numbers 0001–0004 are referenced from the docs but not yet written)
+- `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/roadmap.md` (milestones ↔ lots), `docs/architecture/adr/` (ADRs 0005–0009 written; numbers 0001–0004 are referenced from the docs but not yet written)
 - `contracts/cloudevents/v1/` — the complete v1 contract: 8 CloudEvents schemas plus one validated fixture per type
 - `.scratch/sensor/` — local mirrors of the Sensor spec and tickets 01–11; **canonical is the tracker: GitHub Issues on [linagora/twalk](https://github.com/linagora/twalk/issues)** (conventions in `docs/agents/issue-tracker.md`); all 11 tickets are done and merged
 - `sensor/` — the Sensor Cargo package: library modules (`config`, `consent`, `metrics`, `network`, `normalize`, `outbound` — pure logic) plus the binary wiring to matrix-sdk and NATS in `src/main.rs`; integration-test harness in `tests/` (compose stack, bot/bus/contract helpers, `crypto.rs` for Megolm-capable bots, `smoke.rs`, `sensor_lifecycle.rs`, `message_to_event.rs`, `consent.rs`, `reactions.rs`, `presence.rs`, `outbound.rs`, `persistence.rs`, `fidelity.rs`, `encryption.rs`, `observability.rs`, `deployment.rs`)
