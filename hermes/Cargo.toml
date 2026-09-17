@@ -1,0 +1,18 @@
+[package]
+name = "twalk-hermes"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Hermes: the Twalk agent platform's consumer runtime, which hosts personas as separate processes."
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+# The shared test harness: the test stack's lifecycle, the bus, contract
+# validation and the stub LLM (tests/harness/, ticket #20).
+twalk-test-harness = { path = "../tests/harness" }

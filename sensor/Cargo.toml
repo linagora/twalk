@@ -22,9 +22,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 anyhow = "1"
-async-nats = "0.50"
-jsonschema = "0.56"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde_json = "1"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["full"] }
+# The shared test harness: the test stack's lifecycle, the bus, contract
+# validation and the stub LLM (tests/harness/, ticket #20).
+twalk-test-harness = { path = "../tests/harness" }

@@ -1,5 +1,7 @@
 /target/
 /sensor/target/
+/hermes/target/
+/tests/harness/target/
 .env
 
 # Agent tooling: local skills installs and agent worktrees, never versioned

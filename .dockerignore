@@ -1,0 +1,12 @@
+# Build-context filter for the repository root, which is the Sensor image's
+# build context (see deploy/docker-compose/sensor.Dockerfile: cargo needs the
+# shared test harness at tests/harness/ to resolve the Sensor's dependency
+# graph, so the context cannot be the sensor crate alone).
+#
+# Everything below is either huge or secret, and none of it is ever COPYed.
+**/target
+.git
+.env
+.scratch
+.agents/
+.claude/

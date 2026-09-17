@@ -105,10 +105,13 @@ services:
 
   sensor:
     build:
-      context: ../../sensor
-      # Resolved from the build context: the Dockerfile lives with the
-      # reference deployment, the context is the sensor crate alone.
-      dockerfile: ../deploy/docker-compose/sensor.Dockerfile
+      # The repository root: the sensor crate declares the shared test
+      # harness (tests/harness/) as a dev dependency, and cargo needs every
+      # path dependency present to resolve the graph at all. See
+      # sensor.Dockerfile.
+      context: ../..
+      # Resolved from the build context.
+      dockerfile: deploy/docker-compose/sensor.Dockerfile
     # Name the local build is tagged with, and the image the service runs.
     # Overridable (issue #38) so that several stacks built from different
     # checkouts on one Docker daemon — the deployment test in parallel
