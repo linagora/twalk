@@ -14,7 +14,30 @@
     "body": "On décale à 20h ?",
     "format": "text/plain",
     "reply_to": null,
-    "attachments": [],
+    "attachments": [
+      {
+        "kind": "image",
+        "mxc_uri": "mxc://matrix.example.com/QWxpY2VQaG90bzIwMjYwOTE3",
+        "mime_type": "image/jpeg",
+        "size_bytes": 184320,
+        "caption": "On décale à 20h ?",
+        "dimensions": { "width": 1600, "height": 1200 },
+        "encryption": {
+          "key": {
+            "kty": "oct",
+            "key_ops": ["encrypt", "decrypt"],
+            "alg": "A256CTR",
+            "k": "aWF6-32KGYaC3A_FEUCk1Bt0JA37zP0wrStgmdCaW-0",
+            "ext": true
+          },
+          "iv": "w+sE15fzSc0AAAAAAAAAAA",
+          "hashes": {
+            "sha256": "fdSLu/YkRx3Wyh3KQabP3rd6+SFiKg5lsJZQHtkSAYA"
+          },
+          "v": "v2"
+        }
+      }
+    ],
     "contact": {
       "display_name": "Aïcha Benali",
       "network_identifier": "+33612345678"

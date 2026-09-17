@@ -70,7 +70,7 @@
     },
     "network": {
       "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
       "description": "Twalk extension. Optional on this operational event: when set, mirrors data.network for server-side filtering on NATS."
     },
     "consent": {
@@ -91,8 +91,8 @@
         },
         "network": {
           "type": "string",
-          "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
-          "description": "The network this bridge serves, as the user experiences it. SMS is sms whether the transport is mautrix-gmessages or the SMS Companion (see ADR 0005)."
+          "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+          "description": "The network this bridge serves, as the user experiences it. SMS is sms whether the transport is mautrix-gmessages or the SMS Companion (see ADR 0005). The native Matrix path has no bridge process in front of it (see ADR 0009); matrix stays a valid value here so that the optional network extension, which mirrors this field, can carry it."
         },
         "from_state": {
           "type": "string",

@@ -79,8 +79,8 @@
     },
     "network": {
       "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
-      "description": "Twalk extension. Identifies the external network the message originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. Enables server-side filtering on NATS without deserializing the data payload."
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "description": "Twalk extension. Identifies the external network the message originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic: a room with no m.bridge state event and no ghost-prefixed sender, reached through the user's own Matrix account instead of through a bridge (see ADR 0009). Enables server-side filtering on NATS without deserializing the data payload."
     },
     "consent": {
       "type": "string",
@@ -174,10 +174,79 @@
                 "type": "integer",
                 "minimum": 0,
                 "description": "Duration in milliseconds for audio and video attachments."
+              },
+              "encryption": {
+                "type": "object",
+                "required": ["key", "iv", "hashes", "v"],
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "type": "object",
+                    "required": ["kty", "key_ops", "alg", "k", "ext"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kty": {
+                        "type": "string",
+                        "const": "oct",
+                        "description": "JSON Web Key type. Always oct (a symmetric octet sequence) for Matrix attachment encryption."
+                      },
+                      "key_ops": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": { "type": "string" },
+                        "allOf": [
+                          { "contains": { "const": "encrypt" } },
+                          { "contains": { "const": "decrypt" } }
+                        ],
+                        "description": "Permitted key operations. Must contain at least encrypt and decrypt, per the Matrix EncryptedFile definition. Order is not significant, and the specification permits further operations, so consumers test for membership rather than comparing the whole array."
+                      },
+                      "alg": {
+                        "type": "string",
+                        "const": "A256CTR",
+                        "description": "Key algorithm. Always A256CTR (AES-256 in counter mode) for version v2 attachment encryption."
+                      },
+                      "k": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]{43}$",
+                        "description": "The 256-bit AES key, URL-safe unpadded base64. This is decryption material for the user's own media: consumers MUST keep it inside the user's infrastructure and MUST NOT log it."
+                      },
+                      "ext": {
+                        "type": "boolean",
+                        "const": true,
+                        "description": "JSON Web Key extractability flag. Always true, so the key can be imported by a consumer's crypto implementation."
+                      }
+                    },
+                    "description": "The AES key as a JSON Web Key, exactly as carried by the Matrix event."
+                  },
+                  "iv": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9+/]{22}$",
+                    "description": "The 128-bit unique counter block used by AES-CTR, standard-alphabet unpadded base64 (22 characters). Note the alphabet differs from key.k, which the Matrix specification encodes URL-safe."
+                  },
+                  "hashes": {
+                    "type": "object",
+                    "required": ["sha256"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9+/]{43}$",
+                        "description": "SHA-256 digest of the ciphertext, standard-alphabet unpadded base64 (43 characters). Consumers MUST verify it before decrypting: it is what stops the homeserver from substituting the media bytes."
+                      }
+                    },
+                    "description": "Digests of the ciphertext, keyed by algorithm. The Matrix specification types this as an open map and only recommends sha256; the contract carries sha256 and nothing else, so every consumer has exactly one digest to verify and one algorithm to implement."
+                  },
+                  "v": {
+                    "type": "string",
+                    "const": "v2",
+                    "description": "Version of the attachment encryption scheme. v2 is the only version the Matrix specification defines; material from the pre-specification v1 scheme is not usable by consumers and is not published."
+                  }
+                },
+                "description": "Optional decryption material for an attachment whose ciphertext is what mxc_uri resolves to. Mirrors the Matrix EncryptedFile object (key, iv, hashes, v) defined under 'Sending encrypted attachments' in the client-server specification, minus its url field, which mxc_uri already carries, and minus a mimetype, which the specification keeps in info and the contract keeps in mime_type. Present when the media itself is encrypted, which is the normal case in an end-to-end encrypted room and therefore in every bridge portal room; absent for media served in the clear. Producers re-serialize the values in the canonical encodings below rather than copying the sender's JSON through, so consumers handle exactly one encoding; a producer that cannot fill this object completely (an unsupported protocol version, or no sha256 digest) publishes the attachment without it rather than publishing unusable material. Either way the message is delivered and never silently dropped, but without this object a consumer can fetch the bytes and not read them."
               }
             }
           },
-          "description": "Ordered list of attachments carried by the message."
+          "description": "Ordered list of attachments carried by the message. Only references and decryption material ever transit the bus; the bytes stay in Matrix media storage."
         },
         "contact": {
           "type": "object",
