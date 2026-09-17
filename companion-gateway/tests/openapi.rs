@@ -1894,10 +1894,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // description declares.
     let stub = StubBridge::start().await?;
     let bridges_static = companion_build("openapi-bridges")?;
-    let bridged = GatewayProc::start(&gateway_env_with_bridges(
-        &bridges_static,
-        &stub.base_url(),
-    ))?;
+    let bridged = GatewayProc::start(&gateway_env_with_bridges(&bridges_static, &stub.base_url()))?;
     let bridged_base = bridged.base_url().await?;
     wait_until_answering(&bridged_base).await?;
     let (bridge_device, _) =
@@ -2209,11 +2206,9 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         )
         .await?;
     assert!(
-        logins.body["logins"]
-            .as_array()
-            .is_some_and(|logins| logins
-                .iter()
-                .any(|login| login["login_id"] == json!(login_id))),
+        logins.body["logins"].as_array().is_some_and(|logins| logins
+            .iter()
+            .any(|login| login["login_id"] == json!(login_id))),
         "the login just completed is one the bridge holds: {}",
         logins.body
     );

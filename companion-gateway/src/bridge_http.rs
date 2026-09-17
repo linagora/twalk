@@ -89,10 +89,7 @@ async fn list_bridges(State(gateway): State<Gateway>) -> Response {
 /// `GET /api/bridges/{bridge_id}/login/flows` — the login flows this bridge
 /// offers, as the bridge itself describes them (`qr`, a phone number, a
 /// cookie paste).
-async fn login_flows(
-    State(gateway): State<Gateway>,
-    Path(bridge_id): Path<String>,
-) -> Response {
+async fn login_flows(State(gateway): State<Gateway>, Path(bridge_id): Path<String>) -> Response {
     let owner = gateway.owner();
     match gateway.bridges().flows(&bridge_id, &owner).await {
         Ok(flows) => Json(json!({
@@ -250,7 +247,11 @@ async fn logout(
     Path((bridge_id, login_id)): Path<(String, String)>,
 ) -> Response {
     let owner = gateway.owner();
-    match gateway.bridges().logout(&bridge_id, &login_id, &owner).await {
+    match gateway
+        .bridges()
+        .logout(&bridge_id, &login_id, &owner)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(refusal) => refused(refusal),
     }

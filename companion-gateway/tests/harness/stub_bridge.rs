@@ -429,9 +429,7 @@ async fn start(
         inner.next_process += 1;
         inner.next_qr += 1;
         let process_id = format!("stub-process-{}", inner.next_process);
-        inner
-            .processes
-            .insert(process_id.clone(), flow_id.clone());
+        inner.processes.insert(process_id.clone(), flow_id.clone());
         let qr = inner.next_qr;
         (process_id, format!("2@stub-qr-payload-{qr}"))
     };
@@ -575,11 +573,7 @@ async fn held_step(state: Arc<StubState>, process_id: &str) -> Response {
         }
         woken.await;
     };
-    state
-        .inner
-        .lock()
-        .expect("the stub is not poisoned")
-        .held -= 1;
+    state.inner.lock().expect("the stub is not poisoned").held -= 1;
     match release {
         Release::RefreshedQr { data } => Json(qr_step(process_id, &data)).into_response(),
         Release::Complete { login_id } => complete(state, process_id, &login_id),
