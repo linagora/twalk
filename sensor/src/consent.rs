@@ -77,7 +77,7 @@ impl ConsentChange {
             .as_array()?
             .iter()
             .filter_map(Value::as_str)
-            .filter_map(Network::from_bridge_id)
+            .filter_map(Network::from_contract_value)
             .collect();
         if networks.is_empty() {
             return None;

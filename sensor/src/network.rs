@@ -44,6 +44,22 @@ impl Network {
         let (prefix, _) = localpart.split_once('_')?;
         Self::from_bridge_id(prefix)
     }
+
+    /// Parses a contract `network` enum value — the exact inverse of
+    /// `as_str`, with no transport folding (ADR 0005): unlike
+    /// `from_bridge_id`, `gmessages` is NOT a network and is rejected here.
+    /// Use this for anything that comes off the bus; use `from_bridge_id`
+    /// only for bridge-side identifiers.
+    pub fn from_contract_value(value: &str) -> Option<Self> {
+        match value {
+            "whatsapp" => Some(Self::Whatsapp),
+            "telegram" => Some(Self::Telegram),
+            "signal" => Some(Self::Signal),
+            "discord" => Some(Self::Discord),
+            "sms" => Some(Self::Sms),
+            _ => None,
+        }
+    }
 }
 
 /// Resolves the network of an observed event: the content of the room's
@@ -97,6 +113,14 @@ mod tests {
     #[test]
     fn transports_fold_into_their_network() {
         assert_eq!(Network::from_bridge_id("gmessages"), Some(Network::Sms));
+    }
+
+    #[test]
+    fn contract_values_reject_transports() {
+        assert_eq!(Network::from_contract_value("whatsapp"), Some(Network::Whatsapp));
+        assert_eq!(Network::from_contract_value("sms"), Some(Network::Sms));
+        assert_eq!(Network::from_contract_value("gmessages"), None);
+        assert_eq!(Network::from_contract_value("irc"), None);
     }
 
     #[test]
