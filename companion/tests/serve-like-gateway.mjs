@@ -277,7 +277,6 @@ function proxyToGateway(request, response, origin) {
 	});
 	request.pipe(upstream);
 }
-}
 
 function json(response, status, body) {
 	const payload = JSON.stringify(body);

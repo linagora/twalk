@@ -142,8 +142,14 @@ export async function startRealStack() {
 export async function startBridgeStack() {
 	const synapseUrl = `http://127.0.0.1:${SYNAPSE_PORT}`;
 
-	await composeUp();
-	await waitFor(`${synapseUrl}/health`, 'Synapse', 120_000);
+	// The two stacks share one compose project and Playwright starts their
+	// servers at the same time, so this one brings the stack up only when
+	// nothing answers: two concurrent `docker compose up` on one project is a
+	// race, and the other server is already running one.
+	if (!(await answers(`${synapseUrl}/health`))) {
+		await composeUp();
+	}
+	await waitFor(`${synapseUrl}/health`, 'Synapse', 300_000);
 	provisionBots();
 
 	const { startStubBridge, STUB_PROVISIONING_SECRET } = await import('./stub-bridge.mjs');
@@ -356,6 +362,15 @@ function buildGateway() {
 		throw new Error('cargo build failed for the Companion Gateway');
 	}
 	return join(crate, 'target', 'debug', 'twalk-companion-gateway');
+}
+
+/** Whether something already answers, without waiting for it to start. */
+async function answers(url) {
+	try {
+		return (await fetch(url)).ok;
+	} catch {
+		return false;
+	}
 }
 
 async function waitFor(url, what, timeoutMs) {
