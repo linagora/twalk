@@ -12,7 +12,12 @@ listeners:
     type: http
     x_forwarded: true
     resources:
-      - names: [client]
+      # `openid` serves exactly one endpoint,
+      # GET /_matrix/federation/v1/openid/userinfo, which the Companion
+      # Gateway calls to resolve an OpenID token to a Matrix ID (ADR 0011).
+      # It is the federation API's unauthenticated corner, so exposing it
+      # does not make this test stack federate.
+      - names: [client, openid]
         compress: false
 
 database:

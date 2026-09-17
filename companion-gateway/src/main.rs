@@ -10,7 +10,9 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 use twalk_companion_gateway::config::Config;
 use twalk_companion_gateway::http::{router, Gateway};
+use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
+use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::static_files::Resolver;
 
 /// How long in-flight requests get to finish after SIGTERM before the
@@ -43,6 +45,43 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The user's session (ticket #52). Absent configuration it stays `None`:
+    // the origin serves the Companion, health and metrics, and the whole API
+    // answers 503 — see `config::SignIn` for why that is preferred to
+    // refusing to start.
+    let sessions = match &config.sign_in {
+        Some(sign_in) => {
+            info!(
+                owner = %sign_in.owner,
+                homeserver = %sign_in.homeserver_name,
+                federation_base_url = %sign_in.federation_base_url,
+                state_dir = %sign_in.state_dir.display(),
+                device_token_ttl_seconds = sign_in.device_token_ttl_seconds,
+                "sign-in configured: this deployment serves one owner"
+            );
+            let verifier = Verifier::new(&sign_in.federation_base_url, &sign_in.homeserver_name)
+                .context("failed to build the OpenID verification client")?;
+            Some(Arc::new(
+                Sessions::open(
+                    &sign_in.state_dir,
+                    verifier,
+                    sign_in.owner.clone(),
+                    sign_in.device_token_ttl_seconds,
+                    sign_in.refresh_token_ttl_seconds,
+                    now_unix_seconds,
+                )
+                .context("failed to open the session store")?,
+            ))
+        }
+        None => {
+            warn!(
+                "GATEWAY_OWNER is not set: nobody can sign in, so every /api endpoint answers 503. \
+                 Set GATEWAY_OWNER, GATEWAY_HOMESERVER_FEDERATION_URL and GATEWAY_STATE_DIR to enable sign-in"
+            );
+            None
+        }
+    };
+
     let metrics = Arc::new(Metrics::started_at(now_unix_seconds()));
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
@@ -57,7 +96,7 @@ async fn main() -> Result<()> {
     // 0) discovers the origin by.
     info!("companion gateway listening on {address}");
 
-    let app = router(Gateway::new(companion, metrics, now_unix_seconds));
+    let app = router(Gateway::new(companion, metrics, now_unix_seconds).with_sessions(sessions));
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(
         axum::serve(listener, app)

@@ -8,11 +8,13 @@
 //! `Bus`, contract validation, `poll_until` — lives in the shared harness
 //! crate (`tests/harness/`, ticket #20) and is re-exported here, so this
 //! suite sees one flat `harness::` namespace, exactly as `sensor/tests/
-//! harness/` does. The skeleton uses only `poll_until`: it talks to no
-//! homeserver and no bus yet.
+//! harness/` does. The origin's own suite needs only `poll_until`; the
+//! sign-in suite (ticket #52) also brings the stack up, because a real
+//! homeserver is what mints the OpenID tokens. No bus yet.
 //!
 //! What is Gateway-specific stays here: `GatewayProc`, the static directory
-//! fixtures and the environment the Gateway runs from in tests.
+//! fixtures, the environment the Gateway runs from in tests, and `MatrixUser`
+//! — a Matrix account standing in for the user's own browser.
 
 // Every test binary compiles this module but uses only a subset of it.
 #![allow(dead_code)]
@@ -33,6 +35,12 @@ use tokio::process::Command;
 pub struct GatewayProc {
     child: tokio::process::Child,
     log_lines: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// The tasks draining stdout and stderr. Joined once the process has
+    /// exited, so that a test reading the logs of a Gateway that died sees
+    /// the line it died with: the process exiting and its last line reaching
+    /// the store are two different events, and under load the second can
+    /// lose the race.
+    forwarders: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl GatewayProc {
@@ -49,7 +57,8 @@ impl GatewayProc {
             stream: S,
             is_stderr: bool,
             store: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
-        ) where
+        ) -> tokio::task::JoinHandle<()>
+        where
             S: tokio::io::AsyncRead + Unpin + Send + 'static,
         {
             tokio::spawn(async move {
@@ -63,19 +72,25 @@ impl GatewayProc {
                     }
                     store.lock().await.push(line);
                 }
-            });
+            })
         }
-        forward(
-            child.stdout.take().expect("stdout is piped"),
-            false,
-            log_lines.clone(),
-        );
-        forward(
-            child.stderr.take().expect("stderr is piped"),
-            true,
-            log_lines.clone(),
-        );
-        Ok(Self { child, log_lines })
+        let forwarders = vec![
+            forward(
+                child.stdout.take().expect("stdout is piped"),
+                false,
+                log_lines.clone(),
+            ),
+            forward(
+                child.stderr.take().expect("stderr is piped"),
+                true,
+                log_lines.clone(),
+            ),
+        ];
+        Ok(Self {
+            child,
+            log_lines,
+            forwarders,
+        })
     }
 
     /// The origin the Gateway ended up listening on, read from its own
@@ -115,6 +130,7 @@ impl GatewayProc {
         let status = tokio::time::timeout(Duration::from_secs(10), self.child.wait())
             .await
             .context("the gateway did not exit within 10s of SIGTERM")??;
+        self.drain_logs().await;
         Ok(status)
     }
 
@@ -125,7 +141,16 @@ impl GatewayProc {
         let status = tokio::time::timeout(Duration::from_secs(10), self.child.wait())
             .await
             .context("the gateway did not exit within 10s")??;
+        self.drain_logs().await;
         Ok(status)
+    }
+
+    /// Waits for the log forwarders to reach end of stream, so every line the
+    /// exited process wrote is in the store before a test reads it.
+    async fn drain_logs(&mut self) {
+        for forwarder in std::mem::take(&mut self.forwarders) {
+            let _ = tokio::time::timeout(Duration::from_secs(5), forwarder).await;
+        }
     }
 
     /// A snapshot of the Gateway's captured log lines so far.
@@ -187,8 +212,34 @@ pub fn missing_static_dir(test_name: &str) -> PathBuf {
     ))
 }
 
+/// The local part of the test stack's bot the Gateway is configured with as
+/// its owner, and of the bot standing in for everybody else. Any Matrix
+/// account other than the owner must be refused — on this homeserver the
+/// Sensor has one too.
+pub const OWNER_LOCALPART: &str = "bot_alpha";
+pub const OTHER_LOCALPART: &str = "bot_beta";
+
+/// The Matrix ID of the owner the Gateway is configured with in tests.
+pub fn owner_user_id() -> String {
+    format!("@{OWNER_LOCALPART}:{SERVER_NAME}")
+}
+
+/// The directory the Gateway keeps its stores in for a test, derived from its
+/// static directory so the two are unique together — and deliberately *not*
+/// inside it: a store under the static directory would be a file the origin
+/// serves.
+pub fn gateway_state_dir(static_dir: &Path) -> PathBuf {
+    let mut path = static_dir.as_os_str().to_owned();
+    path.push("-state");
+    PathBuf::from(path)
+}
+
 /// The environment the Gateway runs from in tests: port 0 (the kernel picks),
-/// the given static directory, debug logs for the Gateway's own target.
+/// the given static directory, debug logs for the Gateway's own target, and
+/// the sign-in configuration (ticket #52) — the owner, the homeserver's
+/// federation API and a state directory of its own. A test that never signs
+/// in still runs a fully configured Gateway, and never contacts the
+/// homeserver.
 pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
     vec![
         ("GATEWAY_LISTEN".to_owned(), "127.0.0.1:0".to_owned()),
@@ -200,7 +251,103 @@ pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
             "GATEWAY_LOG_LEVEL".to_owned(),
             "info,twalk_companion_gateway=debug".to_owned(),
         ),
+        ("GATEWAY_OWNER".to_owned(), owner_user_id()),
+        (
+            "GATEWAY_HOMESERVER_FEDERATION_URL".to_owned(),
+            synapse_url(),
+        ),
+        (
+            "GATEWAY_STATE_DIR".to_owned(),
+            gateway_state_dir(static_dir).to_string_lossy().into_owned(),
+        ),
     ]
+}
+
+/// [`gateway_env`] with sign-in unconfigured: what an operator gets who has
+/// not set `GATEWAY_OWNER`. The origin still serves the Companion; its API
+/// is closed.
+pub fn gateway_env_without_sign_in(static_dir: &Path) -> Vec<(String, String)> {
+    gateway_env(static_dir)
+        .into_iter()
+        .filter(|(key, _)| key != "GATEWAY_OWNER")
+        .collect()
+}
+
+/// A Matrix account on the test stack, standing in for the user's own
+/// browser: it logs in with a password and mints OpenID tokens the way the
+/// Companion does.
+///
+/// The account's Matrix access token stays on this side of the seam. That is
+/// the property ADR 0011 is about: the Gateway is handed an OpenID token and
+/// never the access token that minted it.
+pub struct MatrixUser {
+    pub user_id: String,
+    access_token: String,
+    http: reqwest::Client,
+}
+
+impl MatrixUser {
+    /// Logs one of the test stack's provisioned bots in (the password scheme
+    /// is `provision-bots.sh`'s).
+    pub async fn login(localpart: &str) -> Result<Self> {
+        let http = reqwest::Client::new();
+        let body: serde_json::Value = http
+            .post(format!("{}/_matrix/client/v3/login", synapse_url()))
+            .json(&serde_json::json!({
+                "type": "m.login.password",
+                "identifier": { "type": "m.id.user", "user": localpart },
+                "password": format!("test-only-password-{localpart}"),
+            }))
+            .send()
+            .await
+            .context("failed to log a test user in")?
+            .error_for_status()
+            .context("the homeserver refused the login")?
+            .json()
+            .await
+            .context("the login answer is not JSON")?;
+        Ok(Self {
+            user_id: body["user_id"]
+                .as_str()
+                .context("the login answer names no user id")?
+                .to_owned(),
+            access_token: body["access_token"]
+                .as_str()
+                .context("the login answer carries no access token")?
+                .to_owned(),
+            http,
+        })
+    }
+
+    /// A fresh OpenID token, exactly as the homeserver answers it
+    /// (`access_token`, `token_type`, `matrix_server_name`, `expires_in`) —
+    /// the document the Companion forwards to the Gateway unchanged.
+    pub async fn openid_token(&self) -> Result<serde_json::Value> {
+        let token: serde_json::Value = self
+            .http
+            .post(format!(
+                "{}/_matrix/client/v3/user/{}/openid/request_token",
+                synapse_url(),
+                self.user_id
+            ))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("failed to ask for an OpenID token")?
+            .error_for_status()
+            .context("the homeserver refused to mint an OpenID token")?
+            .json()
+            .await
+            .context("the OpenID token answer is not JSON")?;
+        Ok(token)
+    }
+
+    /// The account's Matrix access token: what the Gateway must never hold,
+    /// and what the store and the logs are asserted against.
+    pub fn matrix_access_token(&self) -> &str {
+        &self.access_token
+    }
 }
 
 /// `gateway_env` with per-test overrides: an existing key is replaced, a new

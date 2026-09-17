@@ -9,15 +9,24 @@ pid_file: /data/homeserver.pid
 report_stats: false
 
 listeners:
-  # Client API only. The reference stack does not federate: a personal hub
-  # talks to its own users and to local bridges, and exposing the federation
-  # resource would serve no purpose.
+  # The client API, plus the one endpoint of the federation API the Companion
+  # Gateway needs. The reference stack still does not federate: a personal hub
+  # talks to its own users and to local bridges, so the whole `federation`
+  # resource stays absent.
+  #
+  # `openid` serves exactly GET /_matrix/federation/v1/openid/userinfo, which
+  # resolves a Matrix OpenID token to the Matrix ID that minted it — how the
+  # Gateway learns who the user is without ever holding a Matrix access token
+  # (ADR 0011). The endpoint is unauthenticated by design and answers nothing
+  # without a token this homeserver itself minted; it rides the same
+  # localhost-bound port as the client API, so it is reachable from the
+  # compose network and from behind the operator's reverse proxy, no further.
   - port: 8008
     tls: false
     type: http
     x_forwarded: true
     resources:
-      - names: [client]
+      - names: [client, openid]
         compress: false
 
 database:

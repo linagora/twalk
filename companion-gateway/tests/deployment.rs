@@ -4,10 +4,14 @@
 //! health endpoint, exposing its metrics and serving the Companion's index
 //! file on its own origin.
 //!
-//! The skeleton Gateway depends on no other service (no homeserver, no bus
-//! yet), so this test brings up the `companion-gateway` service alone —
-//! compose still interpolates the whole file, so the env file below carries
-//! every documented variable, exactly as `.env.example` does.
+//! The Gateway depends on no other service to come up (it talks to the
+//! homeserver only while somebody signs in, and to no bus yet), so the first
+//! test brings up the `companion-gateway` service alone — compose still
+//! interpolates the whole file, so the env file below carries every
+//! documented variable, exactly as `.env.example` does. The second test is
+//! about the deployment's Synapse configuration: the `openid` resource that
+//! sign-in verifies tokens at (ticket #52), which nothing else in the
+//! repository would notice the loss of.
 //!
 //! The deploy stack runs under its own compose project and host ports, next
 //! to the harness's own stack: TWALK_DEPLOY_TEST_STACK (default
@@ -103,6 +107,8 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_HTTP_PORT={gateway_port}\n\
          GATEWAY_FALLBACK_FILE=200.html\n\
          GATEWAY_LOG_LEVEL=info,twalk_companion_gateway=debug\n\
+         GATEWAY_OWNER=@owner:{SERVER_NAME}\n\
+         GATEWAY_STATE_DIR=/data\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n"
     );
     std::fs::write(&path, contents)
@@ -287,11 +293,77 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
         Some("text/html; charset=utf-8")
     );
 
+    // Sign-in is configured from the environment file, and the guard is live
+    // in the deployed image: every API endpoint refuses a caller with no
+    // device token. (The sign-in flow itself is exercised against a real
+    // homeserver in tests/signin.rs; here the question is only whether the
+    // deployed container is wired for it.)
+    let unauthenticated = reqwest::get(format!("{base}/api/devices")).await?;
+    assert_eq!(
+        unauthenticated.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the deployed Gateway's API must require a device token"
+    );
+    let body: serde_json::Value = serde_json::from_str(&unauthenticated.text().await?)?;
+    assert_eq!(
+        body["error"].as_str(),
+        Some("unauthenticated"),
+        "a 503 here would mean GATEWAY_OWNER never reached the container: {body}"
+    );
+
     // Only on request: a service left up (with its image) is what makes the
     // next run warm. Deliberately after the assertions, so a failure leaves
     // the container and its logs in place to inspect.
     if teardown_requested() {
         teardown(&env_file).await?;
     }
+    Ok(())
+}
+
+/// The homeserver of the reference deployment must serve the one federation
+/// endpoint sign-in needs — and nothing more of the federation API.
+///
+/// This is a test about `deploy/docker-compose/synapse/homeserver.yaml`: the
+/// listener's `openid` resource is what
+/// `GET /_matrix/federation/v1/openid/userinfo` rides on, and without it every
+/// sign-in against the reference stack fails at the verification step while
+/// nothing else in the repository notices. The `federation` resource stays
+/// absent, which the second assertion pins: a personal hub does not federate.
+///
+/// Synapse belongs to the whole deploy stack rather than to the Gateway, so
+/// this test brings it up and leaves it up, as the Sensor's deployment test
+/// does — a warm stack is what makes the next run fast.
+#[tokio::test]
+async fn the_deployments_homeserver_serves_openid_userinfo_and_no_more_federation() -> Result<()> {
+    let env_file = write_env_file()?;
+    compose(&env_file, &["up", "-d", "--wait", "synapse"], "up synapse").await?;
+    let homeserver = format!("http://localhost:{}", synapse_port());
+
+    // A token this homeserver never minted: a 401 proves the endpoint is
+    // routed, which is all the Gateway needs of it here (tests/signin.rs
+    // covers what a real token does).
+    let userinfo = poll_until(
+        || async {
+            reqwest::get(format!(
+                "{homeserver}/_matrix/federation/v1/openid/userinfo?access_token=never-minted"
+            ))
+            .await
+            .ok()
+        },
+        "the deployed homeserver's OpenID userinfo endpoint",
+    )
+    .await?;
+    assert_eq!(
+        userinfo.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the deployment must route /_matrix/federation/v1/openid/userinfo, or no sign-in can work"
+    );
+
+    let federation = reqwest::get(format!("{homeserver}/_matrix/federation/v1/version")).await?;
+    assert_eq!(
+        federation.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "the rest of the federation API stays absent: this hub does not federate"
+    );
     Ok(())
 }
