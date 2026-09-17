@@ -138,9 +138,11 @@ impl GatewayProc {
     }
 }
 
-/// A static directory standing in for a built Companion: `index.html` plus
-/// one asset, in a fresh temp directory per test.
-pub fn static_dir_with_index(test_name: &str) -> Result<PathBuf> {
+/// A directory shaped like a built Companion — a SvelteKit static export —
+/// in a fresh temp directory per test: a prerendered homepage, the SPA
+/// fallback, a prerendered nested page under each trailing-slash spelling,
+/// an asset, and the Matrix crypto WebAssembly with its brotli sibling.
+pub fn companion_build(test_name: &str) -> Result<PathBuf> {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -148,14 +150,30 @@ pub fn static_dir_with_index(test_name: &str) -> Result<PathBuf> {
         "twalk-gateway-static-{test_name}-{}-{unique}",
         std::process::id()
     ));
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(dir.join("onboarding/signal"))?;
+    std::fs::create_dir_all(dir.join("_app/immutable"))?;
     std::fs::write(dir.join("index.html"), INDEX_HTML)?;
+    std::fs::write(dir.join("200.html"), FALLBACK_HTML)?;
+    std::fs::write(dir.join("onboarding/whatsapp.html"), WHATSAPP_HTML)?;
+    std::fs::write(dir.join("onboarding/signal/index.html"), SIGNAL_HTML)?;
     std::fs::write(dir.join("app.css"), "body { color: rebeccapurple }\n")?;
+    std::fs::write(dir.join("_app/immutable/crypto.wasm"), WASM)?;
+    std::fs::write(dir.join("_app/immutable/crypto.wasm.br"), WASM_BROTLI)?;
     Ok(dir)
 }
 
-/// The marker the static fixtures carry, asserted on by the tests.
-pub const INDEX_HTML: &str = "<!doctype html>\n<title>Companion fixture</title>\n";
+/// The markers the static fixtures carry, asserted on by the tests.
+pub const INDEX_HTML: &str = "<!doctype html>\n<title>Companion home</title>\n";
+pub const FALLBACK_HTML: &str = "<!doctype html>\n<title>Companion shell</title>\n";
+pub const WHATSAPP_HTML: &str = "<!doctype html>\n<title>WhatsApp onboarding</title>\n";
+pub const SIGNAL_HTML: &str = "<!doctype html>\n<title>Signal onboarding</title>\n";
+/// A WebAssembly module header — enough to be a distinct file; nothing here
+/// instantiates it.
+pub const WASM: &[u8] = b"\0asm\x01\0\0\0";
+/// Stands in for the brotli-compressed sibling of the module above. Not real
+/// brotli: the test asserts the `Content-Encoding` the Gateway chose, and
+/// never decodes the body.
+pub const WASM_BROTLI: &[u8] = b"brotli-compressed-crypto-wasm";
 
 /// A path inside the temp directory that deliberately does not exist.
 pub fn missing_static_dir(test_name: &str) -> PathBuf {

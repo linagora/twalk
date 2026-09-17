@@ -11,6 +11,7 @@
 pub mod config;
 pub mod http;
 pub mod metrics;
+pub mod static_files;
 pub mod trace;
 
 /// The Gateway's version, as the health endpoint reports it: the package

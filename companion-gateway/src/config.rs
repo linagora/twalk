@@ -23,6 +23,13 @@ pub struct Config {
     /// empty is not fatal: the Gateway serves a clear 404 until the build
     /// appears, so health and metrics stay up either way.
     pub static_dir: PathBuf,
+    /// Name of the Companion's SPA fallback file inside the static directory
+    /// (GATEWAY_FALLBACK_FILE, default `200.html`): what a path matching no
+    /// file of the build is answered with, so a deep link reloaded cold loads
+    /// the app. `200.html` is SvelteKit's recommended name — an `index.html`
+    /// fallback collides with a prerendered homepage — and it is
+    /// configurable because the name is the Companion build's to choose.
+    pub fallback_file: String,
     /// Log level filter (GATEWAY_LOG_LEVEL), e.g. `info` or
     /// `info,twalk_companion_gateway=debug`. Per-request logs are at debug:
     /// a static origin at info level would be nothing but access logs.
@@ -34,6 +41,10 @@ impl Config {
         Ok(Self {
             listen: optional("GATEWAY_LISTEN", "0.0.0.0:8080")?,
             static_dir: PathBuf::from(required("GATEWAY_STATIC_DIR")?),
+            fallback_file: std::env::var("GATEWAY_FALLBACK_FILE")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "200.html".to_owned()),
             log_level: std::env::var("GATEWAY_LOG_LEVEL")
                 .ok()
                 .filter(|value| !value.is_empty())

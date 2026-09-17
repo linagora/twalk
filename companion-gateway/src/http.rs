@@ -3,13 +3,13 @@
 //! passes through (structured log line, `traceparent`, request counter).
 //!
 //! One origin serves all of it. The Companion is a static export with
-//! client-side routing, so an unknown path that is not the Gateway's own is
-//! answered with the app shell (`index.html`) — a deep link reloaded cold
-//! must load the app, not a 404. The Gateway's own API surface is the one
+//! client-side routing, so a path that matches no file of its build is
+//! answered with the SPA fallback (`200.html`) and a 200 — a deep link
+//! reloaded cold must load the app, not a 404. How a path resolves to a file
+//! is [`crate::static_files`]. The Gateway's own API surface is the one
 //! exception: under `/api/` a 404 stays a 404, as JSON, because a client
 //! parsing an API response must never be handed an HTML page instead.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -20,17 +20,18 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get};
 use axum::{middleware, Router};
 use tower::ServiceExt;
-use tower_http::services::ServeDir;
+use tower_http::services::ServeFile;
 use tracing::{debug, warn};
 
 use crate::metrics::{Metrics, Route};
+use crate::static_files::{Resolution, Resolver};
 use crate::trace;
 
 /// Everything the handlers share. Cheap to clone: one `Arc` each.
 #[derive(Clone)]
 pub struct Gateway {
-    /// Directory the Companion's static files are served from.
-    static_dir: Arc<PathBuf>,
+    /// How a request path resolves to a file of the Companion's build.
+    companion: Arc<Resolver>,
     metrics: Arc<Metrics>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
@@ -39,9 +40,9 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(static_dir: PathBuf, metrics: Arc<Metrics>, now_unix_seconds: fn() -> u64) -> Self {
+    pub fn new(companion: Resolver, metrics: Arc<Metrics>, now_unix_seconds: fn() -> u64) -> Self {
         Self {
-            static_dir: Arc::new(static_dir),
+            companion: Arc::new(companion),
             metrics,
             now_unix_seconds,
         }
@@ -111,43 +112,68 @@ async fn api_not_found(request: Request) -> Response {
         .into_response()
 }
 
-/// The Companion: the requested file when it exists, the app shell otherwise
-/// (client-side routing), and a plain 404 when there is no build to serve.
+/// The Companion: the file its build has for this path, the other spelling of
+/// a prerendered page (307), the SPA fallback with 200 for a client-side
+/// route, and a plain 404 when there is no build to serve at all.
 async fn companion(State(gateway): State<Gateway>, request: Request) -> Response {
-    let served = ServeDir::new(gateway.static_dir.as_path())
-        .append_index_html_on_directories(true)
-        .oneshot(request)
-        .await
-        .expect("serving a file is infallible");
-    if served.status() != StatusCode::NOT_FOUND {
-        return served.map(Body::new);
-    }
-    shell(&gateway).await
-}
-
-/// The Companion's `index.html`, so that a deep link into the app loads the
-/// app. When the configured directory holds no build — the Companion's own
-/// lot has not landed, or an operator pointed the Gateway at an empty
-/// volume — the origin says so in a plain 404 instead of failing to start:
-/// health and metrics stay up, which is what an operator debugs with.
-async fn shell(gateway: &Gateway) -> Response {
-    let index = gateway.static_dir.join("index.html");
-    match tokio::fs::read(&index).await {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], bytes).into_response(),
-        Err(error) => {
-            debug!(path = %index.display(), %error, "no companion build to serve");
+    let query = request
+        .uri()
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    match gateway.companion.resolve(request.uri().path()).await {
+        Resolution::File { path, content_type } => serve(&path, content_type, request).await,
+        Resolution::Fallback { path } => {
+            // 200, not a redirect and not a 404: the route exists, in the
+            // client-side router.
+            serve(&path, "text/html; charset=utf-8", request).await
+        }
+        Resolution::Redirect { location } => (
+            StatusCode::TEMPORARY_REDIRECT,
+            [(header::LOCATION, format!("{location}{query}"))],
+        )
+            .into_response(),
+        Resolution::NotFound => {
+            let root = gateway.companion.root().display();
+            debug!(static_dir = %root, "no companion build to serve");
             (
                 StatusCode::NOT_FOUND,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                 format!(
-                    "The Companion is not available: no index.html in {}.\n\
-                     Point GATEWAY_STATIC_DIR at a Companion build.\n",
-                    gateway.static_dir.display()
+                    "The Companion is not available: no build in {root}.\n\
+                     Point GATEWAY_STATIC_DIR at a Companion build.\n"
                 ),
             )
                 .into_response()
         }
     }
+}
+
+/// Serves one file, with the content type the path calls for.
+///
+/// `ServeFile` brings the parts worth not hand-rolling — conditional
+/// requests, byte ranges — and, when a pre-compressed sibling exists next to
+/// the file (`crypto.wasm.br`, `crypto.wasm.gz`) and the client accepts that
+/// encoding, serves it with the matching `Content-Encoding`. The Matrix
+/// crypto WebAssembly is ~7.5 MB raw and ~1.3 MB brotli-compressed, which on
+/// a phone is the difference between a usable onboarding and a broken one.
+/// The content type is then overwritten with the one the *original*
+/// extension calls for, which is what makes `.wasm` exactly
+/// `application/wasm` whichever encoding went out.
+async fn serve(path: &std::path::Path, content_type: &'static str, request: Request) -> Response {
+    let served = ServeFile::new(path)
+        .precompressed_br()
+        .precompressed_gzip()
+        .oneshot(request)
+        .await
+        .expect("serving a file is infallible");
+    let mut response = served.map(Body::new);
+    if response.status().is_success() {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    }
+    response
 }
 
 /// Every request passes through here: it continues (or originates) the trace

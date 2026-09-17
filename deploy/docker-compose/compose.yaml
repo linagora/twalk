@@ -169,6 +169,9 @@ services:
       # point this elsewhere (with a matching volume below) to serve your own
       # build.
       GATEWAY_STATIC_DIR: ${GATEWAY_STATIC_DIR:-/srv/companion}
+      # The Companion's SPA fallback file: what a client-side route (a deep
+      # link reloaded cold) is served with.
+      GATEWAY_FALLBACK_FILE: ${GATEWAY_FALLBACK_FILE:-200.html}
       GATEWAY_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-info}
     # volumes:
     #   # Serve a Companion build from the host instead of the image's.

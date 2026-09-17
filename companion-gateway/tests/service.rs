@@ -12,19 +12,29 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    assert_valid_traceparent, gateway_env, gateway_env_with, missing_static_dir, parse_exposition,
-    poll_until, static_dir_with_index, GatewayProc, INDEX_HTML,
+    assert_valid_traceparent, companion_build, gateway_env, gateway_env_with, missing_static_dir,
+    parse_exposition, poll_until, GatewayProc, FALLBACK_HTML, INDEX_HTML, SIGNAL_HTML, WASM,
+    WASM_BROTLI, WHATSAPP_HTML,
 };
 
 const METRIC_PREFIX: &str = "twalk_companion_gateway_";
 
-/// The Gateway under test with a static directory of its own, ready to
+/// The Gateway under test with a Companion build of its own, ready to
 /// answer: returns the process and its origin.
 async fn start(test_name: &str) -> Result<(GatewayProc, String)> {
-    let static_dir = static_dir_with_index(test_name)?;
+    let static_dir = companion_build(test_name)?;
     let gateway = GatewayProc::start(&gateway_env(&static_dir))?;
     let base = gateway.base_url().await?;
     Ok((gateway, base))
+}
+
+/// The response's `Content-Type`, whole — the tests assert exact values,
+/// because for `.wasm` an extra parameter is a browser-side TypeError.
+fn content_type(response: &reqwest::Response) -> Option<&str> {
+    response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
 }
 
 #[tokio::test]
@@ -147,15 +157,7 @@ async fn the_companion_is_served_from_the_configured_directory() -> Result<()> {
 
     let asset = reqwest::get(format!("{base}/app.css")).await?;
     assert_eq!(asset.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        asset
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.starts_with("text/css")),
-        Some(true),
-        "static files are served with their content type"
-    );
+    assert_eq!(content_type(&asset), Some("text/css; charset=utf-8"));
 
     // Path traversal: the configured directory is the whole of what the
     // origin exposes. The escape attempt is an unknown path like any other,
@@ -166,6 +168,128 @@ async fn the_companion_is_served_from_the_configured_directory() -> Result<()> {
         !escaped_body.contains("root:"),
         "the Gateway must not serve anything outside its static directory: {escaped_body}"
     );
+
+    gateway.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_prerendered_page_is_resolved_the_way_the_static_export_lays_it_out() -> Result<()> {
+    let (gateway, base) = start("prerendered").await?;
+    poll_until(
+        || async {
+            reqwest::get(format!("{base}/health"))
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()
+        },
+        "the gateway health endpoint",
+    )
+    .await?;
+    // 307s are assertions here, not something to follow.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+
+    // The build has onboarding/whatsapp.html: the path resolves through it.
+    let page = client
+        .get(format!("{base}/onboarding/whatsapp"))
+        .send()
+        .await?;
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert_eq!(content_type(&page), Some("text/html; charset=utf-8"));
+    assert_eq!(page.text().await?, WHATSAPP_HTML);
+
+    // The build has onboarding/signal/index.html: the trailing-slash
+    // spelling resolves through it.
+    let page = client
+        .get(format!("{base}/onboarding/signal/"))
+        .send()
+        .await?;
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert_eq!(page.text().await?, SIGNAL_HTML);
+
+    // Each spelling redirects to the one the build actually has, query
+    // string included, rather than silently serving the app shell.
+    let redirected = client
+        .get(format!("{base}/onboarding/whatsapp/"))
+        .send()
+        .await?;
+    assert_eq!(redirected.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        redirected
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("/onboarding/whatsapp")
+    );
+    let redirected = client
+        .get(format!("{base}/onboarding/signal?step=2"))
+        .send()
+        .await?;
+    assert_eq!(redirected.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        redirected
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("/onboarding/signal/?step=2")
+    );
+
+    gateway.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_crypto_webassembly_is_served_as_application_wasm() -> Result<()> {
+    let (gateway, base) = start("wasm").await?;
+    poll_until(
+        || async {
+            reqwest::get(format!("{base}/health"))
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()
+        },
+        "the gateway health endpoint",
+    )
+    .await?;
+
+    // WebAssembly.instantiateStreaming rejects anything but exactly
+    // `application/wasm` — a charset parameter is already a TypeError, and
+    // the Companion has no fallback path for it.
+    let wasm = reqwest::get(format!("{base}/_app/immutable/crypto.wasm")).await?;
+    assert_eq!(wasm.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        content_type(&wasm),
+        Some("application/wasm"),
+        "the WebAssembly MIME type carries no parameters"
+    );
+    assert_eq!(wasm.bytes().await?.as_ref(), WASM);
+
+    // A pre-compressed sibling is served when the client accepts it — the
+    // crypto module is megabytes raw — with the same content type.
+    // This reqwest has no compression features enabled, so it neither
+    // advertises an encoding on its own nor decodes the answer: the bytes
+    // below are what went over the wire.
+    let client = reqwest::Client::new();
+    let compressed = client
+        .get(format!("{base}/_app/immutable/crypto.wasm"))
+        .header("accept-encoding", "br")
+        .send()
+        .await?;
+    assert_eq!(compressed.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        compressed
+            .headers()
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("br"),
+        "the brotli sibling is served to a client that accepts brotli"
+    );
+    assert_eq!(content_type(&compressed), Some("application/wasm"));
+    assert_eq!(compressed.bytes().await?.as_ref(), WASM_BROTLI);
 
     gateway.stop().await;
     Ok(())
@@ -186,24 +310,29 @@ async fn an_unknown_app_path_loads_the_companion_and_an_unknown_api_path_is_a_js
         "the gateway health endpoint",
     )
     .await?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
 
-    // The Companion is a static export with client-side routing: a deep link
-    // reloaded cold must load the app, not a 404.
-    let deep_link = reqwest::get(format!("{base}/onboarding/whatsapp")).await?;
+    // The Companion is a static export with client-side routing: a route
+    // that was not prerendered exists only in the client's router, so a deep
+    // link reloaded cold must serve the SPA fallback with a 200 — not a
+    // redirect, not a 404.
+    let deep_link = client
+        .get(format!("{base}/contacts/%40alice%3Atest.twalk"))
+        .send()
+        .await?;
     assert_eq!(
         deep_link.status(),
         reqwest::StatusCode::OK,
-        "an unknown app path serves the Companion's shell"
+        "an unknown app path serves the Companion's shell with 200"
     );
+    assert_eq!(content_type(&deep_link), Some("text/html; charset=utf-8"));
     assert_eq!(
-        deep_link
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.starts_with("text/html")),
-        Some(true)
+        deep_link.text().await?,
+        FALLBACK_HTML,
+        "the fallback is 200.html, not the prerendered index.html"
     );
-    assert_eq!(deep_link.text().await?, INDEX_HTML);
 
     // The Gateway's own API surface keeps its status codes: a client parsing
     // an API response must never be handed an HTML page instead.
@@ -330,7 +459,7 @@ async fn sigterm_shuts_the_gateway_down_cleanly() -> Result<()> {
 
 #[tokio::test]
 async fn the_log_level_env_is_honored() -> Result<()> {
-    let static_dir = static_dir_with_index("log-level")?;
+    let static_dir = companion_build("log-level")?;
 
     // At `error`, the Gateway's routine info-level startup lines stay silent
     // — the listen address among them, so this one test asks for a fixed
@@ -385,7 +514,7 @@ async fn the_log_level_env_is_honored() -> Result<()> {
 
 #[tokio::test]
 async fn an_unset_static_directory_variable_fails_loudly() -> Result<()> {
-    let static_dir = static_dir_with_index("misconfigured")?;
+    let static_dir = companion_build("misconfigured")?;
 
     // No GATEWAY_STATIC_DIR at all is a configuration error: the Gateway
     // refuses to start and names the variable to fix, rather than guessing a
@@ -416,7 +545,7 @@ async fn an_absent_companion_build_does_not_take_the_service_down() -> Result<()
     // while health and metrics — what the operator debugs with — stay up.
     let absent = missing_static_dir("no-build");
     let gateway = GatewayProc::start(&gateway_env_with(
-        &static_dir_with_index("no-build")?,
+        &companion_build("no-build")?,
         &[("GATEWAY_STATIC_DIR", &absent.to_string_lossy())],
     ))?;
     let base = gateway.base_url().await?;
@@ -453,7 +582,7 @@ async fn an_absent_companion_build_does_not_take_the_service_down() -> Result<()
                 .logs()
                 .await
                 .iter()
-                .any(|line| line.contains("no index.html in the static directory"))
+                .any(|line| line.contains("no fallback file in the static directory"))
                 .then_some(())
         },
         "the startup warning about the absent build",

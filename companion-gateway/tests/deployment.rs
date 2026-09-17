@@ -101,6 +101,7 @@ fn write_env_file() -> Result<PathBuf> {
          SENSOR_LOG_LEVEL=info\n\
          NATS_PORT={nats_port}\n\
          GATEWAY_HTTP_PORT={gateway_port}\n\
+         GATEWAY_FALLBACK_FILE=200.html\n\
          GATEWAY_LOG_LEVEL=info,twalk_companion_gateway=debug\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n"
     );
@@ -263,6 +264,27 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
     assert!(
         index.text().await?.contains("Companion"),
         "the index file served is the Companion's"
+    );
+
+    // And a client-side route — a deep link reloaded cold — gets the SPA
+    // fallback with a 200 from the deployed image, not a 404.
+    let deep_link = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?
+        .get(format!("{base}/onboarding/whatsapp"))
+        .send()
+        .await?;
+    assert_eq!(
+        deep_link.status(),
+        reqwest::StatusCode::OK,
+        "the deployed image serves the SPA fallback for a client-side route"
+    );
+    assert_eq!(
+        deep_link
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
     );
 
     // Only on request: a service left up (with its image) is what makes the

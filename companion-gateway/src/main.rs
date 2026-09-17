@@ -11,6 +11,7 @@ use tracing::{info, warn};
 use twalk_companion_gateway::config::Config;
 use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::metrics::Metrics;
+use twalk_companion_gateway::static_files::Resolver;
 
 /// How long in-flight requests get to finish after SIGTERM before the
 /// process exits anyway. Static files and a JSON document: a request that
@@ -26,16 +27,19 @@ async fn main() -> Result<()> {
     info!(
         listen = %config.listen,
         static_dir = %config.static_dir.display(),
+        fallback_file = %config.fallback_file,
         "companion gateway starting"
     );
+    let companion = Resolver::new(config.static_dir.clone(), config.fallback_file.clone());
     // A directory that is absent or holds no build is not fatal: the origin
     // answers a plain 404 for the Companion until the build appears, while
     // health and metrics stay up. Warn loudly, because for an operator who
     // did not intend it this is the whole of what is wrong.
-    if !config.static_dir.join("index.html").is_file() {
+    if !companion.fallback_path().is_file() {
         warn!(
             static_dir = %config.static_dir.display(),
-            "no index.html in the static directory: the Companion origin will answer 404 until a build is present"
+            fallback_file = %config.fallback_file,
+            "no fallback file in the static directory: the Companion origin will answer 404 for any path its build has no file for"
         );
     }
 
@@ -53,11 +57,7 @@ async fn main() -> Result<()> {
     // 0) discovers the origin by.
     info!("companion gateway listening on {address}");
 
-    let app = router(Gateway::new(
-        config.static_dir.clone(),
-        metrics,
-        now_unix_seconds,
-    ));
+    let app = router(Gateway::new(companion, metrics, now_unix_seconds));
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(
         axum::serve(listener, app)

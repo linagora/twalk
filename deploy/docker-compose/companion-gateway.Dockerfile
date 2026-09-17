@@ -16,6 +16,12 @@
 # The Companion is a SvelteKit static export (its own lot). Until that build
 # exists, this stage emits the holding page, so the image's shape is already
 # the final one and only the build command changes when the app lands.
+#
+# When it lands, its adapter-static must be configured with
+# `fallback: '200.html'` — the name the Gateway serves any client-side route
+# with (GATEWAY_FALLBACK_FILE), and the name the adapter's own documentation
+# recommends over index.html, which would collide with the prerendered
+# homepage.
 FROM node:22-bookworm-slim AS companion
 WORKDIR /src
 COPY companion companion
@@ -26,6 +32,7 @@ RUN set -eu; \
     else \
       echo "no Companion build in companion/: shipping the holding page"; \
       cp -r holding-page /companion-dist; \
+      cp holding-page/index.html /companion-dist/200.html; \
     fi
 
 FROM rust:1-bookworm AS build
