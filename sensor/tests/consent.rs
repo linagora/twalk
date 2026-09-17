@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 05, contact resolution and consent labelling: the Sensor keeps an
 //! in-memory consent cache fed by a durable consumer on
 //! `twalk.consent.state.changed.v1`, so every published event carries the
