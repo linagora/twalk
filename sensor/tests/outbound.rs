@@ -9,8 +9,8 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    contract_fixture, ensure_stack, poll_until, sensor_env, validate_against_contract, Bot, Bus,
-    SensorProc, SENSOR_USER_ID,
+    contract_fixture, ensure_stack, make_whatsapp_portal, poll_until, sensor_env,
+    validate_against_contract, Bot, Bus, SensorProc, SENSOR_USER_ID,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -57,26 +57,6 @@ fn approved_reply(room_id: &str, reply_to_event_id: &str) -> Result<Value> {
     event["data"]["target"]["reply_to_event_id"] = json!(reply_to_event_id);
     validate_against_contract(&event, "persona.reply.approved")?;
     Ok(event)
-}
-
-/// A mautrix-style portal room marker: the bridge identifies the network
-/// through an m.bridge state event.
-async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
-    let room_id = bridge.create_room(name, false).await?;
-    bridge
-        .send_state_event(
-            &room_id,
-            "m.bridge",
-            "",
-            json!({
-                "bridgebot": bridge.user_id(),
-                "creator": bridge.user_id(),
-                "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
-                "network": { "id": "whatsapp", "displayname": "WhatsApp" },
-            }),
-        )
-        .await?;
-    Ok(room_id)
 }
 
 #[tokio::test]

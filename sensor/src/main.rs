@@ -138,23 +138,14 @@ async fn main() -> Result<()> {
                     network_timestamp: None,
                 };
                 let envelope = normalize::build_message_received(&input);
-                let id = envelope["id"].as_str().unwrap().to_owned();
-                let mut headers = async_nats::header::HeaderMap::new();
-                headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
-                headers.insert("network", network.as_str());
-                headers.insert("consent", consent.as_str());
-                let payload = serde_json::to_vec(&envelope).expect("the envelope is serializable");
-                let subject = normalize::bus_subject(normalize::MESSAGE_RECEIVED_TYPE);
-                match jetstream
-                    .publish_with_headers(subject, headers, payload.into())
-                    .await
-                {
-                    Ok(ack) => match ack.await {
-                        Ok(_) => info!(%id, room = %room.room_id(), "published inbound.message.received.v1"),
-                        Err(error) => warn!(%id, %error, "publish ack failed"),
-                    },
-                    Err(error) => warn!(%id, %error, "publish failed"),
-                }
+                publish_envelope(
+                    &jetstream,
+                    normalize::MESSAGE_RECEIVED_TYPE,
+                    &envelope,
+                    network,
+                    consent,
+                )
+                .await;
             }
         });
     }
@@ -206,23 +197,14 @@ async fn main() -> Result<()> {
                     network_timestamp: None,
                 };
                 let envelope = normalize::build_reaction_added(&input);
-                let id = envelope["id"].as_str().unwrap().to_owned();
-                let mut headers = async_nats::header::HeaderMap::new();
-                headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
-                headers.insert("network", network.as_str());
-                headers.insert("consent", consent.as_str());
-                let payload = serde_json::to_vec(&envelope).expect("the envelope is serializable");
-                let subject = normalize::bus_subject(normalize::REACTION_ADDED_TYPE);
-                match jetstream
-                    .publish_with_headers(subject, headers, payload.into())
-                    .await
-                {
-                    Ok(ack) => match ack.await {
-                        Ok(_) => info!(%id, room = %room.room_id(), "published inbound.reaction.added.v1"),
-                        Err(error) => warn!(%id, %error, "publish ack failed"),
-                    },
-                    Err(error) => warn!(%id, %error, "publish failed"),
-                }
+                publish_envelope(
+                    &jetstream,
+                    normalize::REACTION_ADDED_TYPE,
+                    &envelope,
+                    network,
+                    consent,
+                )
+                .await;
             }
         });
     }
@@ -328,23 +310,14 @@ async fn main() -> Result<()> {
                     last_active_at,
                 };
                 let envelope = normalize::build_presence_updated(&input);
-                let id = envelope["id"].as_str().unwrap().to_owned();
-                let mut headers = async_nats::header::HeaderMap::new();
-                headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
-                headers.insert("network", network.as_str());
-                headers.insert("consent", consent.as_str());
-                let payload = serde_json::to_vec(&envelope).expect("the envelope is serializable");
-                let subject = normalize::bus_subject(normalize::PRESENCE_UPDATED_TYPE);
-                match jetstream
-                    .publish_with_headers(subject, headers, payload.into())
-                    .await
-                {
-                    Ok(ack) => match ack.await {
-                        Ok(_) => info!(%id, %sender, "published inbound.presence.updated.v1"),
-                        Err(error) => warn!(%id, %error, "publish ack failed"),
-                    },
-                    Err(error) => warn!(%id, %error, "publish failed"),
-                }
+                publish_envelope(
+                    &jetstream,
+                    normalize::PRESENCE_UPDATED_TYPE,
+                    &envelope,
+                    network,
+                    consent,
+                )
+                .await;
             }
         });
     }
@@ -420,6 +393,35 @@ async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
     match message.content.msgtype {
         MessageType::Text(text) => Some(normalize::excerpt(&text.body)),
         _ => None,
+    }
+}
+
+/// Publishes a CloudEvents envelope on the bus with the contract's headers:
+/// NATS-Msg-Id (the JetStream dedup anchor) plus the network/consent
+/// extensions duplicated for server-side filtering.
+async fn publish_envelope(
+    jetstream: &async_nats::jetstream::Context,
+    event_type: &str,
+    envelope: &serde_json::Value,
+    network: network::Network,
+    consent: Consent,
+) {
+    let id = envelope["id"].as_str().unwrap().to_owned();
+    let mut headers = async_nats::header::HeaderMap::new();
+    headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
+    headers.insert("network", network.as_str());
+    headers.insert("consent", consent.as_str());
+    let payload = serde_json::to_vec(envelope).expect("the envelope is serializable");
+    let subject = normalize::bus_subject(event_type);
+    match jetstream
+        .publish_with_headers(subject, headers, payload.into())
+        .await
+    {
+        Ok(ack) => match ack.await {
+            Ok(_) => info!(%id, "published {}", event_type),
+            Err(error) => warn!(%id, %error, "publish ack failed"),
+        },
+        Err(error) => warn!(%id, %error, "publish failed"),
     }
 }
 

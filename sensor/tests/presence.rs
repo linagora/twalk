@@ -10,27 +10,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use harness::{
-    ensure_stack, poll_until, sensor_env, validate_against_contract, Bot, Bus, SensorProc,
-    SENSOR_USER_ID,
+    ensure_stack, poll_until, sensor_env, sha256_hex, validate_against_contract, Bot, Bus,
+    SensorProc, SENSOR_USER_ID,
 };
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::time::sleep;
 
 const PRESENCE_SUBJECT: &str = "twalk.inbound.presence.updated.v1";
 const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 const STREAM: &str = "twalk";
-
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
 
 #[tokio::test]
 async fn puppet_presence_becomes_a_schema_valid_cloud_event() -> Result<()> {

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::process::Command;
 use tokio::time::sleep;
 
@@ -476,6 +477,38 @@ fn chunk_extract(response: &Value) -> Result<Vec<Value>> {
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("no chunk in messages response"))?;
     Ok(chunk.clone())
+}
+
+/// SHA-256 of the input as lowercase hex: recomputes the contract's
+/// deterministic event ids independently of the Sensor's own code.
+pub fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A mautrix-style portal room marker: the bridge identifies the network
+/// through an m.bridge state event.
+pub async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
+    let room_id = bridge.create_room(name, false).await?;
+    bridge
+        .send_state_event(
+            &room_id,
+            "m.bridge",
+            "",
+            serde_json::json!({
+                "bridgebot": bridge.user_id(),
+                "creator": bridge.user_id(),
+                "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
+                "network": { "id": "whatsapp", "displayname": "WhatsApp" },
+            }),
+        )
+        .await?;
+    Ok(room_id)
 }
 
 /// The bus side of the seam: NATS JetStream, as the Sensor will use it.

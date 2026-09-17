@@ -6,10 +6,10 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Publishing the `persona.reply.approved` fixture makes the message appear in the target Matrix room
-- [ ] The posted content is the final content, with an `m.in_reply_to` relation to the original message
-- [ ] Failed sends retry with exponential backoff
-- [ ] After retry exhaustion the event lands on a dead-letter subject and the failure is logged
-- [ ] The bridge echo of a sent message flows back as a normal inbound event
+- [x] Publishing the `persona.reply.approved` fixture makes the message appear in the target Matrix room
+- [x] The posted content is the final content, with an `m.in_reply_to` relation to the original message
+- [x] Failed sends retry with exponential backoff
+- [x] After retry exhaustion the event lands on a dead-letter subject and the failure is logged
+- [x] The bridge echo of a sent message flows back as a normal inbound event

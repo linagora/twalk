@@ -7,43 +7,12 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    ensure_stack, sensor_env, validate_against_contract, Bot, Bus, SensorProc, SENSOR_USER_ID,
+    ensure_stack, make_whatsapp_portal, sensor_env, sha256_hex, validate_against_contract, Bot,
+    Bus, SensorProc, SENSOR_USER_ID,
 };
-use serde_json::json;
-use sha2::{Digest, Sha256};
 
 const REACTION_SUBJECT: &str = "twalk.inbound.reaction.added.v1";
 const STREAM: &str = "twalk";
-
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-/// A mautrix-style portal room marker: the bridge identifies the network
-/// through an m.bridge state event.
-async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
-    let room_id = bridge.create_room(name, false).await?;
-    bridge
-        .send_state_event(
-            &room_id,
-            "m.bridge",
-            "",
-            json!({
-                "bridgebot": bridge.user_id(),
-                "creator": bridge.user_id(),
-                "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
-                "network": { "id": "whatsapp", "displayname": "WhatsApp" },
-            }),
-        )
-        .await?;
-    Ok(room_id)
-}
 
 /// The bridge creates the portal room, the Sensor joins it, and the reactor
 /// (a ghost stood in for by bot_beta) is let in. Returns the room id.
