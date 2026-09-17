@@ -169,7 +169,10 @@ mod tests {
     #[test]
     fn the_reply_target_is_optional() {
         let mut event = sample_event();
-        event["data"]["target"].as_object_mut().unwrap().remove("reply_to_event_id");
+        event["data"]["target"]
+            .as_object_mut()
+            .unwrap()
+            .remove("reply_to_event_id");
         let job = ApprovedReply::parse(&event).unwrap();
         assert_eq!(job.reply_to_event_id, None);
     }
@@ -179,8 +182,7 @@ mod tests {
         let job = ApprovedReply::parse(&sample_event()).unwrap();
         assert_eq!(job.traceparent, None);
         let mut event = sample_event();
-        event["traceparent"] =
-            json!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+        event["traceparent"] = json!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
         let job = ApprovedReply::parse(&event).unwrap();
         assert_eq!(
             job.traceparent.as_deref(),
@@ -191,11 +193,17 @@ mod tests {
     #[test]
     fn malformed_events_are_rejected() {
         let mut no_room = sample_event();
-        no_room["data"]["target"].as_object_mut().unwrap().remove("room_id");
+        no_room["data"]["target"]
+            .as_object_mut()
+            .unwrap()
+            .remove("room_id");
         assert!(ApprovedReply::parse(&no_room).is_err());
 
         let mut no_body = sample_event();
-        no_body["data"]["final"].as_object_mut().unwrap().remove("body");
+        no_body["data"]["final"]
+            .as_object_mut()
+            .unwrap()
+            .remove("body");
         assert!(ApprovedReply::parse(&no_body).is_err());
 
         assert!(ApprovedReply::parse(&json!({"unrelated": true})).is_err());

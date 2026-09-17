@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use harness::{
     ensure_stack, make_whatsapp_portal, poll_until, sensor_env_with, sha256_hex,
-    validate_against_contract, Bot, Bus, SensorProc, StoredMessage, SERVER_NAME, SENSOR_USER_ID,
+    validate_against_contract, Bot, Bus, SensorProc, StoredMessage, SENSOR_USER_ID, SERVER_NAME,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -154,10 +154,16 @@ async fn messages_sent_while_down_are_delivered_exactly_once_after_restart() -> 
     let sensor = SensorProc::start(&env)?;
     let room_id = make_whatsapp_portal(&alpha, "persistence-downtime-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
 
-    let event_a1_id = alpha.send_message(&room_id, "A1: before the restart").await?;
-    let event_a2_id = alpha.send_message(&room_id, "A2: still before the restart").await?;
+    let event_a1_id = alpha
+        .send_message(&room_id, "A1: before the restart")
+        .await?;
+    let event_a2_id = alpha
+        .send_message(&room_id, "A2: still before the restart")
+        .await?;
     wait_for_room_events(&bus, &room_id, 2).await?;
 
     // The state and crypto stores must be on disk by now.
@@ -173,7 +179,9 @@ async fn messages_sent_while_down_are_delivered_exactly_once_after_restart() -> 
     // Kill the Sensor mid-traffic; a message sent during the downtime must
     // still be delivered, exactly once, after the restart.
     sensor.stop().await;
-    let event_b_id = alpha.send_message(&room_id, "B: sent while the sensor was down").await?;
+    let event_b_id = alpha
+        .send_message(&room_id, "B: sent while the sensor was down")
+        .await?;
 
     let sensor = SensorProc::start(&env)?;
     let messages = wait_for_room_events(&bus, &room_id, 3).await?;
@@ -211,19 +219,27 @@ async fn restarting_mid_traffic_twice_emits_no_duplicate_event_ids() -> Result<(
     let sensor = SensorProc::start(&env)?;
     let room_id = make_whatsapp_portal(&alpha, "persistence-restart-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
 
-    let event_1_id = alpha.send_message(&room_id, "one: before the first restart").await?;
+    let event_1_id = alpha
+        .send_message(&room_id, "one: before the first restart")
+        .await?;
     wait_for_room_events(&bus, &room_id, 1).await?;
     sensor.stop().await;
 
     let sensor = SensorProc::start(&env)?;
-    let event_2_id = alpha.send_message(&room_id, "two: after the first restart").await?;
+    let event_2_id = alpha
+        .send_message(&room_id, "two: after the first restart")
+        .await?;
     wait_for_room_events(&bus, &room_id, 2).await?;
     sensor.stop().await;
 
     let sensor = SensorProc::start(&env)?;
-    let event_3_id = alpha.send_message(&room_id, "three: after the second restart").await?;
+    let event_3_id = alpha
+        .send_message(&room_id, "three: after the second restart")
+        .await?;
     let messages = wait_for_room_events(&bus, &room_id, 3).await?;
 
     // Let any erroneous re-emission happen before counting publishes.
@@ -281,7 +297,9 @@ async fn run_first_life(
     let sensor = SensorProc::start(env)?;
     let room_id = make_whatsapp_portal(alpha, room_name).await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     let event_id = alpha.send_message(&room_id, "first life").await?;
     wait_for_room_events(bus, &room_id, 1).await?;
     sensor.stop().await;
@@ -308,7 +326,10 @@ async fn assert_recovered(
     let messages = wait_for_room_events(bus, room_id, 2).await?;
     // Let any erroneous re-emission happen before counting publishes.
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    assert!(sensor.is_running(), "the Sensor must not crash on a stale store");
+    assert!(
+        sensor.is_running(),
+        "the Sensor must not crash on a stale store"
+    );
     assert_bus_events(
         &messages,
         room_id,
@@ -317,7 +338,10 @@ async fn assert_recovered(
     )?;
     assert_no_republish(publishes, room_id, 2);
     let new_token = persisted_access_token(state_dir)?;
-    assert_ne!(new_token, old_token, "a fresh login must persist its new session");
+    assert_ne!(
+        new_token, old_token,
+        "a fresh login must persist its new session"
+    );
     assert_eq!(
         stale_stores(state_dir).len(),
         1,
@@ -349,7 +373,17 @@ async fn an_unparseable_session_file_recovers_on_a_clean_store() -> Result<()> {
     // the previous device.
     std::fs::write(state_dir.join("session.json"), b"{\"meta\": {\"user_")?;
 
-    assert_recovered(&bus, &mut publishes, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
+    assert_recovered(
+        &bus,
+        &mut publishes,
+        &alpha,
+        &env,
+        &state_dir,
+        &room_id,
+        first_event_id,
+        &old_token,
+    )
+    .await?;
     let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }
@@ -371,14 +405,27 @@ async fn a_revoked_access_token_recovers_with_a_fresh_login() -> Result<()> {
     // Revoke the persisted token (and delete its device), as a password
     // change or an operator removing the device would.
     reqwest::Client::new()
-        .post(format!("{}/_matrix/client/v3/logout", harness::synapse_url()))
+        .post(format!(
+            "{}/_matrix/client/v3/logout",
+            harness::synapse_url()
+        ))
         .bearer_auth(&old_token)
         .json(&serde_json::json!({}))
         .send()
         .await?
         .error_for_status()?;
 
-    assert_recovered(&bus, &mut publishes, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
+    assert_recovered(
+        &bus,
+        &mut publishes,
+        &alpha,
+        &env,
+        &state_dir,
+        &room_id,
+        first_event_id,
+        &old_token,
+    )
+    .await?;
     let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }

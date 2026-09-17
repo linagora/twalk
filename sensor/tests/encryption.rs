@@ -28,7 +28,11 @@ const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 const STREAM: &str = "twalk";
 
 /// Waits until the bus holds at least `count` events sourced from the room.
-async fn wait_for_room_events(bus: &Bus, room_id: &str, count: usize) -> Result<Vec<StoredMessage>> {
+async fn wait_for_room_events(
+    bus: &Bus,
+    room_id: &str,
+    count: usize,
+) -> Result<Vec<StoredMessage>> {
     poll_until(
         || async {
             let messages = bus
@@ -87,7 +91,9 @@ async fn a_message_in_an_encrypted_room_arrives_decrypted_and_schema_valid() -> 
         .await?;
     // The bot must have seen the Sensor's join — and its device — before
     // sending, so the Megolm session key is shared with it.
-    alpha.wait_for_joined_member(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_joined_member(&room_id, SENSOR_USER_ID)
+        .await?;
     wait_for_user_devices(alpha.client(), SENSOR_USER_ID).await?;
 
     alpha
@@ -148,7 +154,9 @@ async fn undecryptable_history_is_skipped_and_other_rooms_keep_flowing() -> Resu
     alpha_http
         .wait_for_membership(&room_a, SENSOR_USER_ID, "join")
         .await?;
-    alpha.wait_for_joined_member(&room_a, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_joined_member(&room_a, SENSOR_USER_ID)
+        .await?;
     wait_for_user_devices(alpha.client(), SENSOR_USER_ID).await?;
 
     // Room B: a healthy encrypted room observed at the same time.
@@ -157,10 +165,16 @@ async fn undecryptable_history_is_skipped_and_other_rooms_keep_flowing() -> Resu
     alpha_http
         .wait_for_membership(&room_b, SENSOR_USER_ID, "join")
         .await?;
-    alpha.wait_for_joined_member(&room_b, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_joined_member(&room_b, SENSOR_USER_ID)
+        .await?;
 
-    alpha.send_message(&room_b, "fresh secret in room B").await?;
-    alpha.send_message(&room_a, "fresh secret in room A").await?;
+    alpha
+        .send_message(&room_b, "fresh secret in room B")
+        .await?;
+    alpha
+        .send_message(&room_a, "fresh secret in room A")
+        .await?;
 
     // Room B flows, undisturbed by room A's undecryptable history.
     let stored_b = bus
@@ -182,13 +196,24 @@ async fn undecryptable_history_is_skipped_and_other_rooms_keep_flowing() -> Resu
     );
     let expected_id = sha256_hex(&format!(
         "{}:{room_a}",
-        wait_for_encrypted_event_id(&alpha_http, &room_a, alpha.user_id(), Some(&pre_join_event_id)).await?
+        wait_for_encrypted_event_id(
+            &alpha_http,
+            &room_a,
+            alpha.user_id(),
+            Some(&pre_join_event_id)
+        )
+        .await?
     ));
-    assert_eq!(events_a[0].payload["id"].as_str(), Some(expected_id.as_str()));
+    assert_eq!(
+        events_a[0].payload["id"].as_str(),
+        Some(expected_id.as_str())
+    );
 
     // Let any erroneous publish of the undecryptable event happen.
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    let events_a = bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_a).await?;
+    let events_a = bus
+        .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_a)
+        .await?;
     assert_eq!(
         events_a.len(),
         1,
@@ -234,23 +259,27 @@ async fn the_recovery_key_bootstraps_the_identity_and_restores_history() -> Resu
     let room_id = make_encrypted_whatsapp_portal(&alpha, "recovery-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
     onboarding.join_room(&room_id).await?;
-    alpha.wait_for_joined_member(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_joined_member(&room_id, SENSOR_USER_ID)
+        .await?;
 
     // The onboarding device must hold the room key before backups are
     // enabled, so the upload `wait_for_backups_to_upload` waits on covers it:
     // wait until it decrypts the message.
     let (decrypted_tx, decrypted_rx) = tokio::sync::oneshot::channel::<()>();
     let decrypted_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(decrypted_tx)));
-    onboarding.client().add_event_handler(move |event: OriginalSyncRoomMessageEvent| {
-        let decrypted_tx = decrypted_tx.clone();
-        async move {
-            if event.content.body() == "backed-up history" {
-                if let Some(tx) = decrypted_tx.lock().unwrap().take() {
-                    let _ = tx.send(());
+    onboarding
+        .client()
+        .add_event_handler(move |event: OriginalSyncRoomMessageEvent| {
+            let decrypted_tx = decrypted_tx.clone();
+            async move {
+                if event.content.body() == "backed-up history" {
+                    if let Some(tx) = decrypted_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
                 }
             }
-        }
-    });
+        });
     alpha.send_message(&room_id, "backed-up history").await?;
     tokio::time::timeout(std::time::Duration::from_secs(20), decrypted_rx)
         .await

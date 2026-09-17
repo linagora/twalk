@@ -28,8 +28,7 @@ use tokio::time::sleep;
 /// TWALK_TEST_SYNAPSE_PORT / TWALK_TEST_NATS_PORT move the host ports.
 /// Defaults match the main checkout.
 pub fn synapse_url() -> String {
-    let port =
-        std::env::var("TWALK_TEST_SYNAPSE_PORT").unwrap_or_else(|_| "18008".to_owned());
+    let port = std::env::var("TWALK_TEST_SYNAPSE_PORT").unwrap_or_else(|_| "18008".to_owned());
     format!("http://localhost:{port}")
 }
 
@@ -208,7 +207,13 @@ impl Bot {
 
     /// Sends an authenticated request and parses the response, treating an
     /// empty body as `Value::Null` (several endpoints return no content).
-    async fn send_json(&self, method: reqwest::Method, path: &str, body: Option<&Value>, what: &str) -> Result<Value> {
+    async fn send_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        what: &str,
+    ) -> Result<Value> {
         let mut request = self.authed(method, path);
         if let Some(body) = body {
             request = request.json(body);
@@ -239,7 +244,12 @@ impl Bot {
             }]);
         }
         let response = self
-            .send_json(reqwest::Method::POST, "/_matrix/client/v3/createRoom", Some(&body), "createRoom")
+            .send_json(
+                reqwest::Method::POST,
+                "/_matrix/client/v3/createRoom",
+                Some(&body),
+                "createRoom",
+            )
             .await?;
         extract_str(&response, "room_id", "createRoom")
     }
@@ -271,13 +281,22 @@ impl Bot {
     /// not room-scoped) use this to drop them.
     pub async fn joined_rooms(&self) -> Result<Vec<String>> {
         let response = self
-            .send_json(reqwest::Method::GET, "/_matrix/client/v3/joined_rooms", None, "joined rooms")
+            .send_json(
+                reqwest::Method::GET,
+                "/_matrix/client/v3/joined_rooms",
+                None,
+                "joined rooms",
+            )
             .await?;
         response
             .get("joined_rooms")
             .and_then(Value::as_array)
             .map(|rooms| {
-                rooms.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+                rooms
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
             })
             .ok_or_else(|| anyhow!("no joined_rooms in joined rooms response"))
     }
@@ -294,7 +313,12 @@ impl Bot {
     }
 
     /// Sends a message-like event and returns its event id.
-    pub async fn send_event(&self, room_id: &str, event_type: &str, content: Value) -> Result<String> {
+    pub async fn send_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        content: Value,
+    ) -> Result<String> {
         let txn = format!(
             "{}{}",
             std::time::SystemTime::now()
@@ -325,7 +349,12 @@ impl Bot {
         .await
     }
 
-    pub async fn send_reaction(&self, room_id: &str, target_event_id: &str, key: &str) -> Result<String> {
+    pub async fn send_reaction(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        key: &str,
+    ) -> Result<String> {
         self.send_event(
             room_id,
             "m.reaction",
@@ -451,7 +480,12 @@ impl Bot {
     }
 
     /// Reads the content of one state event of a room.
-    pub async fn get_state_event(&self, room_id: &str, event_type: &str, state_key: &str) -> Result<Value> {
+    pub async fn get_state_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Value> {
         self.send_json(
             reqwest::Method::GET,
             &format!(
@@ -496,7 +530,12 @@ impl Bot {
 
     /// Polls `get_membership` until it equals `expected` or the deadline
     /// expires.
-    pub async fn wait_for_membership(&self, room_id: &str, user_id: &str, expected: &str) -> Result<()> {
+    pub async fn wait_for_membership(
+        &self,
+        room_id: &str,
+        user_id: &str,
+        expected: &str,
+    ) -> Result<()> {
         poll_until(
             || async {
                 self.get_membership(room_id, user_id)
@@ -639,7 +678,11 @@ impl Bus {
         headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
         let ack = self
             .jetstream
-            .publish_with_headers(subject.to_owned(), headers, serde_json::to_vec(event)?.into())
+            .publish_with_headers(
+                subject.to_owned(),
+                headers,
+                serde_json::to_vec(event)?.into(),
+            )
             .await
             .context("publish failed")?;
         ack.await.context("publish ack failed")?;
@@ -675,7 +718,11 @@ impl Bus {
 
     /// Like `fetch_all`, but keeps the NATS headers alongside each payload
     /// (needed to assert on `NATS-Msg-Id` and the filtering extensions).
-    pub async fn fetch_all_with_headers(&self, stream: &str, subject: &str) -> Result<Vec<StoredMessage>> {
+    pub async fn fetch_all_with_headers(
+        &self,
+        stream: &str,
+        subject: &str,
+    ) -> Result<Vec<StoredMessage>> {
         use async_nats::jetstream::stream::LastRawMessageErrorKind;
         let stream = self
             .jetstream
@@ -690,20 +737,18 @@ impl Bus {
         let mut out = Vec::new();
         for sequence in 1..=last.sequence {
             match stream.get_raw_message(sequence).await {
-                Ok(message) if message.subject.as_str() == subject => {
-                    out.push(StoredMessage {
-                        headers: message
-                            .headers
-                            .iter()
-                            .flat_map(|(name, values)| {
-                                values
-                                    .iter()
-                                    .map(move |value| (name.to_string(), value.to_string()))
-                            })
-                            .collect(),
-                        payload: serde_json::from_slice(&message.payload)?,
-                    })
-                }
+                Ok(message) if message.subject.as_str() == subject => out.push(StoredMessage {
+                    headers: message
+                        .headers
+                        .iter()
+                        .flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(move |value| (name.to_string(), value.to_string()))
+                        })
+                        .collect(),
+                    payload: serde_json::from_slice(&message.payload)?,
+                }),
                 Ok(_) => {}
                 Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
                 Err(e) => return Err(e).context("failed to fetch message"),
@@ -715,14 +760,25 @@ impl Bus {
     /// Fetches every stored event whose `source` identifies the given room.
     /// Several tests share the bus, so consumers filter by room — as real
     /// consumers will.
-    pub async fn fetch_room_messages(&self, stream: &str, subject: &str, room_id: &str) -> Result<Vec<StoredMessage>> {
+    pub async fn fetch_room_messages(
+        &self,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<Vec<StoredMessage>> {
         self.fetch_room_messages_on(SERVER_NAME, stream, subject, room_id)
             .await
     }
 
     /// Same as `fetch_room_messages`, against an arbitrary server name: the
     /// deploy stack has its own (`deploy.twalk` in deployment.rs).
-    pub async fn fetch_room_messages_on(&self, server_name: &str, stream: &str, subject: &str, room_id: &str) -> Result<Vec<StoredMessage>> {
+    pub async fn fetch_room_messages_on(
+        &self,
+        server_name: &str,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<Vec<StoredMessage>> {
         let expected_source = format!("matrix://{server_name}/{room_id}");
         Ok(self
             .fetch_all_with_headers(stream, subject)
@@ -734,13 +790,24 @@ impl Bus {
 
     /// Polls until an event whose `source` identifies the given room is
     /// stored on the subject.
-    pub async fn wait_for_room_message(&self, stream: &str, subject: &str, room_id: &str) -> Result<StoredMessage> {
+    pub async fn wait_for_room_message(
+        &self,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<StoredMessage> {
         self.wait_for_room_message_on(SERVER_NAME, stream, subject, room_id)
             .await
     }
 
     /// Same as `wait_for_room_message`, against an arbitrary server name.
-    pub async fn wait_for_room_message_on(&self, server_name: &str, stream: &str, subject: &str, room_id: &str) -> Result<StoredMessage> {
+    pub async fn wait_for_room_message_on(
+        &self,
+        server_name: &str,
+        stream: &str,
+        subject: &str,
+        room_id: &str,
+    ) -> Result<StoredMessage> {
         poll_until(
             || async {
                 self.fetch_room_messages_on(server_name, stream, subject, room_id)
@@ -863,8 +930,11 @@ impl SensorProc {
             .spawn()
             .context("failed to start the sensor binary")?;
         let log_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        fn forward<S>(stream: S, is_stderr: bool, store: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>)
-        where
+        fn forward<S>(
+            stream: S,
+            is_stderr: bool,
+            store: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        ) where
             S: tokio::io::AsyncRead + Unpin + Send + 'static,
         {
             tokio::spawn(async move {
@@ -880,8 +950,16 @@ impl SensorProc {
                 }
             });
         }
-        forward(child.stdout.take().expect("stdout is piped"), false, log_lines.clone());
-        forward(child.stderr.take().expect("stderr is piped"), true, log_lines.clone());
+        forward(
+            child.stdout.take().expect("stdout is piped"),
+            false,
+            log_lines.clone(),
+        );
+        forward(
+            child.stderr.take().expect("stderr is piped"),
+            true,
+            log_lines.clone(),
+        );
         Ok(Self { child, log_lines })
     }
 

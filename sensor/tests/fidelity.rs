@@ -45,7 +45,11 @@ async fn wait_for_room_events(
 
 /// Finds the stored event produced from one Matrix event, by recomputing the
 /// contract's deterministic id independently of the Sensor's own code.
-fn find_event<'a>(messages: &'a [StoredMessage], room_id: &str, matrix_event_id: &str) -> &'a Value {
+fn find_event<'a>(
+    messages: &'a [StoredMessage],
+    room_id: &str,
+    matrix_event_id: &str,
+) -> &'a Value {
     let expected_id = sha256_hex(&format!("{matrix_event_id}:{room_id}"));
     messages
         .iter()
@@ -493,7 +497,9 @@ async fn bridge_traffic_preserves_the_network_timestamp() -> Result<()> {
 
     let before = SystemTime::now();
     let portal_message_id = alpha.send_message(&portal_id, "bonjour").await?;
-    let ghost_message_id = puppet.send_message(&ghost_room_id, "hello from a ghost").await?;
+    let ghost_message_id = puppet
+        .send_message(&ghost_room_id, "hello from a ghost")
+        .await?;
 
     let portal_messages = wait_for_room_events(&bus, &portal_id, 1).await?;
     let portal_event = find_event(&portal_messages, &portal_id, &portal_message_id);

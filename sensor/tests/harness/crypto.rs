@@ -195,7 +195,8 @@ impl CryptoBot {
             || async {
                 let room = self.room(room_id).ok()?;
                 let member = room.get_member(&user_id).await.ok()??;
-                (*member.membership() == matrix_sdk::ruma::events::room::member::MembershipState::Join)
+                (*member.membership()
+                    == matrix_sdk::ruma::events::room::member::MembershipState::Join)
                     .then_some(())
             },
             &format!("waiting for the crypto bot to see {user_id} joined in {room_id}"),
@@ -256,11 +257,7 @@ pub async fn wait_for_user_devices(client: &Client, user_id: &str) -> Result<()>
     let user_id = UserId::parse(user_id)?.to_owned();
     poll_until(
         || async {
-            let devices = client
-                .encryption()
-                .get_user_devices(&user_id)
-                .await
-                .ok()?;
+            let devices = client.encryption().get_user_devices(&user_id).await.ok()?;
             if devices.devices().next().is_some() {
                 Some(())
             } else {

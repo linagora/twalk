@@ -21,13 +21,16 @@ async fn joins_when_invited_by_an_allowed_inviter_and_ignores_others() -> Result
 
     let portal = alpha.create_room("portal-allowed", false).await?;
     alpha.invite(&portal, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&portal, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&portal, SENSOR_USER_ID, "join")
+        .await?;
 
     // An invitation from anyone else is ignored: still "invite" after the
     // Sensor has had ample time to act on it.
     let not_a_bridge = beta.create_room("not-a-bridge", false).await?;
     beta.invite(&not_a_bridge, SENSOR_USER_ID).await?;
-    beta.wait_for_membership(&not_a_bridge, SENSOR_USER_ID, "invite").await?;
+    beta.wait_for_membership(&not_a_bridge, SENSOR_USER_ID, "invite")
+        .await?;
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     assert_eq!(
         beta.get_membership(&not_a_bridge, SENSOR_USER_ID).await?,
@@ -48,10 +51,14 @@ async fn leaves_the_room_after_being_removed() -> Result<()> {
 
     let portal = alpha.create_room("portal-removed", false).await?;
     alpha.invite(&portal, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&portal, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&portal, SENSOR_USER_ID, "join")
+        .await?;
 
     alpha.kick(&portal, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&portal, SENSOR_USER_ID, "leave").await?;
+    alpha
+        .wait_for_membership(&portal, SENSOR_USER_ID, "leave")
+        .await?;
 
     sensor.stop().await;
     Ok(())

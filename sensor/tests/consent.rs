@@ -34,7 +34,10 @@ fn unique_event_id() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    sha256_hex(&format!("{nanos}:{}", COUNTER.fetch_add(1, Ordering::Relaxed)))
+    sha256_hex(&format!(
+        "{nanos}:{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 /// A contact-scoped `consent.state.changed` event patched from the contract
@@ -104,7 +107,9 @@ async fn granted_consent_relabels_events_and_reveals_the_network_identifier() ->
 
     let room_id = make_whatsapp_portal(&alpha, "consent-grant-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     alpha.invite(&room_id, puppet.user_id()).await?;
     puppet.join_room(&room_id).await?;
 
@@ -121,7 +126,9 @@ async fn granted_consent_relabels_events_and_reveals_the_network_identifier() ->
     );
     assert_eq!(first.header("consent"), Some("pending"));
     assert!(
-        first.payload["data"]["contact"].get("network_identifier").is_none(),
+        first.payload["data"]["contact"]
+            .get("network_identifier")
+            .is_none(),
         "a pending contact's network identifier never leaves the Sensor"
     );
 
@@ -197,7 +204,9 @@ async fn revoked_consent_relabels_subsequent_events() -> Result<()> {
 
     let room_id = make_whatsapp_portal(&alpha, "consent-revoke-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
 
     alpha.send_message(&room_id, "before the decision").await?;
     let first = bus
@@ -219,7 +228,10 @@ async fn revoked_consent_relabels_subsequent_events() -> Result<()> {
 
     let relabelled = poll_until(
         || async {
-            alpha.send_message(&room_id, "after the decision").await.ok()?;
+            alpha
+                .send_message(&room_id, "after the decision")
+                .await
+                .ok()?;
             bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id)
                 .await
                 .ok()?

@@ -28,11 +28,11 @@ async fn text_message_becomes_a_schema_valid_cloud_event() -> Result<()> {
 
     let room_id = make_whatsapp_portal(&alpha, "whatsapp-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
-
-    let matrix_event_id = alpha
-        .send_message(&room_id, "on décale à 20h ?")
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
         .await?;
+
+    let matrix_event_id = alpha.send_message(&room_id, "on décale à 20h ?").await?;
 
     let stored = bus
         .wait_for_room_message(STREAM, MESSAGE_SUBJECT, &room_id)
@@ -153,13 +153,13 @@ async fn a_keyed_bridge_marker_attributes_a_non_ghost_sender() -> Result<()> {
         .send_state_event(&room_id, "m.bridge", &state_key, content)
         .await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     alpha.invite(&room_id, puppet.user_id()).await?;
     puppet.join_room(&room_id).await?;
 
-    let matrix_event_id = puppet
-        .send_message(&room_id, "sent from my phone")
-        .await?;
+    let matrix_event_id = puppet.send_message(&room_id, "sent from my phone").await?;
 
     let stored = bus
         .wait_for_room_message(STREAM, MESSAGE_SUBJECT, &room_id)
@@ -192,7 +192,9 @@ async fn a_removed_room_stops_producing_events() -> Result<()> {
 
     let room_id = make_whatsapp_portal(&alpha, "removal-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
 
     alpha.send_message(&room_id, "before the removal").await?;
     let stored = bus
@@ -201,11 +203,15 @@ async fn a_removed_room_stops_producing_events() -> Result<()> {
     validate_against_contract(&stored.payload, "inbound.message.received")?;
 
     alpha.kick(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "leave").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "leave")
+        .await?;
 
     let after_kick_id = alpha.send_message(&room_id, "after the removal").await?;
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    let messages = bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id).await?;
+    let messages = bus
+        .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id)
+        .await?;
     assert_eq!(
         messages.len(),
         1,

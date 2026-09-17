@@ -195,8 +195,14 @@ mod tests {
             Consent::Granted,
             &[Network::Whatsapp],
         ));
-        assert_eq!(cache.state("@a:example.com", Network::Whatsapp), Consent::Granted);
-        assert_eq!(cache.state("@a:example.com", Network::Telegram), Consent::Pending);
+        assert_eq!(
+            cache.state("@a:example.com", Network::Whatsapp),
+            Consent::Granted
+        );
+        assert_eq!(
+            cache.state("@a:example.com", Network::Telegram),
+            Consent::Pending
+        );
     }
 
     #[test]
@@ -207,18 +213,42 @@ mod tests {
             Consent::Granted,
             &[Network::Whatsapp, Network::Telegram],
         ));
-        assert_eq!(cache.state("@a:example.com", Network::Whatsapp), Consent::Granted);
-        assert_eq!(cache.state("@a:example.com", Network::Telegram), Consent::Granted);
-        assert_eq!(cache.state("@a:example.com", Network::Signal), Consent::Pending);
+        assert_eq!(
+            cache.state("@a:example.com", Network::Whatsapp),
+            Consent::Granted
+        );
+        assert_eq!(
+            cache.state("@a:example.com", Network::Telegram),
+            Consent::Granted
+        );
+        assert_eq!(
+            cache.state("@a:example.com", Network::Signal),
+            Consent::Pending
+        );
     }
 
     #[test]
     fn a_new_decision_overwrites_the_subjects_previous_one() {
         let cache = ConsentCache::default();
-        cache.apply(&contact_change("@a:example.com", Consent::Granted, &[Network::Whatsapp]));
-        cache.apply(&contact_change("@b:example.com", Consent::Granted, &[Network::Whatsapp]));
-        cache.apply(&contact_change("@a:example.com", Consent::Revoked, &[Network::Whatsapp]));
-        assert_eq!(cache.state("@a:example.com", Network::Whatsapp), Consent::Revoked);
+        cache.apply(&contact_change(
+            "@a:example.com",
+            Consent::Granted,
+            &[Network::Whatsapp],
+        ));
+        cache.apply(&contact_change(
+            "@b:example.com",
+            Consent::Granted,
+            &[Network::Whatsapp],
+        ));
+        cache.apply(&contact_change(
+            "@a:example.com",
+            Consent::Revoked,
+            &[Network::Whatsapp],
+        ));
+        assert_eq!(
+            cache.state("@a:example.com", Network::Whatsapp),
+            Consent::Revoked
+        );
         assert_eq!(
             cache.state("@b:example.com", Network::Whatsapp),
             Consent::Granted,
@@ -226,7 +256,12 @@ mod tests {
         );
     }
 
-    fn consent_event(subject_type: &str, subject_id: &str, new_state: &str, networks: Value) -> Value {
+    fn consent_event(
+        subject_type: &str,
+        subject_id: &str,
+        new_state: &str,
+        networks: Value,
+    ) -> Value {
         json!({
             "type": CONSENT_CHANGED_TYPE,
             "data": {
@@ -280,18 +315,33 @@ mod tests {
         let empty_scope = consent_event("contact", "@a:example.com", "granted", json!([]));
         assert_eq!(ConsentChange::parse(&empty_scope), None);
         // Unknown entries are dropped; the known ones still apply.
-        let mixed = consent_event("contact", "@a:example.com", "granted", json!(["irc", "sms"]));
-        assert_eq!(ConsentChange::parse(&mixed).unwrap().networks, vec![Network::Sms]);
+        let mixed = consent_event(
+            "contact",
+            "@a:example.com",
+            "granted",
+            json!(["irc", "sms"]),
+        );
+        assert_eq!(
+            ConsentChange::parse(&mixed).unwrap().networks,
+            vec![Network::Sms]
+        );
     }
 
     #[test]
     fn malformed_changes_are_rejected() {
         assert_eq!(ConsentChange::parse(&json!({"unrelated": true})), None);
         let mut no_id = consent_event("contact", "@a:example.com", "granted", json!(["whatsapp"]));
-        no_id["data"]["subject"].as_object_mut().unwrap().remove("id");
+        no_id["data"]["subject"]
+            .as_object_mut()
+            .unwrap()
+            .remove("id");
         assert_eq!(ConsentChange::parse(&no_id), None);
-        let mut no_state = consent_event("contact", "@a:example.com", "granted", json!(["whatsapp"]));
-        no_state["data"].as_object_mut().unwrap().remove("new_state");
+        let mut no_state =
+            consent_event("contact", "@a:example.com", "granted", json!(["whatsapp"]));
+        no_state["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("new_state");
         assert_eq!(ConsentChange::parse(&no_state), None);
     }
 }

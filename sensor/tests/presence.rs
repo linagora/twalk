@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use harness::{
-    ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sha256_hex, validate_against_contract, Bot, Bus,
-    SensorProc, SENSOR_USER_ID,
+    ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sha256_hex,
+    validate_against_contract, Bot, Bus, SensorProc, SENSOR_USER_ID,
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::time::sleep;
@@ -45,7 +45,9 @@ async fn puppet_presence_becomes_a_schema_valid_cloud_event() -> Result<()> {
 
     let room_id = make_whatsapp_portal(&alpha, "presence-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
-    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
     alpha.invite(&room_id, puppet.user_id()).await?;
     puppet.join_room(&room_id).await?;
 
@@ -104,7 +106,9 @@ async fn puppet_presence_becomes_a_schema_valid_cloud_event() -> Result<()> {
     // `time` is the receipt instant the natural key is derived from.
     let produced_at = OffsetDateTime::parse(event["time"].as_str().unwrap(), &Rfc3339)?;
     let receipt_timestamp_ms = produced_at.unix_timestamp_nanos() / 1_000_000;
-    let expected_id = sha256_hex(&format!("@bot_beta:test.twalk:online:{receipt_timestamp_ms}"));
+    let expected_id = sha256_hex(&format!(
+        "@bot_beta:test.twalk:online:{receipt_timestamp_ms}"
+    ));
     assert_eq!(event["id"].as_str(), Some(expected_id.as_str()));
     assert_eq!(
         stored.header("Nats-Msg-Id"),
