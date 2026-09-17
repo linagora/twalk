@@ -109,7 +109,11 @@ services:
       # Resolved from the build context: the Dockerfile lives with the
       # reference deployment, the context is the sensor crate alone.
       dockerfile: ../deploy/docker-compose/sensor.Dockerfile
-    image: twalk/sensor:local
+    # Name the local build is tagged with, and the image the service runs.
+    # Overridable (issue #38) so that several stacks built from different
+    # checkouts on one Docker daemon — the deployment test in parallel
+    # worktrees — never overwrite each other's image.
+    image: ${TWALK_SENSOR_IMAGE:-twalk/sensor:local}
     depends_on:
       synapse:
         condition: service_healthy
