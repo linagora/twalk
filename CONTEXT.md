@@ -36,7 +36,7 @@ The versioned CloudEvents 1.0 envelope shared by every component, with type name
 _Avoid_: API, spec
 
 **Network**:
-An external messaging service a conversation comes from, as the user experiences it: WhatsApp, Signal, Telegram, Discord, SMS. A network outlives its transports: SMS is `sms` whether it transits through mautrix-gmessages or the SMS Companion.
+A messaging service a conversation comes from, as the user experiences it: WhatsApp, Signal, Telegram, Discord, SMS, or Matrix itself for native rooms (the bring-your-own-account channel, ADR 0009). A network outlives its transports: SMS is `sms` whether it transits through mautrix-gmessages or the SMS Companion.
 _Avoid_: channel (user-facing copy only), gmessages (a bridge, not a network)
 
 **Consent**:
