@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Network {
     Whatsapp,
     Telegram,
@@ -44,6 +44,22 @@ impl Network {
         let (prefix, _) = localpart.split_once('_')?;
         Self::from_bridge_id(prefix)
     }
+
+    /// Parses a contract `network` enum value — the exact inverse of
+    /// `as_str`, with no transport folding (ADR 0005): unlike
+    /// `from_bridge_id`, `gmessages` is NOT a network and is rejected here.
+    /// Use this for anything that comes off the bus; use `from_bridge_id`
+    /// only for bridge-side identifiers.
+    pub fn from_contract_value(value: &str) -> Option<Self> {
+        match value {
+            "whatsapp" => Some(Self::Whatsapp),
+            "telegram" => Some(Self::Telegram),
+            "signal" => Some(Self::Signal),
+            "discord" => Some(Self::Discord),
+            "sms" => Some(Self::Sms),
+            _ => None,
+        }
+    }
 }
 
 /// Resolves the network of an observed event: the content of the room's
@@ -59,6 +75,25 @@ pub fn resolve(bridge_content: Option<&Value>, sender_localpart: &str) -> Option
         }
     }
     Network::from_ghost_localpart(sender_localpart)
+}
+
+/// The contact's native network identifier, derived from a ghost localpart
+/// `@<network>_<id>:<server>` whose prefix matches the event's network.
+/// Mautrix strips the leading `+` of phone-style ids when minting the
+/// ghost: all-digit ids get it restored (`whatsapp_33612345678` →
+/// `+33612345678`); other ids pass through unchanged. `None` when the
+/// localpart is not a ghost of this network — a plain Matrix user in a
+/// portal room has no derivable identifier.
+pub fn ghost_network_identifier(network: Network, localpart: &str) -> Option<String> {
+    let (prefix, identifier) = localpart.split_once('_')?;
+    if Network::from_bridge_id(prefix) != Some(network) || identifier.is_empty() {
+        return None;
+    }
+    if identifier.bytes().all(|byte| byte.is_ascii_digit()) {
+        Some(format!("+{identifier}"))
+    } else {
+        Some(identifier.to_owned())
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +113,14 @@ mod tests {
     #[test]
     fn transports_fold_into_their_network() {
         assert_eq!(Network::from_bridge_id("gmessages"), Some(Network::Sms));
+    }
+
+    #[test]
+    fn contract_values_reject_transports() {
+        assert_eq!(Network::from_contract_value("whatsapp"), Some(Network::Whatsapp));
+        assert_eq!(Network::from_contract_value("sms"), Some(Network::Sms));
+        assert_eq!(Network::from_contract_value("gmessages"), None);
+        assert_eq!(Network::from_contract_value("irc"), None);
     }
 
     #[test]
@@ -131,5 +174,39 @@ mod tests {
         assert_eq!(resolve(None, "bot_alpha"), None);
         let junk = json!({ "unrelated": true });
         assert_eq!(resolve(Some(&junk), "bot_alpha"), None);
+    }
+
+    #[test]
+    fn ghost_identifiers_restore_the_stripped_phone_prefix() {
+        assert_eq!(
+            ghost_network_identifier(Network::Whatsapp, "whatsapp_33612345678"),
+            Some("+33612345678".to_owned())
+        );
+        // A transport ghost folds into its network first.
+        assert_eq!(
+            ghost_network_identifier(Network::Sms, "gmessages_33612345678"),
+            Some("+33612345678".to_owned())
+        );
+    }
+
+    #[test]
+    fn non_phone_ghost_identifiers_pass_through_unchanged() {
+        assert_eq!(
+            ghost_network_identifier(Network::Signal, "signal_abc-def"),
+            Some("abc-def".to_owned())
+        );
+    }
+
+    #[test]
+    fn ghost_identifiers_require_a_ghost_of_the_event_network() {
+        // The prefix must match the event's network…
+        assert_eq!(
+            ghost_network_identifier(Network::Telegram, "whatsapp_33612345678"),
+            None
+        );
+        // …a plain Matrix user has no derivable identifier…
+        assert_eq!(ghost_network_identifier(Network::Whatsapp, "bot_alpha"), None);
+        // …and an empty identifier is no identifier.
+        assert_eq!(ghost_network_identifier(Network::Whatsapp, "whatsapp_"), None);
     }
 }
