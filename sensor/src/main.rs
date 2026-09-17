@@ -1154,11 +1154,14 @@ async fn run_consent_consumer(
 }
 
 /// Publishes an undeliverable event to the dead-letter subject and acks the
-/// original. The dead-letter copy keeps the event id as `NATS-Msg-Id` so
-/// bus-level dedup still works, and duplicates the event's `network`,
-/// `consent` and `traceparent` extensions as headers, like the inbound path
-/// does. If the publish itself fails the message stays unacked, so it is
-/// redelivered while attempts remain rather than disappearing.
+/// original. The dead-letter copy gets its own stable `Nats-Msg-Id`, derived
+/// from the event id (the approved reply itself is published under the event
+/// id in the same stream, so reusing it would get the copy dropped as a
+/// duplicate); the event id stays visible in the `event-id` header. The
+/// event's `network`, `consent` and `traceparent` extensions are duplicated
+/// as headers, like the inbound path does. If the publish itself fails the
+/// message stays unacked, so it is redelivered while attempts remain rather
+/// than disappearing.
 async fn dead_letter(
     jetstream: &async_nats::jetstream::Context,
     subject: &str,
@@ -1166,10 +1169,30 @@ async fn dead_letter(
     metrics: &Metrics,
 ) {
     let mut headers = async_nats::header::HeaderMap::new();
-    if let Ok(event) = serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
-        if let Some(id) = event.get("id").and_then(serde_json::Value::as_str) {
-            headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
-        }
+    let event = serde_json::from_slice::<serde_json::Value>(&message.message.payload).ok();
+    // A malformed event may carry no usable id: fall back to the id it was
+    // published under, if any.
+    let event_id = event
+        .as_ref()
+        .and_then(|event| event.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            message
+                .message
+                .headers
+                .as_ref()
+                .and_then(|headers| headers.get(async_nats::header::NATS_MESSAGE_ID))
+                .map(|id| id.as_str().to_owned())
+        });
+    if let Some(id) = &event_id {
+        headers.insert(
+            async_nats::header::NATS_MESSAGE_ID,
+            outbound::dead_letter_msg_id(id).as_str(),
+        );
+        headers.insert(outbound::DEAD_LETTER_EVENT_ID_HEADER, id.as_str());
+    }
+    if let Some(event) = &event {
         for extension in ["network", "consent", "traceparent"] {
             if let Some(value) = event.get(extension).and_then(serde_json::Value::as_str) {
                 headers.insert(extension, value);
@@ -1181,8 +1204,16 @@ async fn dead_letter(
         .await
     {
         Ok(ack) => match ack.await {
-            Ok(_) => {
-                metrics.record_dead_lettered();
+            Ok(ack) => {
+                if ack.duplicate {
+                    // The derived id is unique to this event's dead-letter
+                    // copy: a duplicate means an earlier attempt already
+                    // stored (and counted) it, but its ack of the original
+                    // was lost. The copy is safe; just ack the original.
+                    warn!(id = event_id.as_deref(), "dead-letter copy already stored, acking the redelivered original");
+                } else {
+                    metrics.record_dead_lettered();
+                }
                 if let Err(error) = message.ack().await {
                     error!(%error, "ack failed after dead-lettering, a duplicate may be dead-lettered again");
                 }

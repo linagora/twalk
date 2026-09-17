@@ -631,6 +631,21 @@ impl Bus {
         Ok(())
     }
 
+    /// Publishes a CloudEvent the way Hermes does: with `Nats-Msg-Id` set to
+    /// the event's `id`, so the bus de-duplicates a re-published event.
+    pub async fn publish_event(&self, subject: &str, event: &Value) -> Result<()> {
+        let id = event["id"].as_str().context("the event has no string id")?;
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(async_nats::header::NATS_MESSAGE_ID, id);
+        let ack = self
+            .jetstream
+            .publish_with_headers(subject.to_owned(), headers, serde_json::to_vec(event)?.into())
+            .await
+            .context("publish failed")?;
+        ack.await.context("publish ack failed")?;
+        Ok(())
+    }
+
     /// Fetches the most recent message stored on a subject, if any.
     pub async fn last_message(&self, stream: &str, subject: &str) -> Result<Option<Value>> {
         use async_nats::jetstream::stream::LastRawMessageErrorKind;

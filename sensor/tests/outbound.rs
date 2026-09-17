@@ -82,7 +82,7 @@ async fn an_approved_reply_is_posted_as_a_threaded_reply_and_echoes_back() -> Re
         .as_str()
         .unwrap()
         .to_owned();
-    bus.publish(REPLY_APPROVED_SUBJECT, &approved).await?;
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
 
     // The Sensor posts the final content as a native reply to the original
     // message — never the raw suggestion.
@@ -146,6 +146,76 @@ async fn an_approved_reply_is_posted_as_a_threaded_reply_and_echoes_back() -> Re
     Ok(())
 }
 
+/// The dead-letter copy lives in the same stream as the approved reply, so it
+/// needs its own — still stable — message id: reusing the event id would make
+/// the bus drop it as a duplicate of the original publish. The event id stays
+/// visible in its own header, next to the message-flow extensions.
+fn assert_dead_letter_headers(dead: &harness::StoredMessage, approved_id: &str) {
+    assert_eq!(
+        dead.header("Nats-Msg-Id"),
+        Some(format!("{approved_id}:dead-letter").as_str()),
+        "the dead-letter copy carries a derived, stable message id"
+    );
+    assert_eq!(
+        dead.header("event-id"),
+        Some(approved_id),
+        "the dead-letter copy keeps the original event id visible"
+    );
+    assert_eq!(dead.header("network"), Some("whatsapp"));
+    assert_eq!(dead.header("consent"), Some("granted"));
+}
+
+/// A reply that can never be posted is dead-lettered on its first delivery —
+/// well within the bus duplicate window of the approved reply's own publish.
+#[tokio::test]
+async fn a_permanently_unpostable_reply_lands_on_the_dead_letter_subject() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let sensor = SensorProc::start(&outbound_sensor_env())?;
+    let alpha = Bot::login("bot_alpha").await?;
+
+    let room_id = make_whatsapp_portal(&alpha, "outbound-markdown").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    let original_event_id = alpha.send_message(&room_id, "tu peux confirmer ?").await?;
+
+    // Markdown is a contract format the Sensor does not render yet.
+    let mut approved = approved_reply(&room_id, &original_event_id)?;
+    approved["data"]["final"]["format"] = json!("text/markdown");
+    validate_against_contract(&approved, "persona.reply.approved")?;
+    let approved_id = approved["id"].as_str().unwrap().to_owned();
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
+
+    let dead = poll_until(
+        || async {
+            bus.fetch_all_with_headers(STREAM, DEAD_LETTER_SUBJECT)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|m| m.payload["id"].as_str() == Some(approved_id.as_str()))
+        },
+        "the markdown reply on the dead-letter subject",
+    )
+    .await?;
+    assert_eq!(dead.payload, approved, "the dead-letter copy is the approved reply, unchanged");
+    assert_dead_letter_headers(&dead, &approved_id);
+
+    // The Sensor is a member here (its join is in the timeline): check that
+    // it never posted a message.
+    let events = alpha.room_events(&room_id, 50).await?;
+    assert!(
+        events.iter().all(|event| {
+            event.get("sender").and_then(|s| s.as_str()) != Some(SENSOR_USER_ID)
+                || event.get("type").and_then(|t| t.as_str()) != Some("m.room.message")
+        }),
+        "an unpostable reply must never reach the room"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_undeliverable_reply_lands_on_the_dead_letter_subject() -> Result<()> {
     ensure_stack().await?;
@@ -159,7 +229,7 @@ async fn an_undeliverable_reply_lands_on_the_dead_letter_subject() -> Result<()>
 
     let approved = approved_reply(&room_id, "$AbCdEfGh1234")?;
     let approved_id = approved["id"].as_str().unwrap().to_owned();
-    bus.publish(REPLY_APPROVED_SUBJECT, &approved).await?;
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
 
     // After the retries are exhausted the event moves to the dead-letter
     // subject instead of being silently dropped.
@@ -179,13 +249,7 @@ async fn an_undeliverable_reply_lands_on_the_dead_letter_subject() -> Result<()>
         Some(room_id.as_str()),
         "the dead-lettered event is the undeliverable approved reply"
     );
-    assert_eq!(
-        dead.header("Nats-Msg-Id"),
-        Some(approved_id.as_str()),
-        "the dead-letter copy keeps the event id for bus-level dedup"
-    );
-    assert_eq!(dead.header("network"), Some("whatsapp"));
-    assert_eq!(dead.header("consent"), Some("granted"));
+    assert_dead_letter_headers(&dead, &approved_id);
 
     // And nothing was ever posted to the room.
     let events = alpha.room_events(&room_id, 50).await?;
@@ -225,7 +289,7 @@ async fn a_reply_the_homeserver_rejects_is_retried_then_dead_lettered() -> Resul
 
     let approved = approved_reply(&room_id, "$AbCdEfGh1234")?;
     let approved_id = approved["id"].as_str().unwrap().to_owned();
-    bus.publish(REPLY_APPROVED_SUBJECT, &approved).await?;
+    bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
 
     // The rejection must not be swallowed by an early ack: the approval goes
     // through the retry schedule and ends on the dead-letter subject.
@@ -245,6 +309,7 @@ async fn a_reply_the_homeserver_rejects_is_retried_then_dead_lettered() -> Resul
         Some(room_id.as_str()),
         "the dead-lettered event is the rejected approved reply"
     );
+    assert_dead_letter_headers(&dead, &approved_id);
 
     // It was retried before being dead-lettered, not given up on at once:
     // a forbidden send may succeed once the room's power levels change.
