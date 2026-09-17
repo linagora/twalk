@@ -1,6 +1,7 @@
 /target/
 /sensor/target/
 /hermes/target/
+/companion-gateway/target/
 /tests/harness/target/
 .env
 

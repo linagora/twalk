@@ -1,0 +1,39 @@
+[package]
+name = "twalk-companion-gateway"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The Twalk Companion Gateway: serves the Companion PWA on its own origin and, in later tickets, owns consent state and the user's session."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+# The HTTP stack: axum for routing, tower-http's ServeDir for the Companion's
+# static files (content types, conditional requests, byte ranges and
+# path-traversal refusal are not code worth hand-rolling on a public origin).
+# hyper, http, tower and tower-http are already in the repository's dependency
+# graph through matrix-sdk and reqwest, so this adds a router, not a second
+# web framework.
+axum = "0.8"
+serde_json = "1"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
+# Trace ids are carved out of a SHA-256 digest, as the Sensor's are
+# (sensor/src/normalize.rs::originate_traceparent).
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", features = ["rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+# The shared test harness: the test stack's lifecycle, the bus, contract
+# validation and `poll_until` (tests/harness/, ticket #20). The Gateway
+# skeleton needs only `poll_until` from it; its own process-boundary
+# plumbing lives in tests/harness/mod.rs, as the Sensor's does.
+twalk-test-harness = { path = "../tests/harness" }
