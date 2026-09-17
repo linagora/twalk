@@ -6,9 +6,9 @@
 
 **Blocked by:** 04 — Megolm decryption; 09 — Outbound approved replies.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Structured logs with configurable level
-- [ ] Metrics cover: events published, decryption failures, sync lag, outbound send failures
-- [ ] Inbound events originate a valid `traceparent`; outbound sends continue the approved reply's trace
-- [ ] SIGTERM drains in-flight work and exits cleanly
+- [x] Structured logs with configurable level
+- [x] Metrics cover: events published, decryption failures, sync lag, outbound send failures
+- [x] Inbound events originate a valid `traceparent`; outbound sends continue the approved reply's trace
+- [x] SIGTERM drains in-flight work and exits cleanly

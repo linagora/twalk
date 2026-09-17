@@ -6,9 +6,9 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The Sensor bootstraps its cryptographic identity from the operator's recovery key
-- [ ] A message sent in an encrypted room arrives decrypted and schema-valid on the bus
-- [ ] An undecryptable room is logged, counted and skipped while other rooms keep flowing
-- [ ] No cryptographic primitive is implemented in the Sensor codebase
+- [x] The Sensor bootstraps its cryptographic identity from the operator's recovery key
+- [x] A message sent in an encrypted room arrives decrypted and schema-valid on the bus
+- [x] An undecryptable room is logged, counted and skipped while other rooms keep flowing
+- [x] No cryptographic primitive is implemented in the Sensor codebase

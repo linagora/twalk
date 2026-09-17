@@ -6,10 +6,10 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Events carry a resolved `contact.display_name` from membership and bridge metadata
-- [ ] `network_identifier` appears only when the sender's consent state allows it
-- [ ] A `consent.state.changed` event on the bus changes the label on that sender's subsequent events
-- [ ] Unknown senders are labelled `pending`
-- [ ] The initial consent fetch is behind an interface with a no-op default; the Sensor never writes consent state
+- [x] Events carry a resolved `contact.display_name` from membership and bridge metadata
+- [x] `network_identifier` appears only when the sender's consent state allows it
+- [x] A `consent.state.changed` event on the bus changes the label on that sender's subsequent events
+- [x] Unknown senders are labelled `pending`
+- [x] The initial consent fetch is behind an interface with a no-op default; the Sensor never writes consent state
