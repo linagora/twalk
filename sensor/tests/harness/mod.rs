@@ -143,22 +143,41 @@ pub struct Bot {
     http: reqwest::Client,
     access_token: String,
     user_id: String,
+    base_url: String,
 }
 
 impl Bot {
     /// Logs in with the password scheme provisioned by
     /// tests/scripts/provision-bots.sh — keep the two in sync.
     pub async fn login(localpart: &str) -> Result<Self> {
+        Self::login_with(
+            &synapse_url(),
+            SERVER_NAME,
+            localpart,
+            &format!("test-only-password-{localpart}"),
+        )
+        .await
+    }
+
+    /// Logs in against an arbitrary homeserver with an explicit password: the
+    /// deployment test (deployment.rs) points the harness at the deploy
+    /// stack, which has its own server name and credentials.
+    pub async fn login_with(
+        base_url: &str,
+        server_name: &str,
+        localpart: &str,
+        password: &str,
+    ) -> Result<Self> {
         let http = reqwest::Client::new();
         let response: Value = http
-            .post(format!("{}/_matrix/client/v3/login", synapse_url()))
+            .post(format!("{base_url}/_matrix/client/v3/login"))
             .json(&serde_json::json!({
                 "type": "m.login.password",
                 "identifier": {
                     "type": "m.id.user",
-                    "user": format!("@{localpart}:{SERVER_NAME}"),
+                    "user": format!("@{localpart}:{server_name}"),
                 },
-                "password": format!("test-only-password-{localpart}"),
+                "password": password,
             }))
             .send()
             .await
@@ -173,6 +192,7 @@ impl Bot {
             http,
             access_token,
             user_id,
+            base_url: base_url.to_owned(),
         })
     }
 
@@ -182,7 +202,7 @@ impl Bot {
 
     fn authed(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
-            .request(method, format!("{}{path}", synapse_url()))
+            .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(&self.access_token)
     }
 
@@ -526,8 +546,14 @@ impl Bus {
     /// image ships no wget or CLI, so the compose stack cannot healthcheck
     /// it and `--wait` does not cover it.
     pub async fn connect() -> Result<Self> {
+        Self::connect_to(&nats_url()).await
+    }
+
+    /// Connects to an arbitrary NATS URL: the deployment test targets the
+    /// deploy stack's bus, not the harness's own.
+    pub async fn connect_to(url: &str) -> Result<Self> {
         for attempt in 0..30 {
-            match async_nats::connect(nats_url().as_str()).await {
+            match async_nats::connect(url).await {
                 Ok(client) => {
                     return Ok(Self {
                         jetstream: async_nats::jetstream::new(client.clone()),
@@ -638,7 +664,14 @@ impl Bus {
     /// Several tests share the bus, so consumers filter by room — as real
     /// consumers will.
     pub async fn fetch_room_messages(&self, stream: &str, subject: &str, room_id: &str) -> Result<Vec<StoredMessage>> {
-        let expected_source = format!("matrix://{SERVER_NAME}/{room_id}");
+        self.fetch_room_messages_on(SERVER_NAME, stream, subject, room_id)
+            .await
+    }
+
+    /// Same as `fetch_room_messages`, against an arbitrary server name: the
+    /// deploy stack has its own (`deploy.twalk` in deployment.rs).
+    pub async fn fetch_room_messages_on(&self, server_name: &str, stream: &str, subject: &str, room_id: &str) -> Result<Vec<StoredMessage>> {
+        let expected_source = format!("matrix://{server_name}/{room_id}");
         Ok(self
             .fetch_all_with_headers(stream, subject)
             .await?
@@ -650,9 +683,15 @@ impl Bus {
     /// Polls until an event whose `source` identifies the given room is
     /// stored on the subject.
     pub async fn wait_for_room_message(&self, stream: &str, subject: &str, room_id: &str) -> Result<StoredMessage> {
+        self.wait_for_room_message_on(SERVER_NAME, stream, subject, room_id)
+            .await
+    }
+
+    /// Same as `wait_for_room_message`, against an arbitrary server name.
+    pub async fn wait_for_room_message_on(&self, server_name: &str, stream: &str, subject: &str, room_id: &str) -> Result<StoredMessage> {
         poll_until(
             || async {
-                self.fetch_room_messages(stream, subject, room_id)
+                self.fetch_room_messages_on(server_name, stream, subject, room_id)
                     .await
                     .ok()?
                     .into_iter()
