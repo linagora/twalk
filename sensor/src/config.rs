@@ -40,11 +40,14 @@ pub struct Config {
     /// Delivery attempts an approved reply gets before it moves to the
     /// dead-letter subject (SENSOR_SEND_RETRY_MAX_ATTEMPTS, default 5).
     pub send_retry_max_attempts: i64,
-    /// The operator's recovery key (SENSOR_RECOVERY_KEY, optional), saved
-    /// during onboarding. When set, the Sensor opens the account's secret
-    /// storage with it at startup and imports the cross-signing secrets and
-    /// the key-backup decryption key, so a replacement device regains the
-    /// backed-up room-key history. When unset, the Sensor relies on its
+    /// The **Sensor account's own** recovery key (SENSOR_RECOVERY_KEY,
+    /// optional), kept by the operator from provisioning that account —
+    /// never the user's recovery key, which no Twalk service may hold
+    /// (ADR 0011, `docs/architecture/security-model.md`). When set, the
+    /// Sensor opens its own account's secret storage with it at startup and
+    /// imports that account's cross-signing secrets and key-backup
+    /// decryption key, so a replacement device regains the backed-up
+    /// room-key history. When unset, the Sensor relies on its
     /// local crypto store only: new traffic still decrypts (senders share
     /// Megolm keys with its device), history from before the device existed
     /// does not.
