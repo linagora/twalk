@@ -60,7 +60,8 @@ describe('the catalogues', () => {
 			started: '2026-09-18T07:00:00.000Z',
 			seconds: 20,
 			rooms: 3,
-			sensor: '@sensor:example.com'
+			sensor: '@sensor:example.com',
+			user: '@you:example.com'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();
