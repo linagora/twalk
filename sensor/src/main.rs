@@ -78,6 +78,38 @@ async fn main() -> Result<()> {
         auto_enable_backups: true,
         backup_download_strategy: BackupDownloadStrategy::OneShot,
     };
+
+    // With a persisted store, a fresh password login on every start would
+    // mint a new device each time — growing the account's device list and
+    // resetting the crypto identity the crypto store was persisted for. The
+    // session is therefore kept in `session.json` in the state directory:
+    // restore it when present, log in otherwise and persist the new session
+    // for the next start. Restoring also reloads the persisted sync token,
+    // which `SyncSettings::default()` (SyncToken::ReusePrevious) picks up.
+    //
+    // Whether the persisted session is usable is decided before the client
+    // opens the store (issue #28): the crypto store belongs to the session's
+    // device, and matrix-sdk refuses to open it for the new device a fresh
+    // login mints. So when the session is missing, unparseable or its token
+    // was revoked, the stale crypto store is moved aside first and the client
+    // starts on a clean one (the state store and its sync token are kept).
+    let session_file = config.state_dir.as_ref().map(|dir| dir.join("session.json"));
+    let mut session = session_file.as_deref().and_then(load_session);
+    if let Some(persisted) = &session {
+        if access_token_revoked(&config.homeserver_url, &persisted.tokens.access_token).await {
+            warn!(
+                device_id = %persisted.meta.device_id,
+                "the persisted access token was revoked (M_UNKNOWN_TOKEN), falling back to a fresh login"
+            );
+            session = None;
+        }
+    }
+    if session.is_none() {
+        if let Some(state_dir) = &config.state_dir {
+            set_stale_store_aside(state_dir).context("failed to move the stale store aside")?;
+        }
+    }
+
     let client = match &config.state_dir {
         Some(state_dir) => Client::builder()
             .homeserver_url(&config.homeserver_url)
@@ -92,15 +124,15 @@ async fn main() -> Result<()> {
             .await?,
     };
 
-    // With a persisted store, a fresh password login on every start would
-    // mint a new device each time — growing the account's device list and
-    // resetting the crypto identity the crypto store was persisted for. The
-    // session is therefore kept in `session.json` in the state directory:
-    // restore it when present, log in otherwise and persist the new session
-    // for the next start. Restoring also reloads the persisted sync token,
-    // which `SyncSettings::default()` (SyncToken::ReusePrevious) picks up.
-    let session_file = config.state_dir.as_ref().map(|dir| dir.join("session.json"));
-    if restore_session(&client, session_file.as_deref()).await? {
+    // A session that parses but fails to restore is fatal: it points at
+    // store corruption the operator should see, and logging in past a
+    // half-restored session is not safe (the SDK refuses to set
+    // authentication data twice).
+    if let Some(session) = session {
+        client
+            .restore_session(session)
+            .await
+            .context("failed to restore the persisted session")?;
         info!("restored the persisted session");
     } else {
         client
@@ -678,19 +710,12 @@ impl PublishTracker {
     }
 }
 
-/// Restores the Matrix session persisted in `session_file` (ticket 03).
-/// Returns false — and the caller logs in fresh — when there is no file or
-/// the file is unreadable or unparseable; the store's sync token still
-/// applies after the fresh login, so nothing is re-emitted. A session that
-/// parses but fails to restore is fatal: it points at store corruption the
-/// operator should see, and logging in past a half-restored session is not
-/// safe (the SDK refuses to set authentication data twice).
-async fn restore_session(client: &Client, session_file: Option<&Path>) -> Result<bool> {
-    let Some(session_file) = session_file else {
-        return Ok(false);
-    };
+/// Loads the Matrix session persisted in `session_file` (ticket 03).
+/// Returns None — and the caller logs in fresh — when there is no file or
+/// the file is unreadable or unparseable.
+fn load_session(session_file: &Path) -> Option<MatrixSession> {
     if !session_file.is_file() {
-        return Ok(false);
+        return None;
     }
     let session = std::fs::read_to_string(session_file)
         .with_context(|| format!("failed to read {}", session_file.display()))
@@ -699,23 +724,114 @@ async fn restore_session(client: &Client, session_file: Option<&Path>) -> Result
                 .with_context(|| format!("failed to parse {}", session_file.display()))
         });
     match session {
-        Ok(session) => {
-            client
-                .restore_session(session)
-                .await
-                .context("failed to restore the persisted session")?;
-            Ok(true)
-        }
+        Ok(session) => Some(session),
         Err(error) => {
-            warn!(%error, "persisted session is unusable, falling back to a fresh login");
-            Ok(false)
+            warn!(error = format!("{error:#}"), "persisted session is unusable, falling back to a fresh login");
+            None
         }
     }
 }
 
+/// True only when the homeserver positively rejects the access token with
+/// `M_UNKNOWN_TOKEN` (device deleted, password changed, logged out). Any
+/// other outcome — valid token, homeserver unreachable, unexpected answer —
+/// keeps the persisted session: a transient failure must never cost the
+/// device its crypto store.
+async fn access_token_revoked(homeserver_url: &str, access_token: &str) -> bool {
+    let url = format!(
+        "{}/_matrix/client/v3/account/whoami",
+        homeserver_url.trim_end_matches('/')
+    );
+    let response = matrix_sdk::reqwest::Client::new()
+        .get(url)
+        .bearer_auth(access_token)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            warn!(%error, "cannot check the persisted access token, restoring the session as is");
+            return false;
+        }
+    };
+    if response.status() != matrix_sdk::reqwest::StatusCode::UNAUTHORIZED {
+        return false;
+    }
+    let body = response.text().await.unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .is_some_and(|error| error["errcode"] == "M_UNKNOWN_TOKEN")
+}
+
+/// The crypto store matrix-sdk's sqlite backend keeps in the state
+/// directory; its `-wal`/`-shm` companions share this prefix.
+const CRYPTO_STORE_FILE: &str = "matrix-sdk-crypto.sqlite3";
+
+/// Moves the previous device's crypto store (and its dead session file)
+/// into a timestamped `stale-store-*` subdirectory of `state_dir`, so the
+/// new device starts on a clean crypto store (issue #28). Nothing is
+/// deleted: the operator decides what to do with the old store.
+///
+/// Only the crypto store is bound to the device: in matrix-sdk 0.19 the
+/// account check (`CryptoStoreError::MismatchedAccount`) lives in the
+/// `OlmMachine` alone, while the state and event-cache stores are opened and
+/// reloaded (rooms, sync token) on login and restore alike without any
+/// user/device check. They are therefore kept, so the sync resumes from the
+/// persisted token and the recent timeline is not re-emitted on the bus.
+///
+/// The subdirectory stays inside `state_dir` because that is typically a
+/// volume mount point, which cannot be renamed itself, and a rename within
+/// it never crosses filesystems.
+fn set_stale_store_aside(state_dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(state_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("failed to list {}", state_dir.display())),
+    };
+    let mut stale = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(CRYPTO_STORE_FILE) || name_str == "session.json" {
+            stale.push(name);
+        }
+    }
+    if !stale.iter().any(|name| name.to_string_lossy().starts_with(CRYPTO_STORE_FILE)) {
+        return Ok(()); // no crypto store yet: a first start, nothing to set aside
+    }
+    let stamp = now_unix_seconds();
+    let mut aside = state_dir.join(format!("stale-store-{stamp}"));
+    let mut suffix = 1;
+    while aside.exists() {
+        aside = state_dir.join(format!("stale-store-{stamp}-{suffix}"));
+        suffix += 1;
+    }
+    std::fs::create_dir(&aside).with_context(|| format!("failed to create {}", aside.display()))?;
+    for name in &stale {
+        std::fs::rename(state_dir.join(name), aside.join(name))
+            .with_context(|| format!("failed to move {} aside", name.to_string_lossy()))?;
+    }
+    warn!(
+        moved_to = %aside.display(),
+        "the persisted session is unusable: moved the previous device's crypto store aside and logging in as a \
+         new device on a clean crypto store. The state store and sync token are kept, so nothing is re-emitted. \
+         Megolm sessions held only by the old device cannot be decrypted by the new one unless \
+         SENSOR_RECOVERY_KEY restores the key backup. Delete the moved directory once it is no longer needed."
+    );
+    Ok(())
+}
+
 /// Writes a file readable by its owner only — the session file holds an
-/// access token.
+/// access token. The write is atomic: the contents go to a temporary file
+/// in the same directory, are flushed to disk, then renamed over `path`, so
+/// a crash leaves either the old file or the new one, never a partial one.
 fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name);
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -723,8 +839,22 @@ fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    std::io::Write::write_all(&mut file, contents)
+    let result = (|| {
+        let mut file = options.open(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)?;
+        // Persist the rename itself (directory entry) where supported.
+        if let Ok(dir) = std::fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn rfc3339(time: std::time::SystemTime) -> String {
