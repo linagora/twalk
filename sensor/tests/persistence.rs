@@ -245,3 +245,127 @@ async fn restarting_mid_traffic_twice_emits_no_duplicate_event_ids() -> Result<(
     let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }
+
+/// The access token of the session the Sensor persisted in `session.json`.
+fn persisted_access_token(state_dir: &std::path::Path) -> Result<String> {
+    let raw = std::fs::read_to_string(state_dir.join("session.json"))?;
+    let session: Value = serde_json::from_str(&raw)?;
+    session["access_token"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("session.json holds no access_token: {session}"))
+}
+
+/// Subdirectories of the state directory that hold a crypto store: where a
+/// stale store was moved aside (a recovery must never delete it).
+fn stale_stores(state_dir: &std::path::Path) -> Vec<PathBuf> {
+    std::fs::read_dir(state_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|path| path.is_dir() && path.join("matrix-sdk-crypto.sqlite3").exists())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Brings a Sensor up on the state directory, has it join a fresh portal
+/// and publish one message, then kills it. Returns the portal room id and
+/// the Matrix event id of the published message.
+async fn run_first_life(
+    bus: &Bus,
+    alpha: &Bot,
+    env: &[(String, String)],
+    room_name: &str,
+) -> Result<(String, String)> {
+    let sensor = SensorProc::start(env)?;
+    let room_id = make_whatsapp_portal(alpha, room_name).await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha.wait_for_membership(&room_id, SENSOR_USER_ID, "join").await?;
+    let event_id = alpha.send_message(&room_id, "first life").await?;
+    wait_for_room_events(bus, &room_id, 1).await?;
+    sensor.stop().await;
+    Ok((room_id, event_id))
+}
+
+/// After a recovery the Sensor is up and publishing, on a new persisted
+/// session, with the stale store kept aside.
+async fn assert_recovered(
+    bus: &Bus,
+    alpha: &Bot,
+    env: &[(String, String)],
+    state_dir: &std::path::Path,
+    room_id: &str,
+    first_event_id: String,
+    old_token: &str,
+) -> Result<()> {
+    let mut sensor = SensorProc::start(env)?;
+    let event_id = alpha.send_message(room_id, "second life").await?;
+    let messages = wait_for_room_events(bus, room_id, 2).await?;
+    assert!(sensor.is_running(), "the Sensor must not crash on a stale store");
+    assert_bus_events(
+        &messages,
+        room_id,
+        &[first_event_id, event_id],
+        &["first life", "second life"],
+    )?;
+    let new_token = persisted_access_token(state_dir)?;
+    assert_ne!(new_token, old_token, "a fresh login must persist its new session");
+    assert_eq!(
+        stale_stores(state_dir).len(),
+        1,
+        "the stale store must be moved aside, not deleted"
+    );
+    sensor.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unparseable_session_file_recovers_on_a_clean_store() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let state_dir = fresh_state_dir("corrupt-session");
+    let env = env_with_state_dir(&state_dir);
+    let alpha = Bot::login("bot_alpha").await?;
+
+    let (room_id, first_event_id) =
+        run_first_life(&bus, &alpha, &env, "persistence-corrupt-session-portal").await?;
+    let old_token = persisted_access_token(&state_dir)?;
+
+    // A crash mid-write left a truncated session file next to the stores of
+    // the previous device.
+    std::fs::write(state_dir.join("session.json"), b"{\"meta\": {\"user_")?;
+
+    assert_recovered(&bus, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
+    let _ = std::fs::remove_dir_all(&state_dir);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_revoked_access_token_recovers_with_a_fresh_login() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let state_dir = fresh_state_dir("revoked-token");
+    let env = env_with_state_dir(&state_dir);
+    let alpha = Bot::login("bot_alpha").await?;
+
+    let (room_id, first_event_id) =
+        run_first_life(&bus, &alpha, &env, "persistence-revoked-token-portal").await?;
+    let old_token = persisted_access_token(&state_dir)?;
+
+    // Revoke the persisted token (and delete its device), as a password
+    // change or an operator removing the device would.
+    reqwest::Client::new()
+        .post(format!("{}/_matrix/client/v3/logout", harness::synapse_url()))
+        .bearer_auth(&old_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    assert_recovered(&bus, &alpha, &env, &state_dir, &room_id, first_event_id, &old_token).await?;
+    let _ = std::fs::remove_dir_all(&state_dir);
+    Ok(())
+}
