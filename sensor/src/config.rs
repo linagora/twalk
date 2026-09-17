@@ -12,8 +12,9 @@ pub struct Config {
     pub homeserver_url: String,
     /// Full Matrix user ID of the Sensor account, e.g. `@sensor:example.com`.
     pub user_id: String,
-    /// Password of the Sensor account (access-token login comes with the
-    /// crypto bootstrap work in ticket 04).
+    /// Password of the Sensor account. The Sensor logs in with it; the
+    /// password also lets the SDK complete the UIAA dance the first time it
+    /// bootstraps cross-signing (ticket 04).
     pub password: String,
     /// NATS server URL, e.g. `nats://nats:4222`.
     pub nats_url: String,
@@ -35,6 +36,15 @@ pub struct Config {
     /// Delivery attempts an approved reply gets before it moves to the
     /// dead-letter subject (SENSOR_SEND_RETRY_MAX_ATTEMPTS, default 5).
     pub send_retry_max_attempts: i64,
+    /// The operator's recovery key (SENSOR_RECOVERY_KEY, optional), saved
+    /// during onboarding. When set, the Sensor opens the account's secret
+    /// storage with it at startup and imports the cross-signing secrets and
+    /// the key-backup decryption key, so a replacement device regains the
+    /// backed-up room-key history. When unset, the Sensor relies on its
+    /// local crypto store only: new traffic still decrypts (senders share
+    /// Megolm keys with its device), history from before the device existed
+    /// does not.
+    pub recovery_key: Option<String>,
 }
 
 impl Config {
@@ -57,6 +67,9 @@ impl Config {
                 .map(PathBuf::from),
             send_retry_base: Duration::from_millis(optional("SENSOR_SEND_RETRY_BASE_MS", 1000)?),
             send_retry_max_attempts: optional("SENSOR_SEND_RETRY_MAX_ATTEMPTS", 5)?,
+            recovery_key: std::env::var("SENSOR_RECOVERY_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
         })
     }
 }

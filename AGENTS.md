@@ -9,7 +9,7 @@ As of 2026-09-17 the repository contains documentation, the complete event contr
 - `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/adr/` (ADRs 0005–0008 written; numbers 0001–0004 are referenced from the docs but not yet written)
 - `contracts/cloudevents/v1/` — the complete v1 contract: 8 CloudEvents schemas plus one validated fixture per type
 - `.scratch/sensor/` — local mirrors of the Sensor spec and tickets 01–11; **canonical is the tracker: GitHub Issues on [linagora/twalk](https://github.com/linagora/twalk/issues)** (conventions in `docs/agents/issue-tracker.md`); tickets 01–02 are done
-- `sensor/` — the Sensor Cargo package: library modules (`config`, `consent`, `network`, `normalize`, `outbound` — pure logic) plus the binary wiring to matrix-sdk and NATS in `src/main.rs`; integration-test harness in `tests/` (compose stack, bot/bus/contract helpers, `smoke.rs`, `sensor_lifecycle.rs`, `message_to_event.rs`, `consent.rs`, `reactions.rs`, `presence.rs`, `outbound.rs`, `persistence.rs`, `fidelity.rs`)
+- `sensor/` — the Sensor Cargo package: library modules (`config`, `consent`, `network`, `normalize`, `outbound` — pure logic) plus the binary wiring to matrix-sdk and NATS in `src/main.rs`; integration-test harness in `tests/` (compose stack, bot/bus/contract helpers, `crypto.rs` for Megolm-capable bots, `smoke.rs`, `sensor_lifecycle.rs`, `message_to_event.rs`, `consent.rs`, `reactions.rs`, `presence.rs`, `outbound.rs`, `persistence.rs`, `fidelity.rs`, `encryption.rs`)
 - Other component directories hold stub READMEs only: `hermes/`, `companion/`, `companion-gateway/`, `bridges/`, `deploy/`, `ui/`, `sdk/`, `examples/`, `tools/`, `tests/`
 
 ## Build and test commands
@@ -24,7 +24,7 @@ cargo test            # full suite: boots the stack itself, ~15s cold, ~3s warm
 
 ## Code organization
 
-Monorepo with 13 top-level directories — see the "Repository layout" section of `README.md`. Stacks: Rust for `sensor/` and `companion-gateway/`, SvelteKit (static export) for `companion/`. The Sensor test harness speaks the Matrix client-server API over plain HTTP — it deliberately does not depend on matrix-sdk.
+Monorepo with 13 top-level directories — see the "Repository layout" section of `README.md`. Stacks: Rust for `sensor/` and `companion-gateway/`, SvelteKit (static export) for `companion/`. The Sensor test harness speaks the Matrix client-server API over plain HTTP — the HTTP `Bot` helpers deliberately do not depend on matrix-sdk; the exception is the `CryptoBot` helper (`sensor/tests/harness/crypto.rs`), which runs matrix-sdk with its crypto stack because raw HTTP cannot Megolm-encrypt.
 
 ## Code style guidelines
 

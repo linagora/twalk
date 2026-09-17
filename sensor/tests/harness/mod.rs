@@ -2,11 +2,15 @@
 //!
 //! The seam under test is the Sensor's process boundary: a real Synapse and
 //! a real NATS JetStream (see `compose.test.yaml`). Bots play the role of
-//! bridges, speaking the documented Matrix client-server API over HTTP.
+//! bridges, speaking the documented Matrix client-server API over HTTP —
+//! except `crypto::CryptoBot`, which runs matrix-sdk with its crypto stack
+//! because raw HTTP cannot Megolm-encrypt (ticket 04).
 //! Nothing here reaches inside the Sensor process.
 
 // Every test binary compiles this module but uses only a subset of it.
 #![allow(dead_code)]
+
+pub mod crypto;
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -769,9 +773,30 @@ impl SensorProc {
         let _ = self.0.kill().await;
         let _ = self.0.wait().await;
     }
+
+    /// True while the Sensor process is still running (i.e. it has not
+    /// crashed or exited): decryption-failure tests assert the pipeline
+    /// survives an undecryptable room.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.0.try_wait(), Ok(None))
+    }
 }
 
 pub const SENSOR_USER_ID: &str = "@sensor:test.twalk";
+
+/// A fresh state directory path per test: unique per run, and deliberately
+/// NOT created beforehand — starting with an empty store must work, so the
+/// Sensor creates the directory itself.
+pub fn fresh_state_dir(test_name: &str) -> PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "twalk-sensor-state-{test_name}-{}-{unique}",
+        std::process::id()
+    ))
+}
 
 /// Serializes tests that spawn a Sensor process. Every test logs the Sensor
 /// in as the same Matrix account, so two concurrent Sensor processes would

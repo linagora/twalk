@@ -6,9 +6,9 @@
 
 **Blocked by:** 02 — Walking skeleton.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Sync token and crypto store survive process restarts on a volume
-- [ ] Restarting mid-traffic produces no duplicate CloudEvents ids on the bus
-- [ ] Messages sent during a downtime window are delivered after restart, exactly once
-- [ ] A fresh start with an empty store still works (no corruption path)
+- [x] Sync token and crypto store survive process restarts on a volume
+- [x] Restarting mid-traffic produces no duplicate CloudEvents ids on the bus
+- [x] Messages sent during a downtime window are delivered after restart, exactly once
+- [x] A fresh start with an empty store still works (no corruption path)

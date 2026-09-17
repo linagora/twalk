@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Smoke test for the integration-test harness itself (ticket 01).
 //!
 //! Proves the seam before any Sensor code exists: bots can talk to the

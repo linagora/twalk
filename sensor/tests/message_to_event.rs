@@ -1,3 +1,7 @@
+// matrix-sdk crypto futures overflow the default trait-solver depth when
+// spawned (harness::CryptoBot); matrix-sdk itself sets the same limit.
+#![recursion_limit = "256"]
+
 //! Ticket 02, walking skeleton: a plain text message in an observed,
 //! unencrypted room becomes a schema-valid `inbound.message.received.v1`
 //! CloudEvent on the bus, with a deterministic id and `NATS-Msg-Id` set.

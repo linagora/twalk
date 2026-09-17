@@ -2,6 +2,7 @@
 //! modules; this file only wires them to matrix-sdk and NATS JetStream.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -10,9 +11,11 @@ use futures::StreamExt;
 use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
 use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::OriginalSyncReactionEvent;
 use matrix_sdk::ruma::events::relation::Reply;
+use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::member::{MembershipState, StrippedRoomMemberEvent};
 use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent,
@@ -25,6 +28,11 @@ use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
 use twalk_sensor::{consent, network, normalize, outbound};
+
+/// Process-wide count of events the crypto stack could not decrypt (ticket
+/// 04). Surfaced in the logs on every failure; a metrics endpoint is a later
+/// ticket's business.
+static DECRYPTION_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,14 +50,30 @@ async fn main() -> Result<()> {
     // (volume permissions, disk encryption). Without SENSOR_STATE_DIR the
     // Sensor keeps the in-memory behaviour: a fresh login and initial sync
     // on every start.
+    //
+    // Encryption (ticket 04): all cryptography is delegated to the SDK's
+    // crypto crate — the Sensor implements no primitive itself.
+    // Cross-signing is bootstrapped automatically when the account has none
+    // (the first password login carries the UIAA credentials for it); a
+    // server-side key backup is created when none exists, so room keys
+    // survive a device replacement; and when a backup key is later restored
+    // through the recovery key, the backed-up room keys are downloaded in
+    // one shot — the Sensor's rooms are few and the download is bounded.
+    let encryption_settings = EncryptionSettings {
+        auto_enable_cross_signing: true,
+        auto_enable_backups: true,
+        backup_download_strategy: BackupDownloadStrategy::OneShot,
+    };
     let client = match &config.state_dir {
         Some(state_dir) => Client::builder()
             .homeserver_url(&config.homeserver_url)
             .sqlite_store(state_dir, None)
+            .with_encryption_settings(encryption_settings)
             .build()
             .await?,
         None => Client::builder()
             .homeserver_url(&config.homeserver_url)
+            .with_encryption_settings(encryption_settings)
             .build()
             .await?,
     };
@@ -80,6 +104,31 @@ async fn main() -> Result<()> {
                 .expect("a session exists right after login");
             write_private_file(session_file, &serde_json::to_vec(&session)?)
                 .context("failed to persist the session")?;
+        }
+    }
+
+    // Cryptographic identity bootstrap (ticket 04). Let the automatic
+    // cross-signing/bootstrap tasks settle first, then, when the operator
+    // configured SENSOR_RECOVERY_KEY, open the account's secret storage with
+    // it and import what it holds: the cross-signing private keys (so this
+    // device is the same identity, not a new one) and the key-backup
+    // decryption key, which triggers the one-shot download of the backed-up
+    // room keys — this is what lets a replacement device read history. A
+    // failed recovery (wrong key, no secret storage on the account) is
+    // logged loudly but is not fatal: live traffic still decrypts, senders
+    // share Megolm keys with the new device directly.
+    client.encryption().wait_for_e2ee_initialization_tasks().await;
+    if let Some(recovery_key) = &config.recovery_key {
+        let recovery = client.encryption().recovery();
+        match recovery.recover_and_fix_backup(recovery_key).await {
+            Ok(()) => info!(
+                state = ?recovery.state(),
+                "recovered the cryptographic identity from the recovery key"
+            ),
+            Err(error) => error!(
+                %error,
+                "recovery with SENSOR_RECOVERY_KEY failed; continuing with the local device identity only"
+            ),
         }
     }
 
@@ -234,6 +283,28 @@ async fn main() -> Result<()> {
                 .await;
             }
         });
+    }
+
+    // Decryption failures (ticket 04). matrix-sdk-crypto re-types an event
+    // it decrypted to its inner type, so an m.room.encrypted event that
+    // still reaches the handlers is one the crypto stack could not decrypt.
+    // It is logged, counted and skipped — never fatal, never blocking the
+    // other rooms. A key that arrives later does not re-dispatch the event
+    // (no event cache), so a skipped event stays unpublished; portal rooms
+    // share keys at send time, so live traffic does not hit this.
+    {
+        client.add_event_handler(
+            |event: OriginalSyncRoomEncryptedEvent, room: Room| async move {
+                let failures = DECRYPTION_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!(
+                    room = %room.room_id(),
+                    event_id = %event.event_id,
+                    sender = %event.sender,
+                    failures,
+                    "cannot decrypt event, skipping it"
+                );
+            },
+        );
     }
 
     // Inbound reactions: normalize and publish. Reaction removals arrive as
