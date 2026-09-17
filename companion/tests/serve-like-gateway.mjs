@@ -324,7 +324,7 @@ const server = createServer((request, response) => {
 
 		// The stub bridge's control surface, when one is running: a test drives
 		// both sides of a login — the browser and the bridge — from this one
-		// origin. Never present unless `tests/serve-with-gateway.mjs` started it.
+		// origin. Never present unless the bridge stack started one.
 		if (stubOrigin !== null && path.startsWith('/stub-control/')) {
 			proxyToGateway(request, response, stubOrigin);
 			return;

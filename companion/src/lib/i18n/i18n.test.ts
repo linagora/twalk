@@ -54,7 +54,13 @@ describe('the catalogues', () => {
 			id: '@you:example.com',
 			errcode: 'M_PASSWORD_TOO_SHORT',
 			detail: 'the homeserver said no',
-			date: '18/09/2026'
+			date: '18/09/2026',
+			network: 'WhatsApp',
+			device: 'the laptop in the kitchen',
+			started: '2026-09-18T07:00:00.000Z',
+			seconds: 20,
+			rooms: 3,
+			sensor: '@sensor:example.com'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();

@@ -46,12 +46,16 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `src/lib/session/` | Signing this browser in to the Gateway with a Matrix OpenID token (ADR 0011). |
 | `src/lib/tabs/` | The Web Lock that elects one tab. |
 | `src/lib/capabilities/` | The capability gate: `report.ts` decides (pure), `probe.ts` measures (browser-only). |
+| `src/lib/networks/` | Screen 3 and the network flows: the card catalogue, the polled login read as a screen state (`login-view.ts`, pure), the polling itself (`login-session.ts`) and each screen's words (`copy.ts`). |
+| `src/lib/qr/` | The QR encoder. The only module that imports an encoding library. |
 | `src/lib/version/` | The version handshake against the Gateway's `/health`, and the reload it forces. |
 | `src/lib/i18n/` | French and English, ICU patterns, `<locale>.json` per the wireframes. |
 | `src/lib/icons/` | The one module that imports an icon library. |
 | `src/lib/styles/` | `tokens.css` (the design tokens) and `base.css` (element defaults). |
 | `src/service-worker.ts` | Installability. Caches the fingerprinted build and nothing else. |
 | `tests/serve-like-gateway.mjs` | The Gateway's own path resolution, in Node, for Playwright. |
+| `tests/real-stack.mjs` | Brings up the compose stack and the Gateway binaries the stack-backed journeys run against. |
+| `tests/stub-bridge.mjs` | bridgev2's provisioning contract, stubbed — including its blocking step. |
 
 ## The decisions worth knowing before you change something
 
@@ -233,11 +237,64 @@ iOS behaviour — Safari's seven-day eviction, the installed-app exemption,
 Lockdown Mode — is verified by hand on a real device, as spec #65 requires:
 Playwright's WebKit is not Safari.
 
+### The QR code is drawn here, and the redraw follows `generation`
+
+bridgev2's QR step is `{"type": "qr", "data": "…"}`: **the bridge renders no
+image**, and the Gateway passes the raw payload through
+(`BridgeLoginStep.payload` in `companion-gateway/openapi.yaml`). So `src/lib/qr/`
+encodes it — error correction L, which is what WhatsApp's and Signal's own
+clients use and what keeps the module count low enough for a phone camera — and
+draws it as one SVG path with the four-module quiet zone the specification
+requires.
+
+The browser **polls**; it never holds a request open. The Gateway holds the
+bridge's blocking step itself (ticket #55) and `GET /api/bridges/{id}/login`
+answers immediately, so a phone that sleeps mid-scan loses a poll rather than
+the login.
+
+What says a fresh code arrived is `generation`, not the clock.
+`step.valid_for_seconds` is documented as the Gateway's own *estimate* of the
+network's refresh interval — WhatsApp's whole budget is about 2m40 across
+refreshes — so the countdown on screen is the wireframe's decoration and the
+`{#key}` the code is drawn under is the generation.
+
+### The networks screens store nothing
+
+A QR payload and a Google cookie are network credentials in flight. They live in
+a component's state and in the SVG on screen, and are gone when the next
+generation replaces them; nothing on these paths writes to `localStorage` or
+IndexedDB. The one exception is a boolean: whether the user has dismissed a
+screen's disclosure card, which the wireframe asks to remember per device.
+
+### Two origins under `npm run test:e2e:stack`, because there are two owners
+
+`tests/real-stack.mjs` brings up one compose stack and builds the Gateway once,
+then starts it **twice**:
+
+- `startRealStack()` — the bootstrap journey's Gateway, whose owner's account
+  does *not* exist, because creating it is what the journey does and the
+  Gateway creates this deployment's one account and refuses a second;
+- `startBridgeStack()` — the networks journey's Gateway, whose owner is
+  `bot_alpha` (already provisioned on the shared test stack), with the three
+  bridges of `tests/stub-bridge.mjs` configured.
+
+One Gateway cannot be both, which is the whole reason for the second origin.
+Everything else is shared: one orchestrator, one `proxyToGateway` in
+`serve-like-gateway.mjs`, one `TWALK_TEST_REAL_STACK=1` gate. The bridge origin
+also exposes the stub's control surface at `/stub-control/*`, so a browser
+journey drives both sides of a login — the user's and the bridge's — without
+knowing a second port.
+
+The bridge is stubbed for the reason spec #47 gives: a real mautrix-whatsapp
+needs a live WhatsApp account and a human with a phone. Nothing else is stubbed.
+
 ## What is not here yet
 
-Screens 3 to 5 of the wireframes: the network flows (#68), persona activation
-and the dashboard. Screen 1's secondary "pair with my other device" link waits
-on the device-pairing flow and is not wired, and the Matrix access token the
-network screens will need is kept in memory only (`$lib/onboarding/progress.ts`)
-— nothing sensitive goes into browser storage, so a reload loses it and those
-screens will obtain it again rather than find it lying about.
+Screens 4 and 5 of the wireframes: persona activation and the dashboard. Of
+the networks journey (#68), screens 3, 3a and 3b are here; 3c (the SMS preview)
+and 3d (an existing Matrix account) are not. Screen 1's secondary "pair with my
+other device" link waits on the device-pairing flow and is not wired, and the
+Matrix access token screen 3d will need is kept in memory only
+(`$lib/onboarding/progress.ts`) — nothing sensitive goes into browser storage,
+so a reload loses it and that screen will obtain it again rather than find it
+lying about.
