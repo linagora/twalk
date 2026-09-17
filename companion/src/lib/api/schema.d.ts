@@ -38,6 +38,192 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bootstrap/account": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create this deployment's one account, once.
+         * @description Wireframe screen 2. The Gateway creates the account on the homeserver
+         *     with Synapse's admin registration endpoint, which is authenticated by
+         *     a MAC keyed with the registration shared secret rather than by an
+         *     admin token — and which works while the homeserver's own
+         *     self-service registration stays off. That is the point: a personal
+         *     server does not become a public one to give its owner an account.
+         *
+         *     **Exactly one account, ever.** `username` must be the localpart of
+         *     this deployment's `GATEWAY_OWNER`; anything else is `403`. Once that
+         *     account exists, every further attempt is `409`, enforced both by the
+         *     Gateway's own store and by the homeserver's `M_USER_IN_USE`, so
+         *     losing the Gateway's volume does not re-open the window.
+         *
+         *     **No credential is required, and none exists yet.** This runs before
+         *     the account anyone could sign in with, so it is the one `/api`
+         *     endpoint outside the guard. What stands in for authentication is the
+         *     rule above, plus the operator's decision to set
+         *     `GATEWAY_REGISTRATION_SHARED_SECRET` at all: unset, this endpoint
+         *     answers `503` and the window never opens. The residual risk is
+         *     stated in `docs/architecture/security-model.md`.
+         *
+         *     **The recovery key is neither accepted nor returned.** It is
+         *     generated in the browser and used there (ADR 0014), so screen 2's
+         *     "Twalk never sees it" is a property of where the code runs. The
+         *     request object is closed, and a body carrying any
+         *     recovery-key-shaped member is refused with `recovery_key_refused`
+         *     rather than quietly ignored.
+         *
+         *     **The access token in the answer passes through and is not kept.**
+         *     It is the Matrix session the browser continues in — what
+         *     matrix-js-sdk bootstraps the cross-signing identity and the recovery
+         *     key with. The Gateway writes it nowhere and logs it nowhere
+         *     (ADR 0011).
+         */
+        post: operations["createOwnerAccount"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bootstrap/rooms": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Invite the Sensor into the rooms the user selected.
+         * @description Wireframe screen 3d. The Sensor observes the rooms it was invited to
+         *     and nothing else, and an invitation has to come from an account that
+         *     is in the room — the user's. So the Companion sends the user's own
+         *     Matrix access token with the room list: the Gateway reads the
+         *     Sensor's membership in each room, invites it where it is absent, and
+         *     **forgets the token when the call returns**. It is a parameter of
+         *     this one operation, never stored and never logged (ADR 0011), which
+         *     `tests/bootstrap.rs` asserts against the store's bytes and the
+         *     captured log output.
+         *
+         *     Using the user's token rather than an admin credential is also what
+         *     works on a homeserver with password login disabled: an invitation
+         *     needs no more than the inviter's own session.
+         *
+         *     One room failing does not fail the others — the user ticked several
+         *     and wants to know which took — so `200` carries one outcome per
+         *     room, in the order they were asked about. A token the homeserver
+         *     rejects is `401` instead, because then nothing was attempted
+         *     anywhere. Asking about a room the Sensor is already in is
+         *     `already_present`, not an error.
+         *
+         *     The Sensor's own account is provisioned by the deployment, not by
+         *     this endpoint, and its startup depends on nothing here.
+         */
+        post: operations["inviteSensorIntoRooms"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/consent/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record one consent decision.
+         * @description The body mirrors the contract's own `data` object
+         *     (`contracts/cloudevents/v1/consent.state.changed.schema.json`) minus
+         *     what the Gateway stamps itself: `old_state` comes from the journal,
+         *     `occurred_at` from the Gateway's clock, `actor` from the
+         *     deployment's owner.
+         *
+         *     The answer returns as soon as the decision is **committed**.
+         *     Publication follows through a transactional outbox, so a bus that is
+         *     down delays the event and never refuses the decision — and a crash
+         *     between the commit and the publication republishes rather than
+         *     loses, deduplicated on the bus by the event's own deterministic id.
+         *
+         *     `subject.type` is `contact` or `network` here. A `persona` subject is
+         *     refused with `unsupported_subject_type`: activating a persona is a
+         *     consent decision on the same write path (ADR 0013), and ticket #60
+         *     is what opens it.
+         */
+        post: operations["recordConsentDecision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/consent/effective": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The consent state that applies to one contact on one network.
+         * @description The precedence, resolved: the contact's own decision if it has one,
+         *     the network's default otherwise, and `pending` when neither exists —
+         *     with `decided_by` naming the decision that answered, or `null` when
+         *     none did. That `null` is how a caller tells "never decided" from
+         *     "decided pending"; an absent decision is never a revocation.
+         */
+        get: operations["getEffectiveConsent"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/consent/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The current consent state, as recorded.
+         * @description One entry per (subject, network): the state the most recent decision
+         *     covering them left behind. It is a projection of the decision
+         *     journal, not a second record of truth.
+         *
+         *     `network` entries are that network's default and `contact` entries
+         *     override them — this endpoint reports what was *recorded*, and
+         *     `/api/consent/effective` applies the precedence. Revocations are as
+         *     explicit as grants, and an absent subject means "never decided",
+         *     never "revoked".
+         *
+         *     Ticket #50 adds the snapshot a cold consumer reads: the same state
+         *     plus the JetStream sequence it reflects, authenticated by the
+         *     Sensor's service token. This endpoint names no stream position and
+         *     is not paginated.
+         */
+        get: operations["getConsentState"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices": {
         parameters: {
             query?: never;
@@ -232,6 +418,111 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description One decision the owner asks the Gateway to record. */
+        ConsentDecisionRequest: {
+            new_state: components["schemas"]["ConsentState_State"];
+            /**
+             * @description Optional free text kept in the journal and published with the
+             *     event, for the audit trail. The user's own words about their own
+             *     decision — never message content.
+             */
+            reason?: string;
+            scope: components["schemas"]["ConsentScope"];
+            subject: components["schemas"]["ConsentSubject"];
+        };
+        /** @description The perimeter of a decision. */
+        ConsentScope: {
+            /**
+             * @description The networks the decision applies to. Order does not matter on
+             *     the way in: the Gateway sorts it, because the sorted scope is
+             *     part of the event's deterministic id.
+             */
+            networks: components["schemas"]["Network"][];
+        };
+        ConsentState: {
+            /**
+             * @description Every recorded entry, ordered by subject type, subject and
+             *     network. Not paginated: the snapshot's documented cap is #50's.
+             */
+            entries: components["schemas"]["ConsentStateEntry"][];
+        };
+        /**
+         * @description The data-processing agreement state of a subject. `unset` is not one
+         *     of them — it is the absence of a decision, and only `old_state`
+         *     carries it.
+         * @enum {string}
+         */
+        ConsentState_State: "granted" | "pending" | "revoked";
+        /** @description One (subject, network) of the current state. */
+        ConsentStateEntry: {
+            /**
+             * Format: date-time
+             * @description When the decision this entry comes from was taken.
+             */
+            decided_at: string;
+            /** @description That decision's position in the journal. */
+            decision_sequence: number;
+            network: components["schemas"]["Network"];
+            state: components["schemas"]["ConsentState_State"];
+            subject: components["schemas"]["ConsentSubject"];
+        };
+        /** @description Who or what a consent decision applies to. */
+        ConsentSubject: {
+            /**
+             * @description A Matrix user ID for a contact; for a network subject, that
+             *     network's own value — in which case the scope holds exactly that
+             *     one network.
+             */
+            id: string;
+            /**
+             * @description `contact` for one contact, `network` for a whole network's
+             *     default. `persona` exists in the contract and is not writable
+             *     here yet (#60).
+             * @enum {string}
+             */
+            type: "contact" | "network";
+        };
+        /**
+         * @description A username and a password, and deliberately nothing else: a closed
+         *     object is what makes "no recovery key can arrive here" a property of
+         *     the API rather than a convention (ADR 0014).
+         */
+        CreateAccountRequest: {
+            /**
+             * @description The password the user chose. Passed to the homeserver, which
+             *     applies its own policy, and never stored or logged by the
+             *     Gateway.
+             */
+            password: string;
+            /**
+             * @description The localpart of the account to create. Must be the localpart of
+             *     this deployment's `GATEWAY_OWNER`; any other value is `403`.
+             */
+            username: string;
+        };
+        /**
+         * @description The Matrix session the homeserver answered with, forwarded whole:
+         *     what the Companion continues in the browser to generate the
+         *     cross-signing keys and the recovery key itself (ADR 0014). The
+         *     Gateway keeps none of it.
+         */
+        CreatedAccount: {
+            /**
+             * @description The account's Matrix access token. Returned because the browser
+             *     needs a session, and held nowhere: not in the Gateway's store,
+             *     not in a log line (ADR 0011).
+             */
+            access_token: string;
+            /**
+             * @description The device the session belongs to. The browser's crypto store is
+             *     bound to it.
+             */
+            device_id: string;
+            /** @description The homeserver name, as the homeserver reports it. */
+            home_server: string;
+            /** @description The Matrix ID of the account that was created. */
+            user_id: string;
+        };
         /**
          * @description One device in the list. Dates are seconds since the epoch: the
          *     Gateway carries no date library, and a client renders local time
@@ -264,6 +555,19 @@ export interface components {
              *     visible to the user who made it.
              */
             devices: components["schemas"]["Device"][];
+        };
+        /** @description The state that applies to one contact on one network. */
+        EffectiveConsent: {
+            /** @description The contact the question was about. */
+            contact: string;
+            /**
+             * @description The subject whose decision answered — the contact itself, or the
+             *     network whose default applied — and `null` when no decision
+             *     exists, in which case `state` is `pending`.
+             */
+            decided_by: components["schemas"]["ConsentSubject"] | null;
+            network: components["schemas"]["Network"];
+            state: components["schemas"]["ConsentState_State"];
         };
         /**
          * @description Every refusal the Gateway produces. `error` is the stable code a
@@ -301,6 +605,46 @@ export interface components {
              *     into its own build and reloads on a mismatch.
              */
             version: string;
+        };
+        /**
+         * @description The homeserver would not do what the Gateway relayed, or could not
+         *     be reached. Carries the homeserver's own error code where there was
+         *     one, so a client can turn a password policy into a message instead
+         *     of a shrug.
+         */
+        HomeserverRefusal: {
+            /**
+             * @description A human-readable explanation, for an operator reading logs. Not
+             *     for display to the user, and never matched on.
+             */
+            detail?: string;
+            /** @enum {string} */
+            error: "homeserver_refused" | "homeserver_unreachable";
+            /**
+             * @description The homeserver's `errcode` (`M_USER_IN_USE`,
+             *     `M_PASSWORD_TOO_SHORT`, …), on `homeserver_refused`. The
+             *     homeserver's human-readable message is deliberately not
+             *     forwarded: it goes to the Gateway's log, where an operator reads
+             *     it.
+             */
+            matrix_errcode?: string;
+        };
+        /**
+         * @description The user's Matrix access token and the rooms they selected. Closed,
+         *     for the same reason as the registration request.
+         */
+        InviteSensorRequest: {
+            /**
+             * @description The user's own Matrix access token — the session that is in the
+             *     rooms and can therefore invite. Used for these calls and
+             *     forgotten: never stored, never logged.
+             */
+            matrix_access_token: string;
+            /**
+             * @description The rooms the user selected, as Matrix room ids
+             *     (`!opaque:server`). An empty list is allowed and does nothing.
+             */
+            rooms: string[];
         };
         /**
          * @description A session whose tokens were just issued or rotated: the session
@@ -347,6 +691,87 @@ export interface components {
              */
             matrix_server_name?: string;
         };
+        /**
+         * @description A messaging network as the user experiences it, and `matrix` for
+         *     native rooms (ADR 0005, ADR 0009). The contract's own `network`
+         *     enum, exactly: a bridge id (`gmessages`) is never a network.
+         * @enum {string}
+         */
+        Network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+        /** @description A decision as the journal holds it. */
+        RecordedConsentDecision: {
+            /**
+             * @description The Matrix user ID of the owner the decision is attributed to.
+             *     One owner per deployment (ADR 0011), so this is the human, not
+             *     the device it arrived from.
+             */
+            actor: string;
+            /**
+             * @description The id of the `consent.state.changed.v1` event this decision is
+             *     published as: the contract's deterministic key, the lowercase-hex
+             *     sha256 of
+             *     `subject.type:subject.id:new_state:<sorted networks>:occurred_at`.
+             *     A consumer can match a bus event to this answer by it.
+             */
+            event_id: string;
+            new_state: components["schemas"]["ConsentState_State"];
+            /**
+             * Format: date-time
+             * @description When the decision was taken, stamped by the Gateway to the
+             *     millisecond. Part of the event's id, and stored verbatim so the
+             *     id stays reproducible.
+             */
+            occurred_at: string;
+            /**
+             * @description What the subject held on this perimeter before, read inside the
+             *     recording transaction from the most recent decision covering any
+             *     of the scoped networks. `unset` means none ever did.
+             * @enum {string}
+             */
+            old_state: "unset" | "granted" | "pending" | "revoked";
+            /**
+             * @description `true` when the journal already held this exact decision and
+             *     nothing was recorded (the `200` answer).
+             */
+            replayed: boolean;
+            scope: components["schemas"]["ConsentScope"];
+            /**
+             * @description The decision's position in the journal, which is the only
+             *     ordering the Gateway trusts. Not the bus's sequence — that is
+             *     the snapshot's business (#50).
+             */
+            sequence: number;
+            subject: components["schemas"]["ConsentSubject"];
+        };
+        /** @description What happened in one room the user selected. */
+        RoomInvitation: {
+            /**
+             * @description Present on `failed` alone: the homeserver's own error code
+             *     (`M_FORBIDDEN` where the user may not invite in that room), or
+             *     the Gateway's (`invalid_room_id` for a string that is not a
+             *     room id at all).
+             */
+            reason?: string;
+            /** @description The room, exactly as the request spelled it. */
+            room_id: string;
+            /**
+             * @description `invited` — the Sensor was invited and will join on its own.
+             *     `already_present` — it is already in the room, or already
+             *     invited to it; asking twice is not an error.
+             *     `failed` — this room alone did not work; `reason` says why.
+             * @enum {string}
+             */
+            status: "invited" | "already_present" | "failed";
+        };
+        /** @description One outcome per room asked about, in the order asked. */
+        SensorInvitation: {
+            rooms: components["schemas"]["RoomInvitation"][];
+            /**
+             * @description The Matrix ID the Gateway invited (`GATEWAY_SENSOR_USER_ID`), so
+             *     the Companion can name it on screen rather than guess it.
+             */
+            sensor: string | null;
+        };
         /** @description Who is signed in, on which device. */
         Session: {
             device: components["schemas"]["Device"];
@@ -369,6 +794,40 @@ export interface components {
         };
     };
     responses: {
+        /**
+         * @description This deployment writes no consent: `GATEWAY_NATS_URL` is unset, so
+         *     the Gateway has no bus to publish a decision on and refuses to
+         *     record one it could not announce. The session and the origin are
+         *     unaffected; `detail` names the variable.
+         */
+        ConsentNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "consent_not_configured";
+                };
+            };
+        };
+        /**
+         * @description The consent journal (SQLite, the record of truth for consent)
+         *     failed. On a write, nothing was recorded and nothing was published —
+         *     the answer is a failure precisely so that a client is never told a
+         *     decision is stored when it is not.
+         */
+        ConsentStoreUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "store_unavailable";
+                };
+            };
+        };
         /**
          * @description This deployment has no owner (`GATEWAY_OWNER` is unset), so nobody
          *     can sign in and the whole API is closed. The origin still serves the
@@ -482,6 +941,352 @@ export interface operations {
                     "text/plain": string;
                 };
             };
+        };
+    };
+    createOwnerAccount: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAccountRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description The account exists. The body is the Matrix session the Companion
+             *     continues in the browser, and nothing else.
+             */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedAccount"];
+                };
+            };
+            /**
+             * @description The body is not a registration document — a missing or empty
+             *     field, or any member the request object does not declare
+             *     (`invalid_request`) — or it carried something recovery-key-shaped
+             *     (`recovery_key_refused`), which the Gateway refuses to see.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request" | "recovery_key_refused";
+                    };
+                };
+            };
+            /**
+             * @description The username is not this deployment's owner. Refused before the
+             *     registration secret is used at all: the relay creates the
+             *     owner's account or none.
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "not_the_owner";
+                    };
+                };
+            };
+            /**
+             * @description This deployment's account has already been created. The client's
+             *     move is to sign in, not to retry.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "account_already_exists";
+                    };
+                };
+            };
+            /**
+             * @description The homeserver refused the creation, carrying its own error code
+             *     in `matrix_errcode` — a password policy, a username it will not
+             *     accept, a registration shared secret it does not share
+             *     (`homeserver_refused`) — or could not be reached at all
+             *     (`homeserver_unreachable`). An operator's problem in both cases.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HomeserverRefusal"];
+                };
+            };
+            /**
+             * @description Either this deployment relays no registration
+             *     (`GATEWAY_REGISTRATION_SHARED_SECRET` unset — its account was
+             *     provisioned by its operator: `registration_not_configured`), or
+             *     it has no owner at all and the whole API is closed
+             *     (`sign_in_not_configured`). `detail` names the variable that
+             *     would open it.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "registration_not_configured" | "sign_in_not_configured";
+                    };
+                };
+            };
+        };
+    };
+    inviteSensorIntoRooms: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InviteSensorRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description Every selected room was asked about. Read each outcome: the
+             *     request as a whole succeeded even where a room did not.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SensorInvitation"];
+                };
+            };
+            /**
+             * @description The body is not an invitation document — a missing or empty
+             *     field, or any member the request object does not declare
+             *     (`invalid_request`) — or it named more rooms than one request
+             *     may carry (`too_many_rooms`), or it carried something
+             *     recovery-key-shaped (`recovery_key_refused`).
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request" | "too_many_rooms" | "recovery_key_refused";
+                    };
+                };
+            };
+            /**
+             * @description No device token, or one that is unknown, expired or revoked
+             *     (`unauthenticated`) — or the homeserver rejected the *Matrix*
+             *     access token in the body, in which case nothing was invited
+             *     anywhere (`matrix_token_rejected`). The second is the user's
+             *     Matrix session having expired, not their Gateway session: the
+             *     client's move is to log in to Matrix again, not to sign in here.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unauthenticated" | "matrix_token_rejected";
+                    };
+                };
+            };
+            /**
+             * @description The homeserver could not be reached at all, so no room was
+             *     asked about.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "homeserver_unreachable";
+                    };
+                };
+            };
+            /**
+             * @description Either this deployment does not know which Sensor to invite
+             *     (`GATEWAY_SENSOR_USER_ID` unset: `sensor_not_configured`), or it
+             *     has no owner at all and the whole API is closed
+             *     (`sign_in_not_configured`). `detail` names the variable that
+             *     would open it.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "sensor_not_configured" | "sign_in_not_configured";
+                    };
+                };
+            };
+        };
+    };
+    recordConsentDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConsentDecisionRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description The identical decision — same subject, same state, same
+             *     perimeter, same instant — was already in the journal, so
+             *     nothing was recorded and `replayed` is `true`. The body is the
+             *     decision as it was first recorded, with its original
+             *     `event_id`: the contract's ids are deterministic, so a retried
+             *     request never becomes a second decision.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecordedConsentDecision"];
+                };
+            };
+            /**
+             * @description The decision is recorded, and the event named by `event_id` is
+             *     on its way to the bus.
+             */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecordedConsentDecision"];
+                };
+            };
+            /**
+             * @description The decision is not one the contract allows.
+             *
+             *     - `malformed_request` — a required member is missing or of the
+             *       wrong type, or the body is not JSON.
+             *     - `unknown_value` — a value outside the contract's enums: a
+             *       `new_state`, a network, a `subject.type`. `unset` is not a
+             *       state to move to; it is the absence of a decision.
+             *     - `unsupported_subject_type` — `persona`, which this endpoint
+             *       does not accept yet (#60).
+             *     - `scope_contradicts_subject` — a `network` subject whose scope
+             *       is not exactly its own network, which the contract forbids.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request" | "unknown_value" | "unsupported_subject_type" | "scope_contradicts_subject";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["ConsentStoreUnavailable"];
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    getEffectiveConsent: {
+        parameters: {
+            query: {
+                /**
+                 * @description The contact's Matrix user ID.
+                 * @example @whatsapp_33612345678:example.com
+                 */
+                contact: string;
+                /** @description The network the question is about. */
+                network: components["schemas"]["Network"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The state that applies, and what decided it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EffectiveConsent"];
+                };
+            };
+            /**
+             * @description `malformed_request` when `contact` or `network` is missing or
+             *     empty; `unknown_value` when `network` is not one of the
+             *     contract's.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request" | "unknown_value";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["ConsentStoreUnavailable"];
+            503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    getConsentState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every recorded (subject, network) entry. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["ConsentStoreUnavailable"];
+            503: components["responses"]["ConsentNotConfigured"];
         };
     };
     listDevices: {
