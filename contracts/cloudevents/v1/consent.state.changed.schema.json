@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.twalk.dev/cloudevents/v1/consent.state.changed.schema.json",
   "title": "fr.linagora.twalk.consent.state.changed.v1",
-  "description": "The user modified the data-processing consent state of a contact, a channel or a persona. Produced by the Companion Gateway, the single writer of consent state (see ADR 0006). This is an operational event: the network and consent extensions are declared but optional, because a consent change can span several networks and is itself about consent.",
+  "description": "The user modified the data-processing consent state of a contact, a network or a persona. Produced by the Companion Gateway, the single writer of consent state (see ADR 0006). This is an operational event: the network and consent extensions are declared but optional (ADR 0007), because a consent change can span several networks and is itself about consent; network is set only for a single-network change, and consent is never set at all.",
   "type": "object",
   "required": [
     "specversion",
@@ -23,7 +23,7 @@
     "id": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$",
-      "description": "Deterministic identifier computed as sha256(subject_type + ':' + subject_id + ':' + new_state + ':' + occurred_at). Re-emitting the same recorded change produces the same id."
+      "description": "Deterministic identifier: the lowercase-hex sha256 of the UTF-8 string data.subject.type + ':' + data.subject.id + ':' + data.new_state + ':' + <networks> + ':' + data.occurred_at, where the parts are joined by single ASCII colons, each is the corresponding value verbatim (occurred_at exactly as serialized in this event, not reformatted), and <networks> is data.scope.networks sorted in ascending order and joined by single ASCII commas with no spaces, so a single network renders as just that value, with no comma. A third-party producer reproducing this string byte for byte gets the same id, so re-emitting the same recorded change is idempotent on the bus. The scope is part of the key on purpose: two decisions on the same subject, to the same state, at the same instant but over different networks are different decisions, and a key without the scope would collide them onto one id, which the bus would then deduplicate down to one."
     },
     "source": {
       "type": "string",
@@ -47,7 +47,7 @@
     "subject": {
       "type": "string",
       "maxLength": 256,
-      "description": "Optional identifier of the affected subject (a contact's Matrix user ID, a persona id, or a channel id). Mirrors data.subject.id for filtering convenience.",
+      "description": "Optional identifier of the affected subject (a contact's Matrix user ID, a persona id, or a network value). Mirrors data.subject.id for filtering convenience.",
       "examples": [
         "assistant",
         "@whatsapp_33612345678:example.com"
@@ -74,12 +74,12 @@
     "network": {
       "type": "string",
       "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
-      "description": "Twalk extension. Optional on this operational event: only set when the consent change targets exactly one network; the authoritative scope is data.scope.networks."
+      "description": "Twalk extension. Optional on this operational event: the Companion Gateway sets it only when data.scope.networks names exactly one network, and leaves it out otherwise. The authoritative scope is always data.scope.networks; this attribute exists so a single-network change can be filtered server-side on NATS."
     },
     "consent": {
       "type": "string",
       "enum": ["granted", "pending", "revoked"],
-      "description": "Twalk extension. Optional on this operational event: when set, mirrors data.new_state for filtering convenience."
+      "description": "Twalk extension. Declared for envelope uniformity with the message-flow events, but never set on this event: there it labels the consent state of the event's subject, which on an event that announces a consent change is redundant with data.new_state at best and self-contradictory on a revocation, where the subject is already revoked while the event is the very decision that revoked it. Consumers read data.new_state. The Companion Gateway, the only producer, leaves this attribute out; an event that still carries it stays valid, and data.new_state wins."
     },
     "data": {
       "type": "object",
@@ -93,13 +93,13 @@
           "properties": {
             "type": {
               "type": "string",
-              "enum": ["contact", "channel", "persona"],
-              "description": "What the consent decision applies to: a contact, a whole channel, or a persona."
+              "enum": ["contact", "network", "persona"],
+              "description": "What the consent decision applies to: a contact, a whole network, or a persona. A network subject carries that network's default consent state: it applies to every contact on that network for which no contact-scoped decision exists, and a contact-scoped decision for the same network always overrides it."
             },
             "id": {
               "type": "string",
               "maxLength": 256,
-              "description": "Identifier of the subject: a Matrix user ID for a contact, a persona id for a persona, a channel identifier for a channel."
+              "description": "Identifier of the subject: a Matrix user ID for a contact, a persona id for a persona, and for a network subject the network value itself, in which case scope.networks holds exactly that one network."
             }
           },
           "description": "Who or what the consent decision applies to."

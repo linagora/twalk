@@ -1,6 +1,6 @@
 {
   "specversion": "1.0",
-  "id": "d6c3abc336fcdd4d6194ada43205a4504fd6d3169b53dc72f63e963882f00829",
+  "id": "3255d503fa47d8d6f7f75194d2761fb149268fda34343c2a0890d8e9a36a6034",
   "source": "gateway://example.com/consent",
   "type": "fr.linagora.twalk.consent.state.changed.v1",
   "time": "2026-09-17T10:05:00Z",
@@ -8,7 +8,6 @@
   "datacontenttype": "application/json",
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/consent.state.changed.schema.json",
   "network": "whatsapp",
-  "consent": "granted",
   "data": {
     "subject": {
       "type": "persona",
