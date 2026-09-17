@@ -1,3 +1,8 @@
 /target/
 /sensor/target/
 .env
+
+# Agent tooling: local skills installs and agent worktrees, never versioned
+.agents/
+.claude/
+skills-lock.json
