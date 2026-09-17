@@ -76,7 +76,7 @@
     "network": {
       "type": "string",
       "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
-      "description": "Twalk extension. Identifies the external network the presence update originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic: a room with no m.bridge state event and no ghost-prefixed sender, the bring-your-own-account channel (see ADR 0009)."
+      "description": "Twalk extension. Identifies the external network the presence update originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic: a room with no m.bridge state event and no ghost-prefixed sender, reached through the user's own Matrix account instead of through a bridge (see ADR 0009)."
     },
     "consent": {
       "type": "string",
