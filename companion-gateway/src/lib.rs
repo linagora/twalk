@@ -5,10 +5,15 @@
 //! ticket #52 added the user's session on top of it — sign-in through a
 //! Matrix OpenID token ([`matrix_openid`]), the owner check and the
 //! per-device tokens every other endpoint requires ([`session`],
-//! [`session_http`]); ticket #53 added bootstrap — the registration relay for
-//! the one and only account and the Sensor's invitation into the rooms the
-//! user chooses ([`bootstrap`], [`bootstrap_http`]). Consent and the bridge
-//! facade land the same way in the remaining tickets of spec #46.
+//! [`session_http`]); ticket #49 added the consent store — an append-only
+//! decision journal with the current state as its projection ([`store`]),
+//! the write API over it ([`consent`], [`consent_http`]), and a
+//! transactional outbox that publishes each committed decision exactly once
+//! as a `consent.state.changed.v1` ([`outbox`]); ticket #53 added bootstrap —
+//! the registration relay for the one and only account and the Sensor's
+//! invitation into the rooms the user chooses ([`bootstrap`],
+//! [`bootstrap_http`]). The consent snapshot (#50) and the bridge facade land
+//! the same way in the remaining tickets of spec #46.
 //!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
@@ -23,13 +28,17 @@
 pub mod bootstrap;
 pub mod bootstrap_http;
 pub mod config;
+pub mod consent;
+pub mod consent_http;
 pub mod http;
 pub mod matrix_openid;
 pub mod metrics;
 pub mod openapi;
+pub mod outbox;
 pub mod session;
 pub mod session_http;
 pub mod static_files;
+pub mod store;
 pub mod trace;
 
 /// The Gateway's version, as the health endpoint reports it: the package

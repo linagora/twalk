@@ -51,6 +51,12 @@ pub struct Config {
     /// registration, invite the Sensor, both, or neither — and the endpoint of
     /// a half that is off answers 503 naming the variable that would open it.
     pub bootstrap: Bootstrap,
+    /// Where the consent store publishes its committed decisions (ticket
+    /// #49), or `None` when this deployment writes no consent. Everything
+    /// else consent needs — the state directory, the owner, the domain its
+    /// events name themselves by — is [`SignIn`]'s, so this is the one
+    /// variable the ticket adds. See [`Consent`].
+    pub consent: Option<Consent>,
 }
 
 /// What bootstrap needs, beyond the owner that [`SignIn`] already names.
@@ -129,6 +135,60 @@ pub struct SignIn {
     pub refresh_token_ttl_seconds: u64,
 }
 
+/// What the consent store needs beyond sign-in's own configuration: the bus.
+///
+/// Consent is on when a deployment has both an owner and a bus, and the
+/// rest is *derived* rather than configured again — the state directory and
+/// the owner are [`SignIn`]'s, and the domain the events name themselves by
+/// (`gateway://<domain>/consent`) is the owner's own server name. Nothing an
+/// operator sets twice can drift.
+///
+/// Without `GATEWAY_NATS_URL` the consent endpoints answer `503
+/// consent_not_configured` and name it; the origin and the session are
+/// untouched. Without an owner there is nothing to attribute a decision to,
+/// and #52's guard already closes the whole API and says so at startup, so
+/// consent simply stays off.
+#[derive(Debug, Clone)]
+pub struct Consent {
+    /// NATS server URL the outbox publishes to (GATEWAY_NATS_URL), e.g.
+    /// `nats://nats:4222`. A bus that is down is not an error: decisions
+    /// commit and wait in the outbox.
+    pub nats_url: String,
+    /// Directory the decision journal lives in, from
+    /// [`SignIn::state_dir`]: `consent.sqlite3` inside it, next to the
+    /// session store.
+    pub state_dir: PathBuf,
+    /// The domain the Gateway's events name themselves by, from
+    /// [`SignIn::homeserver_name`].
+    pub matrix_domain: String,
+    /// The owner every decision is attributed to, from [`SignIn::owner`]:
+    /// the event's `data.actor`. One owner per deployment (ADR 0011), so the
+    /// device that took the decision is the owner's by construction.
+    pub owner: String,
+}
+
+impl Consent {
+    fn from_env(sign_in: Option<&SignIn>) -> Result<Option<Self>> {
+        let nats_url = std::env::var("GATEWAY_NATS_URL")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        match (sign_in, nats_url) {
+            (Some(sign_in), Some(nats_url)) => Ok(Some(Self {
+                nats_url,
+                state_dir: sign_in.state_dir.clone(),
+                matrix_domain: sign_in.homeserver_name.clone(),
+                owner: sign_in.owner.clone(),
+            })),
+            // A bus but no owner: not fatal, and nothing extra to say — a
+            // decision with no owner to attribute it to cannot be recorded,
+            // and without an owner #52's guard already closes the whole API
+            // and says so at startup.
+            (Some(_), None) | (None, Some(_)) | (None, None) => Ok(None),
+        }
+    }
+}
+
 impl Config {
     pub fn from_env() -> Result<Self> {
         let sign_in = SignIn::from_env()?;
@@ -144,6 +204,9 @@ impl Config {
                 .ok()
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "info".to_owned()),
+            // Before `sign_in` is moved below: consent reads the owner, the
+            // state directory and the domain from it.
+            consent: Consent::from_env(sign_in.as_ref())?,
             sign_in,
             bootstrap,
         })

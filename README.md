@@ -82,7 +82,7 @@ Eight event types are defined in the v1 contract:
 | `fr.linagora.twalk.persona.thinking.emitted.v1`          | Hermes            | A persona has started processing an event.                             |
 | `fr.linagora.twalk.persona.suggest.produced.v1`          | Hermes            | A persona produced a suggested reply for oversight.                    |
 | `fr.linagora.twalk.persona.reply.approved.v1`            | Hermes            | A suggestion was approved and should be sent.                          |
-| `fr.linagora.twalk.consent.state.changed.v1`             | Companion Gateway | The user modified the consent state of a contact or a channel.         |
+| `fr.linagora.twalk.consent.state.changed.v1`             | Companion Gateway | The user modified the consent state of a contact, a network or a persona. |
 | `fr.linagora.twalk.bridge.status.changed.v1`             | Companion Gateway | A bridge changed state (connected, disconnected, session expired).     |
 
 Three CloudEvents extensions are used consistently: `network` (source channel), `consent` (data-processing consent state), `traceparent` (W3C distributed tracing).

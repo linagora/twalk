@@ -2,7 +2,7 @@
 
 The Companion backend (Rust): bridge provisioning facade, persona orchestrator, and consent broker. It is the single writer of consent state (see `docs/architecture/adr/0006-consent-state-owned-by-companion-gateway.md`).
 
-What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — plus the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation; and bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses. Consent and the bridge facade land on top of them in the remaining tickets of spec #46.
+What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation — the consent store (ticket #49): an append-only decision journal in SQLite, the current state as its projection, and a transactional outbox that publishes each committed decision exactly once as a `consent.state.changed.v1` — and bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses. The consent snapshot (#50) and the bridge facade land on top of them in the remaining tickets of spec #46.
 
 ## The origin
 
@@ -19,6 +19,9 @@ One HTTP origin serves everything, so there is no CORS and the device token can 
 | `/api/devices/{id}` | `DELETE` revokes one device. Its token stops working on its next request. |
 | `/api/bootstrap/account` | `POST` creates this deployment's one account, once (screen 2). Open, because there is no account to sign in with yet. |
 | `/api/bootstrap/rooms` | `POST` invites the Sensor into the rooms the user selected (screen 3d), with the user's own Matrix access token, which is then forgotten. |
+| `/api/consent/decisions` | `POST` records one consent decision (below). |
+| `/api/consent/state` | `GET` returns the current state, one entry per (subject, network), as recorded. |
+| `/api/consent/effective` | `GET` returns the state that applies to one contact on one network, with the precedence resolved. |
 | `/api/…` (anything else) | A JSON error, never HTML: a client parsing a response must not be handed a page. Unauthenticated, that is a `401` — the guard answers before routing, so an unknown path tells a caller with no device token nothing about the API's shape. |
 | anything else | The Companion's build in `GATEWAY_STATIC_DIR`, resolved the way SvelteKit's static adapter lays it out (see below). |
 
@@ -77,6 +80,57 @@ A `traceparent` on an inbound request is continued (and returned on the response
 - **The obligation on later tickets.** Every ticket of spec #46 that adds an endpoint extends `openapi.yaml` in the same commit. It is not a convention to remember: an undescribed route fails the suite.
 
 `GET /openapi.yaml` serves the committed file's bytes (`application/yaml`, RFC 9512), unauthenticated — a generator must be able to read it before anyone can sign in, and it holds no secret.
+## Consent
+
+The Gateway is the single writer of consent state, and its own store is the record of truth — the bus is the audit trail, not the memory (ADR 0010).
+
+- **The journal is append-only.** Every decision is one row in `consent.sqlite3`, and SQLite triggers refuse any `DELETE` and any `UPDATE` of a recorded field. The only mutable column is the outbox's `published_at`.
+- **The current state is a projection.** `consent_state` is a SQL *view* over the journal — the most recent decision per (subject, network) — so it cannot drift from the decisions it derives from, and no code path can write state without writing a decision.
+- **Publication goes through a transactional outbox.** Commit, then publish, then mark published. A crash in between republishes rather than loses, and the event carries the contract's deterministic id as `Nats-Msg-Id`, so the bus deduplicates a republished row. A request never waits for the bus: while the bus is away, decisions commit and accumulate as unpublished rows, and `twalk_companion_gateway_consent_outbox_pending` says how many.
+- **Schema migrations are embedded in the binary** (`src/store.rs::MIGRATIONS`, tracked by SQLite's `user_version`) and applied at open, so an operator upgrades the image and nothing else.
+- **No message content, ever.** A decision is a subject, a state, a perimeter, two timestamps, the owner who took it and an optional reason.
+
+### Taking a decision
+
+```http
+POST /api/consent/decisions
+Cookie: twalk_device=<the device token sign-in issued>
+
+{
+  "subject": { "type": "contact", "id": "@whatsapp_33612345678:example.com" },
+  "new_state": "granted",
+  "scope": { "networks": ["whatsapp"] },
+  "reason": "optional, kept in the audit trail"
+}
+```
+
+`subject.type` is `contact` or `network`; `persona` is refused with `unsupported_subject_type` until persona activation lands (#60, ADR 0013 — it uses this same write path). A `network` subject must be scoped to exactly its own network. The answer is `201` with the recorded decision and the id of the event the outbox will publish, or `200` with the same body when the identical decision (same subject, state, perimeter and instant) was already recorded. Every refusal is the Gateway's `Error` document: a stable `error` code — `malformed_request`, `unknown_value`, `unsupported_subject_type`, `scope_contradicts_subject`, `consent_not_configured`, `store_unavailable`, and `unauthenticated` from the guard — with a `detail` for an operator's logs. All three endpoints and every one of those codes are declared in `openapi.yaml`.
+
+Nothing in `src/consent_http.rs` authenticates: the guard above has already done it, and the `Device` it injected is what the handler asks for. The decision's `actor` is the deployment's **owner**, not the device — one owner per Gateway, so every device that can sign in is theirs, and the audit trail records the human; the device's id goes to the log line, where it answers "from which of my devices did I do that?".
+
+### Precedence
+
+A `network` decision is that network's default; a `contact` decision for the same network always overrides it. `GET /api/consent/effective?contact=<matrix id>&network=<network>` applies that:
+
+```json
+{ "contact": "@whatsapp_336…:example.com", "network": "whatsapp",
+  "state": "revoked", "decided_by": { "type": "contact", "id": "@whatsapp_336…:example.com" } }
+```
+
+With no decision at all the state is `pending` and `decided_by` is `null` — which is how a caller tells "never decided" from "decided pending". An absent subject never means "revoked".
+
+### The event
+
+Each committed decision is published on `twalk.consent.state.changed.v1`, validated against `contracts/cloudevents/v1/consent.state.changed.schema.json`. Four conventions a third party can code against:
+
+- `id` is the schema's recipe: `sha256(subject.type + ':' + subject.id + ':' + new_state + ':' + <networks> + ':' + occurred_at)` in lowercase hex, where `<networks>` is `scope.networks` sorted ascending and comma-joined. The scope is in the key on purpose, so two decisions differing only in perimeter are two events.
+- `source` is `gateway://<the owner's server name>/consent`.
+- The `network` extension is set **only** when the scope names exactly one network (so a single-network change can be filtered server-side on NATS); `data.scope.networks` is always the authority.
+- The `consent` extension is **never** set: on an event announcing a consent change it would be redundant with `data.new_state` at best and self-contradictory on a revocation. Consumers read `data.new_state`.
+
+`occurred_at` is when the user decided (part of the id); `time` is when the Gateway produced the event — they differ on a republish, which is why only the first is in the key. `old_state` is what the subject held on this perimeter before, read inside the recording transaction from the most recent decision covering any of the scoped networks; `unset` means none ever did.
+
+Consent follows sign-in: it needs an owner to attribute a decision to, a state directory to keep the journal in and a domain to name its events by, and takes all three from the sign-in configuration. The one variable it adds is `GATEWAY_NATS_URL`; without it the consent endpoints answer `503 consent_not_configured` and the rest of the origin is untouched.
 
 ## Configuration
 
@@ -90,6 +144,7 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_LOG_LEVEL` | `info` | `tracing` filter, e.g. `info,twalk_companion_gateway=debug`. |
 | `GATEWAY_OWNER` | *unset* | The Matrix ID of the one human this deployment serves. Unset: nobody can sign in and the API answers `503`. |
 | `GATEWAY_HOMESERVER_FEDERATION_URL` | *required with an owner* | Base URL of the homeserver's federation API, where an OpenID token is verified. |
+| `GATEWAY_NATS_URL` | *unset* | The bus the consent outbox publishes to, e.g. `nats://nats:4222`. Unset: the consent endpoints answer `503`. A bus that is down delays publication and never refuses a decision. |
 | `GATEWAY_STATE_DIR` | *required with an owner* | Directory the SQLite stores live in; the session store is `sessions.db` inside it. |
 | `GATEWAY_DEVICE_TOKEN_TTL` | `900` | Device-token lifetime in seconds. |
 | `GATEWAY_REFRESH_TOKEN_TTL` | `2592000` | Refresh-token lifetime in seconds. |
@@ -108,10 +163,11 @@ cd companion-gateway
 cargo test                    # unit tests, the process-boundary suites, and the compose deployment test
 cargo test --test service     # the origin's own suite alone (no Docker)
 cargo test --test signin      # sign-in against the shared test stack's Synapse
+cargo test --test consent     # consent against the shared test stack's Synapse and NATS JetStream
 cargo test --test bootstrap   # the registration relay and the Sensor's invitation, same stack
 cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.

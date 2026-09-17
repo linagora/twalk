@@ -9,12 +9,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 use twalk_companion_gateway::bootstrap::Bootstrap;
-use twalk_companion_gateway::config::Config;
+use twalk_companion_gateway::config::{Config, Consent};
 use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
+use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
 use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::static_files::Resolver;
+use twalk_companion_gateway::store::Store;
 
 /// How long in-flight requests get to finish after SIGTERM before the
 /// process exits anyway. Static files and a JSON document: a request that
@@ -123,6 +125,31 @@ async fn main() -> Result<()> {
     };
 
     let metrics = Arc::new(Metrics::started_at(now_unix_seconds()));
+
+    // Consent (ticket #49). Configured, the Gateway opens its decision
+    // journal, publishes whatever the last run left unpublished, and serves
+    // the write API; unconfigured, the consent endpoints answer a 503 naming
+    // what is missing and the rest of the origin is untouched.
+    let consent = match &config.consent {
+        Some(consent) => {
+            let outbox = open_consent(consent, &metrics)?;
+            tokio::spawn(publish_until_shutdown(
+                outbox.clone(),
+                consent.nats_url.clone(),
+            ));
+            Some(outbox)
+        }
+        None => {
+            if config.sign_in.is_some() {
+                warn!(
+                    "GATEWAY_NATS_URL is not set: the consent endpoints answer 503, because a \
+                     decision the bus never hears is a decision no persona can honour"
+                );
+            }
+            None
+        }
+    };
+
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
     // metrics endpoint behaves the same way).
@@ -139,7 +166,8 @@ async fn main() -> Result<()> {
     let app = router(
         Gateway::new(companion, metrics, now_unix_seconds)
             .with_sessions(sessions)
-            .with_bootstrap(bootstrap),
+            .with_bootstrap(bootstrap)
+            .with_consent(consent),
     );
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(
@@ -168,6 +196,44 @@ async fn main() -> Result<()> {
     }
     info!("companion gateway stopped");
     Ok(())
+}
+
+/// Opens the consent store and hands back the outbox the router and the
+/// publication task share.
+///
+/// Opening applies the embedded schema migrations, so an operator upgrades
+/// the image and nothing else. The outbox gauge is published here, before
+/// the origin binds: a restart that inherits unpublished decisions reports
+/// them from its first scrape, not from its first request.
+fn open_consent(consent: &Consent, metrics: &Arc<Metrics>) -> Result<Arc<Outbox>> {
+    let store = Store::open(&consent.state_dir).context("failed to open the consent store")?;
+    info!(
+        store = %store.path().display(),
+        owner = %consent.owner,
+        source = %format!("gateway://{}/consent", consent.matrix_domain),
+        nats_url = %consent.nats_url,
+        "consent store ready: this Gateway is the single writer of consent state"
+    );
+    let store = Arc::new(store);
+    let pending = store
+        .unpublished_count()
+        .context("failed to count the consent outbox")?;
+    metrics.set_consent_outbox_pending(pending);
+    if pending > 0 {
+        // The crash-recovery path, stated plainly because it is the one an
+        // operator will want to see after an unclean stop.
+        info!(
+            pending,
+            "committed consent decisions were not published before the last stop; publishing them now"
+        );
+    }
+    Ok(Arc::new(Outbox::new(
+        store,
+        metrics.clone(),
+        consent.matrix_domain.clone(),
+        consent.owner.clone(),
+        std::time::SystemTime::now,
+    )))
 }
 
 /// Resolves when the process is asked to stop (SIGTERM, or SIGINT from an

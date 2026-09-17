@@ -32,6 +32,16 @@ pub struct Metrics {
     /// (`invited`, `already_present`, `failed`), or one per refused request
     /// (`token_rejected`, `not_configured`, …).
     sensor_invitations: Mutex<BTreeMap<&'static str, u64>>,
+    /// Consent decisions recorded in the journal, by subject type (#49). A
+    /// decision the journal already held is not counted again.
+    consent_decisions: Mutex<BTreeMap<&'static str, u64>>,
+    /// Consent decisions the outbox published on the bus, and how many are
+    /// still waiting for it. Together they are the operator's answer to "is
+    /// the outbox draining?": the counter climbs, the gauge returns to zero.
+    /// The gauge is `None` until consent is configured, so a Gateway that
+    /// writes no consent exposes no consent series at all.
+    consent_published: Mutex<u64>,
+    consent_outbox_pending: Mutex<Option<u64>>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -79,6 +89,9 @@ impl Metrics {
             sign_ins: Mutex::new(BTreeMap::new()),
             registrations: Mutex::new(BTreeMap::new()),
             sensor_invitations: Mutex::new(BTreeMap::new()),
+            consent_decisions: Mutex::new(BTreeMap::new()),
+            consent_published: Mutex::new(0),
+            consent_outbox_pending: Mutex::new(None),
             started_unix_seconds: now_unix_seconds,
         }
     }
@@ -127,6 +140,35 @@ impl Metrics {
             .or_insert(0) += 1;
     }
 
+    /// One consent decision appended to the journal.
+    pub fn record_consent_decision(&self, subject_type: crate::consent::SubjectType) {
+        *self
+            .consent_decisions
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(subject_type.as_str())
+            .or_insert(0) += 1;
+    }
+
+    /// One committed decision published on the bus and marked as such. This
+    /// counter is how a test — and an operator after a crash — sees that a
+    /// decision reached the bus exactly once.
+    pub fn record_consent_published(&self) {
+        *self
+            .consent_published
+            .lock()
+            .expect("the metrics mutex is never poisoned") += 1;
+    }
+
+    /// How many committed decisions are waiting for the bus, as the store
+    /// counts them.
+    pub fn set_consent_outbox_pending(&self, pending: u64) {
+        *self
+            .consent_outbox_pending
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(pending);
+    }
+
     /// Renders the Prometheus text exposition (format version 0.0.4). `now`
     /// is the scrape time in seconds since the epoch.
     pub fn render(&self, now_unix_seconds: u64) -> String {
@@ -156,6 +198,40 @@ impl Metrics {
         {
             out.push_str(&format!(
                 "twalk_companion_gateway_sign_ins_total{{outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+        // The consent series appear once consent is configured: a Gateway
+        // that writes no consent exposes none of them, and a scrape of one
+        // that does always carries the outbox gauge, even at zero.
+        let pending = *self
+            .consent_outbox_pending
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        if let Some(pending) = pending {
+            out.push_str("# HELP twalk_companion_gateway_consent_decisions_total Consent decisions recorded in the journal, by subject type.\n");
+            out.push_str("# TYPE twalk_companion_gateway_consent_decisions_total counter\n");
+            for (subject_type, count) in self
+                .consent_decisions
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_consent_decisions_total{{subject_type=\"{subject_type}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_consent_events_published_total Consent decisions published on the bus by the transactional outbox.\n");
+            out.push_str("# TYPE twalk_companion_gateway_consent_events_published_total counter\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_consent_events_published_total {}\n",
+                self.consent_published
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            out.push_str("# HELP twalk_companion_gateway_consent_outbox_pending Committed consent decisions still waiting to be published.\n");
+            out.push_str("# TYPE twalk_companion_gateway_consent_outbox_pending gauge\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_consent_outbox_pending {pending}\n"
             ));
         }
         out.push_str(
@@ -276,6 +352,48 @@ mod tests {
             assert!(name.starts_with("twalk_companion_gateway_"), "{line}");
             value.parse::<u64>().expect("the value is an integer");
         }
+    }
+
+    #[test]
+    fn the_consent_series_appear_only_once_consent_is_configured() {
+        let metrics = Metrics::started_at(1_000);
+        metrics.record_consent_decision(crate::consent::SubjectType::Contact);
+        assert!(
+            !metrics.render(1_000).contains("consent"),
+            "a Gateway that writes no consent exposes no consent series"
+        );
+
+        metrics.set_consent_outbox_pending(1);
+        metrics.record_consent_decision(crate::consent::SubjectType::Network);
+        metrics.record_consent_published();
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains(
+                "twalk_companion_gateway_consent_decisions_total{subject_type=\"contact\"} 1\n"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "twalk_companion_gateway_consent_decisions_total{subject_type=\"network\"} 1\n"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_companion_gateway_consent_events_published_total 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_companion_gateway_consent_outbox_pending 1\n"),
+            "{body}"
+        );
+        metrics.set_consent_outbox_pending(0);
+        assert!(
+            metrics
+                .render(1_000)
+                .contains("twalk_companion_gateway_consent_outbox_pending 0\n"),
+            "a drained outbox still reports its gauge, at zero"
+        );
     }
 
     #[test]
