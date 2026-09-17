@@ -147,4 +147,4 @@ Three tickets sit outside every lot: [#58](https://github.com/linagora/twalk/iss
 
 Update it when a lot changes state, when a lot is specced (link the spec issue), or when a milestone's scope moves in the README. Status detail belongs in the tracker; this file holds the mapping and the order.
 
-Referenced but not yet written, so nobody hunts for them: ADRs 0001–0004, `docs/architecture/overview.md`, `docs/architecture/security-model.md`, `docs/guides/persona-authoring.md`.
+Referenced but not yet written, so nobody hunts for them: ADRs 0001–0004, `docs/architecture/overview.md`, `docs/guides/persona-authoring.md`. The security model is written: [`security-model.md`](security-model.md).
