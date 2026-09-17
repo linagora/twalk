@@ -49,7 +49,12 @@ describe('the catalogues', () => {
 			path: '/nowhere',
 			https: 'https://',
 			localhost: 'http://localhost',
-			origin: 'http://localhost:4173'
+			origin: 'http://localhost:4173',
+			owner: '@you:example.com',
+			id: '@you:example.com',
+			errcode: 'M_PASSWORD_TOO_SHORT',
+			detail: 'the homeserver said no',
+			date: '18/09/2026'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();

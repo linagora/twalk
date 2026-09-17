@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { isValidDomain, normaliseDomain } from './domain';
+import { homeserverBaseUrl, isValidDomain, normaliseDomain } from './domain';
 
 describe('normaliseDomain', () => {
 	it('strips the decoration a user pastes', () => {
@@ -33,16 +33,27 @@ describe('isValidDomain', () => {
 		expect(isValidDomain('https://example.com/')).toBe(true);
 	});
 
-	it('refuses a single label', () => {
-		// `localhost` or a LAN name is not a Twalk deployment, and it would
-		// send the user into a homeserver probe that cannot succeed.
-		expect(isValidDomain('localhost')).toBe(false);
+	it('refuses a single label that is not loopback', () => {
+		// A LAN name is not a Twalk deployment, and it would send the user
+		// into a homeserver probe that cannot succeed.
 		expect(isValidDomain('twalk')).toBe(false);
+		expect(isValidDomain('nas')).toBe(false);
 	});
 
-	it('refuses an IP address', () => {
+	it('refuses an IP address that is not loopback', () => {
 		// No certificate, so no secure context, so no crypto (ADR 0014).
 		expect(isValidDomain('192.168.1.10')).toBe(false);
+		expect(isValidDomain('192.168.1.10:8008')).toBe(false);
+	});
+
+	it('accepts loopback, with its port', () => {
+		// The exception, and the reason for it: a browser treats loopback as a
+		// secure context without a certificate, which is what lets a developer
+		// and the Playwright harness reach a deployment on this machine.
+		// `*.localhost` resolves to loopback without DNS.
+		expect(isValidDomain('localhost')).toBe(true);
+		expect(isValidDomain('twalk.localhost:19148')).toBe(true);
+		expect(isValidDomain('127.0.0.1:8008')).toBe(true);
 	});
 
 	it('refuses malformed labels', () => {
@@ -57,5 +68,17 @@ describe('isValidDomain', () => {
 	it('refuses a hostname longer than DNS allows', () => {
 		expect(isValidDomain(`${'a'.repeat(64)}.com`)).toBe(false);
 		expect(isValidDomain(`${`${'a'.repeat(50)}.`.repeat(6)}com`)).toBe(false);
+	});
+});
+
+describe('homeserverBaseUrl', () => {
+	it('is HTTPS for a real deployment', () => {
+		expect(homeserverBaseUrl('example.com')).toBe('https://example.com');
+		expect(homeserverBaseUrl('https://Example.COM/')).toBe('https://example.com');
+	});
+
+	it('is plain HTTP on loopback, which has no certificate to have', () => {
+		expect(homeserverBaseUrl('twalk.localhost:19148')).toBe('http://twalk.localhost:19148');
+		expect(homeserverBaseUrl('127.0.0.1:8008')).toBe('http://127.0.0.1:8008');
 	});
 });

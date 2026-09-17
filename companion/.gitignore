@@ -13,3 +13,6 @@ node_modules
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# What tests/real-stack.mjs writes about the stack it brought up
+/tests/.real-stack.json

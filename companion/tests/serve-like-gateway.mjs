@@ -37,7 +37,7 @@
 
 import { createReadStream } from 'node:fs';
 import { stat, readFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
@@ -50,6 +50,22 @@ const PORT = Number(process.env.TWALK_TEST_PORT ?? 4319);
 const GATEWAY_VERSION = process.env.TWALK_TEST_GATEWAY_VERSION ?? '0.1.0';
 const GATEWAY_REVISION = process.env.TWALK_TEST_GATEWAY_REVISION ?? 'test';
 const OPENAPI = resolve(join(here, '..', '..', 'companion-gateway', 'openapi.yaml'));
+
+/**
+ * With `TWALK_TEST_REAL_STACK=1` this server stops standing in for the API and
+ * puts the **real Companion Gateway** behind `/api` — with a real Synapse
+ * behind that (`tests/real-stack.mjs`). Spec #65 asks for exactly this for the
+ * bootstrap journey: the cryptographic work of ADR 0014 is round trips to a
+ * homeserver, and a stub answering them would assert nothing.
+ *
+ * The files stay ours, served by the rules below, so the routing contract this
+ * file exists to prove is still the one under test. Only `/api` moves, and it
+ * moves to the same origin the browser already has — which is what keeps the
+ * device cookie (`HttpOnly`, ADR 0011) working exactly as it does in a
+ * deployment.
+ */
+const REAL_STACK = process.env.TWALK_TEST_REAL_STACK === '1';
+let gatewayOrigin = process.env.TWALK_TEST_GATEWAY_PROXY ?? null;
 
 /** `companion-gateway/src/static_files.rs::content_type_for`, value for value. */
 function contentTypeFor(requestPath) {
@@ -219,6 +235,37 @@ async function serveFile(request, response, path, contentType) {
 	createReadStream(path).pipe(response);
 }
 
+/**
+ * Hands one `/api` request to the real Gateway and streams its answer back,
+ * headers included — `Set-Cookie` above all, since the session is a cookie.
+ *
+ * The `Host` header is forwarded unchanged on purpose: the Gateway decides
+ * whether its session cookies carry `Secure` from it
+ * (`companion-gateway/src/session_http.rs::secure_origin`), and on loopback
+ * they must not, or the browser would drop them over plain HTTP.
+ */
+function proxyToGateway(request, response, origin) {
+	const target = new URL(request.url ?? '/', origin);
+	const upstream = httpRequest(
+		{
+			protocol: target.protocol,
+			hostname: target.hostname,
+			port: target.port,
+			path: `${target.pathname}${target.search}`,
+			method: request.method,
+			headers: request.headers
+		},
+		(answer) => {
+			response.writeHead(answer.statusCode ?? 502, answer.headers);
+			answer.pipe(response);
+		}
+	);
+	upstream.on('error', (error) => {
+		json(response, 502, { error: 'gateway_unreachable', detail: String(error) });
+	});
+	request.pipe(upstream);
+}
+
 function json(response, status, body) {
 	const payload = JSON.stringify(body);
 	response.writeHead(status, {
@@ -264,8 +311,13 @@ const server = createServer((request, response) => {
 
 		// The one exception to the fallback: under `/api` a refusal stays
 		// JSON, because a client parsing an API response must never be handed
-		// an HTML page. A browser with no device cookie gets 401.
+		// an HTML page. A browser with no device cookie gets 401 — unless a
+		// real Gateway is behind us, in which case it answers for itself.
 		if (path === '/api' || path.startsWith('/api/')) {
+			if (gatewayOrigin !== null) {
+				proxyToGateway(request, response, gatewayOrigin);
+				return;
+			}
 			json(response, 401, { error: 'unauthenticated' });
 			return;
 		}
@@ -292,7 +344,21 @@ const server = createServer((request, response) => {
 	});
 });
 
+// The real stack, when asked for, comes up *before* the origin answers
+// anything: Playwright waits on `/health`, so a server that is listening is a
+// server whose Gateway and Synapse are ready.
+if (REAL_STACK && gatewayOrigin === null) {
+	const { startRealStack } = await import('./real-stack.mjs');
+	const stack = await startRealStack();
+	gatewayOrigin = stack.gatewayOrigin;
+	console.log(`the real Gateway answers /api at ${gatewayOrigin}`);
+	console.log(`the real Synapse is ${stack.synapseUrl}, owner ${stack.ownerId}`);
+}
+
 server.listen(PORT, '127.0.0.1', () => {
 	console.log(`serving ${ROOT} like the Gateway on http://127.0.0.1:${PORT}`);
 	console.log(`/health reports version ${GATEWAY_VERSION}`);
+	if (gatewayOrigin !== null) {
+		console.log(`/api is proxied to ${gatewayOrigin}`);
+	}
 });

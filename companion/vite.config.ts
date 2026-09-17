@@ -27,10 +27,123 @@
 
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+
+/**
+ * Strips the debug sections from every `.wasm` the build emits, which in
+ * practice means the Matrix crypto stack of ADR 0014 — the ADR's "debug
+ * symbols stripped, brotli served".
+ *
+ * `@matrix-org/matrix-sdk-crypto-wasm` ships 7.8 MB of WebAssembly, 3.0 MB of
+ * which is the `name` custom section: the Rust symbol names, which a browser
+ * uses for nothing but a stack trace. Dropping it and the two other custom
+ * sections takes the module to about 4.8 MB, and the brotli sibling
+ * `precompress` writes beside it from roughly 1.45 MB to 1.3 MB — the figure
+ * the ADR budgets for.
+ *
+ * Done here rather than with `wasm-strip` or `wasm-opt` because it needs no
+ * toolchain: a WebAssembly module is a header and a list of sections, custom
+ * sections carry an id of 0 and a name, and removing whole sections is a copy.
+ * Nothing is rewritten, so nothing can be rewritten wrongly.
+ */
+function stripWasmDebugSections(): Plugin {
+	const DROPPED = new Set(['name', 'producers', 'target_features']);
+
+	return {
+		name: 'twalk:strip-wasm-debug-sections',
+		apply: 'build',
+		generateBundle(_options, bundle) {
+			for (const chunk of Object.values(bundle)) {
+				if (chunk.type !== 'asset' || !chunk.fileName.endsWith('.wasm')) {
+					continue;
+				}
+				const source = chunk.source;
+				if (typeof source === 'string') {
+					continue;
+				}
+				const stripped = stripSections(new Uint8Array(source), DROPPED);
+				if (stripped !== null) {
+					chunk.source = stripped;
+				}
+			}
+		}
+	};
+}
+
+/** `null` when the bytes are not a WebAssembly module we recognise. */
+function stripSections(module: Uint8Array, dropped: Set<string>): Uint8Array | null {
+	// `\0asm` and version 1, then sections until the end.
+	if (
+		module.length < 8 ||
+		module[0] !== 0x00 ||
+		module[1] !== 0x61 ||
+		module[2] !== 0x73 ||
+		module[3] !== 0x6d
+	) {
+		return null;
+	}
+	const kept: Uint8Array[] = [module.subarray(0, 8)];
+	let at = 8;
+	while (at < module.length) {
+		const start = at;
+		const id = module[at];
+		at += 1;
+		const [size, afterSize] = leb128(module, at);
+		if (size === null || afterSize === null) {
+			return null;
+		}
+		at = afterSize;
+		const body = at;
+		at += size;
+		if (at > module.length) {
+			return null;
+		}
+		if (id === 0) {
+			const [nameLength, afterNameLength] = leb128(module, body);
+			if (nameLength !== null && afterNameLength !== null) {
+				const name = new TextDecoder().decode(
+					module.subarray(afterNameLength, afterNameLength + nameLength)
+				);
+				if (dropped.has(name)) {
+					continue;
+				}
+			}
+		}
+		kept.push(module.subarray(start, at));
+	}
+
+	const total = kept.reduce((sum, part) => sum + part.length, 0);
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const part of kept) {
+		out.set(part, offset);
+		offset += part.length;
+	}
+	return out;
+}
+
+/** An unsigned LEB128, returning the value and the offset after it. */
+function leb128(bytes: Uint8Array, at: number): [number | null, number | null] {
+	let result = 0;
+	let shift = 0;
+	let cursor = at;
+	for (;;) {
+		if (cursor >= bytes.length || shift > 35) {
+			return [null, null];
+		}
+		const byte = bytes[cursor] ?? 0;
+		cursor += 1;
+		result |= (byte & 0x7f) << shift;
+		if ((byte & 0x80) === 0) {
+			return [result >>> 0, cursor];
+		}
+		shift += 7;
+	}
+}
 
 export default defineConfig({
 	plugins: [
+		stripWasmDebugSections(),
 		sveltekit({
 			compilerOptions: {
 				// Runes everywhere except in dependencies. Svelte 5's default
