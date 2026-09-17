@@ -9,7 +9,7 @@ As of 2026-09-17 the repository contains documentation, the complete event contr
 - `README.md`, `docs/wireframes/companion-v0.1.md`, `docs/architecture/adr/` (ADRs 0005–0008 written; numbers 0001–0004 are referenced from the docs but not yet written)
 - `contracts/cloudevents/v1/` — the complete v1 contract: 8 CloudEvents schemas plus one validated fixture per type
 - `.scratch/sensor/` — local mirrors of the Sensor spec and tickets 01–11; **canonical is the tracker: GitHub Issues on [linagora/twalk](https://github.com/linagora/twalk/issues)** (conventions in `docs/agents/issue-tracker.md`); tickets 01–02 are done
-- `sensor/` — the Sensor Cargo package: library modules (`config`, `consent`, `network`, `normalize` — pure logic) plus the binary wiring to matrix-sdk and NATS in `src/main.rs`; integration-test harness in `tests/` (compose stack, bot/bus/contract helpers, `smoke.rs`, `sensor_lifecycle.rs`, `message_to_event.rs`)
+- `sensor/` — the Sensor Cargo package: library modules (`config`, `consent`, `network`, `normalize` — pure logic) plus the binary wiring to matrix-sdk and NATS in `src/main.rs`; integration-test harness in `tests/` (compose stack, bot/bus/contract helpers, `smoke.rs`, `sensor_lifecycle.rs`, `message_to_event.rs`, `presence.rs`)
 - Other component directories hold stub READMEs only: `hermes/`, `companion/`, `companion-gateway/`, `bridges/`, `deploy/`, `ui/`, `sdk/`, `examples/`, `tools/`, `tests/`
 
 ## Build and test commands
