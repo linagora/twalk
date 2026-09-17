@@ -132,6 +132,212 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bridges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The bridges this deployment can connect a network through.
+         * @description Configuration plus the Gateway's own memory: **no bridge is
+         *     contacted**, so the networks screen draws even while every bridge is
+         *     down. Each entry carries the login that bridge has in flight, or
+         *     `null` when nothing has been started on it.
+         *
+         *     A deployment with no bridge configured answers an empty list. That is
+         *     the honest answer to "what can I connect?", not an error — bridges
+         *     are opt-in in the reference deployment, behind a compose profile.
+         */
+        get: operations["getBridges"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bridges/{bridge_id}/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The state of the login in flight — the document the Companion polls.
+         * @description **Always immediate.** The blocking step of a mautrix login lives
+         *     inside the Gateway, not in the browser: the Gateway sits in
+         *     `POST /_matrix/provision/v3/login/step/…/display_and_wait` — which
+         *     does not answer until the phone does — and this endpoint reports
+         *     whatever the last answer was. A phone that sleeps mid-scan therefore
+         *     loses a poll and not the login.
+         *
+         *     `generation` is the number to watch: it changes every time the bridge
+         *     hands back a new step, **refreshes included**. A refreshed QR is a
+         *     bumped generation with a new `step.payload.data` — that is the signal
+         *     to redraw, before the code on screen expires. `step.expires_at` and
+         *     `step.valid_for_seconds` say how long the one on screen is worth
+         *     acting on; for a QR that is the Gateway's own estimate of the
+         *     network's refresh interval, because the bridge states no expiry.
+         *
+         *     A login that finished, failed or was cancelled is still reported, so
+         *     the Companion can show how it ended; `404 no_login_in_flight` means
+         *     nothing was ever started on this bridge.
+         */
+        get: operations["getBridgeLogin"];
+        put?: never;
+        /**
+         * Start a login on this bridge, or repair an existing one.
+         * @description Answers at once, with the flow's **first step already in it**: a QR
+         *     flow returns the first code here, and the Companion polls
+         *     `GET` on this same path from then on.
+         *
+         *     Pass `login_id` to **reconnect**: the flow then re-logs in to the
+         *     login the bridge already holds (mautrix's `?login_id=`), which is how
+         *     a broken session is repaired. It never restarts a container, and it
+         *     never creates a second login.
+         *
+         *     One login at a time per bridge instance in v0.1 — the contract has no
+         *     login dimension yet (spec #47) — so starting a second while one is in
+         *     flight is `409 login_in_flight`, whose `detail` names the device and
+         *     the instant that started the first. A login that has completed,
+         *     failed or been cancelled does not stand in the way.
+         *
+         *     The acting Matrix user is this deployment's owner, from
+         *     configuration: mautrix's shared-secret auth takes the acting user on
+         *     trust, so it is never something a request can choose (ADR 0011).
+         */
+        post: operations["startBridgeLogin"];
+        /**
+         * Cancel the login in flight.
+         * @description Cancels the current step — which is what releases the request the
+         *     Gateway is holding — and then the process, so the bridge forgets it
+         *     rather than keeping it until its 30-minute cap. The login's state
+         *     then reads `cancelled` until something else is started, and the
+         *     bridge is free for the next attempt at once.
+         *
+         *     A bridge that has already forgotten the process is not an error here:
+         *     the login is over either way, which is what was asked for.
+         */
+        delete: operations["cancelBridgeLogin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bridges/{bridge_id}/login/flows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The login flows this bridge offers.
+         * @description Asked of the bridge itself (`GET /_matrix/provision/v3/login/flows`),
+         *     so the list is the bridge's and not a table Twalk keeps: a QR flow, a
+         *     phone number, a cookie paste, whatever that bridge version has. The
+         *     `id` of one of them is what `POST .../login` takes as `flow_id`.
+         */
+        get: operations["getBridgeLoginFlows"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bridges/{bridge_id}/login/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Answer the step the login is waiting on.
+         * @description For a step whose `type` is `user_input` or `cookies` — the ones where
+         *     the login waits for the user rather than for the network. `data` is
+         *     passed to the bridge **untouched**: the Gateway does not know what a
+         *     given network's input fields are called and does not pretend to.
+         *
+         *     What travels here is a network credential — a phone number, the seven
+         *     Google cookies of the SMS preview path — and it is relayed and
+         *     forgotten (ADR 0011). Nothing stores it, and the Gateway's log line
+         *     records the *shape* of what went through and never a value.
+         *
+         *     The answer is the login's new state: the next step, or `complete`.
+         *     Submit against the `step_id` the polled state reports; anything else
+         *     is `400`, because a stale client answering an old step would
+         *     otherwise silently do nothing.
+         */
+        post: operations["submitBridgeLoginStep"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bridges/{bridge_id}/logins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The logins this bridge already holds.
+         * @description Asked of the bridge (`GET /_matrix/provision/v3/logins`). This is
+         *     what the Companion reads to offer "reconnect": the `login_id` to pass
+         *     back to `POST .../login`, and the name the network gives the account.
+         *
+         *     One login per bridge instance is the v0.1 constraint, so this list
+         *     normally holds none or one; it is a list because the bridge's API is,
+         *     and because a second account on one network is what a later contract
+         *     version adds.
+         */
+        get: operations["getBridgeLogins"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bridges/{bridge_id}/logins/{login_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Log this login out of its network.
+         * @description The bridge drops the session and the network credentials it kept for
+         *     it; the Gateway never held either, so there is nothing on its side to
+         *     forget. The network's own "linked devices" list is where the user
+         *     sees the other half of this.
+         *
+         *     A login the bridge does not have is `404 not_found_on_bridge` — the
+         *     distinction from `unknown_bridge` matters, because one is a
+         *     configuration problem and the other is a stale screen.
+         */
+        delete: operations["logoutBridgeLogin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/consent/decisions": {
         parameters: {
             query?: never;
@@ -418,6 +624,212 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        BridgeList: {
+            bridges: components["schemas"]["ConfiguredBridge"][];
+        };
+        /**
+         * @description The whole state of one login, and the document the Companion polls.
+         *     Watch `state` and `generation`; everything else is what to draw.
+         */
+        BridgeLogin: {
+            bridge_id: string;
+            /** @description Why the login failed; `null` unless `state` is `failed`. */
+            error: {
+                /**
+                 * @description - `login_lost` — the bridge stopped answering, or no
+                 *       longer knows the process. **A login in flight does not
+                 *       survive a restart of the bridge or of the Gateway**:
+                 *       nothing about it is persisted on either side. Start
+                 *       again.
+                 *     - `login_expired` — the bridge ended it: cancelled, timed
+                 *       out, or already finished.
+                 *     - `webauthn_required` — the flow asked for a passkey,
+                 *       which the Companion cannot drive. The login fails here
+                 *       rather than hanging on a step nobody will answer; a
+                 *       bridge with `provisioning.fail_on_webauthn` refuses it
+                 *       one step earlier.
+                 *     - `unsupported_step` — a step type this facade does not
+                 *       drive (`client_http`).
+                 *     - `bridge_refused` / `bridge_unreachable` — the bridge
+                 *       answered something unusable, or nothing at all.
+                 * @enum {string}
+                 */
+                code: "login_lost" | "login_expired" | "webauthn_required" | "unsupported_step" | "bridge_refused" | "bridge_unreachable";
+                /**
+                 * @description For an operator's logs. Not for display, and never
+                 *     matched on.
+                 */
+                detail: string | null;
+            } | null;
+            /**
+             * Format: date-time
+             * @description The bridge's own deadline for the process: bridgev2 caps a login
+             *     at 30 minutes. Past it the login is gone whatever this document
+             *     last said.
+             */
+            expires_at: string;
+            flow_id: string;
+            /**
+             * @description Increments on every step the bridge hands back, **refreshes
+             *     included**. A changed generation with the same `step.step_id` is
+             *     a refreshed QR code: redraw it. This, not a timer, is the signal
+             *     that a fresh code has arrived.
+             */
+            generation: number;
+            /** @description The login the network accepted; `null` until `complete`. */
+            login: {
+                /**
+                 * @description What `DELETE .../logins/{login_id}` drops, and what a
+                 *     later reconnect names.
+                 */
+                login_id: string;
+                /** @description The bridge's user-login id, when it names one. */
+                user_id: string | null;
+            } | null;
+            /**
+             * @description The existing login this flow is repairing, when it is a
+             *     reconnect; `null` for a first login.
+             */
+            login_id: string | null;
+            network: string;
+            /**
+             * @description The bridge's own id for this login process. It lives in the
+             *     bridge's memory and does not survive its restart.
+             */
+            process_id: string;
+            /**
+             * Format: date-time
+             * @description When this login was started, to the millisecond.
+             */
+            started_at: string;
+            /**
+             * @description The device that started it. One owner per deployment, so this
+             *     says *which of my devices*, never *who*.
+             */
+            started_by: {
+                device_id: string;
+                device_name: string;
+            };
+            /**
+             * @description - `awaiting_input` — the step needs something from the user;
+             *       submit it.
+             *     - `awaiting_remote` — the Gateway is holding the blocking step
+             *       and the user is scanning. Keep polling; there is nothing to
+             *       send.
+             *     - `complete` — the network accepted the login, and `login` names
+             *       it.
+             *     - `failed` — `error` says why.
+             *     - `cancelled` — this device, or the remote side, stopped it.
+             * @enum {string}
+             */
+            state: "awaiting_input" | "awaiting_remote" | "complete" | "failed" | "cancelled";
+            /** @description The step to render, or `null` once the login is over. */
+            step: components["schemas"]["BridgeLoginStep"] | null;
+        };
+        BridgeLoginFlows: {
+            flows: {
+                /** @description The bridge's longer explanation, when it gives one. */
+                description: string | null;
+                /** @description What `POST .../login` takes as `flow_id`. */
+                id: string;
+                /** @description The bridge's own label for the flow. */
+                name: string;
+            }[];
+        };
+        BridgeLogins: {
+            logins: {
+                /**
+                 * @description What `POST .../login` takes as `login_id` to reconnect, and
+                 *     what `DELETE .../logins/{login_id}` drops.
+                 */
+                login_id: string;
+                /** @description The name the network gives the account. */
+                name: string | null;
+                /**
+                 * @description The bridge's own profile object for the login, passed
+                 *     through unread — its shape is the bridge's and the network's.
+                 */
+                profile: unknown;
+            }[];
+        };
+        BridgeLoginStep: {
+            /**
+             * Format: date-time
+             * @description `received_at` plus `valid_for_seconds`.
+             */
+            expires_at: string;
+            /**
+             * @description The bridge's own words for the user, when it gives any. Show them
+             *     rather than inventing copy: they are the network's wording for
+             *     where to find the "link a device" screen.
+             */
+            instructions: string | null;
+            /**
+             * @description The step's payload, **passed through from the bridge**. For a QR
+             *     step it is `{"type": "qr", "data": "…"}`, and `data` is the raw
+             *     payload the browser draws: the bridge renders no image. For
+             *     `user_input` it is the field list to render; for `cookies`, the
+             *     URL and the cookies to collect.
+             *
+             *     Its shape is the bridge's, not the Gateway's, which is why it is
+             *     not constrained here. It is also a network credential in flight:
+             *     it is held nowhere else and is gone as soon as the next step
+             *     replaces it.
+             */
+            payload: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Format: date-time
+             * @description When the bridge handed this step over.
+             */
+            received_at: string;
+            /**
+             * @description The bridge's id for this step. `POST .../login/submit` is
+             *     answered against exactly this value.
+             */
+            step_id: string;
+            /**
+             * @description bridgev2's own step types. `display_and_wait` is the blocking one
+             *     — the Gateway is holding it, and the browser only polls;
+             *     `user_input` and `cookies` are the ones to submit. `client_http`
+             *     and `webauthn` never appear here: they fail the login instead
+             *     (see `error.code`).
+             * @enum {string}
+             */
+            type: "user_input" | "cookies" | "display_and_wait" | "client_http" | "webauthn" | "complete";
+            /**
+             * @description How long this step is worth acting on, from `received_at`. For a
+             *     QR code it is the Gateway's own estimate of the network's refresh
+             *     interval — the bridge states no expiry, and WhatsApp's whole QR
+             *     budget is about 2m40 across refreshes — so treat it as "redraw
+             *     soon" and `generation` as the fact. Never past `expires_at` of
+             *     the login itself.
+             */
+            valid_for_seconds: number;
+        };
+        ConfiguredBridge: {
+            /**
+             * @description The bridge instance's id, as this deployment's configuration
+             *     declares it (`mautrix-whatsapp`). It identifies the
+             *     implementation, never the network (CONTEXT.md), and it is what
+             *     every other path below takes.
+             */
+            bridge_id: string;
+            /**
+             * @description The login this bridge has in flight, or `null` when nothing has
+             *     been started on it. A login that completed, failed or was
+             *     cancelled is still reported here until the next one replaces it.
+             */
+            login: components["schemas"]["BridgeLogin"] | null;
+            /**
+             * @description The network the user experiences — `whatsapp`, `signal`, `sms` —
+             *     which is what the Companion labels the screen with. Configured
+             *     per instance, because a bridge's name and its network are not the
+             *     same thing: `mautrix-gmessages` is the `sms` network.
+             */
+            network: string;
+        };
         /** @description One decision the owner asks the Gateway to record. */
         ConsentDecisionRequest: {
             new_state: components["schemas"]["ConsentState_State"];
@@ -792,8 +1204,60 @@ export interface components {
             device_name?: string;
             matrix_openid_token: components["schemas"]["MatrixOpenIdToken"];
         };
+        /**
+         * @description A flow to run, and optionally the login to repair. Closed: the acting
+         *     user is the deployment's owner, from configuration, and no request
+         *     can name somebody else.
+         */
+        StartBridgeLoginRequest: {
+            /** @description One of the ids `GET .../login/flows` lists. */
+            flow_id: string;
+            /**
+             * @description Reconnect: re-log in to this existing login instead of creating a
+             *     second one. This is what repairs a broken session.
+             */
+            login_id?: string;
+        };
+        SubmitBridgeLoginStepRequest: {
+            /**
+             * @description What the step's own payload asked for, passed to the bridge
+             *     untouched: `{"phone_number": "+33…"}` for a `user_input` step,
+             *     `{"cookies": {…}}` for a `cookies` one. A network credential — it
+             *     is relayed and forgotten, never stored and never logged
+             *     (ADR 0011).
+             */
+            data: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description The step being answered — the `step.step_id` the polled state
+             *     reports. A different one is refused rather than guessed at.
+             */
+            step_id: string;
+        };
     };
     responses: {
+        /**
+         * @description The bridge itself is the problem, not the request.
+         *
+         *     - `bridge_unreachable` — its provisioning API did not answer. The
+         *       operator checks that the bridge is running and that its
+         *       `provisioning.shared_secret` is the one this Gateway is configured
+         *       with.
+         *     - `bridge_refused` — it answered something the facade cannot use;
+         *       `detail` carries the bridge's own error code.
+         */
+        BridgeUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "bridge_unreachable" | "bridge_refused";
+                };
+            };
+        };
         /**
          * @description This deployment writes no consent: `GATEWAY_NATS_URL` is unset, so
          *     the Gateway has no bus to publish a decision on and refuses to
@@ -825,6 +1289,22 @@ export interface components {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
                     error?: "store_unavailable";
+                };
+            };
+        };
+        /**
+         * @description `no_login_in_flight` — nothing has been started on this bridge, so
+         *     there is nothing to poll, answer or cancel. `unknown_bridge` — no
+         *     such bridge is configured.
+         */
+        NoBridgeLogin: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "no_login_in_flight" | "unknown_bridge";
                 };
             };
         };
@@ -876,8 +1356,31 @@ export interface components {
                 };
             };
         };
+        /**
+         * @description `unknown_bridge` — this deployment has no bridge with that id.
+         *     `GET /api/bridges` lists the ones it has; a deployment whose
+         *     operator has not enabled the bridges compose profile has none.
+         */
+        UnknownBridge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "unknown_bridge";
+                };
+            };
+        };
     };
-    parameters: never;
+    parameters: {
+        /**
+         * @description The bridge instance, as `GET /api/bridges` names it — the
+         *     `bridge_id` this deployment declared in its configuration.
+         * @example mautrix-whatsapp
+         */
+        bridgeId: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -1147,6 +1650,376 @@ export interface operations {
                     };
                 };
             };
+        };
+    };
+    getBridges: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every configured bridge, in configuration order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BridgeList"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    getBridgeLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The login's current state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BridgeLogin"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            404: components["responses"]["NoBridgeLogin"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    startBridgeLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartBridgeLoginRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description The login is started, and its first step is in the body. Poll
+             *     `GET /api/bridges/{bridge_id}/login` from here.
+             */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BridgeLogin"];
+                };
+            };
+            /** @description `invalid_request` — the body is not JSON, or names no `flow_id`. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `too_many_logins` — the network itself will not accept another
+             *     login on this account (`FI.MAU.BRIDGE.TOO_MANY_LOGINS`). The user
+             *     removes a linked device on the network, or logs one of this
+             *     bridge's logins out.
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "too_many_logins";
+                    };
+                };
+            };
+            /**
+             * @description `unknown_bridge` — no such bridge is configured.
+             *     `not_found_on_bridge` — the bridge does not know the `login_id`
+             *     this request asked to repair.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unknown_bridge" | "not_found_on_bridge";
+                    };
+                };
+            };
+            /**
+             * @description `login_in_flight` — a login is already running on this bridge.
+             *     `detail` names the device that started it and when, so the user
+             *     can tell "my other phone is mid-scan" from "the server is stuck".
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "login_in_flight";
+                    };
+                };
+            };
+            502: components["responses"]["BridgeUnavailable"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    cancelBridgeLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The login is cancelled. No body. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthenticated"];
+            404: components["responses"]["NoBridgeLogin"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    getBridgeLoginFlows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The flows, as the bridge describes them. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BridgeLoginFlows"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            404: components["responses"]["UnknownBridge"];
+            502: components["responses"]["BridgeUnavailable"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    submitBridgeLoginStep: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SubmitBridgeLoginStepRequest"];
+            };
+        };
+        responses: {
+            /** @description The step was accepted; the body is the login's new state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BridgeLogin"];
+                };
+            };
+            /**
+             * @description `invalid_request` — the body is not JSON, names no `step_id`,
+             *     carries no `data` object, names a step this login is not on, or
+             *     arrives while the Gateway is holding a blocking step (there is
+             *     nothing to submit then).
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            404: components["responses"]["NoBridgeLogin"];
+            /**
+             * @description `step_cancelled` — the step was cancelled on the bridge's side
+             *     before this answer arrived (`FI.MAU.LOGIN_STEP_CANCELLED`). Poll
+             *     the login and act on the step it reports.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "step_cancelled";
+                    };
+                };
+            };
+            /**
+             * @description `login_expired` — the login is over: cancelled, timed out, or
+             *     already finished (mautrix's three 410s). A login in flight lives
+             *     in the bridge's memory, for at most 30 minutes and only while the
+             *     network's own code is valid. Start a new one.
+             */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "login_expired";
+                    };
+                };
+            };
+            502: components["responses"]["BridgeUnavailable"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    getBridgeLogins: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The logins the bridge holds. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BridgeLogins"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            404: components["responses"]["UnknownBridge"];
+            502: components["responses"]["BridgeUnavailable"];
+            503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    logoutBridgeLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge instance, as `GET /api/bridges` names it — the
+                 *     `bridge_id` this deployment declared in its configuration.
+                 * @example mautrix-whatsapp
+                 */
+                bridge_id: components["parameters"]["bridgeId"];
+                /** @description The login to drop, as `GET .../logins` names it. */
+                login_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The login is gone. No body. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `unknown_bridge` — no such bridge is configured.
+             *     `not_found_on_bridge` — the bridge holds no such login.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unknown_bridge" | "not_found_on_bridge";
+                    };
+                };
+            };
+            502: components["responses"]["BridgeUnavailable"];
+            503: components["responses"]["SignInNotConfigured"];
         };
     };
     recordConsentDecision: {

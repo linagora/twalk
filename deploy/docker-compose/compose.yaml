@@ -248,6 +248,32 @@ services:
       # stays provisioned by the provision one-shot above — this is who to
       # invite, never how to create it.
       GATEWAY_SENSOR_USER_ID: ${GATEWAY_SENSOR_USER_ID:-${SENSOR_USER_ID:-}}
+      # The bridge login facade (ticket #55): which bridges the Companion can
+      # connect a network through, and how the Gateway reaches each one's
+      # provisioning API. Listed by bridge_id; each id then names its own
+      # three variables below.
+      #
+      # This is deliberately not tied to the `bridges` compose profile:
+      # compose has no way to vary a variable by profile, so an operator who
+      # runs no bridge leaves GATEWAY_BRIDGES empty and GET /api/bridges
+      # answers an empty list. Set it when you enable the profile.
+      GATEWAY_BRIDGES: ${GATEWAY_BRIDGES:-}
+      # Where the bridge's provisioning API is: its own appservice listener
+      # on this compose network, not the homeserver. No published port is
+      # needed — the Gateway is inside the network.
+      GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_URL: ${GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_URL:-http://bridge-whatsapp:29318}
+      # The same value as that bridge's provisioning.shared_secret, which
+      # ./provision-bridges.sh renders from WHATSAPP_PROVISIONING_SECRET. It
+      # starts and destroys that bridge's logins: the most powerful thing
+      # this facade holds, which is why the browser never talks to a bridge
+      # directly (docs/architecture/security-model.md).
+      GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_PROVISIONING_SECRET: ${WHATSAPP_PROVISIONING_SECRET:-}
+      # The network the user experiences, which is what the Companion labels
+      # the screen with — never the bridge's name (CONTEXT.md).
+      GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_NETWORK: whatsapp
+      GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL: ${GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL:-http://bridge-signal:29328}
+      GATEWAY_BRIDGE_MAUTRIX_SIGNAL_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
+      GATEWAY_BRIDGE_MAUTRIX_SIGNAL_NETWORK: signal
     volumes:
       # The device list and the session tokens' digests — a restart keeps the
       # user signed in on every device they signed in on — and the consent

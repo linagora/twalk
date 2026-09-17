@@ -57,6 +57,106 @@ pub struct Config {
     /// events name themselves by — is [`SignIn`]'s, so this is the one
     /// variable the ticket adds. See [`Consent`].
     pub consent: Option<Consent>,
+    /// The bridges this deployment can drive logins on (ticket #55), in the
+    /// order `GATEWAY_BRIDGES` names them. Empty when none is configured:
+    /// `GET /api/bridges` then answers an empty list, which is the honest
+    /// answer to "what can I connect?" — the origin, the session and consent
+    /// are untouched. See [`bridges_from_env`].
+    pub bridges: Vec<crate::bridge::BridgeConfig>,
+}
+
+/// The bridges from the environment.
+///
+/// `GATEWAY_BRIDGES` lists the instances by `bridge_id`, comma-separated and
+/// in the order the Companion should offer them:
+///
+/// ```text
+/// GATEWAY_BRIDGES=mautrix-whatsapp,mautrix-signal
+/// ```
+///
+/// Each one then takes its own three variables, keyed by the id with every
+/// character that cannot appear in a variable name replaced by `_` and the
+/// whole thing upper-cased (`mautrix-whatsapp` → `MAUTRIX_WHATSAPP`):
+///
+/// - `GATEWAY_BRIDGE_<ID>_URL` (required) — the bridge's appservice
+///   listener, e.g. `http://bridge-whatsapp:29318`. The provisioning API
+///   lives there, not on the homeserver.
+/// - `GATEWAY_BRIDGE_<ID>_PROVISIONING_SECRET` (required) — the same value
+///   as that bridge's own `provisioning.shared_secret`. It drives logins and
+///   logouts on the user's account: the most powerful thing this facade
+///   holds, and the reason the browser never talks to a bridge directly
+///   (`docs/architecture/security-model.md`).
+/// - `GATEWAY_BRIDGE_<ID>_NETWORK` — the network the user experiences
+///   (`whatsapp`, `signal`, `sms`). Defaults to the id with a `mautrix-`
+///   prefix stripped, which is right for the reference deployment and wrong
+///   for `mautrix-gmessages`, whose network is `sms` (CONTEXT.md) — so that
+///   one sets it.
+///
+/// A bridge that is named and then left without a URL or a secret is a
+/// startup error naming the variable: a facade that silently has no bridge
+/// to talk to would be discovered by a user on the QR screen.
+pub fn bridges_from_env() -> Result<Vec<crate::bridge::BridgeConfig>> {
+    let Some(listed) = env("GATEWAY_BRIDGES") else {
+        return Ok(Vec::new());
+    };
+    let mut bridges = Vec::new();
+    for bridge_id in listed
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let slug = variable_slug(bridge_id);
+        let url_variable = format!("GATEWAY_BRIDGE_{slug}_URL");
+        let secret_variable = format!("GATEWAY_BRIDGE_{slug}_PROVISIONING_SECRET");
+        let base_url = env(&url_variable).with_context(|| {
+            format!(
+                "GATEWAY_BRIDGES names the bridge {bridge_id:?}, so {url_variable} is \
+                 required: the bridge's appservice listener, where its provisioning API is"
+            )
+        })?;
+        let provisioning_secret = env(&secret_variable).with_context(|| {
+            format!(
+                "GATEWAY_BRIDGES names the bridge {bridge_id:?}, so {secret_variable} is \
+                 required: the same value as that bridge's provisioning.shared_secret"
+            )
+        })?;
+        let network = env(&format!("GATEWAY_BRIDGE_{slug}_NETWORK")).unwrap_or_else(|| {
+            bridge_id
+                .strip_prefix("mautrix-")
+                .unwrap_or(bridge_id)
+                .to_owned()
+        });
+        bridges.push(crate::bridge::BridgeConfig {
+            bridge_id: bridge_id.to_owned(),
+            network,
+            base_url,
+            provisioning_secret,
+        });
+    }
+    Ok(bridges)
+}
+
+/// The variable-name half of a `bridge_id`: upper case, and every character
+/// that is not a letter or a digit becomes `_`.
+///
+/// ```
+/// # use twalk_companion_gateway::config::variable_slug;
+/// assert_eq!(variable_slug("mautrix-whatsapp"), "MAUTRIX_WHATSAPP");
+/// assert_eq!(variable_slug("mautrix-gmessages"), "MAUTRIX_GMESSAGES");
+/// // Whatever an operator calls an instance, the variable name is a legal one.
+/// assert_eq!(variable_slug("bridge.2/x"), "BRIDGE_2_X");
+/// ```
+pub fn variable_slug(bridge_id: &str) -> String {
+    bridge_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// What bootstrap needs, beyond the owner that [`SignIn`] already names.
@@ -207,6 +307,7 @@ impl Config {
             // Before `sign_in` is moved below: consent reads the owner, the
             // state directory and the domain from it.
             consent: Consent::from_env(sign_in.as_ref())?,
+            bridges: bridges_from_env()?,
             sign_in,
             bootstrap,
         })

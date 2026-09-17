@@ -30,6 +30,8 @@ use tracing::{debug, warn};
 
 use crate::bootstrap::Bootstrap;
 use crate::bootstrap_http;
+use crate::bridge::Bridges;
+use crate::bridge_http;
 use crate::consent_http;
 use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
@@ -57,6 +59,11 @@ pub struct Gateway {
     /// [`crate::outbox`]). `None` when this deployment writes no consent —
     /// the consent endpoints then answer `503 consent_not_configured`.
     consent: Option<Arc<Outbox>>,
+    /// The bridge login facade ([`crate::bridge`], ticket #55). Never
+    /// `None`: a deployment with no bridge configured has an empty one, and
+    /// `GET /api/bridges` answers an empty list rather than a refusal —
+    /// which is the honest answer to "what can I connect?".
+    bridges: Arc<Bridges>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -71,6 +78,9 @@ impl Gateway {
             sessions: None,
             bootstrap: None,
             consent: None,
+            bridges: Arc::new(
+                Bridges::new(Vec::new()).expect("no bridge configured is a valid configuration"),
+            ),
             now_unix_seconds,
         }
     }
@@ -107,6 +117,31 @@ impl Gateway {
         self.consent.clone()
     }
 
+    /// Adds the bridge facade (ticket #55), the same way the others are
+    /// added.
+    pub fn with_bridges(mut self, bridges: Arc<Bridges>) -> Self {
+        self.bridges = bridges;
+        self
+    }
+
+    pub fn bridges(&self) -> Arc<Bridges> {
+        self.bridges.clone()
+    }
+
+    /// The Matrix ID every bridge call acts as: this deployment's owner,
+    /// from configuration and never from a request. mautrix's shared-secret
+    /// auth takes the acting user on trust, so the Gateway is what decides
+    /// whose login a provisioning call drives (ADR 0011).
+    ///
+    /// Empty only when sign-in is unconfigured, which #52's guard has
+    /// already refused the request for.
+    pub fn owner(&self) -> String {
+        self.sessions
+            .as_ref()
+            .map(|sessions| sessions.owner().to_owned())
+            .unwrap_or_default()
+    }
+
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
@@ -134,10 +169,14 @@ pub fn router(gateway: Gateway) -> Router {
         // behind the same guard, so they need a device token without asking
         // for one.
         .merge(consent_http::routes())
+        // The bridge login facade (ticket #55): the same merge, the same
+        // guard. The Gateway holds each bridge's blocking login step and
+        // these routes are what the Companion polls.
+        .merge(bridge_http::routes())
         // The Gateway's API surface keeps growing this way (the consent
-        // snapshot #50 and the bridge facade land in the remaining tickets of
-        // spec #46), and the prefix answers as an API throughout: a JSON 404,
-        // never the app shell.
+        // snapshot #50 lands in a remaining ticket of spec #46), and the
+        // prefix answers as an API throughout: a JSON 404, never the app
+        // shell.
         .route("/api", any(api_not_found))
         .route("/api/{*rest}", any(api_not_found))
         .fallback(companion)
@@ -325,6 +364,7 @@ mod tests {
         assert_eq!(classify("/openapi.yaml"), Route::OpenApi);
         assert_eq!(classify("/api"), Route::Api);
         assert_eq!(classify("/api/consent"), Route::Api);
+        assert_eq!(classify("/api/bridges/mautrix-whatsapp/login"), Route::Api);
         assert_eq!(classify("/"), Route::Companion);
         assert_eq!(classify("/onboarding/whatsapp"), Route::Companion);
         // A path that merely starts with the same letters is not the API.

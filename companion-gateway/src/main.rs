@@ -150,6 +150,33 @@ async fn main() -> Result<()> {
         }
     };
 
+    // The bridge login facade (ticket #55). Built from configuration alone:
+    // no bridge is contacted at startup, because a bridge that is down must
+    // not keep the Companion's origin from coming up. A misconfigured bridge
+    // *is* fatal, though — a base URL that is not one, or two instances
+    // sharing an id — because the operator can fix it now and a user cannot
+    // diagnose it from the QR screen.
+    let bridges = Arc::new(
+        twalk_companion_gateway::bridge::Bridges::new(config.bridges.clone())
+            .context("failed to build the bridge login facade")?,
+    );
+    if config.bridges.is_empty() {
+        info!(
+            "GATEWAY_BRIDGES is not set: no network can be connected from the Companion, and \
+             GET /api/bridges answers an empty list"
+        );
+    } else {
+        for bridge in &config.bridges {
+            info!(
+                bridge = %bridge.bridge_id,
+                network = %bridge.network,
+                url = %bridge.base_url,
+                "a bridge is configured: the Gateway can drive its logins and holds their \
+                 blocking steps itself"
+            );
+        }
+    }
+
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
     // metrics endpoint behaves the same way).
@@ -167,7 +194,8 @@ async fn main() -> Result<()> {
         Gateway::new(companion, metrics, now_unix_seconds)
             .with_sessions(sessions)
             .with_bootstrap(bootstrap)
-            .with_consent(consent),
+            .with_consent(consent)
+            .with_bridges(bridges),
     );
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(

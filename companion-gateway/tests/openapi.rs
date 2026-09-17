@@ -44,11 +44,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
+use harness::stub_bridge::{COOKIES_FLOW, COOKIES_STEP, QR_FLOW};
 use harness::{
     companion_build, ensure_stack, fresh_owner_user_id, gateway_env, gateway_env_with,
-    gateway_env_with_consent, gateway_env_without_sign_in, missing_static_dir, nats_url,
-    owner_user_id, poll_until, GatewayProc, MatrixUser, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART,
-    OWNER_LOCALPART, SERVER_NAME,
+    gateway_env_with_bridges, gateway_env_with_consent, gateway_env_without_sign_in,
+    missing_static_dir, nats_url, owner_user_id, poll_until, GatewayProc, MatrixUser, StubBridge,
+    FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME, STUB_BRIDGE_ID,
+    UNREACHABLE_BRIDGE_ID,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -1016,6 +1018,42 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/consent/effective",
             "/api/consent/effective?contact=%40a%3Atest.twalk&network=whatsapp",
         ),
+        (Method::GET, "/api/bridges", "/api/bridges"),
+        (
+            Method::GET,
+            "/api/bridges/{bridge_id}/login/flows",
+            "/api/bridges/mautrix-whatsapp/login/flows",
+        ),
+        (
+            Method::POST,
+            "/api/bridges/{bridge_id}/login",
+            "/api/bridges/mautrix-whatsapp/login",
+        ),
+        (
+            Method::GET,
+            "/api/bridges/{bridge_id}/login",
+            "/api/bridges/mautrix-whatsapp/login",
+        ),
+        (
+            Method::DELETE,
+            "/api/bridges/{bridge_id}/login",
+            "/api/bridges/mautrix-whatsapp/login",
+        ),
+        (
+            Method::POST,
+            "/api/bridges/{bridge_id}/login/submit",
+            "/api/bridges/mautrix-whatsapp/login/submit",
+        ),
+        (
+            Method::GET,
+            "/api/bridges/{bridge_id}/logins",
+            "/api/bridges/mautrix-whatsapp/logins",
+        ),
+        (
+            Method::DELETE,
+            "/api/bridges/{bridge_id}/logins/{login_id}",
+            "/api/bridges/mautrix-whatsapp/logins/a-login",
+        ),
     ] {
         call.check(
             method,
@@ -1316,6 +1354,42 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/bootstrap/account",
         ),
         (Method::POST, "/api/bootstrap/rooms", "/api/bootstrap/rooms"),
+        (Method::GET, "/api/bridges", "/api/bridges"),
+        (
+            Method::GET,
+            "/api/bridges/{bridge_id}/login/flows",
+            "/api/bridges/mautrix-whatsapp/login/flows",
+        ),
+        (
+            Method::POST,
+            "/api/bridges/{bridge_id}/login",
+            "/api/bridges/mautrix-whatsapp/login",
+        ),
+        (
+            Method::GET,
+            "/api/bridges/{bridge_id}/login",
+            "/api/bridges/mautrix-whatsapp/login",
+        ),
+        (
+            Method::DELETE,
+            "/api/bridges/{bridge_id}/login",
+            "/api/bridges/mautrix-whatsapp/login",
+        ),
+        (
+            Method::POST,
+            "/api/bridges/{bridge_id}/login/submit",
+            "/api/bridges/mautrix-whatsapp/login/submit",
+        ),
+        (
+            Method::GET,
+            "/api/bridges/{bridge_id}/logins",
+            "/api/bridges/mautrix-whatsapp/logins",
+        ),
+        (
+            Method::DELETE,
+            "/api/bridges/{bridge_id}/logins/{login_id}",
+            "/api/bridges/mautrix-whatsapp/logins/a-login",
+        ),
     ] {
         call.check(
             method,
@@ -1626,6 +1700,395 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
     consenting.stop().await;
+
+    // --- the bridge facade (#55): a Gateway of its own, with a stub bridge
+    // implementing the provisioning contract behind it and a second bridge
+    // configured at a port nothing listens on. A real mautrix bridge needs a
+    // live account and a phone, so the stub is the seam — `tests/bridges.rs`
+    // is where the behaviour is asserted, and this drives every answer the
+    // description declares.
+    let stub = StubBridge::start().await?;
+    let bridges_static = companion_build("openapi-bridges")?;
+    let bridged = GatewayProc::start(&gateway_env_with_bridges(
+        &bridges_static,
+        &stub.base_url(),
+    ))?;
+    let bridged_base = bridged.base_url().await?;
+    wait_until_answering(&bridged_base).await?;
+    let (bridge_device, _) =
+        sign_in_cookies(&http, &bridged_base, &owner, "the connecting device").await?;
+    let bridge_cookie = [("twalk_device", bridge_device.as_str())];
+    let stub_login = format!("/api/bridges/{STUB_BRIDGE_ID}/login");
+    let dead_login = format!("/api/bridges/{UNREACHABLE_BRIDGE_ID}/login");
+
+    let listed = call
+        .check(
+            Method::GET,
+            &bridged_base,
+            "/api/bridges",
+            "/api/bridges",
+            &bridge_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        listed.body["bridges"][0]["bridge_id"].as_str(),
+        Some(STUB_BRIDGE_ID),
+        "the bridge list is configuration, in configuration order: {}",
+        listed.body
+    );
+
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login/flows",
+        &format!("/api/bridges/{STUB_BRIDGE_ID}/login/flows"),
+        &bridge_cookie,
+        None,
+        200,
+        None,
+    )
+    .await?;
+    // A bridge this deployment does not have, and one that is configured and
+    // down: the two refusals an operator has to be able to tell apart.
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login/flows",
+        "/api/bridges/mautrix-telegram/login/flows",
+        &bridge_cookie,
+        None,
+        404,
+        Some("unknown_bridge"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login/flows",
+        &format!("/api/bridges/{UNREACHABLE_BRIDGE_ID}/login/flows"),
+        &bridge_cookie,
+        None,
+        502,
+        Some("bridge_unreachable"),
+    )
+    .await?;
+
+    // Nothing started yet.
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        None,
+        404,
+        Some("no_login_in_flight"),
+    )
+    .await?;
+    call.check(
+        Method::DELETE,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        None,
+        404,
+        Some("no_login_in_flight"),
+    )
+    .await?;
+
+    // A QR login: started, polled while the Gateway holds the blocking step,
+    // then cancelled.
+    let started = call
+        .check(
+            Method::POST,
+            &bridged_base,
+            "/api/bridges/{bridge_id}/login",
+            &stub_login,
+            &bridge_cookie,
+            Some(json!({ "flow_id": QR_FLOW })),
+            201,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        started.body["step"]["type"].as_str(),
+        Some("display_and_wait"),
+        "a QR flow's first step is the blocking one: {}",
+        started.body
+    );
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        None,
+        200,
+        None,
+    )
+    .await?;
+    // A second login while that one is in flight.
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        Some(json!({ "flow_id": QR_FLOW })),
+        409,
+        Some("login_in_flight"),
+    )
+    .await?;
+    // There is nothing to submit while the Gateway is holding the step.
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login/submit",
+        &format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit"),
+        &bridge_cookie,
+        Some(json!({ "step_id": "fi.mau.stub.login.qr", "data": {} })),
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    call.check(
+        Method::DELETE,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        None,
+        204,
+        None,
+    )
+    .await?;
+
+    // The start's own refusals: no flow, a bridge that is not configured, a
+    // bridge that is down, and the network refusing another linked device.
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        Some(json!({ "not": "a start request" })),
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        "/api/bridges/mautrix-telegram/login",
+        &bridge_cookie,
+        Some(json!({ "flow_id": QR_FLOW })),
+        404,
+        Some("unknown_bridge"),
+    )
+    .await?;
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &dead_login,
+        &bridge_cookie,
+        Some(json!({ "flow_id": QR_FLOW })),
+        502,
+        Some("bridge_unreachable"),
+    )
+    .await?;
+    stub.refuse_next_start(403, "FI.MAU.BRIDGE.TOO_MANY_LOGINS");
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        Some(json!({ "flow_id": QR_FLOW })),
+        403,
+        Some("too_many_logins"),
+    )
+    .await?;
+    // And a login id the bridge does not know, which is the reconnect that
+    // is pointing at nothing.
+    stub.refuse_next_start(404, "M_NOT_FOUND");
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        Some(json!({ "flow_id": QR_FLOW, "login_id": "never-existed" })),
+        404,
+        Some("not_found_on_bridge"),
+    )
+    .await?;
+
+    // A cookies login, which is the path where a credential is submitted:
+    // its refusals first, then the one that goes through.
+    let submit = format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit");
+    // One refusal per login: a step that was refused ends that login, which
+    // is the point — the polled state has to say so — so each of these needs
+    // a login of its own.
+    for (status, errcode, expected_status, expected_error) in [
+        (409, "FI.MAU.LOGIN_STEP_CANCELLED", 409, "step_cancelled"),
+        (500, "M_UNKNOWN", 502, "bridge_refused"),
+        (410, "LOGIN_TIMED_OUT", 410, "login_expired"),
+    ] {
+        call.check(
+            Method::POST,
+            &bridged_base,
+            "/api/bridges/{bridge_id}/login",
+            &stub_login,
+            &bridge_cookie,
+            Some(json!({ "flow_id": COOKIES_FLOW })),
+            201,
+            None,
+        )
+        .await?;
+        stub.refuse_next_step(status, errcode);
+        call.check(
+            Method::POST,
+            &bridged_base,
+            "/api/bridges/{bridge_id}/login/submit",
+            &submit,
+            &bridge_cookie,
+            Some(json!({ "step_id": COOKIES_STEP, "data": { "cookies": {} } })),
+            expected_status,
+            Some(expected_error),
+        )
+        .await?;
+    }
+    // A submission to a bridge nobody has started a login on.
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login/submit",
+        &format!("/api/bridges/{UNREACHABLE_BRIDGE_ID}/login/submit"),
+        &bridge_cookie,
+        Some(json!({ "step_id": COOKIES_STEP, "data": {} })),
+        404,
+        Some("no_login_in_flight"),
+    )
+    .await?;
+    // And the one that goes through, which leaves a login on the bridge.
+    let cookies_started = call
+        .check(
+            Method::POST,
+            &bridged_base,
+            "/api/bridges/{bridge_id}/login",
+            &stub_login,
+            &bridge_cookie,
+            Some(json!({ "flow_id": COOKIES_FLOW })),
+            201,
+            None,
+        )
+        .await?;
+    let submitted = call
+        .check(
+            Method::POST,
+            &bridged_base,
+            "/api/bridges/{bridge_id}/login/submit",
+            &submit,
+            &bridge_cookie,
+            Some(json!({
+                "step_id": cookies_started.body["step"]["step_id"].as_str().unwrap_or_default(),
+                "data": { "cookies": { "SID": "a-cookie-the-gateway-relays-and-forgets" } }
+            })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(submitted.body["state"].as_str(), Some("complete"));
+    let login_id = submitted.body["login"]["login_id"]
+        .as_str()
+        .context("the completed login names itself")?
+        .to_owned();
+
+    // The logins the bridge holds, and logging one out.
+    let logins = call
+        .check(
+            Method::GET,
+            &bridged_base,
+            "/api/bridges/{bridge_id}/logins",
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/logins"),
+            &bridge_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        logins.body["logins"]
+            .as_array()
+            .is_some_and(|logins| logins
+                .iter()
+                .any(|login| login["login_id"] == json!(login_id))),
+        "the login just completed is one the bridge holds: {}",
+        logins.body
+    );
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/logins",
+        "/api/bridges/mautrix-telegram/logins",
+        &bridge_cookie,
+        None,
+        404,
+        Some("unknown_bridge"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/logins",
+        &format!("/api/bridges/{UNREACHABLE_BRIDGE_ID}/logins"),
+        &bridge_cookie,
+        None,
+        502,
+        Some("bridge_unreachable"),
+    )
+    .await?;
+    call.check(
+        Method::DELETE,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/logins/{login_id}",
+        &format!("/api/bridges/{STUB_BRIDGE_ID}/logins/{login_id}"),
+        &bridge_cookie,
+        None,
+        204,
+        None,
+    )
+    .await?;
+    call.check(
+        Method::DELETE,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/logins/{login_id}",
+        &format!("/api/bridges/{STUB_BRIDGE_ID}/logins/{login_id}"),
+        &bridge_cookie,
+        None,
+        404,
+        Some("not_found_on_bridge"),
+    )
+    .await?;
+    call.check(
+        Method::DELETE,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/logins/{login_id}",
+        &format!("/api/bridges/{UNREACHABLE_BRIDGE_ID}/logins/{login_id}"),
+        &bridge_cookie,
+        None,
+        502,
+        Some("bridge_unreachable"),
+    )
+    .await?;
+    bridged.stop().await;
+    stub.stop().await;
 
     // --- and now the coverage assertion: everything the description
     // declares was either exercised above, or is listed with its reason.

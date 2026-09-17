@@ -17,8 +17,11 @@
 //! — a Matrix account standing in for the user's own browser.
 
 // Every test binary compiles this module but uses only a subset of it.
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
+pub mod stub_bridge;
+
+pub use stub_bridge::{StubBridge, STUB_PROVISIONING_SECRET};
 pub use twalk_test_harness::*;
 
 use std::path::{Path, PathBuf};
@@ -516,6 +519,53 @@ pub const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 /// sign-in configuration already in [`gateway_env`].
 pub fn gateway_env_with_consent(static_dir: &Path, nats_url: &str) -> Vec<(String, String)> {
     gateway_env_with(static_dir, &[("GATEWAY_NATS_URL", nats_url)])
+}
+
+/// The two bridge instances the bridge suite configures the Gateway with
+/// (ticket #55): one pointed at a running stub, one pointed at a port
+/// nothing listens on — a bridge that is down is a state an operator has,
+/// and the facade has to answer for it.
+pub const STUB_BRIDGE_ID: &str = "mautrix-stub";
+pub const UNREACHABLE_BRIDGE_ID: &str = "mautrix-unreachable";
+
+/// [`gateway_env`] plus the bridge facade's configuration: the stub bridge
+/// above, and an instance whose listener is dead.
+///
+/// The variable names are the ones an operator writes: `GATEWAY_BRIDGES`
+/// lists the instances by `bridge_id`, and each id becomes the middle of its
+/// own three variables (`config::variable_slug`).
+pub fn gateway_env_with_bridges(static_dir: &Path, stub_base_url: &str) -> Vec<(String, String)> {
+    let dead = unreachable_http_url().expect("the kernel can hand out a free port");
+    gateway_env_with(
+        static_dir,
+        &[
+            (
+                "GATEWAY_BRIDGES",
+                &format!("{STUB_BRIDGE_ID},{UNREACHABLE_BRIDGE_ID}"),
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_STUB_URL", stub_base_url),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_STUB_PROVISIONING_SECRET",
+                STUB_PROVISIONING_SECRET,
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_STUB_NETWORK", "whatsapp"),
+            ("GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_URL", &dead),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_PROVISIONING_SECRET",
+                STUB_PROVISIONING_SECRET,
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_NETWORK", "signal"),
+        ],
+    )
+}
+
+/// An HTTP URL nothing listens on: asked of the kernel, then released.
+pub fn unreachable_http_url() -> Result<String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("failed to ask the kernel for a free port")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(format!("http://127.0.0.1:{port}"))
 }
 
 /// A TCP port nothing listens on: asked of the kernel, then released. The
