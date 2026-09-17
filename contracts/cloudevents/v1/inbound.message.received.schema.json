@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
+  "title": "fr.linagora.twalk.inbound.message.received.v1",
+  "description": "A message received from an external messaging network, decrypted by the Sensor and normalized as a CloudEvents 1.0 envelope. Produced by the Sensor after successful Megolm decryption of an m.room.message event in a Matrix portal room. Consumed by Hermes personas subscribed to the inbound.message.received.* subject on NATS JetStream.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "consent",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(matrix_event_id + ':' + matrix_room_id). Ensures idempotent replay: the same underlying Matrix event always produces the same CloudEvents id, so consumers can deduplicate safely across bus resynchronizations."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
+      "description": "URI identifying the Matrix room where the event originated. Format: matrix://<homeserver>/<room_id>. The homeserver is the Synapse instance operated by Twalk; the room_id is the portal room maintained by the Mautrix bridge.",
+      "examples": [
+        "matrix://matrix.example.com/!abcXYZ123:example.com"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.inbound.message.received.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the Sensor produced the event, not the original network timestamp. The original network timestamp is preserved in data.network_timestamp when available."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+      "description": "Matrix user ID of the observed sender, as materialized by the bridge (e.g. @whatsapp_33612345678:example.com). Used for routing and for consent evaluation.",
+      "examples": [
+        "@whatsapp_33612345678:example.com",
+        "@telegram_987654321:example.com"
+      ]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events. Binary payloads (images, files) are referenced by URL in data.attachments and stored separately in Matrix media storage."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header. Enables distributed tracing across Sensor, NATS, Hermes and downstream services without mandating a specific tracing backend.",
+      "examples": [
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+      ]
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms"],
+      "description": "Twalk extension. Identifies the external network the message originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. Enables server-side filtering on NATS without deserializing the data payload."
+    },
+    "consent": {
+      "type": "string",
+      "enum": ["granted", "pending", "revoked"],
+      "description": "Twalk extension. Current consent state of the sender's data-processing agreement, as tracked by the Companion Gateway, the single writer of consent state. Personas MUST refuse to process events where consent is not 'granted', unless they are explicitly authorized to handle consent-management workflows."
+    },
+    "data": {
+      "type": "object",
+      "required": ["body", "format", "reply_to", "attachments", "contact"],
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "The message content in its canonical text form. For messages with rich formatting, the plain-text fallback."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["text/plain", "text/markdown", "text/html"],
+          "description": "Content type of the body field. text/plain is the default and safest; text/html is only used when the source network provided HTML-formatted content."
+        },
+        "reply_to": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": ["matrix_event_id", "excerpt"],
+              "additionalProperties": false,
+              "properties": {
+                "matrix_event_id": {
+                  "type": "string",
+                  "pattern": "^\\$[A-Za-z0-9_-]+$",
+                  "description": "The Matrix event ID of the message being replied to."
+                },
+                "excerpt": {
+                  "type": "string",
+                  "maxLength": 512,
+                  "description": "A short excerpt of the replied-to message for context, so consumers do not need to look it up to reason about the reply."
+                }
+              }
+            }
+          ],
+          "description": "If the message is a reply to a previous one, structured reference to the parent. Null otherwise."
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["kind", "mxc_uri", "mime_type", "size_bytes"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["image", "video", "audio", "file", "sticker", "location"],
+                "description": "Coarse-grained category of the attachment."
+              },
+              "mxc_uri": {
+                "type": "string",
+                "pattern": "^mxc://[^/]+/[A-Za-z0-9]+$",
+                "description": "Matrix content URI, resolvable via the homeserver media API."
+              },
+              "mime_type": {
+                "type": "string",
+                "pattern": "^[a-z]+/[a-zA-Z0-9.+-]+$",
+                "description": "IANA media type of the attachment."
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Attachment size in bytes."
+              },
+              "caption": {
+                "type": "string",
+                "maxLength": 1024,
+                "description": "Optional caption provided with the attachment."
+              },
+              "dimensions": {
+                "type": "object",
+                "required": ["width", "height"],
+                "additionalProperties": false,
+                "properties": {
+                  "width": { "type": "integer", "minimum": 1 },
+                  "height": { "type": "integer", "minimum": 1 }
+                },
+                "description": "Pixel dimensions for image and video attachments."
+              },
+              "duration_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Duration in milliseconds for audio and video attachments."
+              }
+            }
+          },
+          "description": "Ordered list of attachments carried by the message."
+        },
+        "contact": {
+          "type": "object",
+          "required": ["display_name"],
+          "additionalProperties": false,
+          "properties": {
+            "display_name": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Human-readable display name of the sender, as known to the recipient."
+            },
+            "network_identifier": {
+              "type": "string",
+              "maxLength": 256,
+              "description": "Optional native network identifier (e.g. phone number for WhatsApp, username for Telegram). Only populated when consent state allows it."
+            },
+            "avatar_mxc_uri": {
+              "type": "string",
+              "pattern": "^mxc://[^/]+/[A-Za-z0-9]+$",
+              "description": "Optional Matrix content URI for the contact's avatar."
+            }
+          },
+          "description": "Structured information about the sender, resolved by Sensor from the Matrix membership state and bridge metadata."
+        },
+        "network_timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC 3339 timestamp of the original event as reported by the source network, when the bridge provides it. Distinct from the top-level 'time' attribute, which is the Sensor's own timestamp."
+        },
+        "thread_root": {
+          "type": "string",
+          "pattern": "^\\$[A-Za-z0-9_-]+$",
+          "description": "Optional Matrix event ID of the thread root, if the message is part of a Matrix thread."
+        }
+      }
+    }
+  }
+}
