@@ -24,10 +24,10 @@ Last reviewed: 2026-09-17.
 | Reference deployment (Compose) | v0.1 | part of the Sensor lot (ticket 11) | done for Synapse + NATS + Sensor; grows with each component |
 | Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) merged, H2 [#21](https://github.com/linagora/twalk/issues/21) is the frontier |
 | Matrix as a network | v0.1 | — (standalone tickets) | in progress — contract [#17](https://github.com/linagora/twalk/issues/17) merged, Sensor [#18](https://github.com/linagora/twalk/issues/18) open |
-| Bridges | v0.1 | — | planned |
+| Bridges | v0.1 | — (standalone ticket) | in progress — deployment [#73](https://github.com/linagora/twalk/issues/73) |
 | Companion Gateway — consent and auth | v0.1 | [#46](https://github.com/linagora/twalk/issues/46) | specced — tickets #48–#54 |
 | Bridge provisioning facade | v0.1 | [#47](https://github.com/linagora/twalk/issues/47) | specced — tickets #55–#57 |
-| Companion (PWA) | v0.1 | — (wireframes exist) | planned |
+| Companion (PWA) | v0.1 | [#65](https://github.com/linagora/twalk/issues/65) | specced — tickets #66–#70 |
 | Buzz Control Room integration | v0.1 | — | planned |
 | Sovereign SMS (Twake SMS Companion) | v0.2 | — | planned |
 | Telegram and Discord onboarding | v0.2 | — | planned |
@@ -85,7 +85,7 @@ Spec [#47](https://github.com/linagora/twalk/issues/47), tickets #55–#57: **B1
 
 It stays a thin facade: no container control, and no appservice registration generation, because installing one requires a homeserver config edit and a restart. Its network side is never proven by the test suite — a real bridge needs a live WhatsApp or Signal account — which the spec states rather than hides.
 
-### Companion (PWA) · planned
+### Companion (PWA) · specced
 
 The user-facing configuration surface, a SvelteKit static export — the part of v0.1 a non-technical user actually touches. The screens are already designed and reviewed in [`docs/wireframes/companion-v0.1.md`](../wireframes/companion-v0.1.md), so the lot's spec starts from settled UX rather than a blank page:
 
@@ -96,7 +96,11 @@ The user-facing configuration surface, a SvelteKit static export — the part of
 
 Explicitly out of v0.1: Telegram and Discord screens, multi-persona management, the searchable consent inbox, consent policies with time windows, bridge diagnostic deep-dive, product tour, native mobile shell. Design tokens follow the Messagr design system; screens are mobile-first (375–428 px), accessible and localized.
 
-Wireframes are not a spec: the lot still needs its spec issue (API surface against the Companion Gateway, session and pairing model, offline behaviour, test seam).
+Spec [#65](https://github.com/linagora/twalk/issues/65), tickets #66–#70: **C1** the foundation (static export, design tokens, generated API client, capability gate) → **C2** the bootstrap journey, **C3** the networks journey, **C4** persona activation and the dashboard, and **C5** a verification pass on a real iPhone.
+
+[ADR 0014](adr/0014-companion-crypto-runs-in-the-browser.md) settles the cryptographic shape: the recovery key is generated in the browser because it cannot be generated anywhere else — matrix-js-sdk removed its non-WebAssembly backend — and the crypto store is unencrypted, losable and recoverable, with iOS's seven-day eviction of a Safari tab treated as a normal event rather than an error. C5 exists because none of that is verifiable by automation.
+
+Four decisions of that review overrule the reviewed wireframes (no auto-send toggle, no active hours, no address-book consent default, an operational-only activity feed); [#74](https://github.com/linagora/twalk/issues/74) corrects the design document so the change is visible rather than silent.
 
 ### Buzz Control Room integration · planned
 

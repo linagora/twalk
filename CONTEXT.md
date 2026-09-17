@@ -60,6 +60,12 @@ _Avoid_: using "Companion" for the Companion Gateway or the SMS Companion
 **Companion Gateway**:
 The backend serving the Companion: bridge provisioning facade, persona orchestrator, and single writer of consent state. Always named in full.
 
+**Onboarding**:
+The guided path the Companion walks a new user through: homeserver, account, recovery key, one or more networks, a first persona, then the dashboard. It is the user's journey, not a state machine the software stores — progress is read from what actually exists (an account, a connected bridge, an active persona).
+
+**Recovery key**:
+The 48-character secret that unlocks the user's own encrypted history, generated in their browser and shown once (ADR 0014). Twalk never holds it. The Sensor's own key backup uses a separate key of its own, which the operator configures: the two are never the same secret.
+
 **SMS Companion**:
 The first-party Android app (brand name: Twake SMS Companion) that reads and sends SMS on the user's phone and forwards them to the Twalk server over an end-to-end encrypted Matrix session; becomes the reference SMS path in v0.2.
 
