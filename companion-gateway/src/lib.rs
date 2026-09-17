@@ -5,8 +5,10 @@
 //! ticket #52 added the user's session on top of it — sign-in through a
 //! Matrix OpenID token ([`matrix_openid`]), the owner check and the
 //! per-device tokens every other endpoint requires ([`session`],
-//! [`session_http`]). Consent and the bridge facade land the same way in the
-//! remaining tickets of spec #46.
+//! [`session_http`]); ticket #53 added bootstrap — the registration relay for
+//! the one and only account and the Sensor's invitation into the rooms the
+//! user chooses ([`bootstrap`], [`bootstrap_http`]). Consent and the bridge
+//! facade land the same way in the remaining tickets of spec #46.
 //!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
@@ -18,6 +20,8 @@
 //! As in the Sensor, the seam-independent logic lives in these modules and
 //! the binary in `main.rs` only wires them to the network.
 
+pub mod bootstrap;
+pub mod bootstrap_http;
 pub mod config;
 pub mod http;
 pub mod matrix_openid;

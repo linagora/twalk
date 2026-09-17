@@ -45,7 +45,9 @@ info:
     route added by a later ticket is protected before its author writes a
     line of authentication code. The exceptions are the sign-in itself
     (where a device gets its first token), the refresh (which authenticates
-    the refresh token and rotates it) and, from ticket #50, the consent
+    the refresh token and rotates it), the registration relay (which runs
+    before the account that would authenticate anyone exists — see
+    `POST /api/bootstrap/account`) and, from ticket #50, the consent
     snapshot, whose caller is the Sensor and not a device: it takes the
     `serviceToken` scheme declared below.
 
@@ -90,6 +92,12 @@ servers:
 tags:
   - name: session
     description: Signing in, the session's lifetime, and the user's devices.
+  - name: bootstrap
+    description: |
+      Onboarding's two server-side steps: creating this deployment's one
+      account (wireframe screen 2) and inviting the Sensor into the rooms the
+      user chooses (screen 3d). Both are operations a Companion calls while
+      onboarding and, in the account's case, exactly once ever.
   - name: operations
     description: What an operator and a deployment's probes read.
 
@@ -404,6 +412,235 @@ paths:
         "503":
           $ref: "#/components/responses/SignInNotConfigured"
 
+  /api/bootstrap/account:
+    post:
+      operationId: createOwnerAccount
+      tags: [bootstrap]
+      summary: Create this deployment's one account, once.
+      description: |
+        Wireframe screen 2. The Gateway creates the account on the homeserver
+        with Synapse's admin registration endpoint, which is authenticated by
+        a MAC keyed with the registration shared secret rather than by an
+        admin token — and which works while the homeserver's own
+        self-service registration stays off. That is the point: a personal
+        server does not become a public one to give its owner an account.
+
+        **Exactly one account, ever.** `username` must be the localpart of
+        this deployment's `GATEWAY_OWNER`; anything else is `403`. Once that
+        account exists, every further attempt is `409`, enforced both by the
+        Gateway's own store and by the homeserver's `M_USER_IN_USE`, so
+        losing the Gateway's volume does not re-open the window.
+
+        **No credential is required, and none exists yet.** This runs before
+        the account anyone could sign in with, so it is the one `/api`
+        endpoint outside the guard. What stands in for authentication is the
+        rule above, plus the operator's decision to set
+        `GATEWAY_REGISTRATION_SHARED_SECRET` at all: unset, this endpoint
+        answers `503` and the window never opens. The residual risk is
+        stated in `docs/architecture/security-model.md`.
+
+        **The recovery key is neither accepted nor returned.** It is
+        generated in the browser and used there (ADR 0014), so screen 2's
+        "Twalk never sees it" is a property of where the code runs. The
+        request object is closed, and a body carrying any
+        recovery-key-shaped member is refused with `recovery_key_refused`
+        rather than quietly ignored.
+
+        **The access token in the answer passes through and is not kept.**
+        It is the Matrix session the browser continues in — what
+        matrix-js-sdk bootstraps the cross-signing identity and the recovery
+        key with. The Gateway writes it nowhere and logs it nowhere
+        (ADR 0011).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: |
+            The account exists. The body is the Matrix session the Companion
+            continues in the browser, and nothing else.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedAccount"
+        "400":
+          description: |
+            The body is not a registration document — a missing or empty
+            field, or any member the request object does not declare
+            (`invalid_request`) — or it carried something recovery-key-shaped
+            (`recovery_key_refused`), which the Gateway refuses to see.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [invalid_request, recovery_key_refused]
+        "403":
+          description: |
+            The username is not this deployment's owner. Refused before the
+            registration secret is used at all: the relay creates the
+            owner's account or none.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [not_the_owner]
+        "409":
+          description: |
+            This deployment's account has already been created. The client's
+            move is to sign in, not to retry.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [account_already_exists]
+        "502":
+          description: |
+            The homeserver refused the creation, carrying its own error code
+            in `matrix_errcode` — a password policy, a username it will not
+            accept, a registration shared secret it does not share
+            (`homeserver_refused`) — or could not be reached at all
+            (`homeserver_unreachable`). An operator's problem in both cases.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HomeserverRefusal"
+        "503":
+          description: |
+            Either this deployment relays no registration
+            (`GATEWAY_REGISTRATION_SHARED_SECRET` unset — its account was
+            provisioned by its operator: `registration_not_configured`), or
+            it has no owner at all and the whole API is closed
+            (`sign_in_not_configured`). `detail` names the variable that
+            would open it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [registration_not_configured, sign_in_not_configured]
+
+  /api/bootstrap/rooms:
+    post:
+      operationId: inviteSensorIntoRooms
+      tags: [bootstrap]
+      summary: Invite the Sensor into the rooms the user selected.
+      description: |
+        Wireframe screen 3d. The Sensor observes the rooms it was invited to
+        and nothing else, and an invitation has to come from an account that
+        is in the room — the user's. So the Companion sends the user's own
+        Matrix access token with the room list: the Gateway reads the
+        Sensor's membership in each room, invites it where it is absent, and
+        **forgets the token when the call returns**. It is a parameter of
+        this one operation, never stored and never logged (ADR 0011), which
+        `tests/bootstrap.rs` asserts against the store's bytes and the
+        captured log output.
+
+        Using the user's token rather than an admin credential is also what
+        works on a homeserver with password login disabled: an invitation
+        needs no more than the inviter's own session.
+
+        One room failing does not fail the others — the user ticked several
+        and wants to know which took — so `200` carries one outcome per
+        room, in the order they were asked about. A token the homeserver
+        rejects is `401` instead, because then nothing was attempted
+        anywhere. Asking about a room the Sensor is already in is
+        `already_present`, not an error.
+
+        The Sensor's own account is provisioned by the deployment, not by
+        this endpoint, and its startup depends on nothing here.
+      security:
+        - deviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InviteSensorRequest"
+      responses:
+        "200":
+          description: |
+            Every selected room was asked about. Read each outcome: the
+            request as a whole succeeded even where a room did not.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SensorInvitation"
+        "400":
+          description: |
+            The body is not an invitation document — a missing or empty
+            field, or any member the request object does not declare
+            (`invalid_request`) — or it named more rooms than one request
+            may carry (`too_many_rooms`), or it carried something
+            recovery-key-shaped (`recovery_key_refused`).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [invalid_request, too_many_rooms, recovery_key_refused]
+        "401":
+          description: |
+            No device token, or one that is unknown, expired or revoked
+            (`unauthenticated`) — or the homeserver rejected the *Matrix*
+            access token in the body, in which case nothing was invited
+            anywhere (`matrix_token_rejected`). The second is the user's
+            Matrix session having expired, not their Gateway session: the
+            client's move is to log in to Matrix again, not to sign in here.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [unauthenticated, matrix_token_rejected]
+        "502":
+          description: |
+            The homeserver could not be reached at all, so no room was
+            asked about.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [homeserver_unreachable]
+        "503":
+          description: |
+            Either this deployment does not know which Sensor to invite
+            (`GATEWAY_SENSOR_USER_ID` unset: `sensor_not_configured`), or it
+            has no owner at all and the whole API is closed
+            (`sign_in_not_configured`). `detail` names the variable that
+            would open it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [sensor_not_configured, sign_in_not_configured]
+
   /{companionPath}:
     get:
       operationId: getCompanionFile
@@ -569,6 +806,149 @@ components:
           description: |
             The path that matched no endpoint. Set on the `/api` catch-all's
             `404` alone.
+
+    CreateAccountRequest:
+      type: object
+      description: |
+        A username and a password, and deliberately nothing else: a closed
+        object is what makes "no recovery key can arrive here" a property of
+        the API rather than a convention (ADR 0014).
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          minLength: 1
+          description: |
+            The localpart of the account to create. Must be the localpart of
+            this deployment's `GATEWAY_OWNER`; any other value is `403`.
+        password:
+          type: string
+          minLength: 1
+          description: |
+            The password the user chose. Passed to the homeserver, which
+            applies its own policy, and never stored or logged by the
+            Gateway.
+
+    CreatedAccount:
+      type: object
+      description: |
+        The Matrix session the homeserver answered with, forwarded whole:
+        what the Companion continues in the browser to generate the
+        cross-signing keys and the recovery key itself (ADR 0014). The
+        Gateway keeps none of it.
+      required: [user_id, device_id, access_token, home_server]
+      additionalProperties: false
+      properties:
+        user_id:
+          type: string
+          description: The Matrix ID of the account that was created.
+        device_id:
+          type: string
+          description: |
+            The device the session belongs to. The browser's crypto store is
+            bound to it.
+        access_token:
+          type: string
+          description: |
+            The account's Matrix access token. Returned because the browser
+            needs a session, and held nowhere: not in the Gateway's store,
+            not in a log line (ADR 0011).
+        home_server:
+          type: string
+          description: The homeserver name, as the homeserver reports it.
+
+    InviteSensorRequest:
+      type: object
+      description: |
+        The user's Matrix access token and the rooms they selected. Closed,
+        for the same reason as the registration request.
+      required: [matrix_access_token, rooms]
+      additionalProperties: false
+      properties:
+        matrix_access_token:
+          type: string
+          minLength: 1
+          description: |
+            The user's own Matrix access token — the session that is in the
+            rooms and can therefore invite. Used for these calls and
+            forgotten: never stored, never logged.
+        rooms:
+          type: array
+          description: |
+            The rooms the user selected, as Matrix room ids
+            (`!opaque:server`). An empty list is allowed and does nothing.
+          items:
+            type: string
+          maxItems: 64
+
+    SensorInvitation:
+      type: object
+      description: One outcome per room asked about, in the order asked.
+      required: [sensor, rooms]
+      additionalProperties: false
+      properties:
+        sensor:
+          type: [string, "null"]
+          description: |
+            The Matrix ID the Gateway invited (`GATEWAY_SENSOR_USER_ID`), so
+            the Companion can name it on screen rather than guess it.
+        rooms:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomInvitation"
+
+    RoomInvitation:
+      type: object
+      description: What happened in one room the user selected.
+      required: [room_id, status]
+      additionalProperties: false
+      properties:
+        room_id:
+          type: string
+          description: The room, exactly as the request spelled it.
+        status:
+          type: string
+          enum: [invited, already_present, failed]
+          description: |
+            `invited` — the Sensor was invited and will join on its own.
+            `already_present` — it is already in the room, or already
+            invited to it; asking twice is not an error.
+            `failed` — this room alone did not work; `reason` says why.
+        reason:
+          type: string
+          description: |
+            Present on `failed` alone: the homeserver's own error code
+            (`M_FORBIDDEN` where the user may not invite in that room), or
+            the Gateway's (`invalid_room_id` for a string that is not a
+            room id at all).
+
+    HomeserverRefusal:
+      type: object
+      description: |
+        The homeserver would not do what the Gateway relayed, or could not
+        be reached. Carries the homeserver's own error code where there was
+        one, so a client can turn a password policy into a message instead
+        of a shrug.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          enum: [homeserver_refused, homeserver_unreachable]
+        detail:
+          type: string
+          description: |
+            A human-readable explanation, for an operator reading logs. Not
+            for display to the user, and never matched on.
+        matrix_errcode:
+          type: string
+          description: |
+            The homeserver's `errcode` (`M_USER_IN_USE`,
+            `M_PASSWORD_TOO_SHORT`, …), on `homeserver_refused`. The
+            homeserver's human-readable message is deliberately not
+            forwarded: it goes to the Gateway's log, where an operator reads
+            it.
 
     Health:
       type: object

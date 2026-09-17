@@ -38,6 +38,13 @@ tower-http = { version = "0.6", features = ["fs"] }
 # Trace ids are carved out of a SHA-256 digest, as the Sensor's are
 # (sensor/src/normalize.rs::originate_traceparent).
 sha2 = "0.10"
+# Synapse's admin registration endpoint authenticates the call by a hex
+# HMAC-SHA1 over the request's fields, keyed with the registration shared
+# secret (ticket #53). The algorithm is that endpoint's wire format, not a
+# choice: hmac and sha1 are the same RustCrypto family as sha2 above, so this
+# adds two small crates to a graph that already has their traits.
+hmac = "0.12"
+sha1 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

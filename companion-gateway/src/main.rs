@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
+use twalk_companion_gateway::bootstrap::Bootstrap;
 use twalk_companion_gateway::config::Config;
 use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
@@ -82,6 +83,45 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Bootstrap (ticket #53): the registration relay and the Sensor's
+    // invitation. Each half is independently optional, and a half that is off
+    // answers 503 naming the variable that would open it — so an operator
+    // never has to guess which of the two is missing.
+    let bootstrap = match &config.bootstrap.homeserver_url {
+        Some(homeserver_url) => {
+            let bootstrap = Bootstrap::new(
+                homeserver_url,
+                config.bootstrap.registration_shared_secret.clone(),
+                config.bootstrap.sensor_user_id.clone(),
+            )
+            .context("failed to build the bootstrap client")?;
+            if bootstrap.registers_accounts() {
+                info!(
+                    homeserver_url = %bootstrap.homeserver_url(),
+                    owner = config.sign_in.as_ref().map(|sign_in| sign_in.owner.as_str()).unwrap_or("(none)"),
+                    "the registration relay is enabled: it can create this deployment's one account, once, and refuses every other username"
+                );
+            } else {
+                info!(
+                    "GATEWAY_REGISTRATION_SHARED_SECRET is not set: the registration relay is off, and POST /api/bootstrap/account answers 503"
+                );
+            }
+            match bootstrap.sensor_user_id() {
+                Some(sensor) => info!(
+                    sensor = %sensor,
+                    "the Sensor can be invited into the rooms the user selects"
+                ),
+                None => info!(
+                    "GATEWAY_SENSOR_USER_ID is not set: the Gateway cannot invite the Sensor, and POST /api/bootstrap/rooms answers 503"
+                ),
+            }
+            Some(Arc::new(bootstrap))
+        }
+        // No sign-in configuration and no homeserver URL: the whole API is
+        // closed already, so there is nothing to warn about twice.
+        None => None,
+    };
+
     let metrics = Arc::new(Metrics::started_at(now_unix_seconds()));
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
@@ -96,7 +136,11 @@ async fn main() -> Result<()> {
     // 0) discovers the origin by.
     info!("companion gateway listening on {address}");
 
-    let app = router(Gateway::new(companion, metrics, now_unix_seconds).with_sessions(sessions));
+    let app = router(
+        Gateway::new(companion, metrics, now_unix_seconds)
+            .with_sessions(sessions)
+            .with_bootstrap(bootstrap),
+    );
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(
         axum::serve(listener, app)

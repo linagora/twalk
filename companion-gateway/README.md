@@ -2,7 +2,7 @@
 
 The Companion backend (Rust): bridge provisioning facade, persona orchestrator, and consent broker. It is the single writer of consent state (see `docs/architecture/adr/0006-consent-state-owned-by-companion-gateway.md`).
 
-What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — plus the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation. Consent and the bridge facade land on top of them in the remaining tickets of spec #46.
+What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — plus the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation; and bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses. Consent and the bridge facade land on top of them in the remaining tickets of spec #46.
 
 ## The origin
 
@@ -17,6 +17,8 @@ One HTTP origin serves everything, so there is no CORS and the device token can 
 | `/api/session/refresh` | `POST` exchanges the refresh cookie for a new pair of tokens, rotating both. |
 | `/api/devices` | `GET` lists the devices: name, created, last seen, revoked. |
 | `/api/devices/{id}` | `DELETE` revokes one device. Its token stops working on its next request. |
+| `/api/bootstrap/account` | `POST` creates this deployment's one account, once (screen 2). Open, because there is no account to sign in with yet. |
+| `/api/bootstrap/rooms` | `POST` invites the Sensor into the rooms the user selected (screen 3d), with the user's own Matrix access token, which is then forgotten. |
 | `/api/…` (anything else) | A JSON error, never HTML: a client parsing a response must not be handed a page. Unauthenticated, that is a `401` — the guard answers before routing, so an unknown path tells a caller with no device token nothing about the API's shape. |
 | anything else | The Companion's build in `GATEWAY_STATIC_DIR`, resolved the way SvelteKit's static adapter lays it out (see below). |
 
@@ -45,6 +47,25 @@ Revocation is immediate because nothing is cached: every authenticated request r
 
 With no `GATEWAY_OWNER` configured, nobody can sign in: the origin still serves the Companion, `/health` and `/metrics`, and every `/api` endpoint answers `503 sign_in_not_configured` naming the variable. That fails in the safe direction — nothing can be authenticated, so nothing can be decided — and keeps the page that can explain the problem, which refusing to start would take away.
 
+### Bootstrap: one account, and the Sensor's invitation
+
+Screen 2 promises a non-technical user an account; screen 3d promises to observe rooms of an existing Matrix account. Neither works without the Gateway: open self-service registration would turn a personal server into a public one, and the Sensor observes only the rooms it was invited to. `src/bootstrap.rs` does both, and refuses more.
+
+**The registration relay.** `POST /api/bootstrap/account` takes a username and a password and creates the account with Synapse's admin registration endpoint (`POST /_synapse/admin/v1/register`), which is authenticated by a hex HMAC-SHA1 over the request's fields keyed with the registration shared secret — not by an admin token — and which works with `enable_registration: false`. That is the point: public registration stays closed while this one account can still be created.
+
+Exactly one account, ever, enforced in two places that cannot both be lost:
+
+- the username must be the localpart of `GATEWAY_OWNER`, checked before the registration secret is used at all — any other username is `403 not_the_owner`;
+- once the account exists, every further attempt is `409 account_already_exists`. The store remembers the creation, in a table whose schema admits one row (`CHECK (id = 1)`), and the homeserver's own `M_USER_IN_USE` is honoured as the same refusal — so wiping the Gateway's volume does not re-open the window.
+
+The endpoint is open, because it runs before any account exists and therefore before anyone can sign in. What that costs is stated plainly rather than hidden: until the owner finishes screen 2, whoever can reach the origin can claim the owner's account with a password of their choosing. So the relay is opt-in — no `GATEWAY_REGISTRATION_SHARED_SECRET`, no endpoint — and the window closes for good on the first success. An operator who provisions the account with `deploy/docker-compose/provision.sh` never opens it.
+
+**The recovery key never arrives and never leaves.** The key is generated in the browser and used there ([ADR 0014](../docs/architecture/adr/0014-companion-crypto-runs-in-the-browser.md)), so screen 2's "Twalk never sees it" is a property of where the code runs. The API has no field one could ride in on (`deny_unknown_fields`), and a request carrying anything recovery-key-shaped is refused with `400 recovery_key_refused` rather than quietly ignored — a client with that bug should find out at once. The answer carries the Matrix session and nothing else: `user_id`, `device_id`, `access_token`, `home_server`. `tests/bootstrap.rs` asserts both halves, the response's field list included.
+
+**The access token passes through.** The registration answer's token is what the browser bootstraps cross-signing with, so it is returned — and not kept: not in the store, not in a log line, not in the process beyond the response. The same holds for `POST /api/bootstrap/rooms`, which takes the user's Matrix access token as a parameter of one operation: the Gateway reads the Sensor's membership in each selected room, invites it where it is absent, and drops the token when the call returns. One room failing (`M_FORBIDDEN` in somebody else's room, a malformed id) is reported per room; a token the homeserver rejects fails the whole request, because then nothing was attempted anywhere. Asking twice is `already_present`, not an error.
+
+Inviting with the user's own token rather than an admin credential is what makes this work on a homeserver with password login disabled: an invitation needs no more than the inviter's own session. And the Sensor's account stays provisioned by the compose stack — nothing here is on its startup path, which `tests/deployment.rs` asserts from compose's own resolved configuration.
+
 A `traceparent` on an inbound request is continued (and returned on the response); a request without one, or with a malformed one, gets a fresh W3C trace context. Per-request log lines (method, path, status, duration, `traceparent`) are at `debug`; the lifecycle is at `info`.
 
 ### The HTTP description (ticket #63)
@@ -72,6 +93,9 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_STATE_DIR` | *required with an owner* | Directory the SQLite stores live in; the session store is `sessions.db` inside it. |
 | `GATEWAY_DEVICE_TOKEN_TTL` | `900` | Device-token lifetime in seconds. |
 | `GATEWAY_REFRESH_TOKEN_TTL` | `2592000` | Refresh-token lifetime in seconds. |
+| `GATEWAY_HOMESERVER_URL` | the federation URL | Base URL of the homeserver's **client** API, where registration is relayed and invitations are sent. Same host and port as the federation URL in the reference deployment, hence the default. |
+| `GATEWAY_REGISTRATION_SHARED_SECRET` | *unset* | The homeserver's registration shared secret. Unset: the registration relay is off and `POST /api/bootstrap/account` answers `503`. |
+| `GATEWAY_SENSOR_USER_ID` | *unset* | The Sensor's Matrix ID — who gets invited. Unset: `POST /api/bootstrap/rooms` answers `503`. |
 
 SIGTERM (or SIGINT) drains in-flight requests, then exits `0`.
 
@@ -81,12 +105,13 @@ Its own Cargo package with its own lockfile and target directory — there is no
 
 ```bash
 cd companion-gateway
-cargo test                 # unit tests, the process-boundary suites, and the compose deployment test
-cargo test --test service  # the origin's own suite alone (no Docker)
-cargo test --test signin   # sign-in against the shared test stack's Synapse
-cargo test --test openapi  # the description against the running binary
+cargo test                    # unit tests, the process-boundary suites, and the compose deployment test
+cargo test --test service     # the origin's own suite alone (no Docker)
+cargo test --test signin      # sign-in against the shared test stack's Synapse
+cargo test --test bootstrap   # the registration relay and the Sensor's invitation, same stack
+cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` does the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that); `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image. Both reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.

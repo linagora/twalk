@@ -224,6 +224,40 @@ pub fn owner_user_id() -> String {
     format!("@{OWNER_LOCALPART}:{SERVER_NAME}")
 }
 
+/// The test stack's registration shared secret, from
+/// `tests/harness/synapse/homeserver.yaml` — a throwaway constant for the
+/// local, ephemeral stack. What the Gateway's registration relay is
+/// configured with (ticket #53).
+pub const REGISTRATION_SHARED_SECRET: &str = "test-only-registration-shared-secret";
+
+/// The Matrix ID of the Sensor's account on the test stack, provisioned by
+/// `provision-bots.sh`: who the Gateway invites into the rooms the user
+/// selects.
+pub const SENSOR_USER_ID: &str = "@sensor:test.twalk";
+
+/// A Matrix ID nobody has yet, for a test of the registration relay: the
+/// relay creates the owner's account exactly once, so every such test needs
+/// an owner whose account does not exist on the shared stack.
+pub fn fresh_owner_user_id(test_name: &str) -> String {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_nanos();
+    // Synapse's localpart grammar is narrow; keep to lowercase and
+    // underscores whatever the test is called.
+    let slug: String = test_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("@g53_{slug}_{}_{unique}:{SERVER_NAME}", std::process::id())
+}
+
 /// The directory the Gateway keeps its stores in for a test, derived from its
 /// static directory so the two are unique together — and deliberately *not*
 /// inside it: a store under the static directory would be a file the origin
@@ -259,6 +293,17 @@ pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
         (
             "GATEWAY_STATE_DIR".to_owned(),
             gateway_state_dir(static_dir).to_string_lossy().into_owned(),
+        ),
+        // Bootstrap (ticket #53): the registration relay and the Sensor the
+        // Gateway invites. Both halves on, as a deployment that onboards a
+        // user through screens 2 and 3d has them.
+        (
+            "GATEWAY_REGISTRATION_SHARED_SECRET".to_owned(),
+            REGISTRATION_SHARED_SECRET.to_owned(),
+        ),
+        (
+            "GATEWAY_SENSOR_USER_ID".to_owned(),
+            SENSOR_USER_ID.to_owned(),
         ),
     ]
 }
@@ -341,6 +386,116 @@ impl MatrixUser {
             .await
             .context("the OpenID token answer is not JSON")?;
         Ok(token)
+    }
+
+    /// An account the test already has a token for — what the registration
+    /// relay answers with (ticket #53), which is exactly the session the
+    /// Companion continues in the browser. No password involved, which is the
+    /// point: a homeserver may have password login disabled entirely.
+    pub fn with_token(user_id: &str, access_token: &str) -> Self {
+        Self {
+            user_id: user_id.to_owned(),
+            access_token: access_token.to_owned(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// The Matrix ID the homeserver says this token belongs to: proof that a
+    /// token the relay handed back is a working session.
+    pub async fn whoami(&self) -> Result<String> {
+        let body: serde_json::Value = self
+            .http
+            .get(format!(
+                "{}/_matrix/client/v3/account/whoami",
+                synapse_url()
+            ))
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .context("failed to call whoami")?
+            .error_for_status()
+            .context("the homeserver rejected the token")?
+            .json()
+            .await
+            .context("the whoami answer is not JSON")?;
+        Ok(body["user_id"]
+            .as_str()
+            .context("the whoami answer names no user id")?
+            .to_owned())
+    }
+
+    /// Creates a private, unencrypted room owned by this account: a native
+    /// Matrix room, with no bridge marker, which is what makes its traffic
+    /// resolve to `network=matrix` (ADR 0009, ticket #18).
+    pub async fn create_room(&self, name: &str) -> Result<String> {
+        let body: serde_json::Value = self
+            .http
+            .post(format!("{}/_matrix/client/v3/createRoom", synapse_url()))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "name": name, "preset": "private_chat" }))
+            .send()
+            .await
+            .context("failed to create a room")?
+            .error_for_status()
+            .context("the homeserver refused to create the room")?
+            .json()
+            .await
+            .context("the createRoom answer is not JSON")?;
+        Ok(body["room_id"]
+            .as_str()
+            .context("the createRoom answer names no room id")?
+            .to_owned())
+    }
+
+    /// Another user's membership in a room, as this account can read it, or
+    /// `None` when there is no member event: how a test checks that the
+    /// Gateway really invited the Sensor.
+    pub async fn membership(&self, room_id: &str, user_id: &str) -> Result<Option<String>> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/_matrix/client/v3/rooms/{room_id}/state/m.room.member/{user_id}",
+                synapse_url()
+            ))
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .context("failed to read a membership")?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .context("the membership answer is not JSON")?;
+        Ok(body["membership"].as_str().map(str::to_owned))
+    }
+
+    /// Sends a text message, as the user typing in their own client does.
+    pub async fn send_message(&self, room_id: &str, body: &str) -> Result<String> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let answer: serde_json::Value = self
+            .http
+            .put(format!(
+                "{}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/twalk-g53-{unique}",
+                synapse_url()
+            ))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "msgtype": "m.text", "body": body }))
+            .send()
+            .await
+            .context("failed to send a message")?
+            .error_for_status()
+            .context("the homeserver refused the message")?
+            .json()
+            .await
+            .context("the send answer is not JSON")?;
+        Ok(answer["event_id"]
+            .as_str()
+            .context("the send answer names no event id")?
+            .to_owned())
     }
 
     /// The account's Matrix access token: what the Gateway must never hold,

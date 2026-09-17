@@ -46,6 +46,46 @@ pub struct Config {
     /// API is closed fails in the safe direction: nothing can be
     /// authenticated, so nothing can be decided.
     pub sign_in: Option<SignIn>,
+    /// Bootstrap: the registration relay and the Sensor's invitation (ticket
+    /// #53). Each half is independently optional — a deployment may relay
+    /// registration, invite the Sensor, both, or neither — and the endpoint of
+    /// a half that is off answers 503 naming the variable that would open it.
+    pub bootstrap: Bootstrap,
+}
+
+/// What bootstrap needs, beyond the owner that [`SignIn`] already names.
+#[derive(Debug, Clone)]
+pub struct Bootstrap {
+    /// Base URL of the homeserver's **client** API
+    /// (GATEWAY_HOMESERVER_URL, e.g. `http://synapse:8008`): where both
+    /// Synapse's admin registration endpoint and the room-invitation endpoint
+    /// live.
+    ///
+    /// Unset, it falls back to [`SignIn::federation_base_url`], because in the
+    /// reference deployment the client API and the one federation endpoint
+    /// sign-in uses ride the same port — so a working deployment needs no new
+    /// variable. `None` only when there is no sign-in configuration either, in
+    /// which case the whole API is closed anyway.
+    pub homeserver_url: Option<String>,
+    /// Synapse's registration shared secret
+    /// (GATEWAY_REGISTRATION_SHARED_SECRET), the same value as the
+    /// homeserver's own `registration_shared_secret`. Unset: the relay is off
+    /// and `POST /api/bootstrap/account` answers 503.
+    ///
+    /// Setting it opens an unauthenticated endpoint that can create exactly
+    /// one account — the owner's, once. An operator who provisioned that
+    /// account by hand leaves this unset; see [`crate::bootstrap`] for what
+    /// the window is and when it closes.
+    pub registration_shared_secret: Option<String>,
+    /// The Matrix ID of the Sensor this deployment runs
+    /// (GATEWAY_SENSOR_USER_ID, e.g. `@sensor:example.com`) — who gets
+    /// invited into the rooms the user selects on screen 3d. The same value as
+    /// the Sensor's own `SENSOR_USER_ID`. Unset: inviting is off.
+    ///
+    /// The Sensor's account stays provisioned by the compose stack: this is
+    /// who to invite, never how to create it, and nothing here is on the
+    /// Sensor's startup path.
+    pub sensor_user_id: Option<String>,
 }
 
 /// Everything sign-in needs. Present as a whole or not at all: GATEWAY_OWNER
@@ -91,6 +131,8 @@ pub struct SignIn {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
+        let sign_in = SignIn::from_env()?;
+        let bootstrap = Bootstrap::from_env(sign_in.as_ref());
         Ok(Self {
             listen: optional("GATEWAY_LISTEN", "0.0.0.0:8080")?,
             static_dir: PathBuf::from(required("GATEWAY_STATIC_DIR")?),
@@ -102,8 +144,25 @@ impl Config {
                 .ok()
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "info".to_owned()),
-            sign_in: SignIn::from_env()?,
+            sign_in,
+            bootstrap,
         })
+    }
+}
+
+impl Bootstrap {
+    /// Never fails: every part is optional, and a half whose variable is
+    /// unset is simply off. What could be wrong with the values — a Sensor
+    /// Matrix ID that is not one — is refused when
+    /// [`crate::bootstrap::Bootstrap`] is built, which is where the error
+    /// message belongs.
+    fn from_env(sign_in: Option<&SignIn>) -> Self {
+        Self {
+            homeserver_url: env("GATEWAY_HOMESERVER_URL")
+                .or_else(|| sign_in.map(|sign_in| sign_in.federation_base_url.clone())),
+            registration_shared_secret: env("GATEWAY_REGISTRATION_SHARED_SECRET"),
+            sensor_user_id: env("GATEWAY_SENSOR_USER_ID").map(|value| value.trim().to_owned()),
+        }
     }
 }
 
@@ -141,6 +200,13 @@ impl SignIn {
             )?,
         }))
     }
+}
+
+/// An environment variable, treating an empty value as unset: compose
+/// interpolates an unset `.env` entry to the empty string, so the two must
+/// mean the same thing throughout.
+fn env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 fn required(name: &str) -> Result<String> {

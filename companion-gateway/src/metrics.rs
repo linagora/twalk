@@ -22,6 +22,16 @@ pub struct Metrics {
     /// an operator would want to see here: nobody but the owner should ever
     /// be trying.
     sign_ins: Mutex<BTreeMap<&'static str, u64>>,
+    /// Registration relay attempts by outcome (`created`, `not_the_owner`,
+    /// `already_exists`, `recovery_key_refused`, …). A closed set of static
+    /// labels, as above. This is the counter an operator watches: the relay
+    /// should succeed exactly once in a deployment's life, and every other
+    /// sample is somebody trying something.
+    registrations: Mutex<BTreeMap<&'static str, u64>>,
+    /// Sensor invitations by outcome — one sample per room asked about
+    /// (`invited`, `already_present`, `failed`), or one per refused request
+    /// (`token_rejected`, `not_configured`, …).
+    sensor_invitations: Mutex<BTreeMap<&'static str, u64>>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -67,6 +77,8 @@ impl Metrics {
         Self {
             http_requests: Mutex::new(BTreeMap::new()),
             sign_ins: Mutex::new(BTreeMap::new()),
+            registrations: Mutex::new(BTreeMap::new()),
+            sensor_invitations: Mutex::new(BTreeMap::new()),
             started_unix_seconds: now_unix_seconds,
         }
     }
@@ -86,6 +98,29 @@ impl Metrics {
     pub fn record_sign_in(&self, outcome: &'static str) {
         *self
             .sign_ins
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
+    /// Counts one registration attempt. `outcome` is `created` or a
+    /// refusal's own label (ticket #53) — a static string, never anything
+    /// derived from a request.
+    pub fn record_registration(&self, outcome: &'static str) {
+        *self
+            .registrations
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
+    /// Counts one room's invitation outcome, or one refused invitation
+    /// request. Static labels only, as above.
+    pub fn record_sensor_invitation(&self, outcome: &'static str) {
+        *self
+            .sensor_invitations
             .lock()
             .expect("the metrics mutex is never poisoned")
             .entry(outcome)
@@ -124,6 +159,34 @@ impl Metrics {
             ));
         }
         out.push_str(
+            "# HELP twalk_companion_gateway_registrations_total Account registration relay attempts, by outcome.\n",
+        );
+        out.push_str("# TYPE twalk_companion_gateway_registrations_total counter\n");
+        for (outcome, count) in self
+            .registrations
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .iter()
+        {
+            out.push_str(&format!(
+                "twalk_companion_gateway_registrations_total{{outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+        out.push_str(
+            "# HELP twalk_companion_gateway_sensor_invitations_total Sensor room invitations, by outcome.\n",
+        );
+        out.push_str("# TYPE twalk_companion_gateway_sensor_invitations_total counter\n");
+        for (outcome, count) in self
+            .sensor_invitations
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .iter()
+        {
+            out.push_str(&format!(
+                "twalk_companion_gateway_sensor_invitations_total{{outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+        out.push_str(
             "# HELP twalk_companion_gateway_uptime_seconds Seconds since the process started.\n",
         );
         out.push_str("# TYPE twalk_companion_gateway_uptime_seconds gauge\n");
@@ -153,7 +216,29 @@ mod tests {
         metrics.record_sign_in("not_the_owner");
         metrics.record_sign_in("not_the_owner");
 
+        metrics.record_registration("created");
+        metrics.record_registration("already_exists");
+        metrics.record_sensor_invitation("invited");
+        metrics.record_sensor_invitation("invited");
+        metrics.record_sensor_invitation("already_present");
+
         let body = metrics.render(1_030);
+        assert!(
+            body.contains("twalk_companion_gateway_registrations_total{outcome=\"created\"} 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "twalk_companion_gateway_registrations_total{outcome=\"already_exists\"} 1\n"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "twalk_companion_gateway_sensor_invitations_total{outcome=\"invited\"} 2\n"
+            ),
+            "{body}"
+        );
         assert!(
             body.contains("twalk_companion_gateway_sign_ins_total{outcome=\"not_the_owner\"} 2\n"),
             "{body}"

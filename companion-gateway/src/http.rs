@@ -28,6 +28,8 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use tracing::{debug, warn};
 
+use crate::bootstrap::Bootstrap;
+use crate::bootstrap_http;
 use crate::metrics::{Metrics, Route};
 use crate::session::Sessions;
 use crate::session_http;
@@ -44,6 +46,11 @@ pub struct Gateway {
     /// ([`crate::session`]). `None` when sign-in is not configured — the
     /// origin still serves the Companion, and its API is closed.
     sessions: Option<Arc<Sessions>>,
+    /// Bootstrap: the registration relay and the Sensor's invitation
+    /// ([`crate::bootstrap`], ticket #53). `None` when the Gateway has no
+    /// homeserver to bootstrap against — each half is then answered with the
+    /// variable that would enable it.
+    bootstrap: Option<Arc<Bootstrap>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -56,6 +63,7 @@ impl Gateway {
             companion: Arc::new(companion),
             metrics,
             sessions: None,
+            bootstrap: None,
             now_unix_seconds,
         }
     }
@@ -68,8 +76,18 @@ impl Gateway {
         self
     }
 
+    /// Adds the bootstrap half (ticket #53), the same way.
+    pub fn with_bootstrap(mut self, bootstrap: Option<Arc<Bootstrap>>) -> Self {
+        self.bootstrap = bootstrap;
+        self
+    }
+
     pub fn sessions(&self) -> Option<Arc<Sessions>> {
         self.sessions.clone()
+    }
+
+    pub fn bootstrap(&self) -> Option<Arc<Bootstrap>> {
+        self.bootstrap.clone()
     }
 
     pub fn metrics(&self) -> &Metrics {
@@ -92,10 +110,13 @@ pub fn router(gateway: Gateway) -> Router {
         // ticket's routes are added the same way — and every one of them is
         // behind the guard layered below without asking.
         .merge(session_http::routes())
-        // The Gateway's API surface is empty in this skeleton (consent,
-        // session and bridge routes land in the later tickets of spec #46),
-        // but the prefix already answers as an API: a JSON 404, never the
-        // app shell.
+        // Bootstrap: the registration relay and the Sensor's invitation
+        // (ticket #53). Merged the same way, and behind the same guard.
+        .merge(bootstrap_http::routes())
+        // The Gateway's API surface keeps growing this way (consent and the
+        // bridge facade land in the remaining tickets of spec #46), and the
+        // prefix answers as an API throughout: a JSON 404, never the app
+        // shell.
         .route("/api", any(api_not_found))
         .route("/api/{*rest}", any(api_not_found))
         .fallback(companion)
