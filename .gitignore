@@ -9,3 +9,6 @@
 .agents/
 .claude/
 skills-lock.json
+
+# Playwright MCP session artefacts
+.playwright-mcp/
