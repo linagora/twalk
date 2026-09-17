@@ -1,0 +1,390 @@
+- generic [ref=e2]:
+  - generic [ref=e3]:
+    - link "Skip to content" [ref=e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=e9]:
+      - heading "Navigation Menu" [level=2] [ref=e10]
+      - generic [ref=e11]:
+        - link "Homepage" [ref=e13] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e16]:
+          - navigation "Global" [ref=e17]:
+            - list [ref=e18]:
+              - listitem [ref=e19]:
+                - button "Platform" [ref=e21] [cursor=pointer]
+              - listitem [ref=e24]:
+                - button "Solutions" [ref=e26] [cursor=pointer]
+              - listitem [ref=e29]:
+                - button "Resources" [ref=e31] [cursor=pointer]
+              - listitem [ref=e34]:
+                - button "Open Source" [ref=e36] [cursor=pointer]
+              - listitem [ref=e39]:
+                - button "Enterprise" [ref=e41] [cursor=pointer]
+              - listitem [ref=e44]:
+                - link "Pricing" [ref=e45] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+          - generic [ref=e46]:
+            - button "Search or jump to, type / to search" [ref=e48] [cursor=pointer]
+            - link "Sign in" [ref=e55] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Flinagora%2Ftwalk%2Fissues
+            - link "Sign up" [ref=e58] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2F%3Cuser-name%3E%2F%3Crepo-name%3E%2Fissues%2Findex&source=header-repo&source_repo=linagora%2Ftwalk
+            - button "Appearance settings" [ref=e61] [cursor=pointer]
+  - main [ref=e68]:
+    - generic [ref=e69]:
+      - generic [ref=e70]:
+        - generic [ref=e72]:
+          - link "linagora" [ref=e76] [cursor=pointer]:
+            - /url: /linagora
+          - generic [ref=e77]: /
+          - strong [ref=e78]:
+            - link "twalk" [ref=e79] [cursor=pointer]:
+              - /url: /linagora/twalk
+          - generic [ref=e80]: Public
+        - generic [ref=e81]:
+          - list:
+            - listitem [ref=e82]:
+              - link "You must be signed in to change notification settings" [ref=e83] [cursor=pointer]:
+                - /url: /login?return_to=%2Flinagora%2Ftwalk
+                - text: Notifications
+            - listitem [ref=e86]:
+              - link "Fork 0" [ref=e87] [cursor=pointer]:
+                - /url: /login?return_to=%2Flinagora%2Ftwalk
+                - text: Fork
+                - generic "0" [ref=e90]
+            - listitem [ref=e91]:
+              - link "You must be signed in to star a repository" [ref=e93] [cursor=pointer]:
+                - /url: /login?return_to=%2Flinagora%2Ftwalk
+                - text: Star
+                - generic "0 users starred this repository" [ref=e96]: "0"
+      - navigation "Repository" [ref=e97]:
+        - list [ref=e98]:
+          - listitem [ref=e99]:
+            - link "Code" [ref=e100] [cursor=pointer]:
+              - /url: /linagora/twalk
+          - listitem [ref=e104]:
+            - link "Issues 10" [ref=e105] [cursor=pointer]:
+              - /url: /linagora/twalk/issues
+              - generic [ref=e109]: Issues
+              - generic "10" [ref=e110]
+          - listitem [ref=e111]:
+            - link "Pull requests" [ref=e112] [cursor=pointer]:
+              - /url: /linagora/twalk/pulls
+          - listitem [ref=e116]:
+            - link "Actions" [ref=e117] [cursor=pointer]:
+              - /url: /linagora/twalk/actions
+          - listitem [ref=e121]:
+            - link "Projects" [ref=e122] [cursor=pointer]:
+              - /url: /linagora/twalk/projects
+          - listitem [ref=e126]:
+            - link "Security and quality" [ref=e127] [cursor=pointer]:
+              - /url: /linagora/twalk/security
+          - listitem [ref=e131]:
+            - link "Insights" [ref=e132] [cursor=pointer]:
+              - /url: /linagora/twalk/pulse
+    - generic [ref=e142]:
+      - complementary "Issues sidebar navigation" [ref=e143]:
+        - generic [ref=e146]:
+          - navigation "Issue filters" [ref=e147]:
+            - list [ref=e148]:
+              - listitem [ref=e149]:
+                - link "Issues" [ref=e150] [cursor=pointer]:
+                  - /url: /linagora/twalk/issues?q=is%3Aissue+state%3Aopen
+                  - generic "Issues" [ref=e153]
+              - listitem [ref=e154]:
+                - link "Assigned to me" [ref=e155] [cursor=pointer]:
+                  - /url: /linagora/twalk/issues?q=is%3Aissue+state%3Aopen+assignee%3A%40me
+                  - generic "Assigned to me" [ref=e158]
+              - listitem [ref=e159]:
+                - link "Created by me" [ref=e160] [cursor=pointer]:
+                  - /url: /linagora/twalk/issues?q=is%3Aissue+state%3Aopen+author%3A%40me
+                  - generic "Created by me" [ref=e163]
+              - listitem [ref=e164]:
+                - link "Mentioned" [ref=e165] [cursor=pointer]:
+                  - /url: /linagora/twalk/issues?q=is%3Aissue+state%3Aopen+mentions%3A%40me
+                  - generic "Mentioned" [ref=e168]
+              - listitem [ref=e169]:
+                - link "Recent activity" [ref=e170] [cursor=pointer]:
+                  - /url: /linagora/twalk/issues?q=is%3Aissue+updated%3A%3E%40today-1w+sort%3Aupdated-desc
+                  - generic "Recent activity" [ref=e173]
+          - separator [ref=e174]
+          - navigation "Pages" [ref=e175]:
+            - list [ref=e176]:
+              - listitem [ref=e177]:
+                - link "Views" [ref=e178] [cursor=pointer]:
+                  - /url: /linagora/twalk/issues/views
+              - listitem [ref=e181]:
+                - link "Projects" [ref=e182] [cursor=pointer]:
+                  - /url: /linagora/twalk/projects
+              - listitem [ref=e185]:
+                - link "Milestones" [ref=e186] [cursor=pointer]:
+                  - /url: /linagora/twalk/milestones
+              - listitem [ref=e189]:
+                - link "Labels" [ref=e190] [cursor=pointer]:
+                  - /url: /linagora/twalk/labels
+        - generic [ref=e193]:
+          - navigation "Feedback" [ref=e194]:
+            - list [ref=e195]:
+              - listitem [ref=e196]:
+                - link "Feedback Preview" [ref=e197] [cursor=pointer]:
+                  - /url: https://gh.io/issues-sidebar-feedback
+                  - generic [ref=e198]:
+                    - generic [ref=e199]: Feedback
+                    - generic: Preview
+          - list [ref=e200]:
+            - listitem [ref=e201]:
+              - button "Collapse sidebar" [expanded] [ref=e202] [cursor=pointer]
+      - generic [ref=e205]:
+        - generic [ref=e209]:
+          - heading "All issues" [level=1] [ref=e211]
+          - button "New issue" [ref=e214]
+        - generic [ref=e220]:
+          - heading "Issues" [level=2] [ref=e221]
+          - generic [ref=e222]:
+            - search "Filter all issues" [ref=e223]:
+              - form "Search Issues" [ref=e227]:
+                - generic [ref=e230]:
+                  - generic [ref=e232]:
+                    - generic [aria-hidden] [ref=e233]:
+                      - generic [ref=e234]:
+                        - text: "is:"
+                        - generic [ref=e235]: issue
+                      - generic [ref=e237]:
+                        - text: "state:"
+                        - generic [ref=e238]: open
+                    - combobox "Search Issues" [ref=e241]: is:issue state:open
+                  - button "Search" [ref=e242] [cursor=pointer]
+            - region "All issues" [ref=e245]:
+              - generic [ref=e249]:
+                - heading "Search results" [level=2] [ref=e250]
+                - generic [ref=e252]:
+                  - link "Open" [ref=e253] [cursor=pointer]:
+                    - /url: ""
+                  - link "Closed" [ref=e256] [cursor=pointer]:
+                    - /url: ""
+                - list "Search results" [ref=e259]:
+                  - listitem "More information available below." [ref=e262]:
+                    - generic [ref=e263]:
+                      - heading [level=3] [ref=e264]:
+                        - link "[Sensor 11] Reference compose deployment" [ref=e265] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/12
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e270] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e271]: ready-for-agent
+                        - generic [ref=e273]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e274]: "Status: Open."
+                    - generic [ref=e286]:
+                      - generic [ref=e287]:
+                        - generic [ref=e288]: "#12"
+                        - generic [ref=e289]: In linagora/twalk;
+                      - generic [ref=e290]:
+                        - text: ·
+                        - link "mmaudet" [ref=e291] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e295]:
+                    - generic [ref=e296]:
+                      - heading [level=3] [ref=e297]:
+                        - link "[Sensor 10] Observability" [ref=e298] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/11
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e303] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e304]: ready-for-agent
+                        - generic [ref=e306]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e307]: "Status: Open."
+                    - generic [ref=e319]:
+                      - generic [ref=e320]:
+                        - generic [ref=e321]: "#11"
+                        - generic [ref=e322]: In linagora/twalk;
+                      - generic [ref=e323]:
+                        - text: ·
+                        - link "mmaudet" [ref=e324] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e328]:
+                    - generic [ref=e329]:
+                      - heading [level=3] [ref=e330]:
+                        - link "[Sensor 09] Outbound — approved replies" [ref=e331] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/10
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e336] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e337]: ready-for-agent
+                        - generic [ref=e339]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e340]: "Status: Open."
+                    - generic [ref=e352]:
+                      - generic [ref=e353]:
+                        - generic [ref=e354]: "#10"
+                        - generic [ref=e355]: In linagora/twalk;
+                      - generic [ref=e356]:
+                        - text: ·
+                        - link "mmaudet" [ref=e357] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e361]:
+                    - generic [ref=e362]:
+                      - heading [level=3] [ref=e363]:
+                        - link "[Sensor 08] Presence" [ref=e364] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/9
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e369] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e370]: ready-for-agent
+                        - generic [ref=e372]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e373]: "Status: Open."
+                    - generic [ref=e385]:
+                      - generic [ref=e386]:
+                        - generic [ref=e387]: "#9"
+                        - generic [ref=e388]: In linagora/twalk;
+                      - generic [ref=e389]:
+                        - text: ·
+                        - link "mmaudet" [ref=e390] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e394]:
+                    - generic [ref=e395]:
+                      - heading [level=3] [ref=e396]:
+                        - link "[Sensor 07] Reactions" [ref=e397] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/8
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e402] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e403]: ready-for-agent
+                        - generic [ref=e405]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e406]: "Status: Open."
+                    - generic [ref=e418]:
+                      - generic [ref=e419]:
+                        - generic [ref=e420]: "#8"
+                        - generic [ref=e421]: In linagora/twalk;
+                      - generic [ref=e422]:
+                        - text: ·
+                        - link "mmaudet" [ref=e423] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e427]:
+                    - generic [ref=e428]:
+                      - heading [level=3] [ref=e429]:
+                        - link "[Sensor 06] Message shape fidelity" [ref=e430] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/7
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e435] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e436]: ready-for-agent
+                        - generic [ref=e438]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e439]: "Status: Open."
+                    - generic [ref=e451]:
+                      - generic [ref=e452]:
+                        - generic [ref=e453]: "#7"
+                        - generic [ref=e454]: In linagora/twalk;
+                      - generic [ref=e455]:
+                        - text: ·
+                        - link "mmaudet" [ref=e456] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e460]:
+                    - generic [ref=e461]:
+                      - heading [level=3] [ref=e462]:
+                        - link "[Sensor 05] Contact resolution and consent labelling" [ref=e463] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/6
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e468] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e469]: ready-for-agent
+                        - generic [ref=e471]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e472]: "Status: Open."
+                    - generic [ref=e484]:
+                      - generic [ref=e485]:
+                        - generic [ref=e486]: "#6"
+                        - generic [ref=e487]: In linagora/twalk;
+                      - generic [ref=e488]:
+                        - text: ·
+                        - link "mmaudet" [ref=e489] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e493]:
+                    - generic [ref=e494]:
+                      - heading [level=3] [ref=e495]:
+                        - link "[Sensor 04] Megolm decryption" [ref=e496] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/5
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e501] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e502]: ready-for-agent
+                        - generic [ref=e504]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e505]: "Status: Open."
+                    - generic [ref=e517]:
+                      - generic [ref=e518]:
+                        - generic [ref=e519]: "#5"
+                        - generic [ref=e520]: In linagora/twalk;
+                      - generic [ref=e521]:
+                        - text: ·
+                        - link "mmaudet" [ref=e522] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e526]:
+                    - generic [ref=e527]:
+                      - heading [level=3] [ref=e528]:
+                        - link "[Sensor 03] Persistence — resume without replay" [ref=e529] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/4
+                      - link "ready-for-agent Self-contained ticket, grabbable by an agent" [ref=e534] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aready-for-agent
+                        - generic [ref=e535]: ready-for-agent
+                        - generic [ref=e537]: Self-contained ticket, grabbable by an agent
+                    - generic [ref=e538]: "Status: Open."
+                    - generic [ref=e550]:
+                      - generic [ref=e551]:
+                        - generic [ref=e552]: "#4"
+                        - generic [ref=e553]: In linagora/twalk;
+                      - generic [ref=e554]:
+                        - text: ·
+                        - link "mmaudet" [ref=e555] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+                  - listitem "More information available below." [ref=e559]:
+                    - generic [ref=e560]:
+                      - heading [level=3] [ref=e561]:
+                        - link "Sensor — spec" [ref=e562] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues/1
+                      - link "spec Parent spec issue" [ref=e567] [cursor=pointer]:
+                        - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20label%3Aspec
+                        - generic [ref=e568]: spec
+                        - generic [ref=e570]: Parent spec issue
+                    - generic [ref=e571]: "Status: Open."
+                    - generic [ref=e583]:
+                      - generic [ref=e584]:
+                        - generic [ref=e585]: "#1"
+                        - generic [ref=e586]: In linagora/twalk;
+                      - generic [ref=e587]:
+                        - text: ·
+                        - link "mmaudet" [ref=e588] [cursor=pointer]:
+                          - /url: /linagora/twalk/issues?q=is%3Aissue%20state%3Aopen%20author%3Ammaudet
+                        - text: opened on Sep 17, 2026on Sep 17, 2026
+  - contentinfo [ref=e590]:
+    - heading "Footer" [level=2] [ref=e591]
+    - generic [ref=e592]:
+      - generic [ref=e593]:
+        - link "GitHub Homepage" [ref=e594] [cursor=pointer]:
+          - /url: https://github.com
+        - generic [ref=e597]: © 2026 GitHub, Inc.
+      - navigation "Footer" [ref=e598]:
+        - heading "Footer navigation" [level=3] [ref=e599]
+        - list "Footer navigation" [ref=e600]:
+          - listitem [ref=e601]:
+            - link "Terms" [ref=e602] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/github-terms/github-terms-of-service
+          - listitem [ref=e603]:
+            - link "Privacy" [ref=e604] [cursor=pointer]:
+              - /url: https://docs.github.com/site-policy/privacy-policies/github-privacy-statement
+          - listitem [ref=e605]:
+            - link "Security" [ref=e606] [cursor=pointer]:
+              - /url: https://github.com/security
+          - listitem [ref=e607]:
+            - link "Status" [ref=e608] [cursor=pointer]:
+              - /url: https://www.githubstatus.com/
+          - listitem [ref=e609]:
+            - link "Community" [ref=e610] [cursor=pointer]:
+              - /url: https://github.community/
+          - listitem [ref=e611]:
+            - link "Docs" [ref=e612] [cursor=pointer]:
+              - /url: https://docs.github.com/
+          - listitem [ref=e613]:
+            - link "Contact" [ref=e614] [cursor=pointer]:
+              - /url: https://support.github.com?tags=dotcom-footer
+          - listitem [ref=e615]:
+            - button "Manage cookies" [ref=e617] [cursor=pointer]
+          - listitem [ref=e618]:
+            - button "Do not share my personal information" [ref=e620] [cursor=pointer]

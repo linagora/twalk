@@ -5,8 +5,10 @@
 # (tests/harness/mod.rs) logs in with the same scheme — keep in sync.
 set -euo pipefail
 
+# TWALK_TEST_STACK selects the compose project so parallel worktrees each
+# run their own isolated stack (defaults to the main checkout's project).
 COMPOSE_FILE="$(cd "$(dirname "$0")/.." && pwd)/compose.test.yaml"
-COMPOSE="docker compose -p twalk-sensor-test -f $COMPOSE_FILE"
+COMPOSE="docker compose -p ${TWALK_TEST_STACK:-twalk-sensor-test} -f $COMPOSE_FILE"
 
 # bot_alpha / bot_beta play bridges and contacts; sensor is the account the
 # Sensor process logs in as; whatsapp_33612345678 is a ghost-style user for

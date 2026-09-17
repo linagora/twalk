@@ -21,7 +21,7 @@ services:
       - ./synapse:/config:ro
       - synapse-data:/data
     ports:
-      - "18008:8008"
+      - "${TWALK_TEST_SYNAPSE_PORT:-18008}:8008"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8008/health').read()"]
       interval: 5s
@@ -35,7 +35,7 @@ services:
     volumes:
       - nats-data:/data
     ports:
-      - "14222:4222"
+      - "${TWALK_TEST_NATS_PORT:-14222}:4222"
 
 volumes:
   synapse-data:

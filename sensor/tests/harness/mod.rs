@@ -18,8 +18,25 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::sleep;
 
-pub const SYNAPSE_URL: &str = "http://localhost:18008";
-pub const NATS_URL: &str = "nats://localhost:14222";
+/// The harness stack is parameterizable so that parallel worktrees each run
+/// their own isolated instance: TWALK_TEST_STACK names the compose project,
+/// TWALK_TEST_SYNAPSE_PORT / TWALK_TEST_NATS_PORT move the host ports.
+/// Defaults match the main checkout.
+pub fn synapse_url() -> String {
+    let port =
+        std::env::var("TWALK_TEST_SYNAPSE_PORT").unwrap_or_else(|_| "18008".to_owned());
+    format!("http://localhost:{port}")
+}
+
+pub fn nats_url() -> String {
+    let port = std::env::var("TWALK_TEST_NATS_PORT").unwrap_or_else(|_| "14222".to_owned());
+    format!("nats://localhost:{port}")
+}
+
+fn stack_id() -> String {
+    std::env::var("TWALK_TEST_STACK").unwrap_or_else(|_| "twalk-sensor-test".to_owned())
+}
+
 pub const SERVER_NAME: &str = "test.twalk";
 
 fn tests_dir() -> PathBuf {
@@ -63,14 +80,14 @@ async fn do_ensure_stack() -> Result<()> {
     let compose = tests_dir().join("compose.test.yaml");
     let status = Command::new("docker")
         .args([
-            "compose",
-            "-p",
-            "twalk-sensor-test",
-            "-f",
-            compose.to_str().unwrap(),
-            "up",
-            "-d",
-            "--wait",
+            "compose".to_owned(),
+            "-p".to_owned(),
+            stack_id(),
+            "-f".to_owned(),
+            compose.to_string_lossy().into_owned(),
+            "up".to_owned(),
+            "-d".to_owned(),
+            "--wait".to_owned(),
         ])
         .stdout(Stdio::null())
         .status()
@@ -129,7 +146,7 @@ impl Bot {
     pub async fn login(localpart: &str) -> Result<Self> {
         let http = reqwest::Client::new();
         let response: Value = http
-            .post(format!("{SYNAPSE_URL}/_matrix/client/v3/login"))
+            .post(format!("{}/_matrix/client/v3/login", synapse_url()))
             .json(&serde_json::json!({
                 "type": "m.login.password",
                 "identifier": {
@@ -160,7 +177,7 @@ impl Bot {
 
     fn authed(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
-            .request(method, format!("{SYNAPSE_URL}{path}"))
+            .request(method, format!("{}{path}", synapse_url()))
             .bearer_auth(&self.access_token)
     }
 
@@ -309,11 +326,7 @@ impl Bot {
                 "room messages",
             )
             .await?;
-        let chunk = response
-            .get("chunk")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("no chunk in messages response"))?;
-        Ok(chunk.clone())
+        Ok(chunk_extract(&response)?)
     }
 
     /// Polls `room_events` until `predicate` matches an event or the
@@ -406,6 +419,14 @@ impl Bot {
     }
 }
 
+fn chunk_extract(response: &Value) -> Result<Vec<Value>> {
+    let chunk = response
+        .get("chunk")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no chunk in messages response"))?;
+    Ok(chunk.clone())
+}
+
 /// The bus side of the seam: NATS JetStream, as the Sensor will use it.
 pub struct Bus {
     jetstream: async_nats::jetstream::Context,
@@ -417,7 +438,7 @@ impl Bus {
     /// it and `--wait` does not cover it.
     pub async fn connect() -> Result<Self> {
         for attempt in 0..30 {
-            match async_nats::connect(NATS_URL).await {
+            match async_nats::connect(nats_url().as_str()).await {
                 Ok(client) => {
                     return Ok(Self {
                         jetstream: async_nats::jetstream::new(client),
@@ -651,13 +672,13 @@ pub static SENSOR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 /// provisioning scheme (see tests/scripts/provision-bots.sh).
 pub fn sensor_env() -> Vec<(String, String)> {
     vec![
-        ("SENSOR_HOMESERVER".to_owned(), SYNAPSE_URL.to_owned()),
+        ("SENSOR_HOMESERVER".to_owned(), synapse_url()),
         ("SENSOR_USER_ID".to_owned(), SENSOR_USER_ID.to_owned()),
         (
             "SENSOR_PASSWORD".to_owned(),
             "test-only-password-sensor".to_owned(),
         ),
-        ("SENSOR_NATS_URL".to_owned(), NATS_URL.to_owned()),
+        ("SENSOR_NATS_URL".to_owned(), nats_url()),
         (
             "SENSOR_ALLOWED_INVITERS".to_owned(),
             "@bot_alpha:test.twalk".to_owned(),
