@@ -42,6 +42,9 @@ _Avoid_: channel (user-facing copy only), gmessages (a bridge, not a network)
 **Consent**:
 The data-processing agreement state of a contact or channel: `granted`, `pending`, or `revoked`. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
 
+**Event families**:
+The contract's two groups of event types. Message-flow events (`inbound.*`, `persona.*`) always carry the `network` and `consent` extensions; operational events (`consent.state.changed`, `bridge.status.changed`) declare them optional.
+
 ### Companion
 
 **Companion**:
