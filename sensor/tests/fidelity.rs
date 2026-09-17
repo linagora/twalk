@@ -563,3 +563,62 @@ async fn a_plain_matrix_message_produces_no_event() -> Result<()> {
     sensor.stop().await;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_message_edit_produces_no_event() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let sensor = SensorProc::start(&sensor_env())?;
+    let alpha = Bot::login("bot_alpha").await?;
+
+    let room_id = observed_portal(&alpha, "edit-portal").await?;
+
+    let original_id = alpha.send_message(&room_id, "rendez-vous à 10h").await?;
+    // How a bridge relays an edit made on the network: a new event with a
+    // `* `-prefixed fallback body, an m.replace relation and m.new_content.
+    alpha
+        .send_event(
+            &room_id,
+            "m.room.message",
+            json!({
+                "msgtype": "m.text",
+                "body": "* rendez-vous à 11h",
+                "m.new_content": { "msgtype": "m.text", "body": "rendez-vous à 11h" },
+                "m.relates_to": { "rel_type": "m.replace", "event_id": original_id },
+            }),
+        )
+        .await?;
+    // A sentinel after the edit: the Sensor handles a room's timeline in
+    // order and awaits each publish, so once the sentinel is on the bus the
+    // edit has been handled — no sleep needed to assert its absence.
+    let sentinel_id = alpha.send_message(&room_id, "à tout à l'heure").await?;
+
+    let sentinel_event_id = sha256_hex(&format!("{sentinel_id}:{room_id}"));
+    let messages = poll_until(
+        || async {
+            let messages = bus
+                .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id)
+                .await
+                .ok()?;
+            messages
+                .iter()
+                .any(|message| message.payload["id"].as_str() == Some(sentinel_event_id.as_str()))
+                .then_some(messages)
+        },
+        &format!("waiting for the sentinel event from {room_id}"),
+    )
+    .await?;
+
+    let original = find_event(&messages, &room_id, &original_id);
+    validate_against_contract(original, "inbound.message.received")?;
+    assert_eq!(original["data"]["body"].as_str(), Some("rendez-vous à 10h"));
+    assert_eq!(
+        messages.len(),
+        2,
+        "message edits have no v1 event type: only the original and the sentinel are published"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}

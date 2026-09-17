@@ -232,6 +232,18 @@ async fn main() -> Result<()> {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
                 }
+                if let Some(Relation::Replacement(replacement)) = &event.content.relates_to {
+                    // An edit is a new event (`* new text` fallback body)
+                    // replacing an earlier one: no v1 event type exists for
+                    // it, and publishing it would read as a fresh message.
+                    tracing::debug!(
+                        room = %room.room_id(),
+                        event_id = %event.event_id,
+                        replaces = %replacement.event_id,
+                        "skipping message edit, no v1 event type"
+                    );
+                    return;
+                }
                 let Some(attachments) = attachments_for(&event.content.msgtype) else {
                     return; // no v1 shape for this msgtype
                 };
