@@ -5,6 +5,9 @@
 //! bridges, speaking the documented Matrix client-server API over HTTP.
 //! Nothing here reaches inside the Sensor process.
 
+// Every test binary compiles this module but uses only a subset of it.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,6 +91,20 @@ async fn do_ensure_stack() -> Result<()> {
 }
 
 static TXN_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Polls `attempt` every 500 ms until it yields `Some`, or fails after ~20 s.
+pub async fn poll_until<T, Fut>(mut attempt: impl FnMut() -> Fut, description: &str) -> Result<T>
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    for _ in 0..40 {
+        if let Some(value) = attempt().await {
+            return Ok(value);
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+    bail!("timed out {description}")
+}
 
 /// Extracts a required string field from a client-server API response.
 fn extract_str(response: &Value, field: &str, what: &str) -> Result<String> {
@@ -307,15 +324,85 @@ impl Bot {
         predicate: impl Fn(&Value) -> bool,
         description: &str,
     ) -> Result<Value> {
-        for _ in 0..30 {
-            for event in self.room_events(room_id, 50).await? {
-                if predicate(&event) {
-                    return Ok(event);
-                }
-            }
-            sleep(Duration::from_millis(500)).await;
-        }
-        bail!("timed out waiting for {description} in {room_id}")
+        poll_until(
+            || async {
+                self.room_events(room_id, 50)
+                    .await
+                    .ok()?
+                    .into_iter()
+                    .find(|event| predicate(event))
+            },
+            &format!("waiting for {description} in {room_id}"),
+        )
+        .await
+    }
+
+    /// Sends a state event (e.g. the `m.bridge` marker mautrix sets on
+    /// portal rooms to identify the network).
+    pub async fn send_state_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        content: Value,
+    ) -> Result<String> {
+        let response = self
+            .send_json(
+                reqwest::Method::PUT,
+                &format!(
+                    "/_matrix/client/v3/rooms/{}/state/{event_type}/{state_key}",
+                    esc(room_id)
+                ),
+                Some(&content),
+                "send state event",
+            )
+            .await?;
+        extract_str(&response, "event_id", "send state event")
+    }
+
+    /// Reads the membership of a user in a room (invite, join, leave, ban).
+    pub async fn get_membership(&self, room_id: &str, user_id: &str) -> Result<String> {
+        let response = self
+            .send_json(
+                reqwest::Method::GET,
+                &format!(
+                    "/_matrix/client/v3/rooms/{}/state/m.room.member/{}",
+                    esc(room_id),
+                    esc(user_id)
+                ),
+                None,
+                "get membership",
+            )
+            .await?;
+        extract_str(&response, "membership", "get membership")
+    }
+
+    /// Kicks a user out of a room (requires power, like a bridge admin has).
+    pub async fn kick(&self, room_id: &str, user_id: &str) -> Result<()> {
+        self.send_json(
+            reqwest::Method::POST,
+            &format!("/_matrix/client/v3/rooms/{}/kick", esc(room_id)),
+            Some(&serde_json::json!({ "user_id": user_id })),
+            "kick",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Polls `get_membership` until it equals `expected` or the deadline
+    /// expires.
+    pub async fn wait_for_membership(&self, room_id: &str, user_id: &str, expected: &str) -> Result<()> {
+        poll_until(
+            || async {
+                self.get_membership(room_id, user_id)
+                    .await
+                    .ok()
+                    .filter(|membership| membership == expected)
+                    .map(|_| ())
+            },
+            &format!("waiting for membership {expected} of {user_id} in {room_id}"),
+        )
+        .await
     }
 }
 
@@ -389,6 +476,17 @@ impl Bus {
     /// harness's "consume a subject" primitive. Later tickets assert on
     /// whole sequences (e.g. no duplicate ids after a Sensor replay).
     pub async fn fetch_all(&self, stream: &str, subject: &str) -> Result<Vec<Value>> {
+        Ok(self
+            .fetch_all_with_headers(stream, subject)
+            .await?
+            .into_iter()
+            .map(|message| message.payload)
+            .collect())
+    }
+
+    /// Like `fetch_all`, but keeps the NATS headers alongside each payload
+    /// (needed to assert on `NATS-Msg-Id` and the filtering extensions).
+    pub async fn fetch_all_with_headers(&self, stream: &str, subject: &str) -> Result<Vec<StoredMessage>> {
         use async_nats::jetstream::stream::LastRawMessageErrorKind;
         let stream = self
             .jetstream
@@ -404,7 +502,18 @@ impl Bus {
         for sequence in 1..=last.sequence {
             match stream.get_raw_message(sequence).await {
                 Ok(message) if message.subject.as_str() == subject => {
-                    out.push(serde_json::from_slice(&message.payload)?)
+                    out.push(StoredMessage {
+                        headers: message
+                            .headers
+                            .iter()
+                            .flat_map(|(name, values)| {
+                                values
+                                    .iter()
+                                    .map(move |value| (name.to_string(), value.to_string()))
+                            })
+                            .collect(),
+                        payload: serde_json::from_slice(&message.payload)?,
+                    })
                 }
                 Ok(_) => {}
                 Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
@@ -412,6 +521,50 @@ impl Bus {
             }
         }
         Ok(out)
+    }
+
+    /// Fetches every stored event whose `source` identifies the given room.
+    /// Several tests share the bus, so consumers filter by room — as real
+    /// consumers will.
+    pub async fn fetch_room_messages(&self, stream: &str, subject: &str, room_id: &str) -> Result<Vec<StoredMessage>> {
+        let expected_source = format!("matrix://{SERVER_NAME}/{room_id}");
+        Ok(self
+            .fetch_all_with_headers(stream, subject)
+            .await?
+            .into_iter()
+            .filter(|m| m.payload["source"].as_str() == Some(expected_source.as_str()))
+            .collect())
+    }
+
+    /// Polls until an event whose `source` identifies the given room is
+    /// stored on the subject.
+    pub async fn wait_for_room_message(&self, stream: &str, subject: &str, room_id: &str) -> Result<StoredMessage> {
+        poll_until(
+            || async {
+                self.fetch_room_messages(stream, subject, room_id)
+                    .await
+                    .ok()?
+                    .into_iter()
+                    .next()
+            },
+            &format!("waiting for an event from {room_id} on {subject}"),
+        )
+        .await
+    }
+}
+
+/// A message as stored on the bus: payload plus NATS headers.
+pub struct StoredMessage {
+    pub headers: Vec<(String, String)>,
+    pub payload: Value,
+}
+
+impl StoredMessage {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 }
 
@@ -461,4 +614,57 @@ pub fn contract_fixture_types() -> Result<Vec<String>> {
     }
     types.sort();
     Ok(types)
+}
+
+/// The Sensor under test, running as the real binary it ships as — the
+/// agreed seam is the process boundary.
+pub struct SensorProc(tokio::process::Child);
+
+impl SensorProc {
+    pub fn start(env: &[(String, String)]) -> Result<Self> {
+        let child = Command::new(env!("CARGO_BIN_EXE_twalk-sensor"))
+            .envs(env.iter().cloned())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .context("failed to start the sensor binary")?;
+        Ok(Self(child))
+    }
+
+    pub async fn stop(mut self) {
+        let _ = self.0.kill().await;
+        let _ = self.0.wait().await;
+    }
+}
+
+pub const SENSOR_USER_ID: &str = "@sensor:test.twalk";
+
+/// Serializes tests that spawn a Sensor process. Every test logs the Sensor
+/// in as the same Matrix account, so two concurrent Sensor processes would
+/// join each other's invited rooms and observe each other's traffic —
+/// exactly what must NOT happen when asserting a room stopped producing
+/// events. Take this lock at the top of any test that starts a Sensor.
+pub static SENSOR_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The environment the Sensor runs from in tests. The password follows the
+/// provisioning scheme (see tests/scripts/provision-bots.sh).
+pub fn sensor_env() -> Vec<(String, String)> {
+    vec![
+        ("SENSOR_HOMESERVER".to_owned(), SYNAPSE_URL.to_owned()),
+        ("SENSOR_USER_ID".to_owned(), SENSOR_USER_ID.to_owned()),
+        (
+            "SENSOR_PASSWORD".to_owned(),
+            "test-only-password-sensor".to_owned(),
+        ),
+        ("SENSOR_NATS_URL".to_owned(), NATS_URL.to_owned()),
+        (
+            "SENSOR_ALLOWED_INVITERS".to_owned(),
+            "@bot_alpha:test.twalk".to_owned(),
+        ),
+        (
+            "SENSOR_LOG_LEVEL".to_owned(),
+            "info,twalk_sensor=debug".to_owned(),
+        ),
+    ]
 }

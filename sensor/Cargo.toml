@@ -8,8 +8,17 @@ description = "The Twalk Sensor: a Matrix client that decrypts portal-room event
 [lib]
 path = "src/lib.rs"
 
-# The Sensor implementation arrives with ticket 02; [dependencies] stays empty
-# until then. Everything below serves the integration-test harness (ticket 01).
+[dependencies]
+anyhow = "1"
+async-nats = "0.50"
+matrix-sdk = { version = "0.19", features = ["e2e-encryption"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [dev-dependencies]
 anyhow = "1"
 async-nats = "0.50"

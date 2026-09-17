@@ -116,13 +116,16 @@ async fn reaction_and_presence_helpers_work() -> Result<()> {
 async fn bus_round_trips_through_jetstream() -> Result<()> {
     ensure_stack().await?;
     let bus = Bus::connect().await?;
-    bus.ensure_stream("twalk-test", &["twalk.test.>"]).await?;
+    // Harness self-test streams live outside the twalk.* namespace, which
+    // belongs to the Sensor's own stream (JetStream forbids overlapping
+    // subjects across streams).
+    bus.ensure_stream("harness-smoke", &["harness.smoke.>"]).await?;
 
     let payload = serde_json::json!({ "ping": "from the harness" });
-    bus.publish("twalk.test.smoke", &payload).await?;
+    bus.publish("harness.smoke.ping", &payload).await?;
 
     let stored = bus
-        .last_message("twalk-test", "twalk.test.smoke")
+        .last_message("harness-smoke", "harness.smoke.ping")
         .await?
         .expect("the message must be stored by JetStream");
     assert_eq!(stored, payload, "the bus must return exactly what was published");
@@ -130,16 +133,16 @@ async fn bus_round_trips_through_jetstream() -> Result<()> {
     // Consuming a subject yields exactly its own messages, in order.
     // Subjects are suffixed per run: JetStream persists across test runs,
     // so reusing fixed subjects would leak messages between runs.
-    bus.ensure_stream("twalk-consume-test", &["twalk.consume.>"]).await?;
+    bus.ensure_stream("harness-consume", &["harness.consume.>"]).await?;
     let run_id = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     let wanted = serde_json::json!({ "n": 1 });
     let other = serde_json::json!({ "n": 99 });
-    bus.publish(&format!("twalk.consume.{run_id}.alpha"), &wanted).await?;
-    bus.publish(&format!("twalk.consume.{run_id}.beta"), &other).await?;
+    bus.publish(&format!("harness.consume.{run_id}.alpha"), &wanted).await?;
+    bus.publish(&format!("harness.consume.{run_id}.beta"), &other).await?;
     let consumed = bus
-        .fetch_all("twalk-consume-test", &format!("twalk.consume.{run_id}.alpha"))
+        .fetch_all("harness-consume", &format!("harness.consume.{run_id}.alpha"))
         .await?;
     assert_eq!(consumed, vec![wanted], "consume must return exactly the subject's messages");
     Ok(())

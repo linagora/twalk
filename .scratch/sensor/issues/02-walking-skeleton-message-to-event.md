@@ -4,12 +4,12 @@
 
 **Blocked by:** 01 — Integration test harness.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The Sensor runs from environment configuration alone
-- [ ] It auto-joins on invitation from an allowed inviter and ignores other invitations
-- [ ] It stops observing a room after leaving or being removed from it
-- [ ] A plain text message from a bot in an unencrypted room produces a schema-valid `inbound.message.received.v1` on subject `twalk.inbound.message.received.v1`
-- [ ] The event id is deterministic from its natural key; `NATS-Msg-Id` equals the event id
-- [ ] Unknown senders are labelled with consent `pending`
-- [ ] Unit tests cover id derivation and subject mapping
+- [x] The Sensor runs from environment configuration alone
+- [x] It auto-joins on invitation from an allowed inviter and ignores other invitations
+- [x] It stops observing a room after leaving or being removed from it
+- [x] A plain text message from a bot in an unencrypted room produces a schema-valid `inbound.message.received.v1` on subject `twalk.inbound.message.received.v1`
+- [x] The event id is deterministic from its natural key; `NATS-Msg-Id` equals the event id
+- [x] Unknown senders are labelled with consent `pending`
+- [x] Unit tests cover id derivation and subject mapping

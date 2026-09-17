@@ -8,7 +8,10 @@ set -euo pipefail
 COMPOSE_FILE="$(cd "$(dirname "$0")/.." && pwd)/compose.test.yaml"
 COMPOSE="docker compose -p twalk-sensor-test -f $COMPOSE_FILE"
 
-for bot in bot_alpha bot_beta; do
+# bot_alpha / bot_beta play bridges and contacts; sensor is the account the
+# Sensor process logs in as; whatsapp_33612345678 is a ghost-style user for
+# the network-prefix tests (mautrix puppet naming convention).
+for bot in bot_alpha bot_beta sensor whatsapp_33612345678; do
   output=$($COMPOSE exec -T synapse register_new_matrix_user \
       -u "$bot" -p "test-only-password-$bot" --no-admin \
       -c /config/homeserver.yaml http://localhost:8008 2>&1) || true
