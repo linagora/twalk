@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="color-scheme" content="light dark" />
+		<meta name="theme-color" content="#00a896" />
+		<!-- iOS: the installed app gets its own window rather than a Safari
+		     chrome, which is also what exempts the crypto store in IndexedDB
+		     from Safari's seven-day eviction (ADR 0014). -->
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="apple-mobile-web-app-title" content="Twalk" />
+		<!-- A static title, because `ssr = false` means nothing renders one
+		     into this shell: the app replaces it with the translated one once
+		     it boots, and until then a tab, a home-screen icon and the
+		     Gateway's own deployment test all have a name to read. -->
+		<title>Twalk Companion</title>
+		<link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />
+		<link rel="icon" href="%sveltekit.assets%/icons/icon.svg" type="image/svg+xml" />
+		<link rel="apple-touch-icon" href="%sveltekit.assets%/icons/apple-touch-icon.png" />
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+		<noscript>
+			<p style="font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.5">
+				The Twalk Companion needs JavaScript: it generates your account's encryption keys in
+				this browser, so that they never reach the server (ADR 0014). Enable JavaScript for
+				this site, or use another browser.
+			</p>
+		</noscript>
+	</body>
+</html>

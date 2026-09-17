@@ -1,0 +1,15 @@
+node_modules
+
+# The build output. Nothing built is committed: the Gateway's image builds it
+# (deploy/docker-compose/companion-gateway.Dockerfile).
+/build
+/.svelte-kit
+
+# Playwright's own output
+/test-results
+/playwright-report
+/blob-report
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*

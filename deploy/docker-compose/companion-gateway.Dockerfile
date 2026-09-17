@@ -14,26 +14,32 @@
 # small.
 
 # The Companion is a SvelteKit static export (its own lot). Until that build
-# exists, this stage emits the holding page, so the image's shape is already
-# the final one and only the build command changes when the app lands.
+# exists, this stage emitted a holding page; since ticket #66 it builds the
+# app, and `companion-gateway/holding-page/` is no longer referenced from
+# anywhere.
 #
-# When it lands, its adapter-static must be configured with
+# The build is `companion/`'s own and configured there: `adapter-static` with
 # `fallback: '200.html'` — the name the Gateway serves any client-side route
-# with (GATEWAY_FALLBACK_FILE), and the name the adapter's own documentation
+# with (GATEWAY_FALLBACK_FILE), and the name the adapter's documentation
 # recommends over index.html, which would collide with the prerendered
-# homepage.
+# homepage — `precompress: true` for the `.br` and `.gz` siblings the runtime's
+# `ServeFile` looks for, and `trailingSlash: 'never'`, which writes a
+# prerendered page as `<path>.html`: step 2 of the resolution order in
+# `companion-gateway/src/static_files.rs`.
+#
+# `npm ci`, not `npm install`: the lockfile is committed, so the image builds
+# the dependency tree the tests ran against. The generated Gateway client
+# (`companion/src/lib/api/`) is committed too, which is what lets this stage
+# copy `companion/` alone — it has no sibling directory to generate from, and
+# `npm run api:check` outside the image is what keeps it honest.
 FROM node:22-bookworm-slim AS companion
-WORKDIR /src
-COPY companion companion
-COPY companion-gateway/holding-page holding-page
-RUN set -eu; \
-    if [ -f companion/package.json ]; then \
-      cd companion && npm ci && npm run build && cp -r build /companion-dist; \
-    else \
-      echo "no Companion build in companion/: shipping the holding page"; \
-      cp -r holding-page /companion-dist; \
-      cp holding-page/index.html /companion-dist/200.html; \
-    fi
+WORKDIR /src/companion
+COPY companion .
+RUN npm ci --no-audit --no-fund \
+    && npm run build \
+    && cp -r build /companion-dist \
+    && test -f /companion-dist/200.html \
+    && test -f /companion-dist/index.html
 
 FROM rust:1-bookworm AS build
 WORKDIR /src

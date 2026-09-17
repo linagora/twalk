@@ -10,3 +10,14 @@
 .scratch
 .agents/
 .claude/
+
+# The Companion's own build products. The image's Node stage runs `npm ci` and
+# `npm run build` itself (companion-gateway.Dockerfile), so a local
+# node_modules — hundreds of megabytes, and possibly built for another
+# platform — must not travel in the context, and neither must a local build.
+**/node_modules
+companion/build
+companion/.svelte-kit
+companion/test-results
+companion/playwright-report
+companion/blob-report
