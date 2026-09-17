@@ -27,6 +27,18 @@ pub fn dead_letter_subject() -> String {
     format!("{}.dead", normalize::bus_subject(REPLY_APPROVED_TYPE))
 }
 
+/// Header carrying the original event id on a dead-letter copy.
+pub const DEAD_LETTER_EVENT_ID_HEADER: &str = "event-id";
+
+/// `Nats-Msg-Id` of the dead-letter copy of an event. The bus de-duplicates
+/// per stream, and the dead-letter subject shares the twalk stream with the
+/// approved reply, published under its event id: reusing that id would make
+/// the bus drop the copy as a duplicate. The derived id is still stable, so a
+/// redelivered event dead-lettered twice is stored once.
+pub fn dead_letter_msg_id(event_id: &str) -> String {
+    format!("{event_id}:dead-letter")
+}
+
 /// An approved reply to post, parsed from a `persona.reply.approved.v1`
 /// event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +123,14 @@ mod tests {
             dead_letter_subject(),
             "twalk.persona.reply.approved.v1.dead"
         );
+    }
+
+    #[test]
+    fn the_dead_letter_msg_id_is_distinct_from_the_event_id_and_stable() {
+        let id = dead_letter_msg_id("abc123");
+        assert_ne!(id, "abc123");
+        assert_eq!(id, dead_letter_msg_id("abc123"));
+        assert_eq!(id, "abc123:dead-letter");
     }
 
     fn sample_event() -> Value {
