@@ -76,7 +76,11 @@ describe('the catalogues', () => {
 			version: '0.1.0',
 			// The deployment's own address, as /recover reports it when nothing
 			// answered there (ticket #115).
-			url: 'http://twalk.example:8009'
+			url: 'http://twalk.example:8009',
+			// An identity provider as a homeserver advertises it: the sign-in
+			// screen labels its button with the provider's own name, because
+			// that is what a user recognises (ticket #112).
+			provider: 'Connect with Twake'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();

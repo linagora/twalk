@@ -31,6 +31,15 @@ export type DeploymentOutcome =
 	 */
 	| { kind: 'ready'; homeserver: DiscoveredHomeserver }
 	/**
+	 * This deployment already has its account, and this browser holds no
+	 * session for it. The user is returning, not arriving: offer sign-in.
+	 *
+	 * Before the Gateway could be *asked* this, the screen offered to create
+	 * an account, the submit met a 409, and only then pointed at recovery
+	 * (#112). A form whose one action is forbidden is not an answer.
+	 */
+	| { kind: 'needs-sign-in'; homeserver: DiscoveredHomeserver }
+	/**
 	 * This browser holds a live Gateway session. Whether onboarding continues
 	 * or the store-loss journey starts depends on the crypto store, which
 	 * `$lib/crypto/store.ts` answers — not this module.
@@ -52,6 +61,17 @@ export async function probeDeployment(domain: string): Promise<DeploymentOutcome
 	let status: number;
 	let owner: string | null = null;
 	let detail = '';
+	// What this deployment is, asked outright. Unauthenticated, so it answers
+	// before a returning browser has any credential to present.
+	let bootstrapped = false;
+	try {
+		const described = await gateway.GET('/api/deployment');
+		bootstrapped = described.data?.bootstrapped ?? false;
+	} catch {
+		// Left false: the probe below still classifies the deployment, and a
+		// user offered account creation that turns out to be forbidden is the
+		// behaviour that existed before this call — no worse, never better.
+	}
 	try {
 		const result = await gateway.GET('/api/session');
 		status = result.response.status;
@@ -80,6 +100,9 @@ export async function probeDeployment(domain: string): Promise<DeploymentOutcome
 
 	if (status === 200 && owner !== null) {
 		return { kind: 'signed-in', homeserver: discovery.homeserver, owner };
+	}
+	if (bootstrapped) {
+		return { kind: 'needs-sign-in', homeserver: discovery.homeserver };
 	}
 	return { kind: 'ready', homeserver: discovery.homeserver };
 }

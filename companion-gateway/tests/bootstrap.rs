@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use harness::{
     companion_build, ensure_stack, fresh_owner_user_id, gateway_env_with, gateway_state_dir,
     poll_until, GatewayProc, MatrixUser, OTHER_LOCALPART, REGISTRATION_SHARED_SECRET,
-    SENSOR_USER_ID,
+    SENSOR_USER_ID, SERVER_NAME,
 };
 
 /// The password a test registers the owner's account with. A throwaway
@@ -843,6 +843,50 @@ async fn no_matrix_token_password_or_registration_secret_reaches_the_store_or_th
         store.contains(&owner),
         "the store remembers which account was created: {}",
         state_dir.display()
+    );
+
+    gateway.stop().await;
+    Ok(())
+}
+
+/// Ticket #112: a returning browser can **ask** whether this deployment has
+/// its account, instead of offering to create one and reading the refusal.
+///
+/// The value has to move — a deployment is not bootstrapped and then is — so
+/// both sides are asserted around the one registration that changes it. A test
+/// that only checked the `true` would pass against a handler that always said
+/// `true`, which is the answer that sends a first user to a sign-in screen for
+/// an account nobody has created.
+#[tokio::test]
+async fn the_deployment_says_whether_it_has_its_account() -> Result<()> {
+    let (gateway, base, _state_dir, owner) = start("deployment-bootstrapped").await?;
+    let client = client()?;
+
+    let before = json(client.get(format!("{base}/api/deployment")).send().await?).await?;
+    assert_eq!(
+        before["bootstrapped"].as_bool(),
+        Some(false),
+        "before any registration, this deployment has no account"
+    );
+    assert_eq!(
+        before["homeserver"].as_str(),
+        Some(SERVER_NAME),
+        "and it names the server its owner would be on"
+    );
+    assert!(
+        before.get("owner").is_none(),
+        "the owner's Matrix ID is never published to an unauthenticated caller: \
+         naming the human who owns a deployment is a different disclosure, and \
+         no screen needs it before sign-in"
+    );
+
+    register_owner(&client, &base, &owner).await?;
+
+    let after = json(client.get(format!("{base}/api/deployment")).send().await?).await?;
+    assert_eq!(
+        after["bootstrapped"].as_bool(),
+        Some(true),
+        "once the account exists, the deployment says so"
     );
 
     gateway.stop().await;
