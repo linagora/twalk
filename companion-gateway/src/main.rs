@@ -18,6 +18,7 @@ use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
 use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
+use twalk_companion_gateway::portals::{refresh_until_shutdown, PortalBridge, Portals};
 use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::settings::Settings;
 use twalk_companion_gateway::static_files::Resolver;
@@ -369,6 +370,65 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    // The portal register (ticket #105): which conversations the bridges
+    // have actually built, and where the Sensor stands in each. It needs the
+    // homeserver, the Sensor's Matrix ID and each bridge's appservice token
+    // — nothing of the store, the bus or the owner's session — so it is
+    // built from configuration alone and is on whenever those three exist.
+    let portals = match Portals::new(
+        config.bootstrap.homeserver_url.as_deref(),
+        config.bootstrap.sensor_user_id.as_deref(),
+        config
+            .bridges
+            .iter()
+            .map(|bridge| PortalBridge {
+                bridge_id: bridge.bridge_id.clone(),
+                network: bridge.network.clone(),
+                as_token: bridge.as_token.clone(),
+            })
+            .collect(),
+        metrics.clone(),
+    )
+    .context("failed to build the portal register")?
+    {
+        Some(portals) => {
+            info!(
+                sensor = %portals.sensor_user_id(),
+                refresh_seconds = config.portal_refresh_seconds,
+                "the portal register is enabled: GET /api/portals says which conversations the \
+                 bridges have built and which of them the Sensor is inside, and it is inside \
+                 none of them until the user says so"
+            );
+            for bridge in &config.bridges {
+                if bridge.as_token.is_none() {
+                    // Loud, and for a second reason now: without this token
+                    // the register cannot see this bridge's conversations at
+                    // all, so the user is offered none of them and the
+                    // Sensor stays outside every one.
+                    warn!(
+                        bridge = %bridge.bridge_id,
+                        "no as_token is configured for this bridge, so its portal rooms cannot \
+                         be read and none of its conversations can be observed: set \
+                         GATEWAY_BRIDGE_{}_AS_TOKEN to the same value as that bridge's \
+                         appservice.as_token",
+                        twalk_companion_gateway::config::variable_slug(&bridge.bridge_id)
+                    );
+                }
+            }
+            Some(Arc::new(portals))
+        }
+        None => {
+            if !config.bridges.is_empty() {
+                warn!(
+                    "GATEWAY_SENSOR_USER_ID is not set: GET /api/portals answers 503, so nothing \
+                     can put the Sensor into the conversations your bridges build and a \
+                     connected network will publish nothing at all"
+                );
+            }
+            None
+        }
+    };
+
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
     // metrics endpoint behaves the same way).
@@ -393,7 +453,8 @@ async fn main() -> Result<()> {
             .with_contacts(contacts)
             .with_approvals(approvals)
             .with_suggestions(suggestions)
-            .with_settings(settings),
+            .with_settings(settings)
+            .with_portals(portals.clone()),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming
@@ -407,6 +468,18 @@ async fn main() -> Result<()> {
             .map(|sign_in| sign_in.owner.clone())
             .unwrap_or_default();
         tokio::spawn(reconcile(statuses, bridges, owner));
+    }
+    // The portal register's background read (ticket #105), after the bind
+    // for the same reason: it is what keeps `/metrics` able to say how many
+    // conversations the Sensor is outside without anyone opening the
+    // Companion. The API's own read is always live, so this loop is only
+    // about the gauges — and a homeserver it cannot reach costs a warning
+    // and a counter, never the origin.
+    if let Some(portals) = portals {
+        tokio::spawn(refresh_until_shutdown(
+            portals,
+            config.portal_refresh_seconds,
+        ));
     }
 
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();

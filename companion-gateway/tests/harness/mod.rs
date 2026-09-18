@@ -379,6 +379,20 @@ pub fn gateway_env_without_sign_in(static_dir: &Path) -> Vec<(String, String)> {
 /// The account's Matrix access token stays on this side of the seam. That is
 /// the property ADR 0011 is about: the Gateway is handed an OpenID token and
 /// never the access token that minted it.
+/// Percent-encodes one path segment. mautrix's `m.bridge` state key is
+/// `<server_name>/<appservice_id>`, and a raw slash there is a different URL.
+fn path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
 pub struct MatrixUser {
     pub user_id: String,
     access_token: String,
@@ -552,6 +566,155 @@ impl MatrixUser {
             .to_owned())
     }
 
+    /// A brand-new account on the test stack, with a session.
+    ///
+    /// The portal tests need an account nobody else's rooms are in: a bridge
+    /// bot's whole answer to "which conversations exist?" is the list of
+    /// rooms it is joined to, so a shared bot would carry every previous
+    /// test's portals into this one's register. The test stack's Synapse has
+    /// open registration (`tests/harness/synapse/homeserver.yaml`), which is
+    /// what makes this one call rather than an admin credential.
+    pub async fn register_fresh(prefix: &str) -> Result<Self> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let localpart = format!("{prefix}_{unique}");
+        let http = reqwest::Client::new();
+        let body: serde_json::Value = http
+            .post(format!("{}/_matrix/client/v3/register", synapse_url()))
+            .json(&serde_json::json!({
+                "username": localpart,
+                "password": format!("test-only-password-{localpart}"),
+                "auth": { "type": "m.login.dummy" },
+                "inhibit_login": false,
+            }))
+            .send()
+            .await
+            .context("failed to register a test user")?
+            .error_for_status()
+            .context("the homeserver refused the registration")?
+            .json()
+            .await
+            .context("the registration answer is not JSON")?;
+        Ok(Self {
+            user_id: body["user_id"]
+                .as_str()
+                .context("the registration answer names no user id")?
+                .to_owned(),
+            access_token: body["access_token"]
+                .as_str()
+                .context("the registration answer carries no access token")?
+                .to_owned(),
+            http,
+        })
+    }
+
+    /// Invites another account into a room.
+    pub async fn invite(&self, room_id: &str, user_id: &str) -> Result<()> {
+        self.http
+            .post(format!(
+                "{}/_matrix/client/v3/rooms/{room_id}/invite",
+                synapse_url()
+            ))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "user_id": user_id }))
+            .send()
+            .await
+            .context("failed to invite into a room")?
+            .error_for_status()
+            .context("the homeserver refused the invitation")?;
+        Ok(())
+    }
+
+    /// Joins a room this account was invited to — what the Sensor does on its
+    /// own, played here by a test account.
+    pub async fn join(&self, room_id: &str) -> Result<()> {
+        self.http
+            .post(format!(
+                "{}/_matrix/client/v3/rooms/{room_id}/join",
+                synapse_url()
+            ))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("failed to join a room")?
+            .error_for_status()
+            .context("the homeserver refused the join")?;
+        Ok(())
+    }
+
+    /// Sets one state event.
+    pub async fn send_state_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        content: serde_json::Value,
+    ) -> Result<()> {
+        self.http
+            .put(format!(
+                "{}/_matrix/client/v3/rooms/{room_id}/state/{event_type}/{}",
+                synapse_url(),
+                path_segment(state_key)
+            ))
+            .bearer_auth(&self.access_token)
+            .json(&content)
+            .send()
+            .await
+            .context("failed to send a state event")?
+            .error_for_status()
+            .context("the homeserver refused the state event")?;
+        Ok(())
+    }
+
+    /// A portal room, as a bridge builds one: this account creates it (so it
+    /// is the room's admin, as a bridge bot is), marks it with the `m.bridge`
+    /// state event the Sensor attributes a network by
+    /// (`sensor/src/network.rs`), and pulls the named accounts in as the
+    /// conversation's members.
+    ///
+    /// The marker's `bridgebot` names this account, which is how the register
+    /// knows not to count the bot as somebody in the conversation.
+    pub async fn make_portal(&self, name: &str, protocol_id: &str) -> Result<String> {
+        let room_id = self.create_room(name).await?;
+        self.send_state_event(
+            &room_id,
+            "m.bridge",
+            &format!("test.twalk/{protocol_id}"),
+            serde_json::json!({
+                "bridgebot": self.user_id,
+                "protocol": { "id": protocol_id, "displayname": protocol_id },
+                "channel": { "id": format!("{protocol_id}-{name}"), "displayname": name },
+            }),
+        )
+        .await?;
+        Ok(room_id)
+    }
+
+    /// The accounts joined to a room, as this account can read them.
+    pub async fn joined_members(&self, room_id: &str) -> Result<Vec<String>> {
+        let body: serde_json::Value = self
+            .http
+            .get(format!(
+                "{}/_matrix/client/v3/rooms/{room_id}/joined_members",
+                synapse_url()
+            ))
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .context("failed to read a room's members")?
+            .error_for_status()
+            .context("the homeserver refused to list the members")?
+            .json()
+            .await
+            .context("the joined_members answer is not JSON")?;
+        Ok(body["joined"]
+            .as_object()
+            .map(|joined| joined.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
     /// The account's Matrix access token: what the Gateway must never hold,
     /// and what the store and the logs are asserted against.
     pub fn matrix_access_token(&self) -> &str {
@@ -630,6 +793,64 @@ pub fn gateway_env_with_bridges(static_dir: &Path, stub_base_url: &str) -> Vec<(
                 STUB_PROVISIONING_SECRET,
             ),
             ("GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_NETWORK", "signal"),
+        ],
+    )
+}
+
+/// The bridge instances the portal register's suite configures (ticket
+/// #105): one whose appservice credential is a working Matrix session of the
+/// account playing the bridge bot, and one with no credential at all.
+///
+/// The second is not decoration. A bridge the operator wired up without
+/// giving the Gateway its token contributes no conversations to any total,
+/// and the whole point of the register is that such a bridge is *reported*
+/// rather than silently missing — "the Sensor is outside 17 of your 18
+/// conversations" must never quietly mean "…of the 18 I could see".
+///
+/// The token is an ordinary access token rather than an appservice one
+/// because the register only ever speaks the client-server API with it: in a
+/// deployment that credential is the bridge's `as_token`, and Synapse
+/// answers the same calls for both. What the test needs from it is what the
+/// bridge bot has — membership of the portal rooms and the power to invite
+/// in them.
+pub const PORTAL_BRIDGE_ID: &str = "mautrix-portal";
+pub const PORTAL_TOKENLESS_BRIDGE_ID: &str = "mautrix-tokenless";
+
+pub fn gateway_env_with_portals(
+    static_dir: &Path,
+    bridge_bot_access_token: &str,
+) -> Vec<(String, String)> {
+    let dead = unreachable_http_url().expect("the kernel can hand out a free port");
+    gateway_env_with(
+        static_dir,
+        &[
+            (
+                "GATEWAY_BRIDGES",
+                &format!("{PORTAL_BRIDGE_ID},{PORTAL_TOKENLESS_BRIDGE_ID}"),
+            ),
+            // The register never calls a bridge's provisioning API — it asks
+            // the homeserver — so these two instances need no listener, and
+            // the dead port is the proof that it does not.
+            ("GATEWAY_BRIDGE_MAUTRIX_PORTAL_URL", &dead),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_PORTAL_PROVISIONING_SECRET",
+                "test-only-unused-provisioning-secret",
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_PORTAL_NETWORK", "whatsapp"),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_PORTAL_AS_TOKEN",
+                bridge_bot_access_token,
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_TOKENLESS_URL", &dead),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_TOKENLESS_PROVISIONING_SECRET",
+                "test-only-unused-provisioning-secret",
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_TOKENLESS_NETWORK", "signal"),
+            // The background refresh is off: every number this suite asserts
+            // must come from a read it made itself, so that a passing test is
+            // never a timer that happened to fire.
+            ("GATEWAY_PORTAL_REFRESH_SECONDS", "0"),
         ],
     )
 }

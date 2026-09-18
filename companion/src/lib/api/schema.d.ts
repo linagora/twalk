@@ -825,6 +825,96 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/portals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every conversation the bridges have built, and where the Sensor stands in each.
+         * @description The read a per-conversation chooser is drawn from, and the answer to
+         *     a question this deployment could not previously ask itself: *how
+         *     many of my conversations is the Sensor outside?*
+         *
+         *     Read live, as each bridge's own bot, through the appservice token
+         *     that bridge's configuration already carries
+         *     (`GATEWAY_BRIDGE_<ID>_AS_TOKEN`). Nothing here is stored: a
+         *     conversation's name and its member count are read for this request
+         *     and forgotten with the response, and `observation` is the Sensor's
+         *     own `m.room.member` event rather than a row the Gateway wrote.
+         *
+         *     `summary` is in the answer rather than left to the client, because
+         *     "the Sensor is outside 17 of your 18 conversations" is a sentence
+         *     the deployment states. `/metrics` states the same numbers as
+         *     `twalk_companion_gateway_portal_rooms`.
+         *
+         *     `bridges` lists **every** configured bridge, readable or not. A
+         *     bridge the Gateway has no appservice token for contributes no
+         *     portals, and a total that quietly covered fewer bridges than the
+         *     user has connected would reproduce the very defect this endpoint
+         *     exists for.
+         *
+         *     `members` excludes the bridge bot and the Sensor, so deciding to
+         *     observe a conversation never changes how large it looks.
+         *
+         *     No message content is read at any point: the register reads room
+         *     state, never a timeline.
+         */
+        get: operations["listPortals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/portals/observation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Decide which conversations the Sensor observes.
+         * @description The user's decision, in either direction, over one conversation or
+         *     over a selection of them.
+         *
+         *     `observed: true` invites the Sensor into each named portal room, as
+         *     that bridge's own bot — the account that created the room and is in
+         *     it. The Sensor joins on its own when it next syncs, **provided
+         *     `SENSOR_ALLOWED_INVITERS` names that bot**; a portal that stays at
+         *     `invited` is what a deployment missing that setting looks like.
+         *
+         *     `observed: false` removes the Sensor from the room, again as the
+         *     bot. Stopping observation is the exact inverse of starting it,
+         *     through one credential and one mechanism, rather than a second
+         *     control plane for a membership Matrix already models.
+         *
+         *     A room this Gateway does not hold as a portal is `unknown_portal`
+         *     and **no call is made with the appservice credential**: its reach is
+         *     its own bot's rooms, and a room id in a request is never a reason to
+         *     widen it. Inviting the Sensor into a room of the user's own is a
+         *     different operation with a different credential
+         *     (`POST /api/bootstrap/rooms`).
+         *
+         *     One room failing does not fail the others: `200` carries one outcome
+         *     per room, in the order they were asked about. A request naming
+         *     twelve conversations where one is refused still holds eleven
+         *     decisions the user made.
+         */
+        post: operations["setPortalObservation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -2287,6 +2377,124 @@ export interface components {
              */
             total: number;
         };
+        /** @description One conversation, as the homeserver answers about it now. */
+        Portal: {
+            /**
+             * @description The bridge instance whose bot is in this room, as
+             *     `GATEWAY_BRIDGES` names it. Never a network value.
+             */
+            bridge_id: string;
+            /**
+             * @description How many people are in the conversation: joined members,
+             *     excluding the bridge bot and the Sensor. Excluding them is what
+             *     keeps the number from changing when the user decides to observe
+             *     the room.
+             */
+            members: number;
+            /**
+             * @description The room's name — for a one-to-one portal the contact's, for a
+             *     group the group's — or `null` where the bridge set none. Read
+             *     through and stored nowhere.
+             */
+            name: string | null;
+            network: components["schemas"]["Network"];
+            /**
+             * @description `observing` — the Sensor has joined, and this conversation
+             *     reaches the bus.
+             *     `invited` — the Sensor was invited and has not joined; normally
+             *     a moment, and when it lasts, `SENSOR_ALLOWED_INVITERS` does not
+             *     name this bridge's bot.
+             *     `absent` — the Sensor is not in the room and has not been asked
+             *     to be. The default for every portal a bridge builds.
+             * @enum {string}
+             */
+            observation: "observing" | "invited" | "absent";
+            /** @description The portal room on this deployment's homeserver. */
+            room_id: string;
+        };
+        /** @description Whether one configured bridge could be read. */
+        PortalBridgeReading: {
+            bridge_id: string;
+            /**
+             * @description On `readable: false`, what stopped the read, in the operator's
+             *     words — the variable that would open it, or the homeserver's own
+             *     refusal. `null` otherwise.
+             */
+            detail: string | null;
+            network: components["schemas"]["Network"];
+            /**
+             * @description `false` means none of this bridge's conversations are in
+             *     `portals` or in `summary`.
+             */
+            readable: boolean;
+        };
+        /** @description One outcome per room asked about, in the order asked. */
+        PortalObservation: {
+            /** @description The decision that was applied, echoed back. */
+            observed: boolean;
+            outcomes: components["schemas"]["PortalObservationOutcome"][];
+        };
+        /** @description What happened in one room. */
+        PortalObservationOutcome: {
+            /**
+             * @description Present on `failed` alone: the homeserver's own error code
+             *     (`M_FORBIDDEN` where the bot may not invite or remove), or the
+             *     Gateway's own where there was none.
+             */
+            reason?: string;
+            /** @description The room, exactly as the request spelled it. */
+            room_id: string;
+            /**
+             * @description `invited` — the Sensor was invited and joins on its own.
+             *     `already_observed` — it was already in the room, or already
+             *     invited to it; asking twice is not an error.
+             *     `removed` — it was taken out, so this conversation stops
+             *     reaching the bus.
+             *     `not_observed` — it was not in the room to begin with.
+             *     `unknown_portal` — this room is not a portal of any bridge this
+             *     Gateway can read, and nothing was attempted in it.
+             *     `failed` — this room alone did not work; `reason` says why.
+             * @enum {string}
+             */
+            status: "invited" | "already_observed" | "removed" | "not_observed" | "unknown_portal" | "failed";
+        };
+        /** @description The user's decision about one or more conversations. */
+        PortalObservationRequest: {
+            /**
+             * @description `true` puts the Sensor into each conversation, `false` takes it
+             *     out.
+             */
+            observed: boolean;
+            /**
+             * @description The portal rooms to decide about, as `GET /api/portals` spelled
+             *     them.
+             */
+            rooms: string[];
+        };
+        /**
+         * @description Every portal room every readable bridge holds, what it is called,
+         *     how many people are in it, and where the Sensor stands in it.
+         */
+        PortalRegister: {
+            /** @description Every configured bridge, readable or not. */
+            bridges: components["schemas"]["PortalBridgeReading"][];
+            portals: components["schemas"]["Portal"][];
+            summary: components["schemas"]["PortalSummary"];
+        };
+        /**
+         * @description The counts the deployment states rather than leaving a client to
+         *     derive: the same numbers `/metrics` carries.
+         */
+        PortalSummary: {
+            absent: number;
+            invited: number;
+            observing: number;
+            /**
+             * @description Portal rooms across every **readable** bridge. Read it together
+             *     with `bridges`.
+             */
+            total: number;
+        };
         /** @description A decision as the journal holds it. */
         RecordedConsentDecision: {
             /**
@@ -2738,6 +2946,26 @@ export interface components {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
                     error?: "no_login_in_flight" | "unknown_bridge";
+                };
+            };
+        };
+        /**
+         * @description This Gateway holds no portal register: there is no Sensor to invite
+         *     (`GATEWAY_SENSOR_USER_ID`), no bridge configured (`GATEWAY_BRIDGES`),
+         *     or no homeserver to read them from — or it has no owner at all and
+         *     the whole API is closed. A refusal rather than an empty list: "your
+         *     bridges have built no conversations" and "this Gateway cannot see
+         *     them" are very different claims, and only one of them is about the
+         *     user's messages. `detail` names what would open it.
+         */
+        PortalsNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "portals_not_configured" | "sign_in_not_configured";
                 };
             };
         };
@@ -4380,6 +4608,73 @@ export interface operations {
             };
             500: components["responses"]["StoreFailed"];
             503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    listPortals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The register as the homeserver answers about it right now. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalRegister"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["PortalsNotConfigured"];
+        };
+    };
+    setPortalObservation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PortalObservationRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description Every named room was asked about. Read each outcome: the request
+             *     as a whole succeeded even where a room did not.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalObservation"];
+                };
+            };
+            /**
+             * @description The body is not an observation document, or it named no room at
+             *     all, or it named more rooms than one request may carry
+             *     (`invalid_request`; `detail` says which).
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            503: components["responses"]["PortalsNotConfigured"];
         };
     };
     getSession: {

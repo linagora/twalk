@@ -11,7 +11,10 @@ A service that connects one external messaging network to Matrix, landing each c
 _Avoid_: connector
 
 **Portal room**:
-An end-to-end encrypted Matrix room, maintained by a bridge, that holds exactly one external conversation.
+An end-to-end encrypted Matrix room, maintained by a bridge, that holds exactly one external conversation. Built **lazily**, when that conversation becomes active, and not once at login: the set grows all day, which is why observing it is a continuous mechanism and not a step (ADR 0024).
+
+**Portal register**:
+Which portal rooms this deployment's bridges have built, and where the Sensor stands in each: `observing`, `invited` or `absent`. Read live from the homeserver as each bridge's own bot and kept nowhere, so the answer is the Sensor's own membership rather than a record that could drift from it. Its purpose is as much to state a number as to change one — "the Sensor is outside 17 of your 18 conversations" is a sentence the deployment can say (ADR 0024). It is a mechanism and not a policy: the Sensor observes nothing by default, and which conversations it enters is the user's decision, one conversation at a time.
 
 **Sensor**:
 The Matrix client that decrypts portal-room events, enriches them with contact and channel context, and publishes them as typed CloudEvents.

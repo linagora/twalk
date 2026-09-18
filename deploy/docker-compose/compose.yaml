@@ -338,6 +338,11 @@ services:
       # this is a choice about how far back a reply can be approved from,
       # not about whether the answer is honest.
       GATEWAY_APPROVAL_LOOKUP_WINDOW: ${GATEWAY_APPROVAL_LOOKUP_WINDOW:-}
+      # How often the portal register is re-read in the background (issue
+      # #105). Empty: 300 seconds; 0 turns it off. It decides only how fresh
+      # the /metrics counts of observed and unobserved conversations are —
+      # GET /api/portals always reads the homeserver there and then.
+      GATEWAY_PORTAL_REFRESH_SECONDS: ${GATEWAY_PORTAL_REFRESH_SECONDS:-}
       # The model and the language (ticket #98): the LLM endpoint credential
       # as a FILE, which wins over anything the Companion writes, so a
       # production stack can lock the credential down while the model name

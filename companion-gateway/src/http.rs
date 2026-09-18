@@ -42,6 +42,8 @@ use crate::contacts::Contacts;
 use crate::contacts_http;
 use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
+use crate::portals::Portals;
+use crate::portals_http;
 use crate::session::Sessions;
 use crate::session_http;
 use crate::settings::Settings;
@@ -122,6 +124,14 @@ pub struct Gateway {
     /// request, and the handlers say `503 settings_not_configured` anyway
     /// rather than leaving a corner of the surface silent.
     settings: Option<Arc<Settings>>,
+    /// The portal register ([`crate::portals`], ticket #105): which
+    /// conversations this deployment's bridges have built, and where the
+    /// Sensor stands in each. `None` when there is no Sensor to invite, no
+    /// bridge configured, or no homeserver to ask — the portal endpoints
+    /// then answer `503 portals_not_configured`, because "your bridges have
+    /// built no conversations" and "this Gateway cannot see them" are very
+    /// different claims and only one of them is about the user's messages.
+    portals: Option<Arc<Portals>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -145,6 +155,7 @@ impl Gateway {
             approvals: None,
             suggestions: None,
             settings: None,
+            portals: None,
             now_unix_seconds,
         }
     }
@@ -270,6 +281,19 @@ impl Gateway {
         self.settings.clone()
     }
 
+    /// Adds the portal register (ticket #105), the same way. It needs none
+    /// of the store, the bus or the owner's session — only the homeserver,
+    /// the Sensor's Matrix ID and each bridge's appservice token — which is
+    /// why it is its own half rather than a corner of the bridge facade.
+    pub fn with_portals(mut self, portals: Option<Arc<Portals>>) -> Self {
+        self.portals = portals;
+        self
+    }
+
+    pub fn portals(&self) -> Option<Arc<Portals>> {
+        self.portals.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -343,6 +367,11 @@ pub fn router(gateway: Gateway) -> Router {
         // declares as a service-token route, because the runtime is not a
         // device and a persona is never handed that token (ADR 0015).
         .merge(settings_http::routes())
+        // The portal register (ticket #105): the same merge, the same
+        // guard. What a bridge has actually built, and which of those
+        // conversations the Sensor is inside — read live from the
+        // homeserver, stored nowhere.
+        .merge(portals_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))

@@ -95,6 +95,17 @@ pub struct Config {
     /// on a deployment whose bus carries far more traffic than one person's
     /// conversations; the cost is a longer read on the approval path alone.
     pub approval_lookup_window: u64,
+    /// How often the portal register is re-read in the background, in
+    /// seconds (GATEWAY_PORTAL_REFRESH_SECONDS, default
+    /// [`crate::portals::DEFAULT_REFRESH_SECONDS`], ticket #105). `0` turns
+    /// the background read off.
+    ///
+    /// It decides only how stale `/metrics` may be about how many
+    /// conversations the Sensor is outside: `GET /api/portals` always reads
+    /// the homeserver there and then, so the Companion never sees a cached
+    /// list. Lower it on a deployment that watches the gauge; the cost is one
+    /// homeserver call per portal room per interval.
+    pub portal_refresh_seconds: u64,
     /// Where the model configuration and the language preference live, and
     /// the operator's credential file if there is one (ticket #98). `None`
     /// on the same terms as [`Self::sign_in`], because the settings store is
@@ -533,6 +544,10 @@ impl Config {
                 );
                 window
             },
+            portal_refresh_seconds: optional(
+                "GATEWAY_PORTAL_REFRESH_SECONDS",
+                &crate::portals::DEFAULT_REFRESH_SECONDS.to_string(),
+            )?,
             // The settings store (ticket #98) needs what sign-in already
             // names — the state directory — plus, optionally, the
             // operator's credential file.

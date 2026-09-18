@@ -78,6 +78,29 @@ pub struct Metrics {
     /// set of static strings, so the cardinality is bounded.
     approvals_published: Mutex<u64>,
     approval_refusals: Mutex<BTreeMap<&'static str, u64>>,
+    /// How many portal rooms stand in each observation state (#105), and how
+    /// many configured bridges could not be read at all.
+    ///
+    /// This is the fact the product could not previously state. A deployment
+    /// went deaf on seventeen of its eighteen conversations and nothing
+    /// anywhere said so: the number was knowable only by asking the
+    /// homeserver by hand with an appservice token. Here it is a gauge, so
+    /// "the Sensor is outside 17 of your 18 conversations" is something a
+    /// dashboard can say and an alert can fire on. The label set is closed —
+    /// `observing`, `invited`, `absent` — and every series exists at zero
+    /// once a register is held, because a deployment observing nothing must
+    /// read as observing nothing rather than as having no answer.
+    ///
+    /// The unreadable-bridge gauge is what keeps the first one honest: a
+    /// bridge whose appservice token is missing contributes no portals, and
+    /// a total that quietly covered fewer bridges than the user has
+    /// connected would reproduce this defect in another form.
+    ///
+    /// `None` until a register has been read, so a Gateway that holds none
+    /// exposes no portal series at all.
+    portal_rooms: Mutex<Option<BTreeMap<&'static str, u64>>>,
+    portal_bridges_unreadable: Mutex<u64>,
+    portal_refresh_failures: Mutex<u64>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -142,6 +165,9 @@ impl Metrics {
             approval_refusals: Mutex::new(BTreeMap::new()),
             contacts_observed: Mutex::new(0),
             pending_contacts: Mutex::new(None),
+            portal_rooms: Mutex::new(None),
+            portal_bridges_unreadable: Mutex::new(0),
+            portal_refresh_failures: Mutex::new(0),
             started_unix_seconds: now_unix_seconds,
         }
     }
@@ -295,6 +321,37 @@ impl Metrics {
             .expect("the metrics mutex is never poisoned") = Some(pending);
     }
 
+    /// Records a whole reading of the portal register (#105): how many
+    /// conversations stand in each state, and how many bridges could not be
+    /// read. Set as one, from one register, so the three states and the
+    /// unreadable count can never describe different instants.
+    pub fn set_portal_rooms(&self, register: &crate::portals::Register) {
+        let counts = register
+            .summary()
+            .into_iter()
+            .map(|(observation, count)| (observation.label(), count))
+            .collect();
+        *self
+            .portal_rooms
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(counts);
+        *self
+            .portal_bridges_unreadable
+            .lock()
+            .expect("the metrics mutex is never poisoned") = register.unreadable_bridges();
+    }
+
+    /// One bridge's portals could not be read. Counted and not only logged:
+    /// a register that silently shrank would say the Sensor is outside fewer
+    /// conversations than it is, which is the flattering direction to be
+    /// wrong in.
+    pub fn record_portal_refresh_failure(&self) {
+        *self
+            .portal_refresh_failures
+            .lock()
+            .expect("the metrics mutex is never poisoned") += 1;
+    }
+
     /// Renders the Prometheus text exposition (format version 0.0.4). `now`
     /// is the scrape time in seconds since the epoch.
     pub fn render(&self, now_unix_seconds: u64) -> String {
@@ -409,6 +466,36 @@ impl Metrics {
             out.push_str("# TYPE twalk_companion_gateway_pending_contacts gauge\n");
             out.push_str(&format!(
                 "twalk_companion_gateway_pending_contacts {waiting}\n"
+            ));
+        }
+        let portal_rooms = self
+            .portal_rooms
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .clone();
+        if let Some(portal_rooms) = portal_rooms {
+            out.push_str("# HELP twalk_companion_gateway_portal_rooms Portal rooms this deployment's bridges have built, by where the Sensor stands in them.\n");
+            out.push_str("# TYPE twalk_companion_gateway_portal_rooms gauge\n");
+            for (observation, count) in portal_rooms.iter() {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_portal_rooms{{observation=\"{observation}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_portal_bridges_unreadable Configured bridges whose portal rooms could not be read, so their conversations are in no total above.\n");
+            out.push_str("# TYPE twalk_companion_gateway_portal_bridges_unreadable gauge\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_portal_bridges_unreadable {}\n",
+                self.portal_bridges_unreadable
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            out.push_str("# HELP twalk_companion_gateway_portal_refresh_failures_total Failed reads of a bridge's portal rooms.\n");
+            out.push_str("# TYPE twalk_companion_gateway_portal_refresh_failures_total counter\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_portal_refresh_failures_total {}\n",
+                self.portal_refresh_failures
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
             ));
         }
         out.push_str(
