@@ -26,7 +26,14 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import { gateway } from '$lib/api/client';
-	import { domain, restoreDomain, homeserverBaseUrl } from '$lib/onboarding/domain';
+	import {
+		domain,
+		restoreDomain,
+		rememberDomain,
+		homeserverBaseUrl,
+		isValidDomain,
+		normaliseDomain
+	} from '$lib/onboarding/domain';
 	import { homeserver, restoreHomeserver, matrixSession } from '$lib/onboarding/progress';
 	import { localpartOf, matrixIdFor } from '$lib/onboarding/account';
 	import { decodeRecoveryKey, groupRecoveryKey, type RecoveryKeyProblem } from '$lib/recovery/key';
@@ -42,6 +49,22 @@
 	let password = $state('');
 	let typedKey = $state('');
 	let touched = $state(false);
+	/**
+	 * The deployment, when this browser does not already know it (ticket #115).
+	 *
+	 * A recovery screen is reached by definition from a browser that has lost
+	 * something, and often from one that never had anything: a new laptop, a
+	 * reinstalled phone. Such a browser has no remembered domain — the store is
+	 * per origin, so even the same laptop on a different tunnelled port is a
+	 * stranger here — and no Gateway session to be told it by. It used to have
+	 * nowhere to say *which* deployment either, so it resolved an empty
+	 * homeserver URL and failed with a raw `Failed to fetch`.
+	 *
+	 * The Gateway cannot answer this for us. It knows its homeserver's **server
+	 * name**, but not the address this browser reaches it at — through a tunnel
+	 * those differ, and the port is exactly what the user must be able to say.
+	 */
+	let typedDomain = $state('');
 
 	let failure = $state<string | null>(null);
 	let failureKind = $state<string | null>(null);
@@ -69,10 +92,23 @@
 		})();
 	});
 
-	const baseUrl = $derived($homeserver !== '' ? $homeserver : homeserverBaseUrl($domain));
+	/** Asked for only when nothing else can say it. */
+	const askDomain = $derived($domain === '');
+	const effectiveDomain = $derived(askDomain ? normaliseDomain(typedDomain) : $domain);
+	const domainValid = $derived(isValidDomain(effectiveDomain));
+
+	// The homeserver screen 1 resolved, but only if it belongs to the domain in
+	// play: a user correcting the domain here must not be sent to the old one.
+	const baseUrl = $derived(
+		$homeserver !== '' && effectiveDomain === $domain
+			? $homeserver
+			: homeserverBaseUrl(effectiveDomain)
+	);
 	const decoded = $derived(decodeRecoveryKey(typedKey));
 	const keyProblem = $derived<RecoveryKeyProblem | null>(decoded.ok ? null : decoded.problem);
-	const ready = $derived(username.trim().length > 0 && password.length > 0 && decoded.ok);
+	const ready = $derived(
+		domainValid && username.trim().length > 0 && password.length > 0 && decoded.ok
+	);
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
@@ -89,7 +125,7 @@
 			const { restoreFromRecoveryKey } = await import('$lib/crypto/bootstrap');
 			const result = await restoreFromRecoveryKey({
 				baseUrl,
-				userId: owner ?? matrixIdFor(username, $domain),
+				userId: owner ?? matrixIdFor(username, effectiveDomain),
 				password,
 				privateKey: decoded.bytes,
 				onStep: (next) => {
@@ -123,13 +159,31 @@
 				// is a separate problem, and screen 1 will say so.
 			});
 
+			// This deployment is the one we actually reached, so stop asking for
+			// it on this browser.
+			rememberDomain(effectiveDomain);
+
 			stage = 'done';
 		} catch (cause) {
 			stage = 'form';
 			const problem = (cause as { problem?: string }).problem;
-			failureKind = problem ?? 'failed';
+			failureKind = problem ?? classify(cause);
 			failure = cause instanceof Error ? cause.message : String(cause);
 		}
+	}
+
+	/**
+	 * A failure the homeserver never saw is not a failure of the password or
+	 * the key, and must not be reported as one. `Failed to fetch` on this
+	 * screen means the address is wrong or unreachable — the one thing the user
+	 * can fix — and saying so is the difference between a corrected port and a
+	 * hunt for a password that was right all along (#112).
+	 */
+	function classify(cause: unknown): string {
+		const message = cause instanceof Error ? cause.message : String(cause);
+		return /failed to fetch|networkerror|load failed|fetch failed/iu.test(message)
+			? 'unreachable'
+			: 'failed';
 	}
 </script>
 
@@ -166,6 +220,36 @@
 		</header>
 
 		<form class="stack" onsubmit={submit} novalidate>
+			{#if askDomain}
+				<!--
+					Asked before anything secret, because it decides where the
+					secret would be sent.
+				-->
+				<div class="field">
+					<label class="label" for="recover-domain">{$t('recover.domain.label')}</label>
+					<input
+						id="recover-domain"
+						class="input"
+						type="text"
+						inputmode="url"
+						autocomplete="off"
+						spellcheck="false"
+						autocapitalize="none"
+						placeholder={$t('screen1.domain.placeholder')}
+						data-testid="recover-domain-input"
+						bind:value={typedDomain}
+						disabled={stage === 'working'}
+					/>
+					{#if touched && typedDomain.trim() !== '' && !domainValid}
+						<p class="small error" data-testid="recover-domain-invalid">
+							{$t('screen1.domain.invalid', { example: 'example.com' })}
+						</p>
+					{:else}
+						<p class="small muted">{$t('recover.domain.hint')}</p>
+					{/if}
+				</div>
+			{/if}
+
 			{#if owner === null}
 				<div class="field">
 					<label class="label" for="username">{$t('recover.userId.label')}</label>
@@ -179,7 +263,17 @@
 						bind:value={username}
 						disabled={stage === 'working'}
 					/>
-					<p class="small muted">{$t('recover.userId.hint', { domain: $domain })}</p>
+					<!--
+						Only when there is a domain to name: an empty one
+						produced "The username you created on ." live.
+					-->
+					{#if effectiveDomain !== ''}
+						<p class="small muted">
+							{$t('recover.userId.hint', { domain: effectiveDomain })}
+						</p>
+					{:else}
+						<p class="small muted">{$t('recover.userId.hintNoDomain')}</p>
+					{/if}
 				</div>
 			{/if}
 
@@ -234,6 +328,8 @@
 						{$t('recover.error.wrong-recovery-key')}
 					{:else if failureKind === 'no-secret-storage'}
 						{$t('recover.error.no-secret-storage')}
+					{:else if failureKind === 'unreachable'}
+						{$t('recover.error.unreachable', { url: baseUrl })}
 					{:else}
 						{$t('recover.error.failed', { detail: failure })}
 					{/if}
