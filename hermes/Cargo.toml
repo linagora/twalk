@@ -8,6 +8,23 @@ description = "Hermes: the Twalk agent platform's consumer runtime, which hosts 
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "twalk-hermes"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-nats = "0.50"
+futures = "0.3"
+# The runtime asks a persona to stop the way an operator's process manager
+# does — SIGTERM, then SIGKILL — and tokio's `Child::kill` only sends the
+# second one.
+libc = "0.2"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [dev-dependencies]
 anyhow = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }

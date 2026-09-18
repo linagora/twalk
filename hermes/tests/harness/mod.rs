@@ -27,8 +27,13 @@
 //! `docker compose -p <project> -f hermes/tests/compose.assistant.yaml down -v`.
 
 // Every test binary compiles this module but uses only a subset of it.
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
+/// The runtime's own half of the harness (ticket #23): [`RuntimeRun`], which
+/// drives the real `twalk-hermes` binary and lets *it* start the persona.
+mod runtime;
+
+pub use runtime::*;
 pub use twalk_test_harness::*;
 
 use std::path::PathBuf;
