@@ -31,9 +31,20 @@ MESSAGE_RECEIVED_TYPE = "fr.linagora.twalk.inbound.message.received.v1"
 #: operator — or, in Signal's Note to Self, answering nobody at all.
 OUTBOUND_MESSAGE_SENT_TYPE = "fr.linagora.twalk.outbound.message.sent.v1"
 
+#: A reaction the **user** added, from their own phone (ADR 0021). The
+#: ``outbound.*`` family's second member, and on the bus for the same reason
+#: as the first: a persona may want to know a message has already been
+#: acknowledged. Never a trigger either.
+OUTBOUND_REACTION_ADDED_TYPE = "fr.linagora.twalk.outbound.reaction.added.v1"
+
 #: The event types a persona may be woken by. An allowlist, for the same
 #: reason the consent gate is one: a type added to the contract later must
 #: not start triggering personas because nobody thought to exclude it.
+#:
+#: ``outbound.reaction.added`` was the first test of that property and cost
+#: no edit here, which is the argument against replacing this set with a
+#: prefix rule that excludes ``outbound.*``: such a rule is a denylist, and a
+#: denylist admits whatever nobody remembered to name.
 PERSONA_TRIGGER_TYPES = frozenset({MESSAGE_RECEIVED_TYPE})
 
 

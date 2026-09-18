@@ -1,0 +1,20 @@
+{
+  "specversion": "1.0",
+  "id": "908d41e1f05691842779447bf1902f8cc91637532d00714eab6eef4d21f5aa59",
+  "source": "matrix://matrix.example.com/!abcXYZ123:example.com",
+  "type": "fr.linagora.twalk.outbound.reaction.added.v1",
+  "time": "2026-09-18T08:31:14Z",
+  "subject": "@michel:example.com",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/outbound.reaction.added.schema.json",
+  "traceparent": "00-908d41e1f05691842779447bf1902f8c-c91637532d00714e-01",
+  "network": "whatsapp",
+  "data": {
+    "reaction": "👍",
+    "target": {
+      "matrix_event_id": "$AliceProposedTwenty",
+      "excerpt": "On décale à 20h ?"
+    },
+    "network_timestamp": "2026-09-18T08:31:13Z"
+  }
+}

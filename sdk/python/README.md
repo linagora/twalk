@@ -44,6 +44,8 @@ It exists because of one event the consent gate structurally cannot stop. A brid
 
 The event is still published, and a persona may still subscribe to it deliberately: a persona that cannot see the user has already replied would suggest answers to closed conversations. What it may not do is be *woken* by one.
 
+[#147](https://github.com/linagora/twalk/issues/147) and [ADR 0021](../../docs/architecture/adr/0021-the-owner-is-never-a-contact-on-any-event.md) made `outbound.*` a family: the user's own reaction is `outbound.reaction.added`, on the same terms. The gate needed no edit to exclude it, which is the point — an allowlist excludes a new type by default. It is also the reason not to replace the allowlist with a rule that excludes `outbound.*`: a rule that names what is refused is a denylist, and a denylist admits whatever nobody remembered to name, which is precisely the failure this gate exists to prevent.
+
 ## What else the SDK does for you
 
 - **Deterministic ids**, from the contract's natural keys: `thinking` is `sha256(persona_id:trigger_event_id)`, `suggest` is `sha256(persona_id:trigger_event_id:attempt)`. A retry recomputes the same id, so a replay deduplicates on the bus instead of showing the user the same suggestion twice.

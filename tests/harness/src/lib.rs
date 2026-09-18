@@ -22,8 +22,9 @@ mod wait;
 
 pub use bus::{Bus, StoredMessage};
 pub use contract::{
-    contract_fixture, contract_fixture_types, contract_variant_fixture, contract_variant_fixtures,
-    validate_against_contract,
+    contract_fixture, contract_fixture_types, contract_schema, contract_schema_types,
+    contract_type_allows_consent, contract_types_about_a_person, contract_variant_fixture,
+    contract_variant_fixtures, validate_against_contract, MATRIX_USER_ID_SUBJECT_PATTERN,
 };
 pub use stack::{ensure_stack, nats_url, synapse_url, SERVER_NAME};
 pub use stub_llm::{StubLlm, StubRequest};

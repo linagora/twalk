@@ -205,9 +205,30 @@ impl ConsentChange {
 /// In-memory only, and filled in one order: the Gateway's snapshot first,
 /// then the durable consumer from the sequence after it (ADR 0010). The
 /// Sensor never writes consent state (ADR 0006).
+///
+/// The owner has no consent state, and the cache is where that is enforced
+/// rather than at every read: a decision about one of the operator's
+/// confirmed identities is **refused entry**, whether it arrives in the
+/// Gateway's snapshot or on the `consent.state.changed` stream (ADR 0021).
+///
+/// This is not hypothetical. Before ADR 0018 the operator's own messages
+/// were published as a contact's, so they fed the Gateway's pending-contact
+/// projection and the user could be offered a decision about their own
+/// ghost. A deployment upgraded across that change can still hold such a
+/// row, and applying it would label the operator's own traffic with it —
+/// `granted`, on a network-wide grant, which is how the operator's own phone
+/// number came to be published as a contact's attribute.
+///
+/// The Sensor can only refuse to *use* such a row; removing it from the
+/// Gateway's store is the Gateway's half, and the dropped entry is logged at
+/// `warn` so an operator can see that their Gateway still holds one.
 #[derive(Clone, Debug, Default)]
 pub struct ConsentCache {
     states: Arc<RwLock<States>>,
+    /// The operator, when the deployment named one. `None` is a deployment
+    /// that has not been told who its owner is: every subject is a contact,
+    /// which is the behaviour that existed before ADR 0018.
+    owner: Option<crate::owner::Owner>,
 }
 
 #[derive(Debug, Default)]
@@ -217,6 +238,25 @@ struct States {
 }
 
 impl ConsentCache {
+    /// A cache that knows who the operator is, and therefore that no
+    /// decision about them may enter it.
+    pub fn for_owner(owner: Option<crate::owner::Owner>) -> Self {
+        Self {
+            states: Arc::default(),
+            owner,
+        }
+    }
+
+    /// Whether this subject is one the cache refuses to hold a decision
+    /// about: a confirmed identity of the operator's, and nothing else. An
+    /// unconfirmed identity is a contact, so failing safe here means
+    /// keeping the decision.
+    fn is_owner(&self, subject_id: &str) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| owner.is_owner(subject_id))
+    }
+
     /// The consent state that applies to a subject on a network: its own
     /// decision, the network's default, or `pending` when neither exists.
     pub fn state(&self, subject_id: &str, network: Network) -> Consent {
@@ -234,6 +274,9 @@ impl ConsentCache {
     pub fn apply(&self, change: &ConsentChange) {
         let mut states = self.write();
         for entry in change.entries() {
+            if self.refuse(&entry) {
+                continue;
+            }
             insert(&mut states, entry);
         }
     }
@@ -249,8 +292,32 @@ impl ConsentCache {
         let mut states = self.write();
         *states = States::default();
         for entry in &snapshot.entries {
+            if self.refuse(entry) {
+                continue;
+            }
             insert(&mut states, entry.clone());
         }
+    }
+
+    /// Whether this entry is refused entry to the cache — a decision about
+    /// one of the operator's confirmed identities — and says so once, at
+    /// `warn`, because the row it names should not exist at the Gateway
+    /// either.
+    fn refuse(&self, entry: &ConsentEntry) -> bool {
+        let ConsentSubject::Contact(id) = &entry.subject else {
+            return false; // a network default is about a network, not a person
+        };
+        if !self.is_owner(id) {
+            return false;
+        }
+        tracing::warn!(
+            subject = %id,
+            network = %entry.network.as_str(),
+            state = %entry.state.as_str(),
+            "refusing a consent decision about the operator: the owner is not a contact and has \
+             no consent state (ADR 0021). The Companion Gateway should not be holding this row"
+        );
+        true
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, States> {
@@ -462,6 +529,132 @@ mod tests {
             new_state,
             networks: networks.to_vec(),
         }
+    }
+
+    /// A cache belonging to a deployment whose operator is `@michel`, with
+    /// one confirmed WhatsApp ghost.
+    fn cache_with_an_owner() -> ConsentCache {
+        ConsentCache::for_owner(Some(crate::owner::Owner::new(
+            "@michel:example.com",
+            ["@whatsapp_33660469852:example.com".to_owned()],
+        )))
+    }
+
+    #[test]
+    fn a_decision_about_the_operator_is_refused_entry() {
+        // The owner is never a contact and has no consent state (ADR 0021).
+        // A row about one of their identities is a row that should not
+        // exist — before ADR 0018 the user's own messages fed the Gateway's
+        // pending-contact projection, so an upgraded deployment can still
+        // hold one — and applying it is how the operator's own traffic came
+        // to be labelled by a decision nobody should ever have been offered.
+        let cache = cache_with_an_owner();
+        cache.apply(&contact_change(
+            "@whatsapp_33660469852:example.com",
+            Consent::Granted,
+            &[Network::Whatsapp],
+        ));
+        cache.apply(&contact_change(
+            "@michel:example.com",
+            Consent::Revoked,
+            &[Network::Whatsapp],
+        ));
+        assert_eq!(
+            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            Consent::Pending,
+            "nothing was stored about the ghost"
+        );
+        assert_eq!(
+            cache.state("@michel:example.com", Network::Whatsapp),
+            Consent::Pending,
+            "nor about the operator's own Matrix ID, which is always one of their identities"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_entry_about_the_operator_is_refused_entry() {
+        let cache = cache_with_an_owner();
+        cache.apply_snapshot(&ConsentSnapshot {
+            entries: vec![
+                ConsentEntry {
+                    subject: ConsentSubject::Contact(
+                        "@whatsapp_33660469852:example.com".to_owned(),
+                    ),
+                    network: Network::Whatsapp,
+                    state: Consent::Granted,
+                },
+                ConsentEntry {
+                    subject: ConsentSubject::Contact(
+                        "@whatsapp_33612345678:example.com".to_owned(),
+                    ),
+                    network: Network::Whatsapp,
+                    state: Consent::Granted,
+                },
+            ],
+            next_stream_sequence: 12,
+        });
+        assert_eq!(
+            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            Consent::Pending
+        );
+        assert_eq!(
+            cache.state("@whatsapp_33612345678:example.com", Network::Whatsapp),
+            Consent::Granted,
+            "and a real contact in the same snapshot is unaffected: this refuses one subject, \
+             not the snapshot"
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_identity_keeps_its_decision() {
+        // Unknown is not the operator, exactly as unknown is not consent. A
+        // ghost of the same shape, one digit apart, is a contact and their
+        // decision is theirs.
+        let cache = cache_with_an_owner();
+        cache.apply(&contact_change(
+            "@whatsapp_33660469853:example.com",
+            Consent::Granted,
+            &[Network::Whatsapp],
+        ));
+        assert_eq!(
+            cache.state("@whatsapp_33660469853:example.com", Network::Whatsapp),
+            Consent::Granted
+        );
+    }
+
+    #[test]
+    fn a_network_default_is_about_a_network_and_is_never_refused() {
+        // The network default is not a decision about a person, so there is
+        // no owner in it to refuse — but it *is* what used to reach the
+        // operator, because `state` falls back to it when a subject has no
+        // row. Refusing the owner's own rows is not enough on its own, which
+        // is why the producers no longer consult this cache for them at all.
+        let cache = cache_with_an_owner();
+        cache.apply(&network_change(Consent::Granted, &[Network::Whatsapp]));
+        assert_eq!(
+            cache.state("@whatsapp_33612345678:example.com", Network::Whatsapp),
+            Consent::Granted
+        );
+        assert_eq!(
+            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            Consent::Granted,
+            "the fallback still answers for the operator's ghost, which is exactly how their \
+             own reaction came to be labelled `granted` — the fix is that no producer asks"
+        );
+    }
+
+    #[test]
+    fn a_deployment_with_no_operator_refuses_nothing() {
+        let cache = ConsentCache::default();
+        cache.apply(&contact_change(
+            "@whatsapp_33660469852:example.com",
+            Consent::Granted,
+            &[Network::Whatsapp],
+        ));
+        assert_eq!(
+            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            Consent::Granted
+        );
     }
 
     #[test]

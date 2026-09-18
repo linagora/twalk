@@ -244,13 +244,38 @@ async fn main() -> Result<()> {
         .context("failed to ensure the twalk stream")?;
     info!(stream = normalize::STREAM_NAME, "bus ready");
 
+    // The operator, when the deployment named one (ADR 0018). Their own
+    // messages and reactions arrive under network ghosts indistinguishable in
+    // shape from a contact's, so the set is confirmed by the deployment and
+    // handed over here; an identity that is not in it stays a contact.
+    // Logged at startup because the set is the whole of what makes the
+    // exemption correct: an operator has to be able to read back what their
+    // deployment confirmed.
+    //
+    // Resolved before the consent cache because the cache is built around
+    // it: the owner has no consent state (ADR 0021), so a decision about one
+    // of their identities is refused entry rather than filtered at every
+    // read.
+    let owner = config.owner();
+    match &owner {
+        Some(owner) => info!(
+            operator = %owner.matrix_id(),
+            identities = ?owner.identities(),
+            "recognising the operator's own traffic as outbound.* and dropping their presence"
+        ),
+        None => info!(
+            "no operator configured (SENSOR_OWNER): the user's own messages are published as \
+             a contact's"
+        ),
+    }
+
     // Consent labelling (ticket 05): every published event carries the
     // sender's current consent state from this cache. It is filled from the
     // Companion Gateway's snapshot and then from the durable
     // consent.state.changed consumer, in that order and without overlap
     // (ticket #51, ADR 0010) — see `bring_up_consent`. The Sensor never
     // writes consent state (ADR 0006).
-    let consent_cache = ConsentCache::default();
+    let consent_cache = ConsentCache::for_owner(owner.clone());
     let snapshot_source = match config.consent_snapshot() {
         Some((url, token)) => Some(consent::GatewaySnapshot::new(url, token)?),
         None => None,
@@ -264,25 +289,6 @@ async fn main() -> Result<()> {
     .await;
 
     let own_user = client.user_id().unwrap().to_owned();
-
-    // The operator, when the deployment named one (ADR 0018). Their own
-    // messages arrive under network ghosts indistinguishable in shape from a
-    // contact's, so the set is confirmed by the deployment and handed over
-    // here; an identity that is not in it stays a contact. Logged at startup
-    // because the set is the whole of what makes the exemption correct: an
-    // operator has to be able to read back what their deployment confirmed.
-    let owner = config.owner();
-    match &owner {
-        Some(owner) => info!(
-            operator = %owner.matrix_id(),
-            identities = ?owner.identities(),
-            "recognising the operator's own messages as outbound.message.sent"
-        ),
-        None => info!(
-            "no operator configured (SENSOR_OWNER): the user's own messages are published as \
-             a contact's"
-        ),
-    }
 
     // Observation scope is invitation-driven: join when the inviter is a
     // configured bridge provisioning user or the operator, ignore everyone
@@ -539,6 +545,61 @@ async fn main() -> Result<()> {
                     warn!(room = %room.room_id(), %reactor, "cannot determine the network, skipping event");
                     return;
                 };
+
+                // The user's own reaction. Its own event type, the operator's
+                // Matrix ID as the subject, and no consent extension at all:
+                // the extension carries a contact's decision, and the user is
+                // not a contact (ADR 0021, symmetrical with ADR 0018's
+                // `outbound.message.sent`). Nothing below this branch runs
+                // for it — the consent cache is not consulted, so a
+                // network-wide grant can no longer label the operator
+                // `granted`, and no `contact` object is built, so neither
+                // their display name nor the phone number their ghost
+                // localpart carries reaches the bus.
+                if let Some(owner) = owner.as_ref().filter(|o| o.is_owner(reactor.as_str())) {
+                    let target_event_id = event.content.relates_to.event_id.clone();
+                    // The targeted message is somebody else's content
+                    // travelling inside the user's event, and reacting to a
+                    // contact is not a way around the user's own decision
+                    // about them (issue #110). There is no carrier decision
+                    // to reduce publication here, so the builder consults
+                    // the quoted author's alone.
+                    let excerpt = quoted_message(
+                        &room,
+                        &target_event_id,
+                        &own_user,
+                        Some(owner),
+                        &consent_cache,
+                    )
+                    .await;
+                    let input = normalize::OutboundReaction {
+                        matrix_event_id: event.event_id.to_string(),
+                        matrix_room_id: room.room_id().to_string(),
+                        server_name: own_user.server_name().as_str().to_owned(),
+                        owner_matrix_id: owner.matrix_id().to_owned(),
+                        reaction: event.content.relates_to.key.clone(),
+                        target_event_id: target_event_id.to_string(),
+                        target_excerpt: excerpt,
+                        network,
+                        produced_at: rfc3339(std::time::SystemTime::now()),
+                        // Bridges report network timestamps in bridge-specific
+                        // fields; mapping them arrives with the enrichment work.
+                        network_timestamp: None,
+                    };
+                    let envelope = normalize::build_outbound_reaction_added(&input);
+                    publish_tracker
+                        .publish(
+                            jetstream,
+                            normalize::OUTBOUND_REACTION_ADDED_TYPE,
+                            envelope,
+                            network,
+                            None,
+                            metrics,
+                        )
+                        .await;
+                    return;
+                }
+
                 let display_name = room
                     .get_member(&reactor)
                     .await
@@ -606,12 +667,14 @@ async fn main() -> Result<()> {
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
+        let owner = owner.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
         client.add_event_handler(move |event: PresenceEvent, client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
+            let owner = owner.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -619,6 +682,29 @@ async fn main() -> Result<()> {
                 let sender: OwnedUserId = event.sender.clone();
                 if sender == own_user {
                     return; // never loop on our own presence
+                }
+                // The user's own presence is not published at all — no type
+                // of its own, no event (ADR 0021). Unlike their message or
+                // their reaction, it tells nobody anything they do not
+                // already know: the user knows whether they are online. It
+                // reaches here under any of their identities — a network
+                // ghost the bridge materialised for them, or their own
+                // Matrix account, which mautrix invites into every portal
+                // room and whose presence transitions Synapse broadcasts to
+                // everyone sharing a room, which is what made this the
+                // highest-volume event on the reference deployment.
+                //
+                // A *contact's* presence is still published, and the test
+                // for that is deliberate: the rule is the same one #109
+                // established, an exact match against the identities the
+                // deployment confirmed. An unconfirmed identity is a
+                // contact, so failing safe here means publishing.
+                if owner.as_ref().is_some_and(|o| o.is_owner(sender.as_str())) {
+                    tracing::debug!(
+                        %sender,
+                        "skipping the operator's own presence, which is nobody's news"
+                    );
+                    return;
                 }
                 let presence = match event.content.presence.as_str() {
                     "online" => normalize::Presence::Online,
