@@ -1,7 +1,10 @@
-# Build-context filter for the repository root, which is the Sensor image's
-# build context (see deploy/docker-compose/sensor.Dockerfile: cargo needs the
-# shared test harness at tests/harness/ to resolve the Sensor's dependency
-# graph, so the context cannot be the sensor crate alone).
+# Build-context filter for the repository root, which is the build context of
+# every image built from this repository: the Sensor's (see
+# deploy/docker-compose/sensor.Dockerfile: cargo needs the shared test harness
+# at tests/harness/ to resolve the Sensor's dependency graph, so the context
+# cannot be the sensor crate alone) and each persona's (see
+# hermes/personas/assistant/Dockerfile: a persona image carries the SDK from
+# sdk/python/).
 #
 # Everything below is either huge or secret, and none of it is ever COPYed.
 **/target
@@ -21,3 +24,9 @@ companion/.svelte-kit
 companion/test-results
 companion/playwright-report
 companion/blob-report
+
+# Python bytecode from running the SDK's unit tests on the host: it would
+# travel into every persona image and, compiled by another interpreter, be
+# worse than absent.
+**/__pycache__
+**/*.pyc

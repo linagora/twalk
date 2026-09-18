@@ -22,7 +22,7 @@ Last reviewed: 2026-09-17.
 | Contract — CloudEvents v1 | v0.1 | — (landed with the docs seed) | done — 8 schemas, one validated fixture each |
 | Sensor | v0.1 | [#1](https://github.com/linagora/twalk/issues/1) | done — tickets 01–11 merged, reviewed 2026-09-17 |
 | Reference deployment (Compose) | v0.1 | part of the Sensor lot (ticket 11) | done for Synapse + NATS + Sensor; grows with each component |
-| Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 merged, H2 [#21](https://github.com/linagora/twalk/issues/21) under way; H4 absorbed the persona consent gate, H5 gained a current-state re-check |
+| Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) and H2 [#21](https://github.com/linagora/twalk/issues/21) merged (the SDK with its consent gate, and the `assistant` skeleton), H3 [#22](https://github.com/linagora/twalk/issues/22) and H4 [#23](https://github.com/linagora/twalk/issues/23) the frontier; H4 absorbed the persona consent gate, H5 gained a current-state re-check |
 | Human approval (Gateway + Companion) | v0.1 | #46 and #65 | specced — [#97](https://github.com/linagora/twalk/issues/97), [#100](https://github.com/linagora/twalk/issues/100) |
 | Model, language and tracing configuration | v0.1 | #46 and #65 | specced — [#98](https://github.com/linagora/twalk/issues/98), [#101](https://github.com/linagora/twalk/issues/101), [#99](https://github.com/linagora/twalk/issues/99) |
 | Five interface languages | v0.1 | #65 | specced — [#102](https://github.com/linagora/twalk/issues/102) |

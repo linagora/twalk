@@ -1,0 +1,48 @@
+# The assistant persona as the Hermes suite runs it: the real image, built
+# from hermes/personas/assistant/Dockerfile, as a container talking to the
+# shared test stack's bus.
+#
+# A persona ships as a container image (its Python dependencies install
+# inside it; the host has no pip), so the seam this suite drives is that
+# container's process boundary — the same artefact a deployment runs, not a
+# script with the SDK on a host PYTHONPATH.
+#
+# Run under its own compose project, one per test run, so a test starts and
+# removes its own persona without touching the shared stack. The harness
+# (hermes/tests/harness/mod.rs) fills the variables in; every value that
+# identifies one run is required, so a missing one fails loudly instead of
+# leaking events between runs.
+#
+# Host networking, because the two endpoints the persona is pointed at are
+# both on the host: the bus through the port the test stack publishes, and
+# the stub LLM, which runs inside the test process on loopback. It also
+# keeps the stub bound to loopback rather than every interface — and a
+# developer machine that firewalls the docker bridge (this one does) cannot
+# reach a host port from a bridge network at all.
+
+services:
+  assistant:
+    build:
+      # The repository root: the image carries the SDK from sdk/python/.
+      context: ../..
+      dockerfile: hermes/personas/assistant/Dockerfile
+    network_mode: host
+    environment:
+      TWALK_PERSONA_ID: assistant
+      TWALK_HERMES_DOMAIN: ${TWALK_TEST_PERSONA_DOMAIN:-test.twalk}
+      TWALK_NATS_URL: ${TWALK_TEST_PERSONA_NATS_URL:?the harness names the bus}
+      TWALK_BUS_STREAM: ${TWALK_TEST_PERSONA_STREAM:?the harness names the stream}
+      TWALK_BUS_SUBJECT_PREFIX: ${TWALK_TEST_PERSONA_PREFIX:?the harness names the subject prefix}
+      TWALK_PERSONA_CONSUMER: ${TWALK_TEST_PERSONA_CONSUMER:?the harness names the durable consumer}
+      TWALK_LLM_BASE_URL: ${TWALK_TEST_PERSONA_LLM_URL:?the harness names the stub LLM}
+      TWALK_LLM_API_KEY: ${TWALK_TEST_PERSONA_LLM_KEY:-test-only-llm-key}
+      TWALK_LLM_MODEL: ${TWALK_TEST_PERSONA_MODEL:-stub-model}
+      # The operator's provider parameters, passed through to the endpoint
+      # untouched (ADR 0015). The suite sets them to the shape that matters:
+      # one field added, one the client would otherwise send removed.
+      TWALK_LLM_PARAMS: ${TWALK_TEST_PERSONA_LLM_PARAMS:-}
+      TWALK_LOG_LEVEL: debug
+    # A crash must be visible to the test, not papered over by a restart:
+    # supervision is the runtime's job (H4), and asserting it needs a
+    # persona that stays down when it dies.
+    restart: "no"

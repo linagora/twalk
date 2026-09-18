@@ -1,0 +1,5 @@
+# The SDK's runtime dependencies, pinned: a persona image is a deployment
+# artefact, so its build must be reproducible. Installed inside the image
+# (the host has no pip — PEP 668 — and no venv module), never on a host.
+nats-py==2.9.0
+httpx==0.28.1

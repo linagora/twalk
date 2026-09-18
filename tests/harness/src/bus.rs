@@ -57,6 +57,19 @@ impl Bus {
         Ok(())
     }
 
+    /// Removes a stream and everything it holds. The test stack persists
+    /// across runs, so a suite that gives itself a stream of its own — the
+    /// way a persona test isolates a whole subject namespace from the
+    /// Sensor's `twalk.>` — takes it away again instead of leaving one
+    /// behind per run.
+    ///
+    /// Removing one that is not there is not an error: the postcondition is
+    /// that it is gone.
+    pub async fn delete_stream(&self, name: &str) -> Result<()> {
+        let _ = self.jetstream.delete_stream(name).await;
+        Ok(())
+    }
+
     pub async fn publish(&self, subject: &str, payload: &Value) -> Result<()> {
         let ack = self
             .jetstream
