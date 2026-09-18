@@ -12,6 +12,9 @@ of that which is the same for every persona:
   (ADR 0018) and no persona is woken by them;
 * the contract's envelopes and their deterministic ids
   (:mod:`twalk_sdk.envelope`);
+* the suggestion policy — the expiry a draft ages out on, and the attempt
+  discipline that keeps a replay from becoming a second draft
+  (:mod:`twalk_sdk.policy`);
 * the durable subscription, the publishing and the process loop
   (:mod:`twalk_sdk.persona`);
 * an OpenAI-compatible chat-completions client (:mod:`twalk_sdk.llm`).
@@ -47,6 +50,7 @@ from .envelope import (
     thinking_event,
     thinking_id,
 )
+from .policy import DEFAULT_SUGGESTION_TTL_SECONDS, SuggestionPolicy
 from .trigger import (
     MESSAGE_RECEIVED_TYPE,
     OUTBOUND_MESSAGE_SENT_TYPE,
@@ -62,6 +66,7 @@ __all__ = [
     "Config",
     "ConfigError",
     "Context",
+    "DEFAULT_SUGGESTION_TTL_SECONDS",
     "EnvelopeError",
     "FIRST_ATTEMPT",
     "GRANTED",
@@ -76,6 +81,7 @@ __all__ = [
     "Persona",
     "SUGGEST_TYPE",
     "Suggestion",
+    "SuggestionPolicy",
     "THINKING_TYPE",
     "Trigger",
     "consent_of",

@@ -162,9 +162,9 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
     );
     assert_eq!(suggest.header("Nats-Msg-Id"), Some(attribute(event, "id")));
     assert!(
-        event["data"].get("expires_at").is_none(),
-        "the suggestion policy — the attempt counter and the expiry — is H3 (#22); \
-         this ticket builds the envelope it extends, and sets no expiry"
+        event["data"]["expires_at"].is_string(),
+        "a suggestion ages out rather than staying approvable for ever; what \
+         the window is, and where it is measured from, is `suggestion.rs` (#22)"
     );
 
     assert!(

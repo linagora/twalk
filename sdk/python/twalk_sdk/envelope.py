@@ -30,12 +30,15 @@ SCHEMA_BASE = "https://schemas.twalk.dev/cloudevents/v1"
 SPEC_VERSION = "1.0"
 DATA_CONTENT_TYPE = "application/json"
 
-#: The attempt number of a persona's first suggestion for a trigger. The
-#: contract's natural key counts attempts, and the suggestion policy that
-#: produces a second one — with the expiry that goes with it — is H3
-#: (issue #22). Until then a trigger gets attempt 1 and nothing else, which
-#: is what makes this constant the seam H3 extends rather than a magic
-#: number.
+#: The attempt number of a persona's first suggestion for a trigger, and
+#: the only one v0.1 produces: the contract's natural key counts
+#: suggestions that exist, not deliveries that were tried, so a redelivered
+#: trigger is re-keyed to the same number and collapses on the bus rather
+#: than becoming a second draft of one message (see
+#: :mod:`twalk_sdk.policy`). A path that deliberately produces another
+#: suggestion for a trigger — a human asking for a redraft, through the
+#: runtime's approval surface — increments it explicitly, which is why
+#: :func:`suggest_event` takes the attempt rather than counting anything.
 FIRST_ATTEMPT = 1
 
 #: The schemas' own caps, applied on the way out: a chatty model must not be
@@ -109,9 +112,25 @@ def dataschema_of(event_type: str) -> str:
     return f"{SCHEMA_BASE}/{name}.schema.json"
 
 
+def utc_now() -> datetime:
+    """The current instant, in UTC.
+
+    One function, because a suggestion's ``time`` and its ``expires_at``
+    have to be two views of the *same* instant: computed from two calls to
+    the clock, the window the operator configured would be off by however
+    long the lines between them took.
+    """
+    return datetime.now(timezone.utc)
+
+
+def rfc3339(moment: datetime) -> str:
+    """An instant as the contract's ``date-time``, to the second, in UTC."""
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def now_rfc3339() -> str:
     """The current time as the contract's ``date-time``, to the second."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rfc3339(utc_now())
 
 
 def cap_chars(value: str, max_chars: int) -> str:
@@ -196,8 +215,17 @@ def suggest_event(
     suggestion: Suggestion,
     attempt: int = FIRST_ATTEMPT,
     time: Optional[str] = None,
+    expires_at: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """A ``persona.suggest.produced`` envelope for a trigger."""
+    """A ``persona.suggest.produced`` envelope for a trigger.
+
+    ``expires_at`` is the suggestion policy's answer, not this function's:
+    when a suggestion goes stale is a decision (:mod:`twalk_sdk.policy`,
+    which the process loop reads from the operator's configuration), while
+    this module only knows how to write it down. Left out, the envelope
+    carries none — which the contract allows and the SDK's own loop never
+    does.
+    """
     if attempt < 1:
         raise EnvelopeError(f"attempt starts at 1, got {attempt}")
     event = _base_event(
@@ -220,6 +248,8 @@ def suggest_event(
         data["confidence"] = suggestion.confidence
     if suggestion.rationale:
         data["rationale"] = cap_chars(suggestion.rationale, MAX_RATIONALE_CHARS)
+    if expires_at:
+        data["expires_at"] = expires_at
     event["data"] = data
     return event
 

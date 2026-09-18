@@ -54,6 +54,8 @@ The event is still published, and a persona may still subscribe to it deliberate
 - **The trace continued** from the trigger, so one message's trace links sensor → persona → approval → outbound.
 - **A durable pull consumer**, so a restart resumes where the persona stopped instead of losing events; explicit acks, and a bounded retry (NAK with a delay, `max_deliver` 3) for the failure that is usually an endpoint briefly away.
 - **`thinking` on start**, published the moment processing begins, so oversight can show activity in real time.
+- **An expiry on every suggestion** (`policy.py`): a draft the user never got to goes stale rather than staying approvable for ever. The window is the operator's (`TWALK_SUGGESTION_TTL_SECONDS`, an hour by default) and is measured from when the suggestion was *produced*, not from the trigger's own time — a persona is activated by a consent decision (ADR 0013) and its consumer starts at the beginning of the stream, so the message it answers can be arbitrarily old.
+- **An attempt that counts suggestions, not deliveries**: the bus is at-least-once, so the same trigger reaches a persona again after a crash or a NAK. It is re-keyed to the same attempt, so it recomputes the same id and collapses on the bus instead of offering the user two drafts of one message — one of them from a run that failed halfway. The persona says so in its logs when the bus reports the publish as a duplicate, so an absorbed replay reads differently from a suggestion that never came.
 
 What it deliberately does **not** do: send anything. A persona produces suggestions; a suggestion becomes a reply only when a human approval references it.
 
@@ -76,6 +78,7 @@ Twalk ships no LLM and names no model of its own: a persona **refuses to start**
 | `TWALK_BUS_STREAM` | `twalk` | The JetStream stream the events live in. |
 | `TWALK_BUS_SUBJECT_PREFIX` | `twalk` | The bus namespace: a contract type `fr.linagora.twalk.<rest>` travels on `<prefix>.<rest>`. `twalk` in every deployment; configurable because a test drives a persona on a namespace of its own, rather than replaying the whole shared history. |
 | `TWALK_PERSONA_CONSUMER` | `persona-<persona_id>` | The durable consumer's name. |
+| `TWALK_SUGGESTION_TTL_SECONDS` | `3600` | How long a suggestion stays approvable, from when it was produced. A whole number of seconds, at least one: there is no "never expires", because an approval that can be given at any later date is what the expiry exists to prevent. |
 | `TWALK_LOG_LEVEL` | `info` | |
 
 The persona is a consumer, not the bus's operator: it waits for its stream to exist rather than creating one, and it retries a bus that is not up yet.
@@ -99,7 +102,7 @@ The halves that need a dependency (`Persona`, `Llm`) are imported on first use, 
 
 ## Scope
 
-v0.1 is a single completion per message: no tool calling, no multi-turn planning, no streaming. The suggestion policy — a second attempt for the same trigger, and the expiry that goes with it — is [#22](https://github.com/linagora/twalk/issues/22); this SDK builds the envelope that extends (`FIRST_ATTEMPT`, and no `expires_at`).
+v0.1 is a single completion per message: no tool calling, no multi-turn planning, no streaming, and one suggestion per trigger. The suggestion policy ([#22](https://github.com/linagora/twalk/issues/22)) settles both numbers the contract's `suggest` envelope carries: the expiry, which every suggestion now has, and the attempt, which stays at `FIRST_ATTEMPT` because a redelivery is not a new suggestion. A *deliberate* second attempt — a human asking for a redraft — increments it explicitly, and needs the surface that would ask for one: the runtime's ([#23](https://github.com/linagora/twalk/issues/23), [#24](https://github.com/linagora/twalk/issues/24)). `suggest_event` takes the attempt rather than counting anything, which is the seam that lands on.
 
 Not here yet, and deliberately: **OpenTelemetry spans** for the model call, following the GenAI conventions, off until an OTLP endpoint is configured and with prompt content behind a second switch (ADR 0017, [#99](https://github.com/linagora/twalk/issues/99)). The `traceparent` the SDK already carries from the trigger is what those spans will hang from. Until then the SDK logs event ids, subjects and model names — never a message body, a prompt or a completion.
 

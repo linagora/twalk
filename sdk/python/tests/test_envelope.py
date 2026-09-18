@@ -119,16 +119,14 @@ class SuggestEventTest(unittest.TestCase):
                 rationale="Demande simple et ton amical : une confirmation courte suffit.",
             ),
             time="2026-09-17T10:00:09Z",
+            # The fixture's own expiry, handed in: when a suggestion goes
+            # stale is the suggestion policy's decision (`twalk_sdk.policy`,
+            # tested in `test_policy.py`), and this module only writes it
+            # down. The fixture rounds it to the hour, as a worked example
+            # may; a running persona's is exactly one window after `time`.
+            expires_at="2026-09-17T11:00:00Z",
         )
-        expected = fixture("persona.suggest.produced")
-        # expires_at is the suggestion policy's, and the policy is H3
-        # (issue #22): this SDK builds the envelope H3 extends, and sets no
-        # expiry of its own.
-        self.assertIn(
-            "expires_at", expected["data"], "the fixture shows the field H3 will set"
-        )
-        del expected["data"]["expires_at"]
-        self.assertEqual(event, expected)
+        self.assertEqual(event, fixture("persona.suggest.produced"))
 
     def test_the_first_attempt_is_one(self) -> None:
         event = suggest_event(

@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from .policy import DEFAULT_SUGGESTION_TTL_SECONDS, SuggestionPolicy
+
 #: ``data.persona_id`` and the last segment of ``source`` in every
 #: ``persona.*`` schema.
 PERSONA_ID_PATTERN = re.compile(r"^[a-z0-9_-]+$")
@@ -103,6 +105,10 @@ class Config:
     subject_prefix: str = DEFAULT_SUBJECT_PREFIX
     consumer_name: Optional[str] = None
     log_level: str = "info"
+    #: How the persona's suggestions age. A deployment default rather than
+    #: a persona's own judgement: the window the user gets to approve in is
+    #: the operator's to set, while what to suggest is the persona's.
+    suggestion: SuggestionPolicy = field(default_factory=SuggestionPolicy)
 
     def __post_init__(self) -> None:
         if not PERSONA_ID_PATTERN.match(self.persona_id):
@@ -191,6 +197,19 @@ class Config:
                     f"{type(params).__name__}"
                 )
 
+        ttl_raw = optional(
+            "TWALK_SUGGESTION_TTL_SECONDS", str(DEFAULT_SUGGESTION_TTL_SECONDS)
+        )
+        try:
+            suggestion = SuggestionPolicy(ttl_seconds=int(ttl_raw))
+        except ValueError as error:
+            # `int()` and the policy's own refusal land here alike: both mean
+            # the operator asked for a window that is not one.
+            raise ConfigError(
+                "TWALK_SUGGESTION_TTL_SECONDS is how long a suggestion stays "
+                f"approvable, in whole seconds (got {ttl_raw!r}): {error}"
+            ) from error
+
         api_key = (env.get("TWALK_LLM_API_KEY") or "").strip() or None
         return cls(
             persona_id=required("TWALK_PERSONA_ID"),
@@ -207,4 +226,5 @@ class Config:
             subject_prefix=optional("TWALK_BUS_SUBJECT_PREFIX", DEFAULT_SUBJECT_PREFIX),
             consumer_name=(env.get("TWALK_PERSONA_CONSUMER") or "").strip() or None,
             log_level=optional("TWALK_LOG_LEVEL", "info"),
+            suggestion=suggestion,
         )

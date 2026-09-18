@@ -18,8 +18,10 @@ construction:
 4. ``persona.thinking.emitted`` the moment processing starts, so oversight
    can show activity in real time;
 5. ``persona.suggest.produced`` from whatever the handler returns, with the
-   contract's deterministic id, ``Nats-Msg-Id`` set, and the trigger's
-   ``network``, ``consent`` and trace carried through.
+   contract's deterministic id, ``Nats-Msg-Id`` set, the trigger's
+   ``network``, ``consent`` and trace carried through, and the expiry the
+   operator's suggestion policy gives it (:mod:`twalk_sdk.policy`) — so no
+   persona can publish a draft that stays approvable for ever.
 
 The persona talks to the bus itself (ADR 0008): the Hermes runtime starts
 it as a process and supervises it, but never sits between it and the bus.
@@ -65,7 +67,15 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from .config import Config
 from .consent import GRANTED, consent_of, is_granted
-from .envelope import FIRST_ATTEMPT, Suggestion, nats_headers, suggest_event, thinking_event
+from .envelope import (
+    FIRST_ATTEMPT,
+    Suggestion,
+    nats_headers,
+    rfc3339,
+    suggest_event,
+    thinking_event,
+    utc_now,
+)
 from .llm import Llm
 from .trigger import MESSAGE_RECEIVED_TYPE, InboundMessage, triggers_a_persona, type_of
 
@@ -330,16 +340,36 @@ class Persona:
                     trigger.network,
                 )
             else:
-                await self._publish(
+                # One reading of the clock for both: `time` says when the
+                # suggestion was produced and `expires_at` when it stops
+                # being approvable, and the operator's window is the
+                # difference between them.
+                produced_at = utc_now()
+                acknowledgement = await self._publish(
                     jetstream,
                     suggest_event(
                         persona_id=self.config.persona_id,
                         source=self.config.source,
                         trigger=trigger,
                         suggestion=suggestion,
+                        # Not a delivery count: a redelivered trigger is the
+                        # same suggestion, so it keeps the same attempt, the
+                        # same id, and collapses on the bus instead of
+                        # offering the user a second draft of one message
+                        # (twalk_sdk.policy).
                         attempt=FIRST_ATTEMPT,
+                        time=rfc3339(produced_at),
+                        expires_at=self.config.suggestion.expires_at(produced_at),
                     ),
                 )
+                if getattr(acknowledgement, "duplicate", False):
+                    logger.info(
+                        "the bus already held this suggestion: the redelivery "
+                        "was absorbed rather than becoming a second attempt "
+                        "event_id=%s attempt=%s",
+                        trigger.event_id,
+                        FIRST_ATTEMPT,
+                    )
         except Exception as error:
             # The event is not acked: JetStream redelivers it after a delay
             # (bounded by MAX_DELIVER), because the usual cause is an
@@ -354,9 +384,15 @@ class Persona:
             return
         await message.ack()
 
-    async def _publish(self, jetstream: JetStreamContext, event: Dict[str, Any]) -> None:
+    async def _publish(self, jetstream: JetStreamContext, event: Dict[str, Any]) -> Any:
+        """Publishes one event and returns the bus's acknowledgement.
+
+        The acknowledgement is worth having back: it says whether
+        ``Nats-Msg-Id`` matched something already stored, which is how a
+        replay announces itself to the persona rather than only to the bus.
+        """
         subject = self.config.subject(event["type"])
-        await jetstream.publish(
+        acknowledgement = await jetstream.publish(
             subject,
             json.dumps(event, ensure_ascii=False).encode("utf-8"),
             headers=nats_headers(event),
@@ -367,6 +403,7 @@ class Persona:
         logger.info(
             "published %s id=%s subject=%s", event["type"], event["id"], subject
         )
+        return acknowledgement
 
 
 def _sequence(message: Msg) -> Optional[int]:

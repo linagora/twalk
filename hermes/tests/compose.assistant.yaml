@@ -41,6 +41,11 @@ services:
       # untouched (ADR 0015). The suite sets them to the shape that matters:
       # one field added, one the client would otherwise send removed.
       TWALK_LLM_PARAMS: ${TWALK_TEST_PERSONA_LLM_PARAMS:-}
+      # How long a suggestion stays approvable. Empty means the operator
+      # said nothing, which is the SDK's own default (an hour) — so the
+      # suite can test the default and a chosen window through the same
+      # file.
+      TWALK_SUGGESTION_TTL_SECONDS: ${TWALK_TEST_PERSONA_SUGGESTION_TTL:-}
       TWALK_LOG_LEVEL: debug
     # A crash must be visible to the test, not papered over by a restart:
     # supervision is the runtime's job (H4), and asserting it needs a
