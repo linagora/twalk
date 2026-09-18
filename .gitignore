@@ -5,6 +5,10 @@
 /tests/harness/target/
 .env
 
+# Python bytecode, from running the SDK's own unit tests
+__pycache__/
+*.pyc
+
 # Agent tooling: local skills installs and agent worktrees, never versioned
 .agents/
 .claude/
