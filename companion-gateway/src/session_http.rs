@@ -116,6 +116,13 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
     }
     match (method, path) {
         (&Method::POST, "/api/session") => Requirement::Open,
+        // What this deployment is, asked before anyone can sign in (ticket
+        // #112). It answers two facts a caller can already obtain by other
+        // means — the server name is in the deployment's DNS, and "an account
+        // exists here" is what a registration attempt discovers by being
+        // refused — so publishing them adds no knowledge to an attacker and
+        // removes a guess from every screen.
+        (&Method::GET, "/api/deployment") => Requirement::Open,
         (&Method::POST, "/api/session/refresh") => Requirement::RefreshToken,
         // The registration relay: there is no account yet, so there is no
         // device token to have (ticket #53).
@@ -132,6 +139,7 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
 /// is additive to whatever else the API grows.
 pub fn routes() -> Router<Gateway> {
     Router::new()
+        .route("/api/deployment", get(deployment))
         .route("/api/session", post(sign_in).get(current).delete(sign_out))
         .route("/api/session/refresh", post(refresh))
         .route("/api/devices", get(devices))
@@ -270,6 +278,43 @@ async fn refresh(State(gateway): State<Gateway>, headers: HeaderMap) -> Response
         Some(issued) => session_response(StatusCode::OK, &sessions, &issued, &headers),
         None => refused(StatusCode::UNAUTHORIZED, "unauthenticated"),
     }
+}
+
+/// `GET /api/deployment` — what this deployment is, to anyone who asks.
+///
+/// Unauthenticated by design, and it is the answer to a pattern that produced
+/// four defects in one day (#112): every screen that needed to know whether an
+/// account existed here discovered it by attempting something and reading the
+/// failure. The first screen offered to *create* an account, met a 409, and
+/// only then pointed at recovery; a returning user was told their session
+/// could not reach a server that had answered in zero milliseconds.
+///
+/// It says two things and no more. `bootstrapped` is whether this deployment
+/// has its one account — the same fact the registration relay refuses on, so
+/// nothing is published that a registration attempt would not reveal.
+/// `homeserver` is the server name, which is in the deployment's own DNS.
+/// Deliberately absent: the owner's Matrix ID. Naming the human who owns a
+/// deployment to anyone who can reach it is a different disclosure, and no
+/// screen needs it before sign-in.
+async fn deployment(State(gateway): State<Gateway>) -> Response {
+    let Some(sessions) = gateway.sessions() else {
+        return not_configured();
+    };
+    let bootstrapped = match sessions.owner_account_created() {
+        Ok(created) => created.is_some(),
+        Err(error) => {
+            // A store that cannot answer must not be reported as "no account
+            // yet": that would send a returning user to the account form,
+            // which is the journey this endpoint exists to end.
+            warn!(%error, "the session store could not say whether the account exists");
+            return refused(StatusCode::SERVICE_UNAVAILABLE, "store_unreadable");
+        }
+    };
+    Json(serde_json::json!({
+        "bootstrapped": bootstrapped,
+        "homeserver": sessions.homeserver_name(),
+    }))
+    .into_response()
 }
 
 /// `GET /api/session` — who is signed in, on which device. What the Companion

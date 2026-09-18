@@ -53,6 +53,22 @@ COPY tests/harness tests/harness
 ARG TWALK_BUILD_REVISION=unknown
 ENV TWALK_BUILD_REVISION=${TWALK_BUILD_REVISION}
 WORKDIR /src/companion-gateway
+# Cargo decides what to rebuild by comparing mtimes against the artifacts in
+# `target/`, and `target/` is a cache mount shared by every build of this image
+# — across worktrees, and across concurrent runs. An artifact written by
+# *another* tree can therefore be newer than this tree's sources, and cargo
+# then reuses a binary compiled from source that is not in this build context.
+#
+# That is not hypothetical: it shipped an image whose embedded `openapi.yaml`
+# (`include_str!`, so an ordinary mtime-tracked dependency) was a previous
+# branch's, and the deployment test compared the served description against the
+# repository's and failed — correctly, on a binary nobody could locate the
+# source of. Stamping every source to "now" after the COPY keeps the cache's
+# value and removes the trap: this tree's sources are always newer than
+# anything already in it.
+RUN find . -type f \
+        \( -name '*.rs' -o -name '*.toml' -o -name '*.yaml' -o -name '*.lock' \) \
+        -exec touch {} +
 RUN --mount=type=cache,id=twalk-gateway-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=twalk-gateway-target,target=/src/companion-gateway/target \
     cargo build --release --locked \

@@ -474,4 +474,45 @@ test.describe.serial('the bootstrap journey', () => {
 			await fresh.close();
 		}
 	});
+
+	test('an expired session is signed back in, and never asks for the key', async () => {
+		if (stack === null) {
+			return;
+		}
+		// The journey of ticket #112, and the one the product did not have:
+		// the device token is gone — fifteen minutes is its designed lifetime —
+		// and the crypto store is intact. Before this screen existed the only
+		// ways back were an onboarding form offering to create an account that
+		// already exists, and /recover, which asks for a key kept offline for a
+		// completely different event.
+		//
+		// Clearing the cookies is what expiry looks like from the browser: the
+		// device token and the refresh token both gone, everything else kept.
+		await context.clearCookies();
+		forget();
+
+		// The first screen offers the way back in, rather than a form whose one
+		// action this deployment forbids. It knows because it asked:
+		// `GET /api/deployment` says this deployment has its account.
+		await page.goto('/');
+		await expect(page.getByTestId('screen-welcome')).toBeVisible();
+		await page.getByLabel('Your Twalk domain').fill(stack.domain);
+		await page.getByTestId('continue').click();
+		await expect(page.getByTestId('screen-signin')).toBeVisible({ timeout: 30_000 });
+
+		// And it is a sign-in, not a recovery: no key is asked for anywhere on
+		// it. This assertion is the ticket.
+		await expect(page.getByTestId('recovery-key-input')).toHaveCount(0);
+
+		await page.getByLabel('Username', { exact: true }).fill(stack.owner);
+		await page.getByLabel('Password', { exact: true }).fill(password);
+		await page.getByTestId('signin-submit').click();
+
+		// Back where a returning user goes, with a working session.
+		await expect(page.getByTestId('screen-dashboard')).toBeVisible({ timeout: 60_000 });
+
+		// The keys were never touched: this is the same device it was before,
+		// asked of the homeserver rather than of the browser.
+		await expectDeviceIsCrossSigned(stack, password);
+	});
 });

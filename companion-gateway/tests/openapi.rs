@@ -75,6 +75,10 @@ const UNDESCRIBED_ROUTES: &[(&str, &str)] = &[
 /// Declared responses this suite cannot produce at the process boundary,
 /// with the reason. Everything else declared must be exercised.
 const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
+    // `GET /api/deployment`'s 503 is reached below on the unconfigured
+    // deployment, so the status is exercised; its other error code,
+    // `store_unreadable`, needs the Gateway's own SQLite file to fail under a
+    // running process — the same missing seam as the entry that follows.
     (
         "post",
         "/api/session",
@@ -943,6 +947,35 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
 
+    // What this deployment is, asked by a caller with no credential at all —
+    // which is the whole point of the operation (#112): a screen that can ask
+    // does not have to attempt something and read the failure.
+    let described = call
+        .check(
+            Method::GET,
+            &base,
+            "/api/deployment",
+            "/api/deployment",
+            &[],
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        described.body["homeserver"].as_str(),
+        Some(SERVER_NAME),
+        "the deployment names the server its owner is on"
+    );
+    assert!(
+        described.body["bootstrapped"].is_boolean(),
+        "bootstrapped is a fact, not an absence"
+    );
+    assert!(
+        described.body.get("owner").is_none(),
+        "the owner's Matrix ID is not published to an unauthenticated caller"
+    );
+
     // --- sign-in: the happy path, and the cookies it sets
     let token = owner.openid_token().await?;
     let signed_in = call
@@ -1576,6 +1609,10 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/_twalk/bridges/{bridge_id}/status",
             "/_twalk/bridges/bridge-whatsapp/status",
         ),
+        // Open to everyone, and still closed here: a deployment with no owner
+        // has nothing to describe, and answering "no account yet" would send
+        // a returning user to the account form (#112).
+        (Method::GET, "/api/deployment", "/api/deployment"),
     ] {
         call.check(
             method,

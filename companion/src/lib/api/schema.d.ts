@@ -638,6 +638,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/deployment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What this deployment is, before anyone can sign in.
+         * @description Unauthenticated, and deliberately narrow. It exists so a screen can
+         *     **ask** what it needs to know instead of attempting something and
+         *     reading the failure — the pattern behind four defects found in one day
+         *     of live testing (ticket #112): a first screen that offered to create an
+         *     account and discovered on submit that one existed, a network screen
+         *     that rendered an expired session as "your server could not be reached".
+         *
+         *     `bootstrapped` is whether this deployment has its one account. It is
+         *     the same fact the registration relay refuses on, so this publishes
+         *     nothing a registration attempt would not reveal. `homeserver` is the
+         *     server name, which is in the deployment's own DNS.
+         *
+         *     Absent by design: the owner's Matrix ID. Naming the human who owns a
+         *     deployment to anyone who can reach it is a different disclosure, and no
+         *     screen needs it before sign-in.
+         */
+        get: operations["describeDeployment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices": {
         parameters: {
             query?: never;
@@ -2873,6 +2907,52 @@ export interface operations {
                 };
             };
             503: components["responses"]["ContactsNotConfigured"];
+        };
+    };
+    describeDeployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The deployment describes itself. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description Whether this deployment's one account exists. */
+                        bootstrapped: boolean;
+                        /**
+                         * @description The server name this deployment's owner is on.
+                         * @example example.com
+                         */
+                        homeserver: string;
+                    };
+                };
+            };
+            /**
+             * @description `sign_in_not_configured` — this deployment has no owner at all — or
+             *     `store_unreadable`, when the Gateway's store could not be read. A
+             *     store that cannot answer is never reported as "no account yet":
+             *     that would send a returning user back to the account form, which is
+             *     the journey this operation exists to end.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "sign_in_not_configured" | "store_unreadable";
+                    };
+                };
+            };
         };
     };
     listDevices: {

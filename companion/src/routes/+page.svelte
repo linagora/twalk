@@ -82,11 +82,18 @@
 		const outcome = await probeDeployment(normalised);
 		submitting = false;
 
-		if (outcome.kind === 'ready' || outcome.kind === 'signed-in') {
+		if (
+			outcome.kind === 'ready' ||
+			outcome.kind === 'signed-in' ||
+			outcome.kind === 'needs-sign-in'
+		) {
 			domain.set(normalised);
 			rememberDomain(normalised);
 			rememberHomeserver(outcome.homeserver.baseUrl);
-			await goto('/onboarding');
+			// A deployment that already has its account sends a returning user
+			// to sign in, not to a form offering the one action this
+			// deployment forbids (#112).
+			await goto(outcome.kind === 'needs-sign-in' ? '/signin' : '/onboarding');
 			return;
 		}
 		failure = outcome;
