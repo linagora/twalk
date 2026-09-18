@@ -211,6 +211,10 @@
 	"network.discord.name": "Discord",
 	"network.comingSoon": "Arrive en v0.2",
 
+	"networks.add.title": "Ajouter un réseau",
+	"networks.add.intro": "Les réseaux déjà connectés sont signalés comme tels. Choisissez-en un autre à ajouter, ou revenez en arrière.",
+	"networks.add.done": "Terminé, retour au tableau de bord",
+	"networks.backToDashboard": "Retour au tableau de bord",
 	"networks.title": "Connecter votre premier réseau",
 	"networks.step": "Étape 1 sur 3",
 	"networks.intro": "Choisissez-en un pour commencer. Vous ajouterez les autres quand vous le souhaitez.",

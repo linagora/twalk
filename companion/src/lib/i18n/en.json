@@ -87,6 +87,10 @@
 	"network.comingSoon": "Coming in v0.2",
 
 	"networks.title": "Connect your first network",
+	"networks.add.title": "Add a network",
+	"networks.add.intro": "The networks you have connected are marked as such. Pick another one to add, or go back.",
+	"networks.add.done": "Done, back to the dashboard",
+	"networks.backToDashboard": "Back to the dashboard",
 	"networks.step": "1 of 3 to finish setup",
 	"networks.intro": "Pick one to start with. You can add the others whenever you like.",
 	"networks.preview": "Preview",
