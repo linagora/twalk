@@ -592,9 +592,16 @@ async fn activating_a_persona_is_a_decision_on_this_same_write_path() -> Result<
             "scope": { "networks": ["whatsapp", "signal"] }
         }))
         .await?;
-    assert_eq!(activated["old_state"].as_str(), Some("unset"), "{activated}");
+    assert_eq!(
+        activated["old_state"].as_str(),
+        Some("unset"),
+        "{activated}"
+    );
     // Sorted, because the scope is part of the event's deterministic id.
-    assert_eq!(activated["scope"]["networks"], json!(["signal", "whatsapp"]));
+    assert_eq!(
+        activated["scope"]["networks"],
+        json!(["signal", "whatsapp"])
+    );
     let granted_id = event_id(&activated)?;
 
     let event = &fixture.wait_for_published(&[&granted_id]).await?[0].payload;
@@ -604,7 +611,10 @@ async fn activating_a_persona_is_a_decision_on_this_same_write_path() -> Result<
         json!({"type": "persona", "id": persona})
     );
     assert_eq!(event["data"]["new_state"].as_str(), Some("granted"));
-    assert_eq!(event["data"]["scope"]["networks"], json!(["signal", "whatsapp"]));
+    assert_eq!(
+        event["data"]["scope"]["networks"],
+        json!(["signal", "whatsapp"])
+    );
 
     // The owner's own read shows it, which is how the dashboard knows which
     // personas are active and on which networks.
@@ -623,7 +633,10 @@ async fn activating_a_persona_is_a_decision_on_this_same_write_path() -> Result<
     // a Sensor labels senders by (ticket #50).
     let snapshot = reqwest::Client::new()
         .get(format!("{}/api/consent/snapshot", fixture.base))
-        .header("authorization", format!("Bearer {}", harness::SERVICE_TOKEN))
+        .header(
+            "authorization",
+            format!("Bearer {}", harness::SERVICE_TOKEN),
+        )
         .send()
         .await
         .context("the snapshot did not answer")?

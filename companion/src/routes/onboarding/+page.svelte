@@ -81,7 +81,7 @@
 	/**
 	 * The homeserver screen 1 resolved. Falling back to the domain's own base
 	 * URL rather than sending the user back a screen: a reload of this page in
-	 * a browser with no `sessionStorage` would otherwise dead-end.
+	 * a browser with no `localStorage` would otherwise dead-end.
 	 */
 	const baseUrl = $derived($homeserver !== '' ? $homeserver : homeserverBaseUrl($domain));
 
