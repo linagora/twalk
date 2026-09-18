@@ -40,6 +40,19 @@ test.describe('the app loads', () => {
 		// has to answer. A stand-in is enough here: what is under test is the
 		// normalisation and the hand-over, not the cryptography — that is the
 		// real-stack journey's (`bootstrap.spec.ts`).
+		// The deployment this screen probes is stated rather than inherited.
+		// Under `npm run test:e2e:stack` this spec shares a Gateway with the
+		// bootstrap journey, which creates the deployment's one account —
+		// after which screen 1 correctly sends a returning user to `/signin`
+		// rather than to `/onboarding` (#112). Which of the two this test saw
+		// then depended on which spec happened to run first.
+		await page.route('**/api/deployment', (route) =>
+			route.fulfill({
+				status: 200,
+				contentType: 'application/json',
+				body: JSON.stringify({ bootstrapped: false })
+			})
+		);
 		await page.route('https://twalk.example.com/.well-known/matrix/client', (route) =>
 			route.fulfill({ status: 404 })
 		);
