@@ -75,6 +75,8 @@ Monorepo with 13 top-level directories — see the "Repository layout" section o
 
 ## Code style guidelines
 
+**Do not run a formatter.** There is no Prettier, rustfmt-on-save or equivalent configured anywhere in this repository, and none is wanted: the style is tabs, single quotes and a ~100-column wrap in the TypeScript and Svelte, and `cargo fmt` defaults in the Rust, all maintained by attention. A `npx prettier --write` here resolves to whatever binary is on the machine, applies *its* defaults, and rewrites whole files — two merges once turned a 200-line change into 1560 insertions and 1464 deletions, which had to be undone by hand. Match the file you are editing. (`cargo fmt` is the one exception, and only because the Rust crates were written to it.)
+
 In all naming and prose, follow the `CONTEXT.md` vocabulary: **network** (never "channel" outside user-facing copy, never a bridge name like `gmessages`), **persona** (never "bot" for agent identities — test Matrix users standing in for bridges are "test bots"), **the Companion** means the PWA only, **Companion Gateway** always in full.
 
 ## Testing instructions
