@@ -328,6 +328,14 @@ services:
       # only if you run a second Gateway against this bus, where sharing one
       # durable name would split the stream between them.
       GATEWAY_INBOUND_CONSUMER: ${GATEWAY_INBOUND_CONSUMER:-}
+      # Approvals (ticket #24): how many stream positions back the Gateway
+      # searches for the suggestion an approval names, and for the message
+      # that suggestion answers. Empty means its default. The bound is
+      # visible in the answer — a suggestion the search did not reach is
+      # refused as "out of reach" and never as "not found" — so widening
+      # this is a choice about how far back a reply can be approved from,
+      # not about whether the answer is honest.
+      GATEWAY_APPROVAL_LOOKUP_WINDOW: ${GATEWAY_APPROVAL_LOOKUP_WINDOW:-}
     volumes:
       # The device list and the session tokens' digests — a restart keeps the
       # user signed in on every device they signed in on — and the consent

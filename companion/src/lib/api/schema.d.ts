@@ -84,6 +84,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve one suggestion, and send the reply.
+         * @description The human act that turns a suggestion into an outbound reply
+         *     (`CONTEXT.md`). It publishes a `persona.reply.approved.v1` on the
+         *     bus, which the Sensor consumes and posts into the portal room.
+         *
+         *     **One suggestion.** There is deliberately no endpoint that approves a
+         *     list: an approval is a deliberate act and never a batch, so a body
+         *     carrying an array is refused with `approval_is_not_a_batch` rather
+         *     than helpfully interpreted. A client that wants to approve three
+         *     replies sends three requests, and the user clicks three times.
+         *
+         *     **Who approved it** is this deployment's owner, from configuration.
+         *     `approved_by` may be stated and must then be that same Matrix ID; a
+         *     request naming anybody else is `403`, because silently rewriting the
+         *     one identity field of an audit trail is worse than refusing.
+         *
+         *     **The consent check is made now, not when the suggestion was
+         *     produced.** A suggestion the persona wrote while the contact was
+         *     granted is refused if the user has revoked that contact since — the
+         *     definition's "at that moment", and the reason this endpoint is on
+         *     the Gateway rather than on the Hermes runtime, which would have had
+         *     to ask over HTTP for state the Gateway itself writes (ADR 0022).
+         *
+         *     **There is no queue.** The reply is published inside this request or
+         *     it is not published at all: a `201` means the bus acknowledged it and
+         *     names the position it landed at, and a bus that does not answer is a
+         *     `502` the user can retry. An approval is never "accepted, we will try
+         *     later", because a send held for later is a send whose consent check
+         *     has gone stale.
+         *
+         *     The suggestion and the message it answers are read from the bus,
+         *     which has no index from an event id to a stream position, so the read
+         *     is bounded (`GATEWAY_APPROVAL_LOOKUP_WINDOW`). The bound is visible
+         *     in the answer: a suggestion the search did not reach is `410
+         *     suggestion_out_of_reach` and never `404 suggestion_not_found`.
+         */
+        post: operations["approveSuggestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/approvals/{suggestion_event_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What became of one approval.
+         * @description The answer to "did that reply actually go out?", read from the
+         *     Gateway's own record.
+         *
+         *     Every answer is terminal. `publication` is `published` with the
+         *     stream position the reply landed at, or `unpublished` - which means
+         *     this Gateway wrote the row and the publication did not land, a crash
+         *     between the two, repaired by approving the same suggestion again
+         *     (the bus deduplicates on the contract's id, so nothing is sent
+         *     twice). There is no "in flight": an approval publishes inside its own
+         *     request or it is refused, so there is no state here a screen should
+         *     render as a spinner.
+         *
+         *     No answer of this endpoint carries the text that was sent. The reply
+         *     is on the bus, where the retention is declared; the Gateway keeps the
+         *     suggestion's id, who approved it, whether they edited it and where it
+         *     landed.
+         */
+        get: operations["getApproval"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/bootstrap/account": {
         parameters: {
             query?: never;
@@ -887,6 +975,109 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
+         * @description One approval as this Gateway recorded it. The same shape from
+         *     `POST /api/approvals` and from `GET /api/approvals/{id}`, so a client
+         *     renders one thing.
+         *
+         *     There is no member for the reply's text, and there will not be one:
+         *     the text is on the bus, where the retention is declared, and the
+         *     Gateway keeps the suggestion's id, who approved it, whether they
+         *     edited it and where the publication landed.
+         */
+        Approval: {
+            /**
+             * Format: date-time
+             * @description When the Gateway recorded the approval.
+             */
+            approved_at: string;
+            /**
+             * @description The Matrix ID of the human who approved it: this deployment's
+             *     owner. The audit trail of who sent what goes through this field.
+             */
+            approved_by: string;
+            /**
+             * @description The contact the reply goes to — and whose consent was checked, at
+             *     the moment the approval was given.
+             */
+            contact: string;
+            /**
+             * @description Whether the text sent differed from the persona's suggestion. A
+             *     boolean, not the text: "how often do I correct my assistant?" is
+             *     answerable without keeping a word of what was said.
+             */
+            edited: boolean;
+            /**
+             * @description The CloudEvents id of the `persona.reply.approved.v1` that was
+             *     published: `sha256(suggestion_event_id:approved_by)`. No clock
+             *     in it, so approving the same suggestion again lands on the
+             *     message the bus already holds instead of sending a second reply.
+             */
+            event_id: string;
+            /**
+             * @description The network the reply goes out on.
+             * @enum {string}
+             */
+            network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+            /** @description The persona that proposed the reply. */
+            persona_id: string;
+            /**
+             * @description Whether the reply reached the bus. Both values are terminal and
+             *     neither is "in flight": an approval is published inside its own
+             *     request or it is refused, so `unpublished` means a crash between
+             *     the Gateway's write and the bus's acknowledgement, repaired by
+             *     approving the same suggestion again.
+             * @enum {string}
+             */
+            publication: "published" | "unpublished";
+            /** @description When the bus acknowledged it. `null` on the same terms. */
+            published_at?: string | null;
+            /**
+             * @description Where on the bus the reply landed. `null` while `publication` is
+             *     `unpublished`.
+             */
+            stream_sequence?: number | null;
+            /** @description The suggestion that was approved. */
+            suggestion_event_id: string;
+        };
+        /**
+         * @description One approval. A closed object with one required member, and that
+         *     shape is the rule rather than a convenience: an approval names
+         *     exactly one suggestion, so there is no `suggestions` array here and
+         *     there is not going to be one (`CONTEXT.md`: "never a batch").
+         */
+        ApprovalRequest: {
+            /**
+             * @description Optional, and checked rather than trusted: it must be this
+             *     deployment's owner, and a request naming anybody else is `403`.
+             *     Omit it and the Gateway stamps the owner, which is what an
+             *     audit trail of "who sent what" needs.
+             */
+            approved_by?: string;
+            /**
+             * @description The edited content, when the user changed the suggestion before
+             *     approving. Absent means "send what the persona wrote"; the
+             *     published event's `edited` flag says which happened.
+             */
+            final?: {
+                /**
+                 * @description The exact text to send. Empty is refused: approving an empty
+                 *     reply sends an empty message, which is never what was meant.
+                 */
+                body: string;
+                /**
+                 * @description The contract's three content types.
+                 * @default text/plain
+                 * @enum {string}
+                 */
+                format: "text/plain" | "text/markdown" | "text/html";
+            };
+            /**
+             * @description The CloudEvents id of the `persona.suggest.produced` event being
+             *     approved.
+             */
+            suggestion_event_id: string;
+        };
+        /**
          * @description What one bridge says about the logins it holds — the persistent
          *     links, with the network's credentials behind them. Read from the
          *     bridge's `whoami`, which is the only provisioning call that describes
@@ -1465,6 +1656,7 @@ export interface components {
          *     status carries.
          */
         Error: {
+            approval?: components["schemas"]["Approval"];
             /**
              * @description A human-readable explanation, for an operator reading logs. Not
              *     for display to the user, and never matched on.
@@ -1767,6 +1959,24 @@ export interface components {
     };
     responses: {
         /**
+         * @description This deployment approves nothing: `GATEWAY_NATS_URL` is unset, so
+         *     there is no bus to read the suggestion from and none to publish the
+         *     reply on. Answered before the suggestion is looked at, so it is
+         *     never mistaken for a statement about that suggestion; `detail` names
+         *     the variables.
+         */
+        ApprovalsNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "approvals_not_configured";
+                };
+            };
+        };
+        /**
          * @description The bridge itself is the problem, not the request. The three codes
          *     are three different investigations, and telling them apart without
          *     reading `detail` is the point of having three.
@@ -1955,6 +2165,12 @@ export interface components {
          * @example bridge-whatsapp
          */
         statusBridgeId: string;
+        /**
+         * @description The CloudEvents id of the `persona.suggest.produced` event that was
+         *     approved: 64 lowercase hex characters, the contract's own id shape.
+         * @example 319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b
+         */
+        suggestionEventId: string;
     };
     requestBodies: never;
     headers: never;
@@ -2148,6 +2364,284 @@ export interface operations {
                     "text/plain": string;
                 };
             };
+        };
+    };
+    approveSuggestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalRequest"];
+            };
+        };
+        responses: {
+            /**
+             * @description The reply is on the bus, at the position `stream_sequence`
+             *     names. `publication` is `published`.
+             */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Approval"];
+                };
+            };
+            /**
+             * @description The request is not one approval.
+             *
+             *     - `malformed_request` - the body is not JSON, a required member
+             *       is missing or of the wrong type, `suggestion_event_id` is not
+             *       a contract event id, or `final.body` is empty (approving an
+             *       empty reply sends an empty message, which is never what was
+             *       meant).
+             *     - `approval_is_not_a_batch` - the body is a list, or
+             *       `suggestion_event_id` is. An approval names exactly one
+             *       suggestion.
+             *     - `unknown_value` - `final.format` is not one of the contract's
+             *       three content types.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request" | "approval_is_not_a_batch" | "unknown_value";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `approved_by_is_not_the_owner` - the request names an approver
+             *     who is not this deployment's owner. Omit the member and the
+             *     Gateway stamps it.
+             */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "approved_by_is_not_the_owner";
+                    };
+                };
+            };
+            /**
+             * @description Nothing to approve, and the bus was read to its first retained
+             *     message - so this is "it is not there", not "it was not looked
+             *     for far enough", which is `410`.
+             *
+             *     - `suggestion_not_found` - no `persona.suggest.produced` on the
+             *       bus has this id.
+             *     - `trigger_not_found` - the suggestion exists and the message it
+             *       answers does not, so there is no room to reply in.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_not_found" | "trigger_not_found";
+                    };
+                };
+            };
+            /**
+             * @description The suggestion exists and cannot be approved. Six situations,
+             *     six codes: each one is a different sentence for the user, and
+             *     collapsing them would be the defect that cost this project seven
+             *     incidents in two days.
+             *
+             *     - `suggestion_expired` - its `expires_at` has passed. A stale
+             *       suggestion cannot be approved late (the policy that sets it is
+             *       `sdk/python/twalk_sdk/policy.py`). The suggestion stays
+             *       visible; ask the persona for a new one.
+             *     - `consent_revoked` - the sender's consent **is revoked now**,
+             *       whatever it was when the persona wrote the reply. Nothing was
+             *       sent.
+             *     - `consent_pending` - the sender's consent is pending now:
+             *       never decided, or decided "not yet". A different sentence from
+             *       a revocation, so a different code.
+             *     - `suggestion_was_never_consented` - the message the suggestion
+             *       answers was observed with a consent label that was not
+             *       `granted`, so the suggestion should never have been produced.
+             *       This is the audit fact at observation time, and it is checked
+             *       separately from the two above, which are about now.
+             *     - `already_approved` - this suggestion was approved before. The
+             *       body carries that first approval under `approval`, so a client
+             *       whose first answer was lost learns where its reply went
+             *       instead of being told to try again. Nothing was sent twice:
+             *       the contract's id is deterministic and the bus deduplicates.
+             *     - `trigger_has_no_room` - the message the suggestion answers
+             *       does not name a portal room, so there is nowhere to send the
+             *       reply.
+             *     - `suggestion_unreadable` - the suggestion is on the bus and
+             *       this build cannot read it (an unknown network, an unknown
+             *       consent state, a content type the contract does not name).
+             *       Found and not understood, which is not "not found".
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_expired" | "consent_revoked" | "consent_pending" | "suggestion_was_never_consented" | "already_approved" | "trigger_has_no_room" | "suggestion_unreadable";
+                    };
+                };
+            };
+            /**
+             * @description The search reached its bound before the stream's first retained
+             *     message, so the suggestion may exist further back than this
+             *     Gateway reads. Not a `404`: "gone" and "never was" lead a user
+             *     to different actions, and a suggestion this old has expired in
+             *     any case. `GATEWAY_APPROVAL_LOOKUP_WINDOW` widens the search.
+             *
+             *     - `suggestion_out_of_reach` - the suggestion itself.
+             *     - `trigger_out_of_reach` - the message it answers, searched
+             *       backwards from the suggestion's own position.
+             */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_out_of_reach" | "trigger_out_of_reach";
+                    };
+                };
+            };
+            /**
+             * @description - `store_unavailable` - the Gateway's own store could not be
+             *       read or written. Nothing was sent.
+             *     - `approval_published_but_not_recorded` - the reply **was**
+             *       published and the Gateway could not write that down. The reply
+             *       has gone out; it will not appear under `GET /api/approvals/{id}`
+             *       until the record is repaired by approving again, which
+             *       republishes under the same deterministic id and is
+             *       deduplicated by the bus. Its own code because the answer to
+             *       "did my reply go out?" is yes, and every other `500` here
+             *       means no.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable" | "approval_published_but_not_recorded";
+                    };
+                };
+            };
+            /**
+             * @description `bus_unreachable` - the bus did not answer, so the suggestion
+             *     could not be read or the reply could not be published. Nothing
+             *     was sent, and this approval can be given again once the bus is
+             *     back.
+             *
+             *     A `502` and not a `503`: this Gateway is configured and
+             *     answering, and what failed is the thing behind it. A `503` here
+             *     would tell a client that the deployment does not do approvals,
+             *     which is a different problem with a different fix.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            503: components["responses"]["ApprovalsNotConfigured"];
+        };
+    };
+    getApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The CloudEvents id of the `persona.suggest.produced` event that was
+                 *     approved: 64 lowercase hex characters, the contract's own id shape.
+                 * @example 319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b
+                 */
+                suggestion_event_id: components["parameters"]["suggestionEventId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The approval this Gateway recorded. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Approval"];
+                };
+            };
+            /**
+             * @description `malformed_request` - the path names something that is not a
+             *     contract event id (64 lowercase hex characters).
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `approval_not_found` - this Gateway has no record of approving
+             *     that suggestion. It was never approved here, and no reply went
+             *     out because of it.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "approval_not_found";
+                    };
+                };
+            };
+            /**
+             * @description `store_unavailable` - the Gateway's own store could not be read,
+             *     so whether the reply went out is unknown rather than no.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            503: components["responses"]["ApprovalsNotConfigured"];
         };
     };
     createOwnerAccount: {

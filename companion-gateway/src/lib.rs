@@ -36,6 +36,20 @@
 //! feature: no body, no display name, no `network_identifier`, enforced by
 //! the shape of the types rather than by care.
 //!
+//! Ticket #24 made the Gateway the **approval authority** ([`approval`],
+//! [`approval_http`]): `POST /api/approvals` turns one suggestion into a
+//! `persona.reply.approved.v1` on the bus, and refuses it when the
+//! suggestion has expired, when its trigger was never consented, or when the
+//! sender's consent is no longer `granted` *at that moment* — which is a
+//! read of this Gateway's own consent state rather than a question asked of
+//! another process. Spec #19 had put this endpoint on the Hermes runtime,
+//! with the runtime asking the Gateway over HTTP; ADR 0022 records why it
+//! moved here instead, and the short version is that the single writer of
+//! consent state should not have to phone anybody to know what it wrote.
+//! The module has no outbox, on purpose: an approval publishes inside its
+//! own request or it is refused, because a send held for later is a send
+//! whose consent check has gone stale.
+//!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
 //! the origin itself ([`openapi`]) and checked against the running binary by
@@ -46,6 +60,8 @@
 //! As in the Sensor, the seam-independent logic lives in these modules and
 //! the binary in `main.rs` only wires them to the network.
 
+pub mod approval;
+pub mod approval_http;
 pub mod bootstrap;
 pub mod bootstrap_http;
 pub mod bridge;

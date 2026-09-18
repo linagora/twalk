@@ -36,7 +36,7 @@ The user's decision that a persona may read a given network, recorded as a conse
 A reply a persona proposes and never sends: it exists to be read, edited or refused by a human. Written in the language of the message it answers, not the user's (ADR 0016). Contract type: `persona.suggest.produced`.
 
 **Approval**:
-The human act that turns a suggestion into an outbound reply, carrying the identity of whoever approved it. Deliberate by construction — an explicit call, never a default, never a batch — and refused if the sender's consent is no longer `granted` at that moment. Contract type: `persona.reply.approved`.
+The human act that turns a suggestion into an outbound reply, carrying the identity of whoever approved it. Deliberate by construction — an explicit call, never a default, never a batch — and refused if the sender's consent is no longer `granted` at that moment. Served and published by the Companion Gateway, because that last clause is a read of the consent state and the Gateway is its single writer (ADR 0022); the event's `source` names the persona whose suggestion was approved, not the publisher. Contract type: `persona.reply.approved`.
 
 ### Contract
 

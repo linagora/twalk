@@ -279,6 +279,81 @@ written, cached or logged. A contact whose last message has fallen outside that 
 with `display_name: null`, which is an answer and not a failure: the Companion shows the Matrix
 ID, which is what the decision will name anyway.
 
+## Approving a suggestion (ticket #24)
+
+A persona proposes a reply and never sends it. The act that sends it is an **approval**, and
+`CONTEXT.md` defines it with enough precision that the definition is the implementation:
+
+> The human act that turns a suggestion into an outbound reply, carrying the identity of whoever
+> approved it. Deliberate by construction — an explicit call, never a default, never a batch — and
+> refused if the sender's consent is no longer `granted` at that moment.
+
+```
+POST /api/approvals
+{ "suggestion_event_id": "319be8ff…",
+  "final": { "body": "Plutôt 20h30, si ça te va", "format": "text/plain" } }
+
+201
+{ "event_id": "57f0e4d3…", "suggestion_event_id": "319be8ff…",
+  "approved_by": "@michel:example.com", "persona_id": "assistant",
+  "network": "whatsapp", "contact": "@whatsapp_33612345678:example.com",
+  "edited": true, "approved_at": "2026-09-17T10:04:37.000Z",
+  "publication": "published", "stream_sequence": 4242,
+  "published_at": "2026-09-17T10:04:37.000Z" }
+```
+
+`final` is optional — without it the persona's own words go out, and `edited` says which happened.
+`approved_by` may be stated and must then be the deployment's owner: the Gateway stamps it either
+way and refuses to record an approval under another name, because silently rewriting the one
+identity field of an audit trail is worse than saying no.
+
+**One suggestion.** There is no endpoint that approves a list, and a body carrying one is refused
+with `approval_is_not_a_batch` rather than helpfully interpreted. A batch approval is a single
+click that sends several messages, which is the thing "never a batch" forbids.
+
+**The consent check is made now.** Not the label the suggestion was born with — that label is a
+fact about when the Sensor observed the message, and it stays `granted` after the user revokes the
+contact. Both are checked, and they are two different refusals: `suggestion_was_never_consented`
+for the label, `consent_revoked` (or `consent_pending`) for the state as it is at the moment the
+approval is given. That last one is why this endpoint is on the Gateway and not on the Hermes
+runtime, which spec [#19](https://github.com/linagora/twalk/issues/19) had planned for and which
+would have had to ask the Gateway over HTTP for state the Gateway itself writes —
+[ADR 0022](../docs/architecture/adr/0022-the-approval-api-lives-on-the-companion-gateway.md).
+
+**There is no queue.** A consent decision is committed and published later, because a decision the
+user took must survive a bus outage. An approval is the opposite: a send held for later is a send
+whose consent check has gone stale, so the reply is published inside the request or not at all. A
+`201` means the bus acknowledged it and names the position; a bus that does not answer is a `502`
+the user can retry. The row the Gateway then writes is bookkeeping — `GET
+/api/approvals/{suggestion_event_id}` reads it back, which is how "did my reply actually go out?"
+has an answer that is not a spinner — and it holds **no message content**: the suggestion's id,
+who approved it, whether they edited it, and where the publication landed.
+
+Every refusal has its own code, and the status is part of the answer rather than decoration:
+
+| Status | Code | What happened |
+| --- | --- | --- |
+| `400` | `malformed_request`, `approval_is_not_a_batch`, `unknown_value` | The request is not one approval. |
+| `403` | `approved_by_is_not_the_owner` | Somebody else was named as the approver. |
+| `404` | `suggestion_not_found`, `trigger_not_found` | The whole retained stream was read and it is not there. |
+| `409` | `suggestion_expired`, `consent_revoked`, `consent_pending`, `suggestion_was_never_consented`, `already_approved`, `trigger_has_no_room`, `suggestion_unreadable` | It exists and cannot be approved. |
+| `410` | `suggestion_out_of_reach`, `trigger_out_of_reach` | The bounded search gave up before the stream's start — "I did not look that far", which is not "it is not there". |
+| `502` | `bus_unreachable` | The bus did not answer. Nothing was sent. Not a `503`: this Gateway is configured and answering. |
+| `503` | `approvals_not_configured` | This deployment has no bus, so it approves nothing. Answered before the suggestion is looked at. |
+
+The suggestion and the message it answers are found by reading the bus, which has no index from an
+event id to a stream position. The read is bounded by `GATEWAY_APPROVAL_LOOKUP_WINDOW`, and the
+bound is **visible in the answer**: `410` and not `404`, because a user acts differently on "this
+is gone" than on "this never existed". The trigger's search is anchored on the suggestion's own
+position rather than on the stream's head, so a persona activated today — which reads the stream
+from the beginning (ADR 0013) — can still have its first suggestions approved, although the
+messages they answer are weeks old.
+
+One gap, named rather than papered over: the approved reply carries no `target.reply_to_event_id`,
+so the Sensor posts it into the portal room without threading it under the original. The contract's
+inbound event carries no Matrix event ID of its own to thread under, and inventing one would be
+worse than the gap.
+
 ## Configuration
 
 Environment variables only, like the Sensor. They are documented for an operator in `deploy/docker-compose/.env.example`.
@@ -300,6 +375,7 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_SENSOR_USER_ID` | *unset* | The Sensor's Matrix ID — who gets invited. Unset: `POST /api/bootstrap/rooms` answers `503`. |
 | `GATEWAY_SERVICE_TOKEN` | *unset* | The token the consent snapshot is read with. Unset: `GET /api/consent/snapshot` answers `503`. Shorter than 32 characters: the Gateway refuses to start. |
 | `GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES` | `100000` | The largest snapshot served. Over it, an error — never a truncation. |
+| `GATEWAY_APPROVAL_LOOKUP_WINDOW` | `20000` | How many stream positions back an approval searches for the suggestion it names, and for the message that suggestion answers. The bound is visible in the answer: a suggestion the search did not reach is `410 suggestion_out_of_reach`, never `404 suggestion_not_found`. Widen it on a bus carrying far more than one person's conversations; the cost is a longer read on the approval path alone. |
 | `GATEWAY_INBOUND_CONSUMER` | `companion-gateway-pending-contacts` | The durable JetStream consumer the pending-contact projection reads through. One Gateway per deployment owns it; rename it only for a second Gateway on the same bus, which would otherwise split the stream with the first. |
 | `GATEWAY_BRIDGES` | *unset* | The bridge instances this deployment can log in to, by `bridge_id`, comma-separated and in the order the Companion offers them (`mautrix-whatsapp,mautrix-signal`). Unset: `GET /api/bridges` answers an empty list. |
 | `GATEWAY_BRIDGE_<ID>_URL` | *required per bridge* | That bridge's appservice listener, where its provisioning API is — e.g. `http://bridge-whatsapp:29318`. `<ID>` is the `bridge_id` upper-cased with every non-alphanumeric character as `_`. |
@@ -325,6 +401,7 @@ cargo test --test consent_snapshot  # the snapshot, and the hand-off to the bus
 cargo test --test bridges     # the bridge login facade against a stub bridge
 cargo test --test bridge_status  # the status webhook, the mapping table and the reconciliation
 cargo test --test pending     # the pending-contact projection against a real bus
+cargo test --test approvals   # approving a suggestion, and every way it is refused
 cargo test --test openapi     # the description against the running binary
 ```
 

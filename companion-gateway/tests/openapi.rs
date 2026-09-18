@@ -117,6 +117,18 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "store_unavailable, as above",
     ),
     (
+        "post",
+        "/api/approvals",
+        "500",
+        "store_unavailable and approval_published_but_not_recorded both need the Gateway's own SQLite file to fail under a running process — the same fault-injection seam this suite does not have. The second one is the interesting half (the reply went out and the record did not), and it is asserted as a shape by `approval_http::tests` and `store::tests::an_approval_is_recorded_unpublished_and_then_marked`",
+    ),
+    (
+        "get",
+        "/api/approvals/{suggestion_event_id}",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
         "get",
         "/api/consent/effective",
         "500",
@@ -506,6 +518,72 @@ fn inbound_event(subject: &str) -> Value {
         }
     });
     validate_against_contract(&event, "inbound.message.received")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
+/// The message an approval's suggestion answers (#24): the only place the
+/// portal room and the sender are named, which is why the approval path has
+/// to find it on the bus.
+fn approval_trigger_event(sender: &str, room_id: &str) -> Value {
+    let at = "2026-09-17T10:00:00Z";
+    let event = json!({
+        "specversion": "1.0",
+        "id": sha256_hex(&format!("openapi-g24-trigger:{sender}:{room_id}")),
+        "source": format!("matrix://{SERVER_NAME}/{room_id}"),
+        "type": "fr.linagora.twalk.inbound.message.received.v1",
+        "time": at,
+        "subject": sender,
+        "datacontenttype": "application/json",
+        "network": "whatsapp",
+        "consent": "granted",
+        "data": {
+            "body": "On décale à 20h ?",
+            "format": "text/plain",
+            "reply_to": null,
+            "attachments": [],
+            "contact": { "display_name": "Aicha Benali" }
+        }
+    });
+    validate_against_contract(&event, "inbound.message.received")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
+/// The suggestion a persona produced for it, with the expiry ticket #22's
+/// policy always sets — `in_seconds` from now, so the description's `201` is
+/// driven against a suggestion that is still approvable however long this
+/// suite has been running.
+fn approval_suggestion_event(trigger: &Value, expires_in_seconds: i64) -> Value {
+    let trigger_id = trigger["id"].as_str().expect("the trigger has an id");
+    let expires_at = (time::OffsetDateTime::now_utc()
+        + time::Duration::seconds(expires_in_seconds))
+    .replace_nanosecond(0)
+    .expect("a whole second is a valid instant")
+    .format(&time::format_description::well_known::Rfc3339)
+    .expect("an instant formats as RFC 3339");
+    let event = json!({
+        "specversion": "1.0",
+        "id": sha256_hex(&format!("openapi-g24-suggest:{trigger_id}")),
+        "source": format!("hermes://{SERVER_NAME}/personas/assistant"),
+        "type": "fr.linagora.twalk.persona.suggest.produced.v1",
+        "time": trigger["time"],
+        "subject": trigger_id,
+        "datacontenttype": "application/json",
+        "network": "whatsapp",
+        "consent": "granted",
+        "data": {
+            "persona_id": "assistant",
+            "trigger": {
+                "event_id": trigger_id,
+                "event_type": "fr.linagora.twalk.inbound.message.received.v1"
+            },
+            "suggestion": { "body": "Pas de problème, à 20h !", "format": "text/plain" },
+            "attempt": 1,
+            "expires_at": expires_at
+        }
+    });
+    validate_against_contract(&event, "persona.suggest.produced")
         .expect("the fixture is an event the contract allows");
     event
 }
@@ -1123,6 +1201,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     .await?;
 
     // --- the refusals every /api endpoint shares: no credential at all
+    let absent_approval = format!("/api/approvals/{}", "a".repeat(64));
     for (method, template, target) in [
         (Method::GET, "/api/session", "/api/session"),
         (Method::DELETE, "/api/session", "/api/session"),
@@ -1161,6 +1240,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::GET,
             "/api/contacts/display-names",
             "/api/contacts/display-names?contact=%40a%3Atest.twalk",
+        ),
+        (Method::POST, "/api/approvals", "/api/approvals"),
+        (
+            Method::GET,
+            "/api/approvals/{suggestion_event_id}",
+            absent_approval.as_str(),
         ),
         (Method::GET, "/api/bridges", "/api/bridges"),
         (
@@ -1291,6 +1376,32 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         )
         .await?;
     }
+    // Approvals are the same half of the same configuration (#24): no bus, so
+    // no suggestion to read and nowhere to publish the reply. Answered before
+    // the suggestion is looked at, so a client never reads "this deployment
+    // does not approve" as a statement about that suggestion.
+    call.check(
+        Method::POST,
+        &base,
+        "/api/approvals",
+        "/api/approvals",
+        &consent_cookie,
+        Some(json!({ "suggestion_event_id": "a".repeat(64) })),
+        503,
+        Some("approvals_not_configured"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &base,
+        "/api/approvals/{suggestion_event_id}",
+        &absent_approval,
+        &consent_cookie,
+        None,
+        503,
+        Some("approvals_not_configured"),
+    )
+    .await?;
     // The snapshot answers the same way, to the service token this Gateway
     // does have: authentication first, then the half that is missing.
     call.check_with_bearer(
@@ -1757,7 +1868,18 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // halves a deployment can have configured or not, so its answers are
     // driven on a Gateway of its own rather than by reconfiguring the first.
     let consent_static = companion_build("openapi-consent")?;
-    let consenting = GatewayProc::start(&gateway_env_with_consent(&consent_static, &nats_url()))?;
+    // The approval search window (#24) is widened past the shared stream's
+    // whole length, so that a suggestion nobody published is answered `404
+    // suggestion_not_found` — the whole stream having been read — rather
+    // than the `410` a bounded search that gave up would give. Both answers
+    // are exercised; this Gateway is the one that gives the first.
+    let consenting = GatewayProc::start(&gateway_env_with(
+        &consent_static,
+        &[
+            ("GATEWAY_NATS_URL", &nats_url()),
+            ("GATEWAY_APPROVAL_LOOKUP_WINDOW", "100000000"),
+        ],
+    ))?;
     let consenting_base = consenting.base_url().await?;
     wait_until_answering(&consenting_base).await?;
     let (deciding_device, _) =
@@ -2054,7 +2176,232 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("unknown_value"),
     )
     .await?;
+
+    // --- approvals (#24), on the same Gateway: the act that turns a
+    // suggestion into an outbound reply. Its behaviour is
+    // `tests/approvals.rs`'s; what is driven here is every answer the
+    // description declares.
+    //
+    // A conversation of this run's own: the message, then the suggestion
+    // that answers it, both published as a Sensor and a persona would.
+    let approvable = format!(
+        "@whatsapp_openapi_g24_{}:{SERVER_NAME}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let approvable_room = format!(
+        "!openapig24{}:{SERVER_NAME}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    call.check(
+        Method::POST,
+        &consenting_base,
+        "/api/consent/decisions",
+        "/api/consent/decisions",
+        &deciding_cookie,
+        Some(json!({
+            "subject": { "type": "contact", "id": approvable },
+            "new_state": "granted",
+            "scope": { "networks": ["whatsapp"] }
+        })),
+        201,
+        None,
+    )
+    .await?;
+    let trigger = approval_trigger_event(&approvable, &approvable_room);
+    bus.publish_event("twalk.inbound.message.received.v1", &trigger)
+        .await?;
+    let suggestion = approval_suggestion_event(&trigger, 3600);
+    let suggestion_id = suggestion["id"].as_str().unwrap().to_owned();
+    bus.publish_event("twalk.persona.suggest.produced.v1", &suggestion)
+        .await?;
+
+    // Nothing to approve: the whole retained stream was read, which is why
+    // this Gateway's search window is wider than the stream.
+    call.check(
+        Method::POST,
+        &consenting_base,
+        "/api/approvals",
+        "/api/approvals",
+        &deciding_cookie,
+        Some(json!({ "suggestion_event_id": sha256_hex("openapi-no-such-suggestion") })),
+        404,
+        Some("suggestion_not_found"),
+    )
+    .await?;
+    // Never a batch, and never under another name.
+    call.check(
+        Method::POST,
+        &consenting_base,
+        "/api/approvals",
+        "/api/approvals",
+        &deciding_cookie,
+        Some(json!([{ "suggestion_event_id": suggestion_id }])),
+        400,
+        Some("approval_is_not_a_batch"),
+    )
+    .await?;
+    call.check(
+        Method::POST,
+        &consenting_base,
+        "/api/approvals",
+        "/api/approvals",
+        &deciding_cookie,
+        Some(json!({
+            "suggestion_event_id": suggestion_id,
+            "approved_by": "@not-the-owner:test.twalk"
+        })),
+        403,
+        Some("approved_by_is_not_the_owner"),
+    )
+    .await?;
+    // The act itself.
+    let approved = call
+        .check(
+            Method::POST,
+            &consenting_base,
+            "/api/approvals",
+            "/api/approvals",
+            &deciding_cookie,
+            Some(json!({
+                "suggestion_event_id": suggestion_id,
+                "final": { "body": "d'accord pour 20h", "format": "text/plain" }
+            })),
+            201,
+            None,
+        )
+        .await?;
+    assert_eq!(approved.body["publication"].as_str(), Some("published"));
+    assert_eq!(approved.body["edited"].as_bool(), Some(true));
+    // And again: refused, carrying the first approval so a client whose
+    // answer was lost learns where its reply went.
+    let again = call
+        .check(
+            Method::POST,
+            &consenting_base,
+            "/api/approvals",
+            "/api/approvals",
+            &deciding_cookie,
+            Some(json!({ "suggestion_event_id": suggestion_id })),
+            409,
+            Some("already_approved"),
+        )
+        .await?;
+    assert_eq!(
+        again.body["approval"]["event_id"], approved.body["event_id"],
+        "the already-approved answer names the approval that stands: {}",
+        again.body
+    );
+    // The read-back: the answer to "did my reply go out?".
+    let recorded = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/approvals/{suggestion_event_id}",
+            &format!("/api/approvals/{suggestion_id}"),
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        recorded.body["stream_sequence"], approved.body["stream_sequence"],
+        "the read-back names the same position the approval did: {}",
+        recorded.body
+    );
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/approvals/{suggestion_event_id}",
+        &absent_approval,
+        &deciding_cookie,
+        None,
+        404,
+        Some("approval_not_found"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/approvals/{suggestion_event_id}",
+        "/api/approvals/not-an-event-id",
+        &deciding_cookie,
+        None,
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
     consenting.stop().await;
+
+    // --- a Gateway whose approval search is bounded to one stream position:
+    // the suggestion above is far behind the head, so it is `410 gone` and
+    // not `404 not found`. Two answers for two different facts, and the
+    // description declares both.
+    //
+    // Traffic after the suggestion, so that it is genuinely behind the head:
+    // a window of one position only excludes it once something newer exists.
+    for index in 0..4 {
+        let filler = approval_trigger_event(
+            &format!("@whatsapp_openapi_g24_filler_{index}:{SERVER_NAME}"),
+            &format!("!openapig24filler{index}:{SERVER_NAME}"),
+        );
+        bus.publish_event("twalk.inbound.message.received.v1", &filler)
+            .await?;
+    }
+    let narrow_static = companion_build("openapi-approval-window")?;
+    let narrow = GatewayProc::start(&gateway_env_with(
+        &narrow_static,
+        &[
+            ("GATEWAY_NATS_URL", &nats_url()),
+            ("GATEWAY_APPROVAL_LOOKUP_WINDOW", "1"),
+        ],
+    ))?;
+    let narrow_base = narrow.base_url().await?;
+    wait_until_answering(&narrow_base).await?;
+    let (narrow_device, _) =
+        sign_in_cookies(&http, &narrow_base, &owner, "the narrow device").await?;
+    call.check(
+        Method::POST,
+        &narrow_base,
+        "/api/approvals",
+        "/api/approvals",
+        &[("twalk_device", narrow_device.as_str())],
+        Some(json!({ "suggestion_event_id": suggestion_id })),
+        410,
+        Some("suggestion_out_of_reach"),
+    )
+    .await?;
+    narrow.stop().await;
+
+    // --- a Gateway whose bus is configured and does not answer: `502`, and
+    // not the `503` that would tell a client this deployment does not do
+    // approvals. What failed is the thing behind the Gateway, and the fixes
+    // are different.
+    let busless_static = companion_build("openapi-approval-bus-down")?;
+    let busless = GatewayProc::start(&gateway_env_with(
+        &busless_static,
+        &[("GATEWAY_NATS_URL", &unreachable_nats_url()?)],
+    ))?;
+    let busless_base = busless.base_url().await?;
+    wait_until_answering(&busless_base).await?;
+    let (busless_device, _) =
+        sign_in_cookies(&http, &busless_base, &owner, "the busless device").await?;
+    call.check(
+        Method::POST,
+        &busless_base,
+        "/api/approvals",
+        "/api/approvals",
+        &[("twalk_device", busless_device.as_str())],
+        Some(json!({ "suggestion_event_id": suggestion_id })),
+        502,
+        Some("bus_unreachable"),
+    )
+    .await?;
+    busless.stop().await;
 
     // --- a Gateway whose snapshot cap is below its own state: the one
     // answer that is neither the state nor a truncation of it (#50). One
