@@ -13,6 +13,14 @@ anyhow = "1"
 async-nats = "0.50"
 futures = "0.3"
 matrix-sdk = { version = "0.19", features = ["e2e-encryption"] }
+# The Companion Gateway's consent snapshot is read over HTTP (ADR 0010).
+# The version every other crate here pins, so the workspace-less repository
+# still resolves one; rustls only, so a Gateway behind the operator's TLS
+# proxy needs no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 serde_json = "1"
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }

@@ -1,10 +1,11 @@
 //! Metrics: a handful of process counters and gauges rendered in the
 //! Prometheus text exposition format, served over HTTP by the binary (see
-//! `SENSOR_METRICS_LISTEN`). No metrics crate: the Sensor needs four counters
-//! and a gauge, and a hand-rolled exposition is smaller than any dependency.
+//! `SENSOR_METRICS_LISTEN`). No metrics crate: the Sensor needs a handful of
+//! counters and two gauges, and a hand-rolled exposition is smaller than any
+//! dependency.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 /// Process-wide health signals. Cheap to clone into every task: all state is
@@ -18,6 +19,16 @@ pub struct Metrics {
     outbound_send_failures: AtomicU64,
     /// Events moved to the dead-letter subject after exhausting retries.
     dead_lettered_events: AtomicU64,
+    /// Failed reads of the Companion Gateway's consent snapshot (ADR 0010).
+    /// Every failure means the Sensor is labelling senders `pending` that the
+    /// user may well have granted, so it is counted and not only logged: a
+    /// degraded label is invisible in the events themselves.
+    consent_snapshot_failures: AtomicU64,
+    /// Entries the last applied consent snapshot held, and whether one has
+    /// been applied at all: a Sensor still retrying an unreachable Gateway
+    /// must not read as one that recovered an empty state.
+    consent_snapshot_entries: AtomicU64,
+    consent_snapshot_applied: AtomicBool,
     /// When the last sync response completed, in seconds since the epoch.
     /// Zero until the first sync completes.
     last_sync_unix_seconds: AtomicU64,
@@ -36,6 +47,9 @@ impl Metrics {
             decryption_failures: AtomicU64::new(0),
             outbound_send_failures: AtomicU64::new(0),
             dead_lettered_events: AtomicU64::new(0),
+            consent_snapshot_failures: AtomicU64::new(0),
+            consent_snapshot_entries: AtomicU64::new(0),
+            consent_snapshot_applied: AtomicBool::new(false),
             last_sync_unix_seconds: AtomicU64::new(0),
         }
     }
@@ -60,6 +74,19 @@ impl Metrics {
 
     pub fn record_dead_lettered(&self) {
         self.dead_lettered_events.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns the running total, for the failure log line.
+    pub fn record_consent_snapshot_failure(&self) -> u64 {
+        self.consent_snapshot_failures
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    }
+
+    pub fn record_consent_snapshot(&self, entries: usize) {
+        self.consent_snapshot_entries
+            .store(entries as u64, Ordering::Relaxed);
+        self.consent_snapshot_applied.store(true, Ordering::Relaxed);
     }
 
     pub fn record_sync(&self, now_unix_seconds: u64) {
@@ -102,6 +129,22 @@ impl Metrics {
             "twalk_sensor_dead_lettered_events_total {}\n",
             self.dead_lettered_events.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP twalk_sensor_consent_snapshot_failures_total Failed reads of the Companion Gateway's consent snapshot.\n");
+        out.push_str("# TYPE twalk_sensor_consent_snapshot_failures_total counter\n");
+        out.push_str(&format!(
+            "twalk_sensor_consent_snapshot_failures_total {}\n",
+            self.consent_snapshot_failures.load(Ordering::Relaxed)
+        ));
+        // Renders only once a snapshot has been applied, so that an absent
+        // sample and an empty state stay distinguishable.
+        if self.consent_snapshot_applied.load(Ordering::Relaxed) {
+            out.push_str("# HELP twalk_sensor_consent_snapshot_entries (subject, network) entries the applied consent snapshot held.\n");
+            out.push_str("# TYPE twalk_sensor_consent_snapshot_entries gauge\n");
+            out.push_str(&format!(
+                "twalk_sensor_consent_snapshot_entries {}\n",
+                self.consent_snapshot_entries.load(Ordering::Relaxed)
+            ));
+        }
         // The sync age only exists once a sync has completed; a Sensor that
         // never synced renders no sample rather than a misleading zero.
         let last_sync = self.last_sync_unix_seconds.load(Ordering::Relaxed);
@@ -130,6 +173,8 @@ mod tests {
         metrics.record_decryption_failure();
         metrics.record_outbound_send_failure();
         metrics.record_dead_lettered();
+        metrics.record_consent_snapshot_failure();
+        metrics.record_consent_snapshot(3);
         metrics.record_sync(1_000);
 
         let body = metrics.render(1_030);
@@ -154,6 +199,14 @@ mod tests {
             "{body}"
         );
         assert!(
+            body.contains("twalk_sensor_consent_snapshot_failures_total 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_consent_snapshot_entries 3\n"),
+            "{body}"
+        );
+        assert!(
             body.contains("twalk_sensor_last_sync_age_seconds 30\n"),
             "{body}"
         );
@@ -173,6 +226,24 @@ mod tests {
                 .render(1_000)
                 .contains("twalk_sensor_last_sync_age_seconds"),
             "a Sensor that never synced renders no sync age"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_gauge_tells_no_snapshot_from_an_empty_one() {
+        let metrics = Metrics::new();
+        assert!(
+            !metrics
+                .render(1_000)
+                .contains("twalk_sensor_consent_snapshot_entries"),
+            "a Sensor that never read a snapshot renders no entry count"
+        );
+        metrics.record_consent_snapshot(0);
+        assert!(
+            metrics
+                .render(1_000)
+                .contains("twalk_sensor_consent_snapshot_entries 0\n"),
+            "an applied snapshot of an undecided deployment still renders"
         );
     }
 }

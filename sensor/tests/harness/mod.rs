@@ -12,13 +12,15 @@
 //! contract validation, `poll_until` — lives in the shared harness crate
 //! (`tests/harness/`, ticket #20) and is re-exported here, so the Sensor's
 //! test files keep seeing one flat `harness::` namespace. What is
-//! Sensor-specific stays here: the Matrix `Bot`, the portal-room helpers
-//! and `SensorProc`.
+//! Sensor-specific stays here: the Matrix `Bot`, the portal-room helpers,
+//! `SensorProc`, and `gateway::StubGateway` — the other side of the one seam
+//! the Sensor has with the Companion Gateway, its consent snapshot.
 
 // Every test binary compiles this module but uses only a subset of it.
 #![allow(dead_code)]
 
 pub mod crypto;
+pub mod gateway;
 
 pub use twalk_test_harness::*;
 
@@ -635,6 +637,20 @@ pub fn fresh_state_dir(test_name: &str) -> PathBuf {
         "twalk-sensor-state-{test_name}-{}-{unique}",
         std::process::id()
     ))
+}
+
+/// A loopback address nothing is listening on: the kernel picks a free port,
+/// and the listener is dropped before the address is handed out. Used both to
+/// bind the Sensor's own endpoints on a port no parallel worktree can collide
+/// with, and — deliberately — to point it at a service that is not there.
+pub fn free_loopback_addr() -> Result<String> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .context("failed to ask the kernel for a free port")?;
+    let addr = listener
+        .local_addr()
+        .context("the listener has no local address")?;
+    drop(listener);
+    Ok(addr.to_string())
 }
 
 /// Serializes tests that spawn a Sensor process. Every test logs the Sensor

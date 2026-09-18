@@ -164,6 +164,17 @@ services:
       SENSOR_LOG_LEVEL: ${SENSOR_LOG_LEVEL:-info}
       SENSOR_METRICS_LISTEN: ${SENSOR_METRICS_LISTEN:-}
       SENSOR_RECOVERY_KEY: ${SENSOR_RECOVERY_KEY:-}
+      # The consent snapshot (ticket #51, ADR 0010): where the Sensor reads
+      # the whole consent state at startup, and the token it reads it with.
+      # Both derive from the one secret GATEWAY_SERVICE_TOKEN, so setting that
+      # lights up both halves of the same hand-off: the Gateway serves the
+      # snapshot, and the Sensor reads it from this stack's own Gateway.
+      # Leaving it empty leaves these empty too — no snapshot, a cold consent
+      # cache on every restart (issue #16), and inbound events unaffected.
+      # Override either one to read a snapshot from a Gateway that is not
+      # this stack's; setting one without the other is refused on startup.
+      SENSOR_GATEWAY_URL: ${SENSOR_GATEWAY_URL:-${GATEWAY_SERVICE_TOKEN:+http://companion-gateway:8080}}
+      SENSOR_GATEWAY_SERVICE_TOKEN: ${SENSOR_GATEWAY_SERVICE_TOKEN:-${GATEWAY_SERVICE_TOKEN:-}}
     volumes:
       # Session, sync token and crypto store: a restart resumes the sync
       # instead of re-syncing (and re-emitting) recent traffic.

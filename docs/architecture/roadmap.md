@@ -53,7 +53,7 @@ The 8 event types in [`contracts/cloudevents/v1/`](../../contracts/cloudevents/v
 
 Spec [#1](https://github.com/linagora/twalk/issues/1), tickets 01–11, all merged. The inbound chokepoint: joins portal rooms, decrypts, enriches with contact and consent context, publishes schema-valid CloudEvents exactly once per occurrence, and posts approved replies back into portal rooms. A code review of the whole lot on 2026-09-17 produced six bug tickets ([#26](https://github.com/linagora/twalk/issues/26)–[#31](https://github.com/linagora/twalk/issues/31)), all fixed and merged the same day.
 
-Known follow-ups, none blocking: [#16](https://github.com/linagora/twalk/issues/16) (the consent cache restarts cold — its real fix belongs to the Companion Gateway lot), [#13](https://github.com/linagora/twalk/issues/13) (reaction excerpts in encrypted rooms), [#38](https://github.com/linagora/twalk/issues/38) (test isolation).
+Known follow-ups, none blocking: [#13](https://github.com/linagora/twalk/issues/13) (reaction excerpts in encrypted rooms), [#38](https://github.com/linagora/twalk/issues/38) (test isolation). [#16](https://github.com/linagora/twalk/issues/16) (the consent cache restarts cold) was the seventh, and it is closed by the Gateway lot's [#51](https://github.com/linagora/twalk/issues/51): the Sensor reads the Gateway's consent snapshot at startup and follows the bus from the sequence it names.
 
 ### Matrix as a network · in progress
 
