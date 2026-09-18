@@ -86,6 +86,25 @@
 //! configured at all are **four answers** rather than one silence — the
 //! conflation behind nine incidents in two days.
 //!
+//! Ticket #105 added the portal register ([`portals`], [`portals_http`],
+//! ADR 0024), which answers the defect that made a freshly connected network
+//! publish nothing at all. A bridge builds a portal room lazily, as each
+//! conversation becomes active, and invites only the user; nothing invited
+//! the Sensor, so a working deployment sat outside seventeen of its
+//! eighteen WhatsApp conversations while every component reported itself
+//! healthy. The register reads each bridge's portal rooms **as that bridge's
+//! own bot**, through the appservice token ticket #56 already put in
+//! configuration — the first thing on this origin that *acts* with that
+//! token rather than merely verifying a push with it — and it states, as a
+//! number the deployment can say out loud, how many conversations the Sensor
+//! is outside. What it deliberately does not do is invite the Sensor into
+//! them: the mechanism is the Gateway's and the policy is the user's, one
+//! conversation at a time (#143), because those eighteen rooms held some
+//! 1,300 memberships and observing all of them by default is the decision
+//! #122 is about. It keeps no store: the answer to "is this conversation
+//! observed?" is the Sensor's own membership event, asked of the homeserver
+//! on every read.
+//!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
 //! the origin itself ([`openapi`]) and checked against the running binary by
@@ -115,6 +134,8 @@ pub mod matrix_openid;
 pub mod metrics;
 pub mod openapi;
 pub mod outbox;
+pub mod portals;
+pub mod portals_http;
 pub mod session;
 pub mod session_http;
 pub mod settings;

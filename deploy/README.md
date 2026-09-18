@@ -61,7 +61,19 @@ If you skip step 1 the failure is loud but its shape depends on what `.env` says
 
 Connecting a network is a human act and stays one. WhatsApp and Signal are both paired by scanning a QR code with the phone that holds the account: no script can scan it, and the deployment test does not try. Once the bridges are up, the login runs through each bridge's provisioning API — which is what the Companion's networks screens ([#68](https://github.com/linagora/twalk/issues/68)) and the Companion Gateway's facade ([#55](https://github.com/linagora/twalk/issues/55)) exist to put in front of a human — or, until those land, through the bridge's Matrix management room (`!wa login`, `!signal login`) from your own Matrix client.
 
-For those portal rooms to reach the bus, `SENSOR_ALLOWED_INVITERS` has to name each bridge's bot (`@whatsappbot:<domain>`, `@signalbot:<domain>`). See `.env.example`.
+### Choosing which conversations are observed
+
+A bridge builds a portal room **when a conversation becomes active**, not once at login. On the reference deployment one WhatsApp account produced eighteen of them over a single day, as people wrote — and mautrix invites only *the user* into each. So a connected network does not put anything on the bus by itself, and the set of conversations keeps growing for as long as the deployment runs.
+
+`SENSOR_ALLOWED_INVITERS` is necessary and is not sufficient. It has to name each bridge's bot (`@whatsappbot:<domain>`, `@signalbot:<domain>`) — that is what lets the Sensor accept an invitation — but it settles only what the Sensor *accepts*, and nothing in mautrix ever asks. What completes the path is the **portal register** ([#105](https://github.com/linagora/twalk/issues/105)): the Companion Gateway reads each bridge's portal rooms as that bridge's own bot, using `GATEWAY_BRIDGE_<ID>_AS_TOKEN`, and invites the Sensor into the conversations the user chooses.
+
+Three things follow, and each is worth knowing before you go looking for a missing message.
+
+- **Nothing is observed by default, and that is deliberate.** Those eighteen rooms held roughly 1,300 memberships, several hundred people who do not know Twalk exists. Observation is chosen per conversation, and until it is chosen the Sensor is in none of them.
+- **The deployment can say how many conversations it is outside.** `GET /api/portals` lists every conversation with its name, its size and whether the Sensor is inside; `/metrics` carries the same counts as `twalk_companion_gateway_portal_rooms{observation="observing|invited|absent"}`. The Sensor's own `twalk_sensor_observed_rooms` says how many rooms it is actually reading.
+- **A conversation stuck at `invited` is a configuration error with a name.** The Gateway invited the Sensor and the Sensor refused the inviter: that bridge's bot is missing from `SENSOR_ALLOWED_INVITERS`. The Sensor counts those refusals as `twalk_sensor_invites_total{outcome="ignored"}` and logs one warning each.
+
+A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversations read at all, and says so in `GET /api/portals` rather than quietly contributing nothing to the totals. `GATEWAY_PORTAL_REFRESH_SECONDS` decides only how fresh the `/metrics` counts are (300 by default, `0` turns the background read off); the API always reads the homeserver there and then.
 
 ## What is where
 

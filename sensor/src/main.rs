@@ -296,27 +296,46 @@ async fn main() -> Result<()> {
     {
         let allowed = config.allowed_inviters.clone();
         let own_user = own_user.clone();
-        client.add_event_handler(move |event: StrippedRoomMemberEvent, room: Room, _client: Client| {
-            let allowed = allowed.clone();
-            let own_user = own_user.clone();
-            async move {
-                if event.state_key != own_user {
-                    return;
-                }
-                if event.content.membership != MembershipState::Invite {
-                    return;
-                }
-                let inviter = event.sender.to_string();
-                if allowed.contains(&inviter) {
-                    info!(room = %room.room_id(), %inviter, "joining observed room");
-                    if let Err(error) = room.join().await {
-                        warn!(room = %room.room_id(), %error, "failed to join invited room");
+        let invite_metrics = metrics.clone();
+        client.add_event_handler(
+            move |event: StrippedRoomMemberEvent, room: Room, _client: Client| {
+                let allowed = allowed.clone();
+                let own_user = own_user.clone();
+                let metrics = invite_metrics.clone();
+                async move {
+                    if event.state_key != own_user {
+                        return;
                     }
-                } else {
-                    info!(room = %room.room_id(), %inviter, "ignoring invite from disallowed inviter");
+                    if event.content.membership != MembershipState::Invite {
+                        return;
+                    }
+                    let inviter = event.sender.to_string();
+                    if allowed.contains(&inviter) {
+                        info!(room = %room.room_id(), %inviter, "joining observed room");
+                        if let Err(error) = room.join().await {
+                            metrics.record_invite_failed();
+                            warn!(room = %room.room_id(), %error, "failed to join invited room");
+                        } else {
+                            metrics.record_invite_joined();
+                        }
+                    } else {
+                        // Counted, not only logged. A bridge bot missing from
+                        // SENSOR_ALLOWED_INVITERS makes every conversation the
+                        // user chooses land here, and the only symptom is a
+                        // silence somewhere else entirely (#105).
+                        let ignored = metrics.record_invite_ignored();
+                        warn!(
+                            room = %room.room_id(),
+                            %inviter,
+                            ignored,
+                            "ignoring an invitation from a user SENSOR_ALLOWED_INVITERS does not \
+                             name: if this is a bridge bot, this room's conversation will never \
+                             reach the bus"
+                        );
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     // Inbound messages: normalize and publish. Text, media (image, video,
@@ -828,12 +847,19 @@ async fn main() -> Result<()> {
     // sync-age gauge (the operator's lag signal). Boxed so the shutdown path
     // can drop the loop itself, not just a pinned reference to it.
     let sync_metrics = metrics.clone();
-    let mut sync = Box::pin(
-        client.sync_with_callback(SyncSettings::default(), move |_response| {
+    let mut sync = Box::pin(client.sync_with_callback(SyncSettings::default(), {
+        let client = client.clone();
+        move |_response| {
             sync_metrics.record_sync(now_unix_seconds());
+            // Observation scope is invitation-driven and starts empty,
+            // so how many rooms the Sensor is actually in is a fact
+            // worth exposing rather than inferring from a silence
+            // (#105). Read from the SDK's own state, after the sync
+            // that may have changed it.
+            sync_metrics.record_observed_rooms(client.joined_rooms().len() as u64);
             async { LoopCtrl::Continue }
-        }),
-    );
+        }
+    }));
     tokio::select! {
         result = &mut sync => {
             result.context("sync loop failed")?;

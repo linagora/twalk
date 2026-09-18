@@ -32,6 +32,25 @@ pub struct Metrics {
     /// When the last sync response completed, in seconds since the epoch.
     /// Zero until the first sync completes.
     last_sync_unix_seconds: AtomicU64,
+    /// Rooms the Sensor is joined to, and what became of the invitations it
+    /// was sent (ticket #105).
+    ///
+    /// Observation scope is invitation-driven and starts empty, which is the
+    /// right default and also the shape of the worst defect this product has
+    /// had: a deployment sat outside seventeen of its eighteen conversations
+    /// while every component reported itself healthy, and nothing anywhere
+    /// said so. The gauge is the Sensor's own half of that answer — the
+    /// Companion Gateway states how many conversations exist, this states
+    /// how many are actually being read.
+    ///
+    /// The `ignored` counter is the one an operator reads after "I chose a
+    /// conversation and nothing happened": an invitation from a user
+    /// `SENSOR_ALLOWED_INVITERS` does not name is refused, correctly and
+    /// silently, and the silence used to be the only symptom.
+    observed_rooms: AtomicU64,
+    invites_joined: AtomicU64,
+    invites_ignored: AtomicU64,
+    invites_failed: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -51,6 +70,10 @@ impl Metrics {
             consent_snapshot_entries: AtomicU64::new(0),
             consent_snapshot_applied: AtomicBool::new(false),
             last_sync_unix_seconds: AtomicU64::new(0),
+            observed_rooms: AtomicU64::new(0),
+            invites_joined: AtomicU64::new(0),
+            invites_ignored: AtomicU64::new(0),
+            invites_failed: AtomicU64::new(0),
         }
     }
 
@@ -92,6 +115,29 @@ impl Metrics {
     pub fn record_sync(&self, now_unix_seconds: u64) {
         self.last_sync_unix_seconds
             .store(now_unix_seconds, Ordering::Relaxed);
+    }
+
+    /// How many rooms the Sensor is joined to, as the SDK's own state
+    /// answers it — recorded on every completed sync, so the gauge follows a
+    /// room joined or left without anything else being asked.
+    pub fn record_observed_rooms(&self, rooms: u64) {
+        self.observed_rooms.store(rooms, Ordering::Relaxed);
+    }
+
+    pub fn record_invite_joined(&self) {
+        self.invites_joined.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An invitation from a user `SENSOR_ALLOWED_INVITERS` does not name.
+    /// Returns the running total, for the log line: on a deployment whose
+    /// bridge bots were left out of that list this climbs once per
+    /// conversation the user chose, which is the whole diagnosis.
+    pub fn record_invite_ignored(&self) -> u64 {
+        self.invites_ignored.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn record_invite_failed(&self) {
+        self.invites_failed.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Renders the Prometheus text exposition (format version 0.0.4). `now`
@@ -143,6 +189,24 @@ impl Metrics {
             out.push_str(&format!(
                 "twalk_sensor_consent_snapshot_entries {}\n",
                 self.consent_snapshot_entries.load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP twalk_sensor_observed_rooms Rooms the Sensor has joined, and whose traffic therefore reaches the bus.\n");
+        out.push_str("# TYPE twalk_sensor_observed_rooms gauge\n");
+        out.push_str(&format!(
+            "twalk_sensor_observed_rooms {}\n",
+            self.observed_rooms.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP twalk_sensor_invites_total Invitations the Sensor received, by what it did with them.\n");
+        out.push_str("# TYPE twalk_sensor_invites_total counter\n");
+        for (outcome, count) in [
+            ("joined", &self.invites_joined),
+            ("ignored", &self.invites_ignored),
+            ("failed", &self.invites_failed),
+        ] {
+            out.push_str(&format!(
+                "twalk_sensor_invites_total{{outcome=\"{outcome}\"}} {}\n",
+                count.load(Ordering::Relaxed)
             ));
         }
         // The sync age only exists once a sync has completed; a Sensor that
@@ -209,6 +273,12 @@ mod tests {
         assert!(
             body.contains("twalk_sensor_last_sync_age_seconds 30\n"),
             "{body}"
+        );
+        assert!(body.contains("twalk_sensor_observed_rooms 0\n"), "{body}");
+        assert!(
+            body.contains("twalk_sensor_invites_total{outcome=\"ignored\"} 0\n"),
+            "every outcome exists at zero, so a Sensor refusing every inviter is \
+             distinguishable from one nobody ever invited: {body}"
         );
         // Every sample line is `name[labels] value` with an integer value.
         for line in body.lines().filter(|line| !line.starts_with('#')) {

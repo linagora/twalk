@@ -1334,6 +1334,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/suggestions/{suggestion_event_id}",
             absent_suggestion.as_str(),
         ),
+        (Method::GET, "/api/portals", "/api/portals"),
+        (
+            Method::POST,
+            "/api/portals/observation",
+            "/api/portals/observation",
+        ),
         (Method::POST, "/api/approvals", "/api/approvals"),
         (
             Method::GET,
@@ -1491,6 +1497,31 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             None,
             503,
             Some("contacts_not_configured"),
+        )
+        .await?;
+    }
+    // The portal register is off for a different reason on this deployment:
+    // no bridge is configured at all, so there is no conversation for the
+    // Sensor to be inside or outside of. A refusal rather than an empty
+    // list, because "your bridges have built no conversations" and "this
+    // Gateway cannot see them" are very different claims (#105).
+    for (method, template, body) in [
+        (Method::GET, "/api/portals", None),
+        (
+            Method::POST,
+            "/api/portals/observation",
+            Some(json!({ "rooms": ["!a:test.twalk"], "observed": true })),
+        ),
+    ] {
+        call.check(
+            method,
+            &base,
+            template,
+            template,
+            &consent_cookie,
+            body,
+            503,
+            Some("portals_not_configured"),
         )
         .await?;
     }
@@ -3501,6 +3532,74 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some(json!({ "state_event": "CONNECTED" })),
         503,
         Some("as_token_not_configured"),
+    )
+    .await?;
+    // The portal register (#105). This Gateway has two bridges: one whose
+    // appservice token is a test constant the homeserver has never heard of,
+    // and one with no token at all. So both are unreadable, for two different
+    // reasons, and the answer says so — which is the property that matters
+    // more than a populated list here: a count of conversations must never
+    // quietly cover fewer bridges than the user has connected.
+    // `tests/portals.rs` is where the register is driven against real portal
+    // rooms with a credential that works.
+    let register = call
+        .check(
+            Method::GET,
+            &bridged_base,
+            "/api/portals",
+            "/api/portals",
+            &bridge_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        register.body["bridges"].as_array().map(Vec::len),
+        Some(2),
+        "every configured bridge is in the answer, readable or not: {}",
+        register.body
+    );
+    assert_eq!(
+        register.body["bridges"][0]["readable"], false,
+        "a bridge whose appservice token the homeserver rejects is unreadable, not empty: {}",
+        register.body
+    );
+    assert_eq!(
+        register.body["summary"]["total"], 0,
+        "and no total pretends to cover it: {}",
+        register.body
+    );
+    // A room id that is not a portal of any readable bridge: an outcome, not
+    // a status code, and nothing is attempted with the appservice credential.
+    let refused = call
+        .check(
+            Method::POST,
+            &bridged_base,
+            "/api/portals/observation",
+            "/api/portals/observation",
+            &bridge_cookie,
+            Some(json!({ "rooms": ["!nobody:test.twalk"], "observed": true })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        refused.body["outcomes"][0]["status"], "unknown_portal",
+        "a room this Gateway does not hold as a portal is never invited into: {}",
+        refused.body
+    );
+    // A decision about nothing is the one shape that is refused outright: it
+    // is a client bug, and answering 200 to it would hide one.
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/portals/observation",
+        "/api/portals/observation",
+        &bridge_cookie,
+        Some(json!({ "rooms": [], "observed": true })),
+        400,
+        Some("invalid_request"),
     )
     .await?;
     bridged.stop().await;

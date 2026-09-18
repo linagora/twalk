@@ -113,6 +113,75 @@ async fn the_metrics_endpoint_reports_sensor_health() -> Result<()> {
     Ok(())
 }
 
+/// The Sensor's own answer to "which conversations am I actually reading,
+/// and did I refuse an invitation on the way?" (ticket #105).
+///
+/// The second half is the one worth having. Observation scope is
+/// invitation-driven, and an invitation from a user `SENSOR_ALLOWED_INVITERS`
+/// does not name is refused correctly and — until now — silently. On a
+/// deployment whose bridge bots were left out of that list, that refusal is
+/// the *only* trace of why a conversation the user chose never reached the
+/// bus, and it was a log line nobody was looking at.
+#[tokio::test]
+async fn the_sensor_says_how_many_rooms_it_observes_and_how_many_invitations_it_refused(
+) -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let sensor = SensorProc::start(&sensor_env_with(&[(
+        "SENSOR_METRICS_LISTEN",
+        METRICS_LISTEN,
+    )]))?;
+    let alpha = Bot::login("bot_alpha").await?;
+    let beta = Bot::login("bot_beta").await?;
+
+    // An allowed inviter — a bridge bot, in a deployment.
+    let observed = make_whatsapp_portal(&alpha, "observed-portal").await?;
+    alpha.invite(&observed, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&observed, SENSOR_USER_ID, "join")
+        .await?;
+
+    // And one the deployment never named: the shape of a bridge bot missing
+    // from SENSOR_ALLOWED_INVITERS.
+    let refused = make_whatsapp_portal(&beta, "refused-portal").await?;
+    beta.invite(&refused, SENSOR_USER_ID).await?;
+
+    let body = poll_until(
+        || async {
+            let body = reqwest::get(METRICS_URL).await.ok()?.text().await.ok()?;
+            let samples = parse_exposition(&body);
+            let at_least = |name: &str, least: u64| {
+                samples
+                    .iter()
+                    .any(|(series, value)| series == name && *value >= least)
+            };
+            (at_least("twalk_sensor_invites_total{outcome=\"joined\"}", 1)
+                && at_least("twalk_sensor_invites_total{outcome=\"ignored\"}", 1)
+                && at_least("twalk_sensor_observed_rooms", 1))
+            .then_some(body)
+        },
+        "the Sensor to report one joined invitation, one refused and the rooms it observes",
+    )
+    .await?;
+
+    // The refusal is a count, not only a silence — and the room stayed
+    // unobserved, which the homeserver confirms.
+    assert!(
+        parse_exposition(&body).iter().any(|(name, value)| name
+            == "twalk_sensor_invites_total{outcome=\"failed\"}"
+            && *value == 0),
+        "every outcome exists at zero, so 'never happened' and 'not measured' stay apart:\n{body}"
+    );
+    assert_ne!(
+        beta.get_membership(&refused, SENSOR_USER_ID).await?,
+        "join",
+        "an invitation from a user SENSOR_ALLOWED_INVITERS does not name is not acted on"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn inbound_events_originate_a_valid_traceparent() -> Result<()> {
     ensure_stack().await?;

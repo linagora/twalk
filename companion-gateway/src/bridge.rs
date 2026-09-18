@@ -809,9 +809,10 @@ impl Bridges {
                 None,
             )
             .await?;
-        let flows = body.get("flows").and_then(Value::as_array).ok_or_else(|| {
-            unusable(ProvisioningCall::Flows, "a `flows` array", &body)
-        })?;
+        let flows = body
+            .get("flows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| unusable(ProvisioningCall::Flows, "a `flows` array", &body))?;
         Ok(flows
             .iter()
             .filter_map(|flow| {
