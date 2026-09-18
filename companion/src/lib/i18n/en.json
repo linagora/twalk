@@ -220,6 +220,8 @@
 	"matrix.qrLater": "Signing in by QR code from another Matrix client (MSC4108) arrives with a later version: it carries your encryption secrets across, and that needs machinery these screens deliberately do not load.",
 
 	"matrix.error.unreachable": "That homeserver could not be reached. Check the address and your internet connection.",
+	"matrix.error.ssoLost": "This sign-in could not be completed, because the browser no longer knows which homeserver it started at. Nothing was sent anywhere. Enter your homeserver and try again.",
+	"matrix.error.ssoNeedsStorage": "This browser will not let the sign-in remember where it started, so single sign-on cannot finish here. Use a password, or allow site data for this address.",
 	"matrix.error.rejected": "The homeserver refused those credentials. Check your username and password.",
 	"matrix.error.rateLimited": "The homeserver is rate-limiting sign-in attempts. Wait a moment, then try again.",
 	"matrix.error.refused": "The homeserver refused the sign-in. Try again, and open the diagnostics if it persists.",

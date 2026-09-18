@@ -86,15 +86,34 @@
 
 		// Coming back from the homeserver's SSO page.
 		const token = loginTokenFrom(new URL(window.location.href));
-		if (token !== null && baseUrl !== '') {
-			// Out of the address bar before anything else: a login token is a
-			// credential, and a copied URL must not carry one.
+		if (token !== null) {
+			// Out of the address bar before anything else, and whatever
+			// happens next: a login token is a credential, and a copied URL
+			// must not carry one. Previously this ran only on the path that
+			// went on to use the token, so a round trip that could not be
+			// completed left the credential in the address bar (#125).
 			const clean = new URL(window.location.href);
 			clean.searchParams.delete('loginToken');
 			history.replaceState(null, '', clean.toString());
+
+			// The token is exchanged against the homeserver that issued it, or
+			// not at all. Falling back to whatever this screen happens to know
+			// is how a linagora.com token was presented to twalk.localhost.
+			let issuer: string | null = null;
+			try {
+				issuer = window.localStorage.getItem(SSO_HOMESERVER_KEY);
+				window.localStorage.removeItem(SSO_HOMESERVER_KEY);
+			} catch {
+				issuer = null;
+			}
+			if (issuer === null || issuer === '') {
+				problem = $t('matrix.error.ssoLost');
+				return;
+			}
+			baseUrl = issuer;
 			busy = true;
 			try {
-				await useSession(await loginWithToken(baseUrl, token));
+				await useSession(await loginWithToken(issuer, token));
 				return;
 			} catch (error) {
 				problem = messageFor(error);
@@ -151,7 +170,31 @@
 		}
 	}
 
+	/**
+	 * Which homeserver an SSO round trip was started against.
+	 *
+	 * A redirect is a full page load, so component state does not come back.
+	 * This screen used to rebuild the homeserver from what onboarding had
+	 * remembered — the *deployment's* server — and hand a login token issued
+	 * by one homeserver to a different one (#125, found against a real
+	 * corporate homeserver). A login token is a single-use credential issued
+	 * by one server for that server.
+	 *
+	 * In `localStorage` rather than `sessionStorage` because an identity
+	 * provider may answer in a new tab, and the token is worthless without the
+	 * server that issued it.
+	 */
+	const SSO_HOMESERVER_KEY = 'twalk:networks:sso-homeserver';
+
 	function startSso(idpId?: string) {
+		try {
+			window.localStorage.setItem(SSO_HOMESERVER_KEY, baseUrl);
+		} catch {
+			// Storage is off: say so rather than starting a round trip whose
+			// return this screen would have to refuse.
+			problem = $t('matrix.error.ssoNeedsStorage');
+			return;
+		}
 		window.location.href = ssoRedirectUrl(
 			baseUrl,
 			`${window.location.origin}/networks/matrix`,

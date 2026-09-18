@@ -183,6 +183,43 @@ test('an SSO-only homeserver gets its provider’s own button and no password fo
 	await expect(page.getByTestId('matrix-problem')).toHaveCount(0);
 });
 
+test('an SSO round trip keeps its homeserver, and refuses the token anywhere else', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// The journey this pins was found live against a corporate homeserver: the
+	// redirect comes back as a full page load, component state is gone, and
+	// the screen used to rebuild the homeserver from what onboarding had
+	// remembered — the *deployment's* server — and present a token issued by
+	// one homeserver to a different one (#125).
+	//
+	// Arriving with a token and nothing remembered is the same situation with
+	// the fallback removed: there is no issuer to exchange it against.
+	await page.goto('/networks/matrix?loginToken=not-a-real-token');
+
+	// It says so, and it says nothing was sent anywhere — because nothing was.
+	await expect(page.getByTestId('matrix-problem')).toBeVisible();
+	await expect(page.getByTestId('matrix-problem')).toContainText(/no longer knows which homeserver/i);
+
+	// And the credential is out of the address bar whatever happened next.
+	// It used to be stripped only on the path that went on to use it, so a
+	// round trip that could not complete left it there.
+	expect(page.url()).not.toContain('loginToken');
+
+	// No request carried the token to any homeserver.
+	const carried: string[] = [];
+	page.on('request', (r) => {
+		if (r.url().includes('/login') || (r.postData() ?? '').includes('not-a-real-token')) {
+			carried.push(`${r.method()} ${r.url()}`);
+		}
+	});
+	await page.waitForTimeout(500);
+	expect(carried, 'the token was presented to no one').toEqual([]);
+});
+
 test('a refused sign-in says which of the homeserver’s refusals it was', async ({
 	context,
 	page,
