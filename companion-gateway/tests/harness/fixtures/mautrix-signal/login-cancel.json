@@ -1,0 +1,27 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/login/cancel/{process}?user_id={mxid}",
+  "bridge": "mautrix-signal v26.09",
+  "answers": {
+    "cancelled": {
+      "status": 200,
+      "note": "200 and `{}`. Cancelling the process is also what released the request held on its `display_and_wait` step, since the step cancel refuses.",
+      "substituted": [],
+      "body": {}
+    },
+    "already_gone": {
+      "status": 404,
+      "note": "",
+      "substituted": [],
+      "body": { "errcode": "M_NOT_FOUND", "error": "Login not found" }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}

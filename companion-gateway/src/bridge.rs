@@ -618,9 +618,34 @@ impl Bridges {
             .collect())
     }
 
-    /// `GET /_matrix/provision/v3/logins` — the logins this bridge already
-    /// holds. What the Companion reads to offer "reconnect" against an
-    /// existing login id.
+    /// `GET /_matrix/provision/v3/logins` — the ids of the logins this
+    /// bridge already holds. What the Companion reads to offer "reconnect"
+    /// against an existing login id.
+    ///
+    /// # This endpoint answers ids, and only ids
+    ///
+    /// Its name invites the assumption that it lists *logins*. It does not.
+    /// Both reference bridges answer
+    ///
+    /// ```text
+    /// {"login_ids":["33612345678"]}
+    /// ```
+    ///
+    /// — bare strings, under `login_ids`. There is no name here, no profile,
+    /// and no connection state, so [`ExistingLogin::name`] comes back `None`
+    /// and [`ExistingLogin::profile`] `null` against a real bridge.
+    ///
+    /// **For a login's name, profile or state, call [`Self::whoami`]**, whose
+    /// `logins` array carries the whole object — `id`, `name`, `profile`, and
+    /// the nested `state` document the status webhook also pushes. That is the
+    /// only call that has them, which is also why it is the only honest source
+    /// of "is this network connected?" (#108).
+    ///
+    /// The Gateway used to read this answer as a list of objects, found
+    /// neither a bare array nor a `logins` member, and reported the bridge
+    /// unreachable — so the reconnect list never worked at all (#106). The
+    /// two object shapes below are kept as a courtesy to a bridge that grows
+    /// one; the id-only shape is the one the reference bridges send.
     pub async fn logins(
         &self,
         bridge_id: &str,
@@ -637,8 +662,23 @@ impl Bridges {
                 None,
             )
             .await?;
-        // bridgev2 answers a bare array; be tolerant of an object wrapping
-        // it, because a bridge that does is still answering the question.
+        // What the reference bridges send: ids under `login_ids`.
+        if let Some(ids) = body.get("login_ids").and_then(Value::as_array) {
+            return Ok(ids
+                .iter()
+                .filter_map(|id| {
+                    Some(ExistingLogin {
+                        login_id: id.as_str()?.to_owned(),
+                        // Not in this answer. See whoami.
+                        name: None,
+                        profile: Value::Null,
+                    })
+                })
+                .collect());
+        }
+        // A bare array, or an object wrapping one, of login objects: not
+        // what mautrix v26.09 sends, kept because a bridge that answers
+        // either is still answering the question.
         let logins = match body.as_array() {
             Some(logins) => logins.clone(),
             None => body
@@ -646,12 +686,23 @@ impl Bridges {
                 .and_then(Value::as_array)
                 .cloned()
                 .ok_or_else(|| BridgeRefusal::BridgeUnreachable {
-                    detail: "the bridge's logins answer is not a list of logins".to_owned(),
+                    detail: "the bridge's logins answer names neither login_ids nor a list \
+                             of logins"
+                        .to_owned(),
                 })?,
         };
         Ok(logins
             .iter()
             .filter_map(|login| {
+                // A bare array of id strings, which is the same contract as
+                // `login_ids` without the wrapper.
+                if let Some(id) = login.as_str() {
+                    return Some(ExistingLogin {
+                        login_id: id.to_owned(),
+                        name: None,
+                        profile: Value::Null,
+                    });
+                }
                 let login_id = login
                     .get("id")
                     .or_else(|| login.get("login_id"))
@@ -668,6 +719,15 @@ impl Bridges {
 
     /// `GET /_matrix/provision/v3/whoami` — what the bridge says about
     /// itself, as the `logins` array of its answer.
+    ///
+    /// # The only call that describes a login
+    ///
+    /// Each member of that array is the whole login object — `id`, `name`,
+    /// `profile`, and a nested `state` document with `state_event`,
+    /// `timestamp`, `ttl` and `source`. [`Self::logins`] answers bare id
+    /// strings and nothing else, so **whoami is where a login's name, its
+    /// profile and its connection state come from**, and the only provisioning
+    /// call that can answer "is this network connected right now?" (#108).
     ///
     /// This is the **reconciliation read** (ticket #56): it is called at
     /// startup, once per bridge, so that a Gateway which restarts does not
@@ -839,15 +899,26 @@ impl Bridges {
         let step_type = step.step_type;
         let process_id = view.process_id.clone();
         let step_id = step.step_id.clone();
+        // The transaction id the bridge issued with *this* step. A submit
+        // that omits it is accepted — the reference bridges only validate
+        // the parameter when it is there — but echoing it is what makes a
+        // retry idempotent, and it is the same rule the held step follows
+        // (#106). It has to be the latest one: a bridge re-issues the id
+        // with every answer it gives.
+        let txn_id = step.txn_id.clone();
         drop(view);
 
+        let query: Vec<(&str, &str)> = match &txn_id {
+            Some(txn_id) => vec![("txn_id", txn_id.as_str())],
+            None => Vec::new(),
+        };
         let answer = self
             .call(
                 bridge,
                 &self.clients.http,
                 reqwest::Method::POST,
                 &["login", "step", &process_id, &step_id, step_type.as_str()],
-                &[],
+                &query,
                 Some(data),
             )
             .await;
@@ -890,8 +961,16 @@ impl Bridges {
             view.detail = Some("cancelled from the Companion".to_owned());
         });
 
-        // A blocking step is cancelled at the step, which is what releases
-        // the held request; then the process, so the bridge forgets it.
+        // Both cancels, in bridgev2's order — and the first one is expected
+        // to fail. Against mautrix-whatsapp and mautrix-signal v26.09 the
+        // step cancel answers `500 M_BAD_STATE: Login process does not
+        // support cancelling steps` for a `display_and_wait` step, so the
+        // endpoint is simply not usable for a QR flow; what releases the held
+        // request is the *process* cancel below, and the held request then
+        // comes back `410 FI.MAU.BRIDGE.LOGIN_CANCELLED`. Both outcomes are
+        // discarded on purpose: the login is over either way, which is what
+        // was asked for. The call stays because a connector whose flow does
+        // support it is the case the endpoint exists for.
         if was_holding {
             if let Some(step_id) = &step_id {
                 let _ = self
@@ -1299,11 +1378,35 @@ async fn call_bridge(
         });
     }
     let (errcode, _) = mautrix_error(response).await;
+    // Which of these are observed and which are read out of mautrix's source
+    // is written down, because #106 was three bugs in a row where the
+    // difference mattered. Observed against mautrix-whatsapp and
+    // mautrix-signal v26.09 (`tests/harness/fixtures`): the 400 from a
+    // connector refusing a submitted value, the 401, the 403 with no
+    // `?user_id=`, the 404 for a forgotten process, the 410
+    // `FI.MAU.BRIDGE.LOGIN_CANCELLED` a held step comes back with, and the
+    // 500 `M_BAD_STATE` for a stale `txn_id`, step id or step type.
+    // Unexercised, kept because bridgev2 defines them and the deployment
+    // simply never provoked one: `FI.MAU.BRIDGE.TOO_MANY_LOGINS` (needs a
+    // `max_logins` cap) and `FI.MAU.LOGIN_STEP_CANCELLED` (the reference
+    // bridges refuse the step-cancel endpoint outright for a QR flow).
     Err(match (status.as_u16(), errcode.as_str()) {
         (403, "FI.MAU.BRIDGE.TOO_MANY_LOGINS") => BridgeRefusal::TooManyLogins,
         (409, "FI.MAU.LOGIN_STEP_CANCELLED") => BridgeRefusal::StepCancelled,
         (410, _) => BridgeRefusal::LoginExpired { errcode },
         (404, _) => BridgeRefusal::NotFoundOnBridge { errcode },
+        // The network itself would not take what was submitted — a phone
+        // number it calls too short, a cookie it will not accept. The user
+        // can act on that, so it must not arrive as a bad gateway. The
+        // bridge drops the login process along with the refusal, which the
+        // detail has to say or the user retries into a 404.
+        (400, _) => BridgeRefusal::InvalidRequest {
+            detail: format!(
+                "the network would not accept what was submitted ({errcode}). The bridge \
+                 drops the login process when a step is refused, so start the login again \
+                 rather than submitting a correction to this one"
+            ),
+        },
         (status, _) => BridgeRefusal::BridgeRefused { errcode, status },
     })
 }
@@ -1593,6 +1696,7 @@ mod tests {
             network: "whatsapp".to_owned(),
             base_url: "http://bridge:29318".to_owned(),
             provisioning_secret: "a-secret-of-at-least-16".to_owned(),
+            acting_as: "@owner:twalk.localhost".to_owned(),
             as_token: None,
         };
         assert!(Bridges::new(vec![config("a"), config("b")]).is_ok());
@@ -1613,6 +1717,7 @@ mod tests {
                 network: "whatsapp".to_owned(),
                 base_url: "http://bridge-whatsapp:29318".to_owned(),
                 provisioning_secret: "the-secret-that-drives-logins".to_owned(),
+                acting_as: "@owner:twalk.localhost".to_owned(),
                 as_token: Some("the-token-that-impersonates-the-appservice".to_owned()),
             }
         );
@@ -1635,6 +1740,7 @@ mod tests {
             network: "whatsapp".to_owned(),
             base_url: "bridge-whatsapp:29318".to_owned(),
             provisioning_secret: "a-secret-of-at-least-16".to_owned(),
+            acting_as: "@owner:twalk.localhost".to_owned(),
             as_token: None,
         }]) {
             Ok(_) => panic!("a base URL without a scheme is not a URL"),
@@ -1676,6 +1782,7 @@ mod tests {
                     network: "whatsapp".to_owned(),
                     base_url: "http://bridge:29318".to_owned(),
                     provisioning_secret: "a-secret-of-at-least-16".to_owned(),
+                    acting_as: "@owner:twalk.localhost".to_owned(),
                     as_token: None,
                 },
                 slot: Mutex::new(Slot::Active(Arc::new(ActiveLogin {
@@ -1830,6 +1937,7 @@ mod tests {
             generation: 3,
             step: Some(StepView {
                 step_id: "qr".to_owned(),
+                txn_id: Some("bls_the-one-the-bridge-issued".to_owned()),
                 step_type: StepType::DisplayAndWait,
                 instructions: Some("Scan it".to_owned()),
                 payload: json!({ "type": "qr", "data": "2@payload" }),

@@ -1,0 +1,101 @@
+{
+  "endpoint": "GET /_matrix/provision/v3/whoami?user_id={mxid}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "one_connected_login": {
+      "status": 200,
+      "note": "The only place a login's name, profile and connection state can be read. `state` is the same BridgeState document the status webhook carries, and `state.timestamp` is unix seconds.",
+      "substituted": [
+        "logins[0].id, logins[0].name and logins[0].profile.phone held the deployment owner's real phone number"
+      ],
+      "body": {
+        "network": {
+          "displayname": "WhatsApp",
+          "network_url": "https://whatsapp.com",
+          "network_icon": "mxc://maunium.net/NeXNQarUbrlYBiPCpprYsRqr",
+          "network_id": "whatsapp",
+          "beeper_bridge_type": "whatsapp",
+          "default_port": 29318,
+          "default_command_prefix": "!wa"
+        },
+        "login_flows": [
+          {
+            "name": "QR",
+            "description": "Scan a QR code to pair the bridge to your WhatsApp account",
+            "id": "qr"
+          },
+          {
+            "name": "Pairing code",
+            "description": "Input your phone number to get a pairing code, to pair the bridge to your WhatsApp account",
+            "id": "phone"
+          }
+        ],
+        "homeserver": "twalk.localhost",
+        "bridge_bot": "@whatsappbot:twalk.localhost",
+        "command_prefix": "!wa",
+        "logins": [
+          {
+            "state_event": "CONNECTED",
+            "state_ts": 1789706879,
+            "state": {
+              "state_event": "CONNECTED",
+              "timestamp": 1789706879,
+              "ttl": 21600,
+              "source": "bridge"
+            },
+            "id": "33612345678",
+            "name": "+33612345678",
+            "profile": { "phone": "+33612345678" }
+          }
+        ]
+      }
+    },
+    "no_logins": {
+      "status": 200,
+      "note": "The same call on the Signal bridge, which nobody had logged in to: `logins` is an empty array, and the network block is the only thing that differs. Reproduced here because it is the shape a fresh WhatsApp bridge answers too.",
+      "substituted": [],
+      "body": {
+        "network": {
+          "displayname": "WhatsApp",
+          "network_url": "https://whatsapp.com",
+          "network_icon": "mxc://maunium.net/NeXNQarUbrlYBiPCpprYsRqr",
+          "network_id": "whatsapp",
+          "beeper_bridge_type": "whatsapp",
+          "default_port": 29318,
+          "default_command_prefix": "!wa"
+        },
+        "login_flows": [
+          {
+            "name": "QR",
+            "description": "Scan a QR code to pair the bridge to your WhatsApp account",
+            "id": "qr"
+          },
+          {
+            "name": "Pairing code",
+            "description": "Input your phone number to get a pairing code, to pair the bridge to your WhatsApp account",
+            "id": "phone"
+          }
+        ],
+        "homeserver": "twalk.localhost",
+        "bridge_bot": "@whatsappbot:twalk.localhost",
+        "command_prefix": "!wa",
+        "logins": []
+      }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "Every provisioning endpoint answers this without ?user_id=, GET and POST alike (#106).",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    },
+    "bad_secret": {
+      "status": 401,
+      "note": "A bearer token that is not the provisioning secret.",
+      "substituted": [],
+      "body": { "errcode": "M_UNKNOWN_TOKEN", "error": "Invalid auth token" }
+    }
+  }
+}
