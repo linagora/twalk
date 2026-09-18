@@ -19,6 +19,9 @@
 //!   [`crate::bootstrap`];
 //! - the consent snapshot (ticket #50), which takes a service token — the
 //!   Sensor is not a device and has no OpenID token to sign in with;
+//! - the runtime settings (ticket #98), which takes the same service token
+//!   for the same reason: its caller is the Hermes runtime, which reads the
+//!   model the operator named and injects it into each persona (ADR 0015);
 //! - the bridge status webhook (ticket #56), which takes the calling
 //!   bridge's own `as_token` — a mautrix bridge has no browser, no device
 //!   and no OpenID token either. It is the one guarded path outside `/api/`,
@@ -131,6 +134,13 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
         // is not a device and has no OpenID token to sign in with, so it
         // presents a service token the handler checks itself.
         (&Method::GET, "/api/consent/snapshot") => Requirement::ServiceToken,
+        // The runtime settings (ticket #98): the same token, and for the
+        // same reason — the Hermes runtime is a service, not one of the
+        // owner's browsers. It is the second row of this table's service
+        // half, and the only other endpoint that credential opens; a
+        // persona is handed neither it nor this URL, because the token that
+        // reads the model also reads the list of every contact (ADR 0015).
+        (&Method::GET, "/api/settings/runtime") => Requirement::ServiceToken,
         _ => Requirement::DeviceToken,
     }
 }

@@ -79,9 +79,22 @@ const REGISTRATION_SHARED_SECRET: &str = "deploy-test-only-registration-shared-s
 const CORRESPONDENT_PASSWORD: &str = "deploy-test-only-password-correspondent";
 
 /// The service token the deployed Gateway serves its consent snapshot to
-/// (ticket #50) — long enough for the Gateway's own minimum, and throwaway
-/// like the rest of this stack's credentials.
+/// (ticket #50) and its runtime settings to (ticket #98) — long enough for
+/// the Gateway's own minimum, and throwaway like the rest of this stack's
+/// credentials.
 const SERVICE_TOKEN: &str = "deploy-test-only-gateway-service-token";
+
+/// The LLM endpoint credential this stack supplies as a **file**, which is
+/// what the reference deployment does (ADR 0015, ticket #98). Throwaway, and
+/// distinctive, so that a test can search an answer for it.
+const FILE_CREDENTIAL: &str = "deploy-test-only-llm-endpoint-key";
+
+/// The host path that file lives at. Stable per compose project rather than
+/// per run: a path that changed every time would recreate the gateway
+/// container on every run, and a warm stack is what makes the next run fast.
+fn credential_file() -> PathBuf {
+    std::env::temp_dir().join(format!("twalk-gateway-deploy-test-{}.key", deploy_stack()))
+}
 
 fn owner_user_id() -> String {
     format!("@{OWNER_LOCALPART}:{SERVER_NAME}")
@@ -188,6 +201,8 @@ fn write_env_file() -> Result<PathBuf> {
     let (gateway_image, sensor_image) = (gateway_image(), sensor_image());
     let (gateway_port, synapse_port, nats_port) = (gateway_port(), synapse_port(), nats_port());
     let owner = owner_user_id();
+    let credential_path = credential_file();
+    let credential_file = credential_path.display().to_string();
     let contents = format!(
         "MATRIX_DOMAIN={SERVER_NAME}\n\
          MATRIX_HTTP_PORT={synapse_port}\n\
@@ -209,9 +224,16 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_SENSOR_USER_ID=@sensor:{SERVER_NAME}\n\
          GATEWAY_NATS_URL=nats://nats:4222\n\
          GATEWAY_SERVICE_TOKEN={SERVICE_TOKEN}\n\
+         HERMES_LLM_API_KEY_FILE={credential_file}\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n\
          TWALK_SENSOR_IMAGE={sensor_image}\n"
     );
+    // The credential the operator supplies as a file (#98). compose mounts
+    // this same host path into the Gateway and into the Hermes runtime, so
+    // writing it here is what makes "the file wins" a property of the
+    // deployment and not only of the code.
+    std::fs::write(&credential_path, format!("{FILE_CREDENTIAL}\n"))
+        .with_context(|| format!("failed to write {}", credential_path.display()))?;
     std::fs::write(&path, contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(path)
@@ -528,6 +550,36 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
         "the deployed Gateway's snapshot must refuse a caller with no service token"
     );
 
+    // The model and language settings (#98), on the same credential: this is
+    // what the Hermes runtime reads before it starts a persona. Nothing has
+    // been configured on this stack, so `llm` is null — which is the point:
+    // the runtime is TOLD there is no model rather than left to guess
+    // between that, a Gateway it cannot reach, and one that refused its
+    // token (ADR 0015).
+    let runtime = client
+        .get(format!("{base}/api/settings/runtime"))
+        .bearer_auth(SERVICE_TOKEN)
+        .send()
+        .await?;
+    assert_eq!(
+        runtime.status(),
+        reqwest::StatusCode::OK,
+        "the deployed Gateway must serve its runtime settings to the service token"
+    );
+    let runtime: serde_json::Value = runtime.json().await?;
+    assert!(
+        runtime["llm"].is_null(),
+        "nothing has named a model on this stack: {runtime}"
+    );
+    assert!(runtime["language"].is_null(), "{runtime}");
+    let unauthenticated = reqwest::get(format!("{base}/api/settings/runtime")).await?;
+    assert_eq!(
+        unauthenticated.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "and it must refuse a caller with no service token — the endpoint that carries the \
+         LLM credential is not one a device cookie opens"
+    );
+
     // Only on request: a service left up (with its image) is what makes the
     // next run warm. Deliberately after the assertions, so a failure leaves
     // the container and its logs in place to inspect.
@@ -702,6 +754,34 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
 
     // Sign in with that account, as the Companion does after screen 2.
     let device_token = sign_in(&client, &base, &owner_token).await?;
+
+    // The operator's credential file reached the gateway container, and it
+    // is the one in force although nobody has typed one into the Companion
+    // (#98). That is the reference deployment's own combination — the model
+    // name from the browser, the key from a file (ADR 0015) — and this is
+    // where the compose wiring for it is asserted rather than assumed.
+    let model: serde_json::Value = client
+        .get(format!("{base}/api/settings/model"))
+        .header("cookie", format!("twalk_device={device_token}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(
+        model["credential"]["source"].as_str(),
+        Some("file"),
+        "a 'companion' or a null source here means HERMES_LLM_API_KEY_FILE never reached the \
+         gateway container: {model}"
+    );
+    assert_eq!(
+        model["credential"]["configured"].as_bool(),
+        Some(true),
+        "{model}"
+    );
+    assert!(
+        !model.to_string().contains(FILE_CREDENTIAL),
+        "the credential is write-only: no browser-facing read returns it. {model}"
+    );
 
     // A native Matrix room of the user's own: no bridge marker, which is what
     // makes its traffic resolve to `network=matrix` (ADR 0009, ticket #18).

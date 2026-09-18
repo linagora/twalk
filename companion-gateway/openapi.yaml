@@ -47,9 +47,10 @@ info:
     (where a device gets its first token), the refresh (which authenticates
     the refresh token and rotates it), the registration relay (which runs
     before the account that would authenticate anyone exists — see
-    `POST /api/bootstrap/account`) and the consent snapshot, whose caller is
-    the Sensor and not a device: it takes the `serviceToken` scheme declared
-    below, and refuses a device token.
+    `POST /api/bootstrap/account`) and the two service reads, whose callers
+    are not devices: the consent snapshot, read by the Sensor, and the
+    runtime settings, read by the Hermes runtime. Both take the
+    `serviceToken` scheme declared below, and both refuse a device token.
 
     One endpoint lives outside `/api/` and still takes a credential: the
     bridge status webhook, under the Gateway's reserved `/_twalk/` prefix.
@@ -146,6 +147,28 @@ tags:
       (`CONTEXT.md`). The consent check is a read of this Gateway's own
       state, not a question asked of another service — see ADR 0022 for why
       that moved here from the Hermes runtime.
+  - name: settings
+    description: |
+      What this deployment reasons with, and in which language.
+
+      Twalk ships no LLM and has no default: the operator names an
+      OpenAI-compatible endpoint and a model, and until they do, a persona
+      refuses to start (ADR 0015). The Gateway holds that choice because the
+      operator must be able to change it without shell access, and the
+      Hermes runtime reads it here and injects it into each persona rather
+      than letting a persona fetch it — the token that opens this
+      configuration is the token that opens the list of every contact.
+
+      The recommended shape is an **OpenAI-compatible proxy in front of the
+      model**: the reference deployment runs LiteLLM in front of Qwen at
+      OVH, so Twalk sees a plain endpoint serving a model called `qwen`, and
+      every provider quirk stays in the proxy. The provider passthrough is
+      the escape hatch for an operator with no proxy, not the norm.
+
+      The user's native language lives here for the same reason
+      (ADR 0016): a persona runs in a container and cannot read
+      `navigator.language`, and it needs a language to fall back to when it
+      cannot tell what language the message it is answering was written in.
   - name: bridges
     description: |
       Connecting a network: the login flows a bridge offers, starting one,
@@ -1757,6 +1780,405 @@ paths:
         "503":
           $ref: "#/components/responses/ApprovalsNotConfigured"
 
+  /api/settings/model:
+    get:
+      operationId: getModelConfiguration
+      tags: [settings]
+      summary: The endpoint and model the operator named, without the credential.
+      description: |
+        Twalk ships no LLM and has no default: nothing is ever sent to a
+        model the operator did not name, and a persona refuses to start
+        without one ([ADR 0015](../docs/architecture/adr/0015-no-default-llm-configured-through-the-companion.md)).
+        This is what they named, and what the Hermes runtime will inject.
+
+        **`configured: false` is a state, not a refusal.** A deployment
+        whose operator has not chosen a model yet answers `200` with every
+        member `null`, so a settings screen draws it without an error
+        branch. "No endpoint configured at all" stays distinguishable from
+        every way an endpoint can fail, which is what
+        `POST /api/settings/model/probe` reports.
+
+        **The credential never comes back.** `credential` says whether one
+        is configured, which of the two sources is in force, and its last
+        four characters — enough for a human to recognise the key they
+        pasted, not enough for anyone to use it. The only answer on this
+        origin that carries the credential itself is
+        `GET /api/settings/runtime`, whose caller is the Hermes runtime.
+
+        **A credential the operator supplied as a file wins** over one set
+        here (ADR 0015). That is how the reference deployment runs — the
+        model name from the browser, the key from a file — so
+        `credential.source` is `file` while `companion_credential_stored`
+        stays `true`, and the interface can answer "why is the key I pasted
+        not being used?".
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The model configuration, credential described and not carried.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfiguration"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "503":
+          $ref: "#/components/responses/SettingsNotConfigured"
+    put:
+      operationId: putModelConfiguration
+      tags: [settings]
+      summary: Name the endpoint, the model, and optionally the credential.
+      description: |
+        Replaces the configuration whole.
+
+        **The recommended shape is an OpenAI-compatible proxy in front of
+        the model** — the reference deployment runs LiteLLM in front of Qwen
+        at OVH, and Twalk therefore sees `http://127.0.0.1:4000/v1` serving
+        a model called `qwen`. Every provider peculiarity (`drop_params`,
+        `additional_drop_params`, `reasoning_effort`, the provider's real
+        model id) then lives in the proxy's own configuration, which is what
+        a proxy is for.
+
+        `params` is the **escape hatch**, not the norm: an operator with no
+        proxy needs it, because providers differ in what they reject — OVH's
+        AI Endpoints, the first endpoint tried in practice, rejects fields
+        OpenAI clients send by default. It is merged into every completion
+        request untouched and **last**, so it also overrides what a persona
+        asked for, and a member set to `null` **removes** a field the
+        request would otherwise carry. Leaving it empty is the healthy shape.
+
+        **The credential has three cases, because it is write-only and a
+        client cannot round-trip it.** The member absent keeps whatever is
+        stored — which is what a screen that only renamed the model sends,
+        having never been shown the key. `null` forgets the one set from
+        this browser; it does not touch the operator's file, which is not
+        the Companion's to remove. A string replaces it.
+
+        A member the shape does not have is **refused**, not ignored: a
+        client that sent `credentials` for `credential` would otherwise
+        believe it had set a key it had not.
+      security:
+        - deviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelConfigurationRequest"
+      responses:
+        "200":
+          description: |
+            The configuration as it now stands — the same document `GET`
+            answers, the credential still absent from it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelConfiguration"
+        "400":
+          description: |
+            - `malformed_request` — the body is not JSON, is not an object,
+              is missing `base_url` or `model`, or carries a member this
+              endpoint does not have.
+            - `invalid_base_url` — not an absolute `http`/`https` URL with a
+              host. It is the chat-completions **base**
+              (`http://127.0.0.1:4000/v1`), not the completions path.
+            - `invalid_model` — empty. There is no default model.
+            - `invalid_params` — not a JSON object.
+            - `invalid_credential` — not a string and not `null`; an empty
+              string is refused, because `null` is how a credential is
+              forgotten.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [
+                            malformed_request,
+                            invalid_base_url,
+                            invalid_model,
+                            invalid_params,
+                            invalid_credential,
+                          ]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "503":
+          $ref: "#/components/responses/SettingsNotConfigured"
+    delete:
+      operationId: deleteModelConfiguration
+      tags: [settings]
+      summary: Forget the endpoint, the model and the browser's credential.
+      description: |
+        `204` whether or not there was anything to forget: the caller asked
+        for a deployment with no model configured, and that is what it has.
+
+        The operator's credential file is untouched — it is not the
+        Companion's to remove — so a deployment can be left holding a key
+        and no model, which is an ordinary state on the way to naming
+        another one.
+      security:
+        - deviceToken: []
+      responses:
+        "204":
+          description: There is now no model configured.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "503":
+          $ref: "#/components/responses/SettingsNotConfigured"
+
+  /api/settings/model/probe:
+    post:
+      operationId: probeModelConfiguration
+      tags: [settings]
+      summary: Ask the configured endpoint whether it is there, and willing.
+      description: |
+        Sends **one chat completion of one token** to the configured
+        endpoint, with the operator's provider parameters merged in exactly
+        as a persona merges them — so what this proves is what a persona
+        will do, and not a near-miss of it. It is the only endpoint on this
+        origin that spends the operator's money, and it does so only when a
+        human asks. The prompt is the word `ping`: no message content
+        reaches the endpoint.
+
+        **Four causes, four answers.** That is the whole point of this
+        operation: "it does not work" has four different fixes here, and a
+        single signal for several causes is the failure pattern behind nine
+        incidents in two days on this project
+        ([#116](https://github.com/linagora/twalk/issues/116),
+        [#141](https://github.com/linagora/twalk/issues/141)).
+
+        | answer | what happened | what to do |
+        | --- | --- | --- |
+        | `200 outcome: ok` | the endpoint answered a chat completion | nothing |
+        | `409 model_not_configured` | nothing is configured to probe | name one |
+        | `502 endpoint_unreachable` | nothing answered: DNS, connection, TLS, or this Gateway's ten-second deadline | check the address and the network. A proxy on `127.0.0.1` is a good address the Gateway can reach and a container of its own network namespace cannot |
+        | `502 endpoint_refused` | it answered and said no, and `endpoint_status` is its own status | check the credential, then the model name |
+        | `502 endpoint_not_compatible` | it answered a success that is not a chat completion | wrong port or wrong path: a web server's index page answers `200` very convincingly |
+
+        A success does **not** mean the model produced text: with a budget
+        of one token a reasoning model spends it thinking and answers with
+        no content ([#162](https://github.com/linagora/twalk/issues/162)),
+        and that is still a reachable, willing endpoint that knows this
+        model's name.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The endpoint answered a chat completion.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelProbe"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: |
+            `model_not_configured` — there is no endpoint to probe. Not a
+            `404`: the route exists and the deployment is fine, and this is
+            the answer that keeps "no endpoint configured at all" distinct
+            from every way a configured endpoint can fail.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [model_not_configured]
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "502":
+          description: |
+            - `endpoint_unreachable` — nothing answered. `endpoint_status`
+              is `null`, because there was no answer to have a status.
+            - `endpoint_refused` — the endpoint answered and refused;
+              `endpoint_status` carries its status unedited.
+            - `endpoint_not_compatible` — the endpoint answered a success
+              that is not an OpenAI chat completion.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [
+                            endpoint_unreachable,
+                            endpoint_refused,
+                            endpoint_not_compatible,
+                          ]
+        "503":
+          $ref: "#/components/responses/SettingsNotConfigured"
+
+  /api/settings/language:
+    get:
+      operationId: getLanguagePreference
+      tags: [settings]
+      summary: The user's native language, and the five the Companion ships.
+      description: |
+        A stored preference rather than a browser fact, because a persona
+        runs in a container and cannot read `navigator.language`
+        ([ADR 0016](../docs/architecture/adr/0016-a-reply-follows-the-conversation-not-the-user.md)).
+        It governs the interface, the explanations, and the language a
+        persona falls back to when it cannot tell what language the message
+        it is answering was written in. **It never governs the text sent to
+        a contact**: a suggestion follows the conversation, because a French
+        user answering an English-speaking contact in French has been handed
+        something they cannot send.
+
+        `language: null` is "no preference", which is not the same as
+        English. A persona with no fallback follows the incoming message and
+        nothing else; defaulting silently to English is exactly what
+        [#164](https://github.com/linagora/twalk/issues/164) found in
+        production, against a French speaker who wrote `test`.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The preference, and the choices.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LanguagePreference"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "503":
+          $ref: "#/components/responses/SettingsNotConfigured"
+    put:
+      operationId: putLanguagePreference
+      tags: [settings]
+      summary: Set, or with null forget, the user's native language.
+      description: |
+        One of the five the Companion ships, spelled exactly as the
+        catalogues are (`fr`, never `fr-FR` and never `FR`), or `null` for
+        no preference. A closed list, so a tag no catalogue exists for is
+        refused here rather than discovered later by a persona.
+      security:
+        - deviceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LanguagePreferenceRequest"
+      responses:
+        "200":
+          description: The preference as it now stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LanguagePreference"
+        "400":
+          description: |
+            - `malformed_request` — the body is not JSON, is not an object,
+              is missing `language`, or carries another member.
+            - `unsupported_language` — not one of the five, and not `null`.
+              `detail` names the five.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [malformed_request, unsupported_language]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "503":
+          $ref: "#/components/responses/SettingsNotConfigured"
+
+  /api/settings/runtime:
+    get:
+      operationId: getRuntimeSettings
+      tags: [settings]
+      summary: Everything the Hermes runtime injects into a persona, in one read.
+      description: |
+        The one read on this origin that carries the endpoint credential,
+        because its caller is the process that puts it into a persona's
+        environment.
+
+        **Authentication.** The same service token the consent snapshot
+        takes (`GATEWAY_SERVICE_TOKEN`), as `Authorization: Bearer`. Its
+        caller is the Hermes runtime: a service, not one of the owner's
+        browsers, with no Matrix OpenID token to sign in with. A device
+        token is not accepted here.
+
+        **Why the runtime and not each persona.** That same token opens
+        `GET /api/consent/snapshot` — the list of every contact the
+        deployment knows — and a persona has no business holding it to learn
+        which model to call. A third-party persona takes the same path as a
+        first-party one, so "a first-party persona would never read it" is
+        not a control; the control is that the runtime injects the answer
+        and the variable is not in the persona's environment
+        (ADR 0008, ADR 0015).
+
+        **`llm: null` is the third of three signals.** A runtime that cannot
+        reach this Gateway sees a transport failure; one whose token is
+        wrong sees `401`; one told `llm: null` knows the operator has named
+        no model, and refuses to start saying exactly that. None of the
+        three is an empty document that could be mistaken for another.
+      security:
+        - serviceToken: []
+      responses:
+        "200":
+          description: |
+            The model configuration with the credential in force, and the
+            language preference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSettings"
+        "401":
+          description: |
+            `unauthenticated` — no `Authorization: Bearer` header, one the
+            Gateway cannot read, or a token that is not this Gateway's
+            service token. One answer for all of them; a device token is one
+            of the things refused here.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [unauthenticated]
+        "500":
+          $ref: "#/components/responses/SettingsStoreUnavailable"
+        "503":
+          description: |
+            - `sign_in_not_configured` — this deployment has no owner, so it
+              keeps no settings and its whole API is closed.
+            - `service_token_not_configured` — `GATEWAY_SERVICE_TOKEN` is
+              unset, so this Gateway serves no runtime settings to anyone.
+              Answered before authentication, as the snapshot's is.
+            - `settings_not_configured` — there is no settings store.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [
+                            sign_in_not_configured,
+                            service_token_not_configured,
+                            settings_not_configured,
+                          ]
+
   /api/bridges:
     get:
       operationId: getBridges
@@ -2413,14 +2835,19 @@ components:
       description: |
         A token from the Gateway's own configuration
         (`GATEWAY_SERVICE_TOKEN`), for a caller that is not a device and has
-        no OpenID token to sign in with: the Sensor reading the consent
-        snapshot, which is the one endpoint that takes it. The distinction is
-        not one a client may guess at: a device cookie grants no access to a
-        service-token route, and a service token grants no access to a device
-        route. It is a bearer credential over the whole consent state, so an
-        operator generates it (`openssl rand -hex 32`) rather than choosing
-        it, and the Gateway refuses to start with one shorter than 32
-        characters.
+        no OpenID token to sign in with. Two endpoints take it, and no
+        others: the Sensor reading the consent snapshot, and the Hermes
+        runtime reading the model and language settings it injects into each
+        persona. The distinction is not one a client may guess at: a device
+        cookie grants no access to a service-token route, and a service
+        token grants no access to a device route. One credential opening
+        both is deliberate rather than an economy — it is *why* the runtime
+        injects the model configuration instead of letting each persona
+        fetch it, because a persona holding this token would hold the list
+        of every contact too (ADR 0015). It is a bearer credential over the
+        whole consent state and over the endpoint credential, so an operator
+        generates it (`openssl rand -hex 32`) rather than choosing it, and
+        the Gateway refuses to start with one shorter than 32 characters.
 
   parameters:
     bridgeId:
@@ -2502,6 +2929,36 @@ components:
               - properties:
                   error:
                     enum: [sign_in_not_configured]
+
+    SettingsNotConfigured:
+      description: |
+        - `sign_in_not_configured` — this deployment has no owner
+          (`GATEWAY_OWNER` is unset), so it keeps no settings and its whole
+          API is closed. This is what the guard answers, and in practice it
+          is the one a caller sees.
+        - `settings_not_configured` — there is no settings store. The two
+          are configured together, so this is the handler saying the same
+          fact rather than leaving a corner of the surface silent.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - properties:
+                  error:
+                    enum: [sign_in_not_configured, settings_not_configured]
+    SettingsStoreUnavailable:
+      description: |
+        `store_unavailable` — the Gateway's settings store could not be read
+        or written. Nothing was changed.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - properties:
+                  error:
+                    enum: [store_unavailable]
 
     UnknownBridge:
       description: |
@@ -2666,6 +3123,247 @@ components:
             `404` alone.
         approval:
           $ref: "#/components/schemas/Approval"
+        endpoint_status:
+          type: ["integer", "null"]
+          description: |
+            The HTTP status the configured LLM endpoint answered the probe
+            with. Set on `POST /api/settings/model/probe`'s `502` alone, and
+            `null` there when nothing answered at all — which is the whole
+            distinction between `endpoint_refused` and
+            `endpoint_unreachable`.
+
+    ModelConfiguration:
+      type: object
+      description: |
+        The endpoint and model the operator named, as a browser is told
+        them. The credential is described and never carried.
+      required:
+        [configured, base_url, model, params, updated_at, credential, personas]
+      additionalProperties: false
+      properties:
+        configured:
+          type: boolean
+          description: |
+            Whether a model has been named at all. `false` is a state and
+            not a failure: every other member is then `null`, and a settings
+            screen draws it without an error branch.
+        base_url:
+          type: ["string", "null"]
+          description: |
+            The OpenAI-compatible chat-completions **base**, without a
+            trailing slash. Normalised on write, so the runtime and the
+            probe build the same `…/chat/completions`.
+          examples: ["http://127.0.0.1:4000/v1"]
+        model:
+          type: ["string", "null"]
+          description: |
+            The model name **the configured endpoint** knows, not a family
+            name: `qwen` on the reference deployment, because that is what
+            its LiteLLM serves it as.
+          examples: ["qwen"]
+        params:
+          type: ["object", "null"]
+          description: |
+            The provider passthrough, merged into every completion request
+            untouched. `null` when there is none, which is the healthy shape
+            with a proxy in front.
+        updated_at:
+          type: ["string", "null"]
+          format: date-time
+          description: When the configuration was last written. RFC 3339, to the millisecond.
+        credential:
+          $ref: "#/components/schemas/EndpointCredential"
+        personas:
+          type: object
+          description: |
+            Per-persona overrides. **Always `{}` in v0.1.** The member
+            exists so that adding the first override later is not a change
+            of shape; shipping a working override with one persona would
+            ship an unexercised path.
+
+    EndpointCredential:
+      type: object
+      description: |
+        What a browser is told about the endpoint's credential. Never the
+        credential.
+      required:
+        [configured, source, hint, file, companion_credential_stored]
+      additionalProperties: false
+      properties:
+        configured:
+          type: boolean
+          description: Whether any credential is in force. Some endpoints need none.
+        source:
+          type: ["string", "null"]
+          enum: [file, companion, null]
+          description: |
+            Which of the two won. `file` is a credential the operator
+            supplied through `GATEWAY_LLM_API_KEY_FILE`, and it **wins** —
+            so a production stack can lock the credential down while the
+            model name still comes from the browser (ADR 0015).
+        hint:
+          type: ["string", "null"]
+          description: |
+            The last four characters of the credential in force: enough for
+            a human to recognise the key they pasted, not enough for anyone
+            to use it. `null` for a credential under eight characters, where
+            four would be most of it.
+        file:
+          type: ["string", "null"]
+          description: |
+            The path `GATEWAY_LLM_API_KEY_FILE` names, when it names one.
+            Shown because "the file wins" is useless to a human who cannot
+            see which file won.
+        companion_credential_stored:
+          type: boolean
+          description: |
+            Whether a credential was set from the Companion — `true` even
+            when the file is the one in force, which is exactly the
+            combination a settings screen has to explain.
+
+    ModelConfigurationRequest:
+      type: object
+      description: |
+        A whole model configuration. `credential` absent keeps the stored
+        one, `null` forgets the one set from this browser, and a string
+        replaces it; the three cases exist because the credential is
+        write-only, so a client cannot round-trip it.
+      required: [base_url, model]
+      additionalProperties: false
+      properties:
+        base_url:
+          type: string
+          minLength: 1
+          description: |
+            An absolute `http` or `https` chat-completions **base** URL with
+            a host.
+          examples: ["http://127.0.0.1:4000/v1"]
+        model:
+          type: string
+          minLength: 1
+          examples: ["qwen"]
+        params:
+          type: ["object", "null"]
+          description: |
+            Provider parameters merged into every completion request
+            untouched and last, a member set to `null` removing a field the
+            request would otherwise carry. The escape hatch for an operator
+            with no proxy in front; leave it out otherwise.
+          examples: [{ "max_tokens": 2000 }]
+        credential:
+          type: ["string", "null"]
+          minLength: 1
+          description: |
+            The endpoint's bearer token. Write-only: no read of this API
+            returns it. An empty string is refused — `null` is how it is
+            forgotten.
+
+    ModelProbe:
+      type: object
+      description: The configured endpoint answered a chat completion.
+      required: [outcome, endpoint_status, base_url, model, endpoint_model]
+      additionalProperties: false
+      properties:
+        outcome:
+          type: string
+          enum: [ok]
+          description: |
+            Always `ok` here. The other outcomes are refusals with their own
+            statuses and their own `error` codes, so a client never has to
+            read a success to discover a failure.
+        endpoint_status:
+          type: integer
+          description: The status the endpoint answered with.
+        base_url:
+          type: string
+          description: The endpoint that was probed.
+        model:
+          type: string
+          description: The model name that was sent.
+        endpoint_model:
+          type: ["string", "null"]
+          description: |
+            The model the endpoint echoed back, when it did. A proxy that
+            maps a friendly name onto a provider's real one reports the
+            provider's here, which is how an operator confirms what actually
+            answered.
+
+    LanguagePreference:
+      type: object
+      description: The user's native language, and the choices.
+      required: [language, available]
+      additionalProperties: false
+      properties:
+        language:
+          type: ["string", "null"]
+          enum: [en, fr, it, es, de, null]
+          description: |
+            `null` is "no preference", which is not English: a persona with
+            no fallback follows the incoming message and nothing else.
+        available:
+          type: array
+          description: The interface languages the Companion ships, in the order it offers them.
+          items:
+            type: string
+            enum: [en, fr, it, es, de]
+
+    LanguagePreferenceRequest:
+      type: object
+      required: [language]
+      additionalProperties: false
+      properties:
+        language:
+          type: ["string", "null"]
+          enum: [en, fr, it, es, de, null]
+
+    RuntimeSettings:
+      type: object
+      description: |
+        Everything the Hermes runtime injects into a persona's environment.
+        The one document on this origin that carries the endpoint
+        credential.
+      required: [llm, language, personas]
+      additionalProperties: false
+      properties:
+        llm:
+          oneOf:
+            - $ref: "#/components/schemas/RuntimeLlm"
+            - type: "null"
+          description: |
+            `null` when the operator has named no model — which is a
+            different fact from a Gateway the runtime could not reach and
+            from one that refused its token, and the runtime refuses to
+            start saying exactly that (ADR 0015).
+        language:
+          type: ["string", "null"]
+          enum: [en, fr, it, es, de, null]
+          description: |
+            The user's native language, for the fallback ADR 0016 defines.
+            `null` when they have set none.
+        personas:
+          type: object
+          description: Per-persona overrides. Always `{}` in v0.1.
+
+    RuntimeLlm:
+      type: object
+      required: [base_url, model, api_key, credential_source, params]
+      additionalProperties: false
+      properties:
+        base_url:
+          type: string
+        model:
+          type: string
+        api_key:
+          type: ["string", "null"]
+          description: |
+            The credential **in force**, resolved: the operator's file if
+            there is one, otherwise whatever the Companion set, otherwise
+            `null` for an endpoint that needs none.
+        credential_source:
+          type: ["string", "null"]
+          enum: [file, companion, null]
+        params:
+          type: ["object", "null"]
 
     ApprovalRequest:
       type: object

@@ -86,6 +86,14 @@ _Avoid_: calling one "the owner's Matrix ID", which is the account and never a g
 The Companion Gateway's own per-device credential, issued once a Matrix OpenID token has proved the owner's identity, carried as an `HttpOnly` cookie on the Gateway's origin, and revocable per device. Distinct from a Matrix access token, which the Gateway never holds (ADR 0011).
 _Avoid_: calling it an access token, or a session
 
+**Model configuration**:
+The OpenAI-compatible endpoint, the model name that endpoint knows, an optional credential and a free-form object of provider parameters passed through untouched: what a persona reasons with. There is no default and Twalk ships no model, so a persona refuses to start without one (ADR 0015). Held by the Companion Gateway, set from the Companion, injected by the Hermes runtime into each persona's environment — never fetched by a persona, because the credential that reads it also opens the consent snapshot. The recommended shape is an OpenAI-compatible proxy in front of the model, which leaves the provider parameters as an escape hatch rather than the norm. A credential the operator supplied as a file **wins** over one set from the browser.
+_Avoid_: "the LLM settings" when the language preference is also meant
+
+**Native language**:
+The user's own language, one of the five the Companion ships. It governs the interface, the explanations, and the language a persona falls back to when it cannot tell what language the message it is answering was written in (ADR 0016). It never governs the text sent to a contact: a suggestion follows the conversation. Stored rather than read from the browser, because a persona runs in a container and cannot read `navigator.language`. Unset is a state of its own and is not English.
+_Avoid_: "locale", "the user's language" for the language a suggestion is written in
+
 **SMS Companion**:
 The first-party Android app (brand name: Twake SMS Companion) that reads and sends SMS on the user's phone and forwards them to the Twalk server over an end-to-end encrypted Matrix session; becomes the reference SMS path in v0.2.
 

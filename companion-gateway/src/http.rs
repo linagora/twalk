@@ -44,6 +44,8 @@ use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
 use crate::session::Sessions;
 use crate::session_http;
+use crate::settings::Settings;
+use crate::settings_http;
 use crate::static_files::{Resolution, Resolver};
 use crate::suggestions::Suggestions;
 use crate::suggestions_http;
@@ -111,6 +113,15 @@ pub struct Gateway {
     /// empty list, because "nobody has suggested anything" and "this Gateway
     /// is not watching" are very different claims.
     suggestions: Option<Arc<Suggestions>>,
+    /// The model configuration and the language preference
+    /// ([`crate::settings`], ticket #98): what the operator chose to reason
+    /// with, and the language a persona falls back to. `None` on the same
+    /// terms as [`Self::sessions`] — the store is a file in
+    /// `GATEWAY_STATE_DIR` and there is no owner to hold a preference for
+    /// without one — so in practice the guard has already refused the
+    /// request, and the handlers say `503 settings_not_configured` anyway
+    /// rather than leaving a corner of the surface silent.
+    settings: Option<Arc<Settings>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -133,6 +144,7 @@ impl Gateway {
             contacts: None,
             approvals: None,
             suggestions: None,
+            settings: None,
             now_unix_seconds,
         }
     }
@@ -245,6 +257,19 @@ impl Gateway {
         self.suggestions.clone()
     }
 
+    /// Adds the model and language settings (ticket #98), the same way. It
+    /// is configured with sign-in rather than with consent: naming a model
+    /// needs no bus, and an operator who has not set `GATEWAY_NATS_URL` can
+    /// still say what their personas will reason with.
+    pub fn with_settings(mut self, settings: Option<Arc<Settings>>) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    pub fn settings(&self) -> Option<Arc<Settings>> {
+        self.settings.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -312,6 +337,12 @@ pub fn router(gateway: Gateway) -> Router {
         // nowhere, carrying the persona's own words and none of the message
         // they answer.
         .merge(suggestions_http::routes())
+        // The model and the language (ticket #98): the same merge, the same
+        // guard. Six of the seven operations are the owner's browser; the
+        // seventh is the Hermes runtime's read, which the guard's table
+        // declares as a service-token route, because the runtime is not a
+        // device and a persona is never handed that token (ADR 0015).
+        .merge(settings_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))
