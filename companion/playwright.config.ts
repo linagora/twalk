@@ -66,7 +66,7 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
-			testIgnore: ['networks/**', 'dashboard/**', 'session/**'],
+			testIgnore: ['networks/**', 'dashboard/**', 'approvals/**', 'session/**'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',
@@ -121,6 +121,29 @@ export default defineConfig({
 			fullyParallel: false,
 			workers: 1,
 			dependencies: ['networks'],
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
+		},
+		{
+			// The approval screen (#100), on the same origin as the dashboard:
+			// approving needs a signed-in device, a bus to publish a suggestion
+			// on and the Gateway's own consent journal to read — which is the
+			// bridge Gateway, the only one configured with all three.
+			//
+			// One worker and after `dashboard`, for the reason that project
+			// gives: one Gateway, one consent journal, one bus. These specs
+			// publish inbound events and write consent decisions about
+			// contacts, which is state the dashboard's own counts are asserted
+			// against — so they run when it has finished, not beside it.
+			name: 'approvals',
+			testMatch: 'approvals/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			dependencies: ['dashboard'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',

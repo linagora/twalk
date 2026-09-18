@@ -32,6 +32,12 @@
 	is v0.2, so the chip says where the decisions are not, instead of pretending
 	to lead somewhere.
 
+	The approval chip (#100) is the same idea one more time: `GET /api/suggestions`
+	answers with every proposed reply in full, and this screen is allowed a
+	number and a link. The reduction happens in `$lib/dashboard/load.ts`, so no
+	component here could render a persona's words even by accident; the content
+	lives at `/approvals`, opened deliberately.
+
 	The version handshake is not repeated here: `$lib/boot.ts` runs it before
 	any screen renders and `VersionBanner` (in the root layout) is what tells
 	the user the Gateway moved under an installed shell. The footer names the
@@ -222,6 +228,33 @@
 			</p>
 		</div>
 	{/each}
+
+	<!-- #100's count and link, and deliberately nothing else: what the
+	     assistant proposed is on `/approvals`, opened on purpose. The text
+	     never reaches this file — `$lib/dashboard/load.ts` drops it at the
+	     seam, the same way it drops the pending contacts' identities. -->
+	{#if snapshot.waiting !== null && snapshot.waiting.count > 0}
+		<div class="waiting" data-testid="approvals-waiting">
+			<p class="chip" data-testid="approvals-chip" data-count={snapshot.waiting.count}>
+				<Icon name="persona" size="dense" />
+				{$t('dashboard.chip.suggestions', { count: snapshot.waiting.count })}
+			</p>
+			{#if snapshot.waiting.atLeast}
+				<p class="small muted" data-testid="approvals-at-least">
+					{$t('dashboard.chip.suggestionsAtLeast')}
+				</p>
+			{/if}
+			<p class="small muted" data-testid="approvals-private">
+				{$t('dashboard.chip.suggestionsPrivate')}
+			</p>
+			<p>
+				<a class="button button--primary" href="/approvals" data-testid="to-approvals">
+					{$t('dashboard.chip.suggestionsLink')}
+					<Icon name="continue" size="dense" />
+				</a>
+			</p>
+		</div>
+	{/if}
 
 	{#if pending !== null && pending > 0}
 		<div class="waiting" data-testid="pending-waiting">
