@@ -18,6 +18,23 @@
 // and becomes a waiting tab itself. Then the asker's lock request — which is
 // queued, not polled — is granted.
 //
+// # The holder that is there and cannot answer
+//
+// A take-over used to have no terminal state: the asker posted its message and
+// the button spun for ever if nothing came back (#135). The obvious diagnosis
+// was "the holder is gone", and it is the wrong one — measured against the live
+// deployment, a lock does die with its tab, a reload keeps the app, and an
+// external round trip and back keeps the app. What actually happens is the
+// opposite: the holder is **alive and cannot answer**. Chrome freezes a
+// background tab it thinks you have forgotten (Memory Saver); a frozen tab
+// keeps its document, and so keeps its Web Lock, and runs no JavaScript, so it
+// never hears the request.
+//
+// No timeout diagnoses that on its own — which is why `takeOver` does not just
+// fail, it reports *which* of the two happened, and the screen names the
+// remedy that works on a frozen tab: find it and close it, or restart the
+// browser. A spinner names none.
+//
 // Browsers without Web Locks (iOS Lockdown Mode) report `unsupported`, which
 // the capability gate has already listed as degraded: they get the app, and
 // the risk, rather than a wall.
@@ -35,6 +52,28 @@ export type TabRole =
 
 const LOCK_NAME = 'twalk-companion-crypto';
 const CHANNEL_NAME = 'twalk-companion-tabs';
+
+/**
+ * How long a take-over waits for the holder before saying it did not answer.
+ *
+ * A live holder yields in well under a second — measured at four seconds for
+ * the whole journey including two page loads — so this is generous for the
+ * case that works and short enough that the case that never will is not
+ * mistaken for slowness. The screen states it, because a deadline the user is
+ * not told about is indistinguishable from a hang.
+ */
+export const TAKE_OVER_TIMEOUT_MS = 5000;
+
+/** What a take-over came to. */
+export type TakeOverOutcome =
+	/** The holder let go and this tab now runs the app. */
+	| 'active'
+	/**
+	 * Nobody answered within [`TAKE_OVER_TIMEOUT_MS`]. The lock is still held
+	 * — a released one would have been granted — so the holder exists and is
+	 * not running JavaScript.
+	 */
+	| 'unanswered';
 
 type LockManager = {
 	request: (
@@ -64,16 +103,37 @@ export interface TabElection {
  * Elects this tab, and keeps it elected. Idempotent per page: calling it twice
  * returns the same election.
  */
-export function electTab(options: TabElection): { takeOver: () => void; stop: () => void } {
+export function electTab(options: TabElection): {
+	takeOver: () => Promise<TakeOverOutcome>;
+	stop: () => void;
+} {
 	const locks = lockManager();
 	const channel = openChannel();
 	let stopped = false;
 	/** Resolves the callback holding the lock, which releases it. */
 	let release: (() => void) | null = null;
+	/** A take-over in flight, waiting to be told this tab became active. */
+	let asking: ((outcome: TakeOverOutcome) => void) | null = null;
+
+	/**
+	 * Announces a role, and settles a take-over that was waiting for it.
+	 * Becoming active *is* the answer: the holder yielded and the queued lock
+	 * request was granted.
+	 */
+	const announce = (role: TabRole) => {
+		if (role === 'active' && asking !== null) {
+			const settle = asking;
+			asking = null;
+			settle('active');
+		}
+		options.onRole(role);
+	};
 
 	if (locks === null) {
-		options.onRole('unsupported');
-		return { takeOver: () => {}, stop: () => channel?.close() };
+		announce('unsupported');
+		// Nothing was elected, so this tab is already running the app and
+		// there is nothing to take over.
+		return { takeOver: async () => 'active', stop: () => channel?.close() };
 	}
 
 	const claim = () => {
@@ -85,7 +145,7 @@ export function electTab(options: TabElection): { takeOver: () => void; stop: ()
 				if (lock === null || stopped) {
 					return;
 				}
-				options.onRole('active');
+				announce('active');
 				await new Promise<void>((resolve) => {
 					release = resolve;
 				});
@@ -95,7 +155,7 @@ export function electTab(options: TabElection): { takeOver: () => void; stop: ()
 				// A rejected request means no lock, which is the same
 				// situation as another tab holding it.
 				if (!stopped) {
-					options.onRole('elsewhere');
+					announce('elsewhere');
 				}
 			});
 	};
@@ -106,12 +166,12 @@ export function electTab(options: TabElection): { takeOver: () => void; stop: ()
 	void locks
 		.request(LOCK_NAME, { mode: 'exclusive', ifAvailable: true }, async (lock) => {
 			if (lock === null) {
-				options.onRole('elsewhere');
+				announce('elsewhere');
 				return;
 			}
 			// Held only long enough to answer; the queued claim takes over.
 		})
-		.catch(() => options.onRole('elsewhere'))
+		.catch(() => announce('elsewhere'))
 		.finally(claim);
 
 	channel?.addEventListener('message', (event: MessageEvent) => {
@@ -120,7 +180,7 @@ export function electTab(options: TabElection): { takeOver: () => void; stop: ()
 		}
 		void (async () => {
 			await options.onYield?.();
-			options.onRole('elsewhere');
+			announce('elsewhere');
 			release?.();
 			// Queue up again, so this tab can be taken back later.
 			setTimeout(claim, 0);
@@ -128,9 +188,36 @@ export function electTab(options: TabElection): { takeOver: () => void; stop: ()
 	});
 
 	return {
-		takeOver: () => channel?.postMessage({ type: 'take-over' }),
+		/**
+		 * Asks the holder to let go, and always comes back with an answer.
+		 *
+		 * `active` means it did; `unanswered` means the deadline passed with
+		 * the lock still held, which — since a browser releases a lock when
+		 * its tab dies — means the holder is there and is running nothing.
+		 */
+		takeOver: () => {
+			if (channel === null) {
+				// No `BroadcastChannel`: there is no way to ask at all, and a
+				// button that pretended to ask would be the spinner again.
+				return Promise.resolve<TakeOverOutcome>('unanswered');
+			}
+			return new Promise<TakeOverOutcome>((resolve) => {
+				asking = resolve;
+				channel.postMessage({ type: 'take-over' });
+				setTimeout(() => {
+					if (asking === resolve) {
+						asking = null;
+						resolve('unanswered');
+					}
+				}, TAKE_OVER_TIMEOUT_MS);
+			});
+		},
 		stop: () => {
 			stopped = true;
+			// A take-over still waiting when the page goes away is answered,
+			// not dropped: a promise nobody settles is the defect in miniature.
+			asking?.('unanswered');
+			asking = null;
 			release?.();
 			channel?.close();
 		}

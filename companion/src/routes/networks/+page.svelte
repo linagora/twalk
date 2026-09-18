@@ -28,6 +28,26 @@
 	A bridge the Gateway could not reach is *unknown*, not disconnected: the
 	card says nothing rather than claiming a working link is broken. The list
 	itself still answers, so one bridge being down costs the other nothing.
+
+	# Two journeys, and the screen says which one this is
+
+	Observed live with WhatsApp connected for two hours and Signal for two
+	minutes: *"Connecter votre premier réseau — Étape 1 sur 3 — Choisissez-en
+	un pour commencer."* Every word of it was wrong for that user (#120). The
+	onboarding wizard's copy was shown unconditionally to anyone who reached
+	the picker, including a returning user adding a network to a working
+	deployment.
+
+	So the heading is derived from the same answer the cards are: how many
+	networks `GET /api/bridges` says are connected, read through
+	`connection.ts` like everything else. Never from a flag the Companion wrote
+	into browser storage — spec #65 is explicit that onboarding progress is
+	read from what exists on the Gateway.
+
+	Three modes and not two, because "I could not ask" is not "nothing is
+	connected". A Gateway that did not answer gets the neutral heading: it
+	claims nothing, where *first network* and *step 1 of 3* are claims that can
+	be false. That is the same rule as the cards below, one level up.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -61,6 +81,22 @@
 	});
 
 	const grid = $derived<CardState[]>(gridFor({ bridges, bridgesKnown, ios }));
+
+	/**
+	 * Which journey this is, from the deployment's own state.
+	 *
+	 * `first` is onboarding: no network connected, and the step counter means
+	 * something. `add` is a returning user. `unknown` is a Gateway that did
+	 * not answer, and it reads like `add`: a heading that claims nothing is
+	 * the honest one when nothing is known.
+	 */
+	const mode = $derived<'first' | 'add' | 'unknown'>(
+		!loaded || !bridgesKnown
+			? 'unknown'
+			: grid.some((state) => state.connected)
+				? 'add'
+				: 'first'
+	);
 
 	/** The tooltip and the helper line under a card that cannot be tapped. */
 	function blockedCopy(state: CardState): string | null {
@@ -105,17 +141,38 @@
 	}
 </script>
 
-<section class="screen" data-testid="screen-networks">
+<section class="screen" data-testid="screen-networks" data-mode={mode}>
 	<header class="stack">
 		<p class="small">
-			<a href="/onboarding">
-				<Icon name="back" size="dense" />
-				{$t('onboarding.back')}
-			</a>
+			<!-- Back to where this user came from: onboarding has a previous
+			     step, a working deployment has a dashboard. -->
+			{#if mode === 'first'}
+				<a href="/onboarding">
+					<Icon name="back" size="dense" />
+					{$t('onboarding.back')}
+				</a>
+			{:else}
+				<a href="/dashboard" data-testid="back-to-dashboard">
+					<Icon name="back" size="dense" />
+					{$t('networks.backToDashboard')}
+				</a>
+			{/if}
 		</p>
-		<h1>{$t('networks.title')}</h1>
-		<p class="subtitle">{$t('networks.step')}</p>
-		<p class="muted">{$t('networks.intro')}</p>
+		{#if mode === 'first'}
+			<h1>{$t('networks.title')}</h1>
+			<!-- The step counter belongs to the journey that has steps. -->
+			<p class="subtitle" data-testid="networks-step">{$t('networks.step')}</p>
+			<p class="muted">{$t('networks.intro')}</p>
+		{:else}
+			<h1>{$t('networks.add.title')}</h1>
+			<p class="muted">{$t('networks.add.intro')}</p>
+		{/if}
+		{#if !loaded}
+			<p class="muted" data-testid="networks-loading">
+				<span class="spinner" aria-hidden="true"></span>
+				{$t('networks.loading')}
+			</p>
+		{/if}
 	</header>
 
 	{#if loaded && !bridgesKnown}
@@ -217,7 +274,13 @@
 			{$t('networks.toAssistant')}
 			<Icon name="continue" size="dense" />
 		</a>
-		<a class="skip-link" href="/personas" data-testid="skip-networks">{$t('networks.skip')}</a>
+		{#if mode === 'first'}
+			<!-- "Skip for now, I'll add networks later" is an offer to leave a
+			     journey. A user who came back to add a network is not in one. -->
+			<a class="skip-link" href="/personas" data-testid="skip-networks">{$t('networks.skip')}</a>
+		{:else}
+			<a class="skip-link" href="/dashboard" data-testid="done-adding">{$t('networks.add.done')}</a>
+		{/if}
 	</p>
 
 	<p class="card card--info small">

@@ -25,10 +25,20 @@
 	import VersionBanner from '$lib/components/VersionBanner.svelte';
 	import { boot, startBoot } from '$lib/boot';
 	import { locale, t } from '$lib/i18n';
+	import { captureLoginToken } from '$lib/matrix/login-token';
 	import { session } from '$lib/session/state';
-	import type { TabRole } from '$lib/tabs/lock';
+	import type { TabRole, TakeOverOutcome } from '$lib/tabs/lock';
 
 	let { children } = $props();
+
+	/**
+	 * A credential in the address bar goes before anything decides what to
+	 * render (#135). Here, and not in the route that uses it: the route did
+	 * not mount — the election below showed the tab-lock screen instead — and
+	 * the login token stayed in the URL. Component initialisation is top-down,
+	 * so this line runs before any screen exists.
+	 */
+	captureLoginToken();
 
 	/**
 	 * The session-expired dialog lives here, over every screen, because #111
@@ -44,7 +54,13 @@
 	 * which is one task, so no screen flashes on the way through.
 	 */
 	let tabRole = $state<TabRole>('electing');
-	let takeOver = $state<() => void>(() => {});
+	/**
+	 * Asks the holder to let go, and says what came of it — including the case
+	 * the button used to spin through, a holder that is frozen and cannot
+	 * answer (#135). Never called before the election answers, since the
+	 * screen that offers it is the election's own `elsewhere`.
+	 */
+	let takeOver = $state<() => Promise<TakeOverOutcome>>(async () => 'unanswered');
 
 	onMount(() => {
 		void startBoot();

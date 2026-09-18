@@ -8,9 +8,23 @@
 //
 // # Where "connected" comes from, and the one network it cannot come from
 //
-// `GET /api/bridges` reports one row per configured bridge with the login it
-// holds; a login in state `complete` is a network the user connected, and the
-// Gateway can say so without contacting anything.
+// From `$lib/networks/connection.ts`, which is the single place that judgement
+// is made, and from nowhere else.
+//
+// This module used to make it itself, as `bridge.login?.state !== 'complete'`
+// — the **login process**, which lives in the Gateway's memory for at most
+// thirty minutes and is gone after a restart or after the login it describes
+// finished. That is the defect #108 named, and it survived here because #108
+// was scoped by directory while the defect is defined by source of truth
+// (#142). The consequence was worse on this screen than on the picker: the
+// list came back empty on a deployment with WhatsApp and Signal both
+// connected, so there was nothing to tick and **no persona could be activated
+// at all**.
+//
+// A network is in the perimeter when `isConnected` says so, which is the
+// contract's `connected` and nothing rounded up to it: a bridge that is
+// starting or reconnecting has no link to scope a consent decision onto yet,
+// and the screen would be claiming one on the user's behalf.
 //
 // Matrix is the exception, and the reason is in the Gateway's own description:
 // the existing-account path (screen 3d) invites the Sensor into the rooms the
@@ -22,12 +36,18 @@
 // scope a consent decision to a network on the user's behalf, which is the
 // precise behaviour this project exists to prevent.
 
-/** One row of `GET /api/bridges`, reduced to what a scope needs from it. */
-export interface BridgeRow {
-	readonly bridge_id: string;
-	readonly network: string;
-	readonly login: { readonly state: string } | null;
-}
+import { connectionOf, isConnected, type ConfiguredBridge } from '$lib/networks/connection';
+
+/**
+ * One row of `GET /api/bridges`, whole.
+ *
+ * Whole, and not a hand-written subset: the two members that matter have
+ * confusable names — `connection` is the bridge's own answer about the link it
+ * holds, `login` is a login process in the Gateway's memory — and a subset
+ * that kept only the second is how this module came to read the wrong one
+ * (#142).
+ */
+export type BridgeRow = ConfiguredBridge;
 
 /** A network offered as part of an activation's perimeter. */
 export interface ScopeOption {
@@ -51,10 +71,10 @@ export const MATRIX_NETWORK = 'matrix';
  * Bridge order is the Gateway's — configuration order — so two deployments
  * with the same bridges draw the same screen.
  */
-export function scopeOptions(bridges: readonly BridgeRow[]): ScopeOption[] {
+export function scopeOptions(bridges: readonly ConfiguredBridge[]): ScopeOption[] {
 	const options: ScopeOption[] = [];
 	for (const bridge of bridges) {
-		if (bridge.login?.state !== 'complete') {
+		if (!isConnected(connectionOf(bridge))) {
 			continue;
 		}
 		if (options.some((option) => option.network === bridge.network)) {

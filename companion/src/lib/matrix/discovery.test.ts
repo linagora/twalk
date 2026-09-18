@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { discoverHomeserver, type Fetch } from './discovery';
+import { directBaseUrl, discoverHomeserver, type Fetch } from './discovery';
 
 function respond(routes: Record<string, { status?: number; body?: unknown }>): Fetch {
 	return (async (input: RequestInfo | URL) => {
@@ -109,5 +109,25 @@ describe('discoverHomeserver', () => {
 			})
 		);
 		expect(result).toMatchObject({ ok: false, kind: 'unreachable' });
+	});
+});
+
+describe('directBaseUrl', () => {
+	it('spells a bare server name the way this project spells one', () => {
+		// What a user can recite: the half of their own Matrix ID after the
+		// colon. `linagora.com` failing while `https://matrix.linagora.com`
+		// worked is Matrix's delegation mechanism inverted (#124).
+		expect(directBaseUrl('linagora.com')).toBe('https://linagora.com');
+		expect(directBaseUrl('  Example.COM ')).toBe('https://example.com');
+		expect(directBaseUrl('twalk.localhost:19148')).toBe('http://twalk.localhost:19148');
+	});
+
+	it('takes an address the user gave as the address it is', () => {
+		// Port and path included: `homeserverBaseUrl` alone drops a port on
+		// anything but loopback, and a homeserver on 8448 is a real deployment.
+		expect(directBaseUrl('https://matrix.example.com')).toBe('https://matrix.example.com');
+		expect(directBaseUrl('https://matrix.example.com:8448')).toBe('https://matrix.example.com:8448');
+		expect(directBaseUrl('https://example.com/synapse/')).toBe('https://example.com/synapse');
+		expect(directBaseUrl('http://127.0.0.1:19148')).toBe('http://127.0.0.1:19148');
 	});
 });

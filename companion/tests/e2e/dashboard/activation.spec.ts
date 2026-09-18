@@ -156,3 +156,37 @@ test('pausing the assistant records a revocation, and says it is starved rather 
 		})
 	);
 });
+
+test('a live link with no login process behind it is still a network to activate on', async ({
+	page,
+	request
+}) => {
+	// Found live (#142): WhatsApp and Signal both connected and working, and
+	// the persona screen said "no network is connected yet" — so there was
+	// nothing to tick and no persona could be activated on anything. The
+	// feature was unreachable on a working deployment.
+	//
+	// This is that deployment: the bridge holds a live session, and the
+	// Gateway holds no login process at all — because the login that made it
+	// finished, or because the Gateway has restarted since. A login process
+	// lives in memory for at most thirty minutes; a link lives in the bridge.
+	const bridge = new StubBridge(request, WHATSAPP_BRIDGE);
+	await bridge.addExistingLogin('a-live-session', '+33660469852', 'CONNECTED');
+	await clearLogin(request, deviceToken, WHATSAPP_BRIDGE);
+
+	await page.goto('/personas');
+	await expect(page.getByTestId('persona-card')).toBeVisible();
+
+	// The network is offered, ticked, from the bridge's own answer.
+	await expect(page.getByTestId('scope-whatsapp').getByRole('checkbox')).toBeChecked();
+	// And the sentence that was the symptom is not on the screen, because it
+	// is not true here. It stays for the case where it is.
+	await expect(page.getByTestId('no-network')).toHaveCount(0);
+
+	// Reachable: a perimeter with something in it is what enables the button.
+	// The activation itself, and the event it is, is the first test in this
+	// file — this one must not move the consent journal it asserts on.
+	await expect(page.getByTestId('activate')).toBeEnabled();
+
+	await bridge.reset();
+});

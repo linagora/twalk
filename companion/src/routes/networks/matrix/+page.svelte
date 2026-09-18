@@ -26,18 +26,46 @@
 	those need member state this listing deliberately does not fetch. Such a
 	room is shown by what is actually known about it and labelled as such,
 	rather than rendered blank (`$lib/matrix/rooms.ts`).
+
+	# The field starts empty, and on purpose
+
+	It used to arrive filled with the Twalk deployment's own homeserver — from
+	the homeserver onboarding had resolved, or from discovery on the Twalk
+	domain — which is the one account this screen is not for (#124). The
+	consequence was not cosmetic: the screen reads the login flows of whatever
+	is in the field, so the local deployment's password form was offered to an
+	owner whose real account signs in through their organisation's identity
+	provider, and nothing on the screen suggested their homeserver was even
+	supported.
+
+	So nothing guesses. The field is empty on a first visit, it accepts **a
+	server name or an address** — `.well-known` delegation is what Matrix has
+	for exactly this, and `linagora.com` is what a person can recite — and the
+	only value ever offered is the homeserver of an account this browser has
+	already connected here.
+
+	# Two refusals, two places
+
+	This screen has two actions with a page between them, so it has two message
+	surfaces and they are not interchangeable (#139). `problem` answers signing
+	in and listing, and renders by the sign-in controls at the top.
+	`inviteProblem` answers the invitation, and renders **against the button** — which on
+	an account with a hundred rooms is three thousand pixels further down. The
+	owner who reported "nothing happens" had been told, at the top of a page
+	they were at the bottom of.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 
+	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import { gateway } from '$lib/api/client';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import type { MatrixSession } from '$lib/crypto/bootstrap';
 	import { discoverHomeserver } from '$lib/matrix/discovery';
+	import { takeLoginToken } from '$lib/matrix/login-token';
 	import {
 		loginFlows,
-		loginTokenFrom,
 		loginWithPassword,
 		loginWithToken,
 		MatrixLoginError,
@@ -51,18 +79,26 @@
 		roomLabel,
 		type RoomSummary
 	} from '$lib/matrix/rooms';
-	import { domain, restoreDomain } from '$lib/onboarding/domain';
-	import { homeserver, matrixSession, restoreHomeserver } from '$lib/onboarding/progress';
+	import { matrixSession } from '$lib/onboarding/progress';
 
 	type Stage = 'signing-in' | 'rooms' | 'inviting' | 'invited';
 
 	let stage = $state<Stage>('signing-in');
+	/** What the user typed: a server name, or a homeserver's address. */
+	let typed = $state('');
+	/** The homeserver discovery resolved it to, or `''` before it has. */
 	let baseUrl = $state('');
+	/** Whether `.well-known` sent us somewhere other than what was typed. */
+	let delegated = $state(false);
+	let resolving = $state(false);
 	let flows = $state<LoginFlows | null>(null);
 	let username = $state('');
 	let password = $state('');
 	let busy = $state(false);
+	/** Signing in and listing: answered by the controls at the top. */
 	let problem = $state<string | null>(null);
+	/** The invitation: answered at the invite button, wherever that is (#139). */
+	let inviteProblem = $state<string | null>(null);
 	let session = $state<MatrixSession | null>(null);
 	let rooms = $state<RoomSummary[]>([]);
 	let selected = $state<Set<string>>(new Set());
@@ -86,36 +122,23 @@
 	const allShownChosen = $derived(shown.length > 0 && shown.every((room) => selected.has(room.roomId)));
 
 	onMount(async () => {
-		restoreDomain();
-		const remembered = restoreHomeserver();
-		baseUrl = remembered !== '' ? remembered : '';
-
 		// The account the user has just created in the bootstrap journey is
 		// already a Matrix account they own: offer it rather than asking them
-		// to type a password they set two screens ago.
+		// to type a password they set two screens ago. This is a session the
+		// user made minutes ago in this browser, not a guess about which
+		// homeserver they meant.
 		const live = $matrixSession;
 		if (live !== null) {
 			await useSession(live);
 			return;
 		}
 
-		if (baseUrl === '' && $domain !== '') {
-			const found = await discoverHomeserver($domain);
-			baseUrl = found.ok ? found.homeserver.baseUrl : `https://${$domain}`;
-		}
-
-		// Coming back from the homeserver's SSO page.
-		const token = loginTokenFrom(new URL(window.location.href));
+		// Coming back from the homeserver's SSO page. The token was taken out
+		// of the address bar by the root layout, before any screen decided
+		// what to render: stripping it here meant not stripping it at all on a
+		// load where this route never mounted (#135, and #125 before it).
+		const token = takeLoginToken();
 		if (token !== null) {
-			// Out of the address bar before anything else, and whatever
-			// happens next: a login token is a credential, and a copied URL
-			// must not carry one. Previously this ran only on the path that
-			// went on to use the token, so a round trip that could not be
-			// completed left the credential in the address bar (#125).
-			const clean = new URL(window.location.href);
-			clean.searchParams.delete('loginToken');
-			history.replaceState(null, '', clean.toString());
-
 			// The token is exchanged against the homeserver that issued it, or
 			// not at all. Falling back to whatever this screen happens to know
 			// is how a linagora.com token was presented to twalk.localhost.
@@ -142,10 +165,59 @@
 			}
 		}
 
-		if (baseUrl !== '') {
-			await readFlows();
+		// The one value this screen ever offers: the homeserver of an account
+		// it has already connected in this browser. Nothing is inferred from
+		// the Twalk deployment, whose homeserver is the one account this
+		// screen is not for (#124).
+		const known = knownHomeserver();
+		if (known !== null) {
+			typed = known;
+			await resolveHomeserver();
 		}
 	});
+
+	/** The last value discovery was run for, so a blur does not re-run it. */
+	let resolvedFrom = '';
+
+	/**
+	 * Turns what the user typed into a homeserver, then reads its login flows.
+	 *
+	 * Discovery rather than a base URL binding: `.well-known` delegation is
+	 * how a person gets to type `linagora.com` — their own server name —
+	 * instead of `https://matrix.linagora.com`, and it is also what tells us,
+	 * before any credential is asked for, that there is a homeserver there at
+	 * all. An address is still accepted, unchanged.
+	 */
+	async function resolveHomeserver() {
+		const value = typed.trim();
+		if (resolving || value === '') {
+			return;
+		}
+		if (value === resolvedFrom) {
+			// A blur that changed nothing asks the homeserver nothing.
+			return;
+		}
+		resolving = true;
+		problem = null;
+		flows = null;
+		baseUrl = '';
+		try {
+			const found = await discoverHomeserver(value);
+			if (!found.ok) {
+				// Which of the two failures it was is `found.kind`; both read
+				// the same to a user who mistyped their server name, and the
+				// message names the two spellings that work.
+				problem = $t('matrix.error.notFound', { domain: value });
+				return;
+			}
+			resolvedFrom = value;
+			baseUrl = found.homeserver.baseUrl;
+			delegated = found.homeserver.delegated;
+			await readFlows();
+		} finally {
+			resolving = false;
+		}
+	}
 
 	async function readFlows() {
 		problem = null;
@@ -161,6 +233,9 @@
 		session = next;
 		matrixSession.set(next);
 		baseUrl = next.baseUrl;
+		typed = next.baseUrl;
+		resolvedFrom = next.baseUrl;
+		rememberHomeserver(next.baseUrl);
 		stage = 'rooms';
 		busy = true;
 		try {
@@ -214,6 +289,40 @@
 	 */
 	const SSO_HOMESERVER_KEY = 'twalk:networks:sso-homeserver';
 
+	/**
+	 * The homeserver of the Matrix account this browser has already connected
+	 * here — the only value this screen ever offers in its field.
+	 *
+	 * Not onboarding's homeserver, which is the Twalk deployment's own and the
+	 * one account this screen is not for (#124). A public address and nothing
+	 * else: the session it belonged to is in memory and is lost on a reload,
+	 * by design (ADR 0011).
+	 */
+	const KNOWN_HOMESERVER_KEY = 'twalk:networks:matrix-account-homeserver';
+
+	function knownHomeserver(): string | null {
+		try {
+			const stored = window.localStorage.getItem(KNOWN_HOMESERVER_KEY);
+			return stored !== null && stored !== '' ? stored : null;
+		} catch {
+			return null;
+		}
+	}
+
+	function rememberHomeserver(value: string): void {
+		try {
+			window.localStorage.setItem(KNOWN_HOMESERVER_KEY, value);
+		} catch {
+			// Storage is off: the user types it again next time, which is the
+			// behaviour of a first visit and is never wrong.
+		}
+	}
+
+	/** Where the homeserver is asked to send the browser back. */
+	const returnUrl = $derived(
+		typeof window === 'undefined' ? '' : `${window.location.origin}/networks/matrix`
+	);
+
 	function startSso(idpId?: string) {
 		try {
 			window.localStorage.setItem(SSO_HOMESERVER_KEY, baseUrl);
@@ -223,11 +332,7 @@
 			problem = $t('matrix.error.ssoNeedsStorage');
 			return;
 		}
-		window.location.href = ssoRedirectUrl(
-			baseUrl,
-			`${window.location.origin}/networks/matrix`,
-			idpId
-		);
+		window.location.href = ssoRedirectUrl(baseUrl, returnUrl, idpId);
 	}
 
 	/** Chooses, or unchooses, every room the filter is currently showing. */
@@ -260,7 +365,7 @@
 			return;
 		}
 		stage = 'inviting';
-		problem = null;
+		inviteProblem = null;
 		const answer = await gateway.POST('/api/bootstrap/rooms', {
 			body: {
 				matrix_access_token: session.accessToken,
@@ -276,7 +381,7 @@
 			// (#138). Saying "the invitation failed" for either was true and
 			// useless.
 			const code = (answer.error as { error?: string } | undefined)?.error;
-			problem =
+			inviteProblem =
 				code === 'matrix_token_rejected'
 					? $t('matrix.error.tokenRejected')
 					: $t('matrix.error.invite');
@@ -316,12 +421,24 @@
 		<p class="subtitle">{$t('matrix.caption')}</p>
 	</header>
 
-	{#if problem !== null}
-		<p class="card card--warning" role="alert" data-testid="matrix-problem">{problem}</p>
-	{/if}
+	<!-- The sign-in surface. It sits at the top because the controls it answers
+	     do: the homeserver field, the identity providers and the password form
+	     are all within a screen of here. The invitation's refusal is not here —
+	     it is at the invite button, a hundred rooms down (#139). -->
+	<ActionProblem message={problem} testId="matrix-problem" />
 
 	{#if stage === 'signing-in'}
-		<div class="field">
+		<!-- One field, empty, with the two spellings it accepts in its own
+		     placeholder and hint. It asks the question instead of answering it
+		     wrongly (#124), and `.well-known` is what makes the answer a user
+		     can recite — their server name — sufficient. -->
+		<form
+			class="field"
+			onsubmit={(event) => {
+				event.preventDefault();
+				void resolveHomeserver();
+			}}
+		>
 			<label class="label" for="homeserver">{$t('matrix.homeserver')}</label>
 			<input
 				id="homeserver"
@@ -330,12 +447,36 @@
 				inputmode="url"
 				spellcheck="false"
 				autocapitalize="none"
-				bind:value={baseUrl}
-				onblur={readFlows}
-				disabled={busy}
+				placeholder={$t('matrix.homeserverPlaceholder')}
+				aria-describedby="homeserver-hint"
+				bind:value={typed}
+				onblur={resolveHomeserver}
+				disabled={busy || resolving}
 				data-testid="matrix-homeserver"
 			/>
-		</div>
+			<p class="small muted" id="homeserver-hint">{$t('matrix.homeserverHint')}</p>
+			<button
+				class="button button--secondary"
+				type="submit"
+				disabled={busy || resolving || typed.trim() === ''}
+				data-testid="matrix-homeserver-continue"
+			>
+				{#if resolving}
+					<span class="spinner" aria-hidden="true"></span>
+					{$t('matrix.resolving')}
+				{:else}
+					{$t('networks.continue')}
+				{/if}
+			</button>
+		</form>
+
+		{#if baseUrl !== '' && delegated}
+			<!-- Where the delegation led, because the user typed one thing and
+			     their credentials are about to go to another. -->
+			<p class="small muted" data-testid="matrix-resolved" data-homeserver={baseUrl}>
+				{$t('matrix.resolved', { url: baseUrl })}
+			</p>
+		{/if}
 
 		{#if flows !== null && flows.sso}
 			<!-- One button per advertised identity provider, labelled with the
@@ -361,6 +502,14 @@
 					</button>
 				{/if}
 			</div>
+			<!-- The constraint #124 asks to be named rather than hidden: the
+			     round trip comes back to whatever address this Companion is
+			     reached at, and a homeserver with an allow-list of return
+			     addresses will refuse one it has never been told about. A user
+			     meeting that deserves the sentence, not a generic failure. -->
+			<p class="small muted" data-testid="matrix-sso-return">
+				{$t('matrix.ssoReturn', { origin: returnUrl })}
+			</p>
 		{/if}
 
 		{#if flows !== null && flows.password}
@@ -501,6 +650,11 @@
 					</li>
 				{/each}
 			</ul>
+
+			<!-- The invitation's answer, immediately above the control that asks
+			     for it, so that a user who pressed the button at the bottom of a
+			     hundred rooms reads the refusal without hunting for it (#139). -->
+			<ActionProblem message={inviteProblem} testId="matrix-invite-problem" />
 
 			<button
 				class="button button--primary"

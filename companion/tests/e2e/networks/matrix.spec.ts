@@ -294,3 +294,158 @@ test('a refused sign-in says which of the homeserver’s refusals it was', async
 	const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }));
 	expect(stored).not.toContain('not-the-password');
 });
+
+test('a refused invitation is readable from where the button was pressed', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// A hundred rooms, which is what a work account looks like and what this
+	// screen was unusable with (#139). The list is stubbed at the homeserver's
+	// own `/sync` rather than created for real: what is under test is where the
+	// refusal renders, and a hundred `createRoom` calls would prove nothing
+	// about that while taking a minute.
+	// Matched by path rather than by a glob: the request carries a JSON filter
+	// in its query string, and a pattern that has to survive that is a pattern
+	// that silently stops matching.
+	await page.route(
+		(url) => url.pathname === '/_matrix/client/v3/sync',
+		async (route) => {
+			const join: Record<string, unknown> = {};
+			for (let index = 0; index < 100; index += 1) {
+				const number = String(index).padStart(3, '0');
+				join[`!room${number}:test.twalk`] = {
+					state: {
+						events: [{ type: 'm.room.name', content: { name: `Room ${number}` } }]
+					},
+					timeline: { events: [] },
+					summary: {}
+				};
+			}
+			await route.fulfill({ json: { rooms: { join } } });
+		}
+	);
+
+	// And a refusal to answer the click with. The Gateway's own 401 is what
+	// the owner met; stubbing it here keeps the assertion about the screen.
+	await page.route('**/api/bootstrap/rooms', async (route) => {
+		await route.fulfill({ status: 401, json: { error: 'matrix_token_rejected' } });
+	});
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill(stack!.synapseUrl);
+	await page.getByTestId('matrix-homeserver').blur();
+	await page.getByTestId('matrix-username').fill('bot_alpha');
+	await page.getByTestId('matrix-password').fill(PASSWORD);
+	await page.getByTestId('matrix-signin').click();
+
+	await expect(page.getByTestId('matrix-rooms')).toBeVisible();
+	await expect(page.getByTestId('matrix-rooms-count')).toContainText('100');
+
+	// Act at the bottom, as the owner did: tick a room and press the button,
+	// which Playwright scrolls to exactly as a finger would.
+	await page.getByTestId('room-!room000:test.twalk').check();
+	const button = page.getByTestId('invite-sensor');
+	await button.click();
+
+	// The answer is where the action was. `toBeInViewport` is the assertion
+	// that could have caught this: the old message was visible to a selector
+	// and three thousand pixels above the button to a person.
+	const answer = page.getByTestId('matrix-invite-problem');
+	await expect(answer).toBeVisible();
+	await expect(answer).toBeInViewport();
+	await expect(button).toBeInViewport();
+	await expect(answer).toHaveAttribute('role', 'alert');
+	await expect(answer).toContainText(/homeserver|serveur/i);
+
+	// And it did not also render at the top, where nobody was looking.
+	await expect(page.getByTestId('matrix-problem')).toHaveCount(0);
+});
+
+test('the homeserver field starts empty, whatever onboarding resolved', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// A browser that has walked the bootstrap journey: it knows the Twalk
+	// domain and the homeserver onboarding resolved. Both are the deployment's
+	// own server, which is the one account this screen is not for — and both
+	// are what used to arrive in the field (#124).
+	await page.addInitScript(() => {
+		window.localStorage.setItem('twalk:domain', 'twalk.localhost:8009');
+		window.localStorage.setItem('twalk:homeserver', 'http://twalk.localhost:8009');
+	});
+
+	await page.goto('/networks/matrix');
+	const field = page.getByTestId('matrix-homeserver');
+	await expect(field).toBeVisible();
+	await expect(field).toHaveValue('');
+
+	// Nothing arrives that could only have come from the deployment, and no
+	// login form is offered for a homeserver nobody named.
+	await expect(page.getByTestId('screen-matrix')).not.toContainText('twalk.localhost');
+	await expect(page.getByTestId('matrix-username')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-password')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-sso')).toHaveCount(0);
+
+	// The shape of what to type is on the screen rather than in the field.
+	await expect(field).toHaveAttribute('placeholder', /\./);
+});
+
+test('a server name is enough: the field follows .well-known delegation', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// `@mmaudet:linagora.com` is what a person can recite; `linagora.com`
+	// delegates to `matrix.linagora.com`, and the field used to fail on the
+	// first while working on the second (#124). The delegation is stubbed —
+	// the homeserver behind it is the real Synapse, and everything after this
+	// one document is the real journey.
+	await page.route('https://delegated.test/.well-known/matrix/client', async (route) => {
+		await route.fulfill({
+			status: 200,
+			headers: { 'access-control-allow-origin': '*', 'content-type': 'application/json' },
+			body: JSON.stringify({ 'm.homeserver': { base_url: stack!.synapseUrl } })
+		});
+	});
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill('delegated.test');
+	await page.getByTestId('matrix-homeserver-continue').click();
+
+	// It says where the delegation led, because the credentials are about to
+	// go somewhere the user did not type.
+	const resolved = page.getByTestId('matrix-resolved');
+	await expect(resolved).toBeVisible();
+	await expect(resolved).toHaveAttribute('data-homeserver', stack!.synapseUrl);
+
+	// And the flows are that server's: this is the real Synapse answering.
+	await page.getByTestId('matrix-username').fill('bot_alpha');
+	await page.getByTestId('matrix-password').fill(PASSWORD);
+	await page.getByTestId('matrix-signin').click();
+	await expect(page.getByTestId('screen-matrix')).toHaveAttribute('data-stage', 'rooms');
+});
+
+test('a homeserver that answers nothing is named as that, before any credential', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill('nothing-here.invalid');
+	await page.getByTestId('matrix-homeserver-continue').click();
+
+	const problem = page.getByTestId('matrix-problem');
+	await expect(problem).toBeVisible({ timeout: 20_000 });
+	await expect(problem).toContainText(/nothing-here.invalid/);
+	// No form for a server that is not there.
+	await expect(page.getByTestId('matrix-username')).toHaveCount(0);
+});
