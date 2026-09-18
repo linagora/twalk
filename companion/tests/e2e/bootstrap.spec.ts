@@ -197,6 +197,102 @@ test.describe.serial('the bootstrap journey', () => {
 		await assertKeyNeverLeft(recoveryKey);
 	});
 
+	/**
+	 * A room for the owner, created from the test process. Screen 3d lists the
+	 * user's rooms in the browser and invites the Sensor into the ones ticked,
+	 * so the journey needs at least one to tick.
+	 */
+	async function createOwnerRoom(name: string): Promise<string> {
+		const login = await fetch(`${stack!.synapseUrl}/_matrix/client/v3/login`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({
+				type: 'm.login.password',
+				identifier: { type: 'm.id.user', user: stack!.ownerId },
+				password
+			})
+		});
+		const session = (await login.json()) as { access_token: string };
+		const created = await fetch(`${stack!.synapseUrl}/_matrix/client/v3/createRoom`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Bearer ${session.access_token}`
+			},
+			body: JSON.stringify({ name, preset: 'private_chat' })
+		});
+		// One read of the body, whichever way it went: a `Response` cannot be
+		// read twice.
+		const body = await created.text();
+		expect(created.ok, body).toBe(true);
+		return (JSON.parse(body) as { room_id: string }).room_id;
+	}
+
+	test('the journey carries on: a network, the assistant, the dashboard', async () => {
+		if (stack === null) {
+			return;
+		}
+		// The account screen used to end here with "connecting a network is the
+		// next step, and it is not built yet" — true when it was written and
+		// false since the network screens merged, which left a user with a
+		// finished account and nowhere to go. This test is the path, walked.
+		await expect(page.getByTestId('onboarding-done')).toBeVisible();
+		await page.getByTestId('to-networks').click();
+		await expect(page.getByTestId('screen-networks')).toBeVisible();
+
+		// This deployment configures no bridge, and the picker says so on the
+		// three cards that need one while leaving Matrix available — so Matrix
+		// is the walkable path here, and the screen does not pretend otherwise.
+		for (const network of ['whatsapp', 'signal', 'sms']) {
+			await expect(page.getByTestId(`card-${network}`)).toHaveAttribute(
+				'data-blocked',
+				'no-bridge'
+			);
+		}
+		await expect(page.getByTestId('card-matrix')).toHaveAttribute('data-blocked', '');
+
+		// Screen 3d, for real: the room list is read in the browser and only the
+		// ids ticked reach the Gateway.
+		//
+		// No sign-in step here, and that is the journey rather than a shortcut:
+		// this tab created the account minutes ago and still holds the Matrix
+		// session in memory, so the screen opens on the rooms. A returning user
+		// — a reload, another day — gets the sign-in form, which
+		// `tests/e2e/networks/matrix.spec.ts` walks.
+		const room = await createOwnerRoom(`Twalk journey ${Date.now()}`);
+		await page.getByTestId('card-matrix').getByRole('link').click();
+		await expect(page.getByTestId('screen-matrix')).toHaveAttribute('data-stage', 'rooms');
+		await expect(page.getByTestId('matrix-rooms')).toBeVisible();
+		await page.getByTestId(`room-${room}`).check();
+		await page.getByTestId('invite-sensor').click();
+		await expect(page.getByTestId(`outcome-${room}`)).toHaveAttribute('data-status', 'invited');
+
+		// Back to the picker, and on to screen 4.
+		await page.getByRole('link', { name: /Continue|Continuer/ }).click();
+		await expect(page.getByTestId('screen-networks')).toBeVisible();
+		await page.getByTestId('to-personas').click();
+		await expect(page.getByTestId('screen-personas')).toBeVisible();
+
+		// Matrix is offered unticked even though the invitation just
+		// succeeded: the Gateway forgot the access token that sent it and
+		// records nothing about it, so the Companion asks rather than assumes.
+		const matrix = page.getByTestId('scope-matrix').getByRole('checkbox');
+		await expect(matrix).not.toBeChecked();
+		await expect(page.getByTestId('activate')).toBeDisabled();
+		await matrix.check();
+
+		await page.getByTestId('activate').click();
+		await expect(page.getByTestId('activated')).toBeVisible();
+		await expect(page.getByTestId('activated-networks')).toHaveAttribute('data-networks', 'matrix');
+
+		// And screen 5, which is where the user comes back to from now on.
+		await page.getByTestId('to-dashboard').click();
+		await expect(page.getByTestId('screen-dashboard')).toBeVisible();
+		await expect(page.getByTestId('persona-assistant')).toHaveAttribute('data-active', 'yes');
+		// Honest on arrival: the decision is recorded and nothing runs on it.
+		await expect(page.getByTestId('no-runtime')).toBeVisible();
+	});
+
 	test('a reload stays signed in', async () => {
 		if (stack === null) {
 			return;
