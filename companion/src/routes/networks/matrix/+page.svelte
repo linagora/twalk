@@ -79,7 +79,8 @@
 		roomLabel,
 		type RoomSummary
 	} from '$lib/matrix/rooms';
-	import { matrixSession } from '$lib/onboarding/progress';
+	import { get } from 'svelte/store';
+	import { homeserver, matrixSession, restoreHomeserver } from '$lib/onboarding/progress';
 
 	type Stage = 'signing-in' | 'rooms' | 'inviting' | 'invited';
 
@@ -122,6 +123,10 @@
 	const allShownChosen = $derived(shown.length > 0 && shown.every((room) => selected.has(room.roomId)));
 
 	onMount(async () => {
+		// Which homeserver this deployment drives, so the screen can refuse a
+		// foreign one before asking for a credential rather than after.
+		restoreHomeserver();
+
 		// The account the user has just created in the bootstrap journey is
 		// already a Matrix account they own: offer it rather than asking them
 		// to type a password they set two screens ago. This is a session the
@@ -188,6 +193,19 @@
 	 * before any credential is asked for, that there is a homeserver there at
 	 * all. An address is still accepted, unchanged.
 	 */
+	/**
+	 * The deployment's own homeserver, when this browser knows it.
+	 *
+	 * v0.1 observes only an account on it (ADR 0020). The screen asks the
+	 * deployment rather than assuming, and it asks **before** any credential:
+	 * the owner drove this whole journey against their corporate homeserver —
+	 * `.well-known` delegation, SSO through their identity provider, the room
+	 * listing — and it failed at the last step, after they had signed in and
+	 * chosen a room (#138). A screen that cannot do a thing must say so before
+	 * it takes something from you, not after.
+	 */
+	let foreignHomeserver = $state<string | null>(null);
+
 	async function resolveHomeserver() {
 		const value = typed.trim();
 		if (resolving || value === '') {
@@ -211,6 +229,38 @@
 				return;
 			}
 			resolvedFrom = value;
+
+			// Asked before anything is offered. A homeserver this deployment
+			// does not drive cannot be observed at all in this version: the
+			// Sensor would have to federate into rooms it does not host
+			// (ADR 0020), and no amount of signing in changes that.
+			//
+			// Compared as **base URLs**, and only where the delegation landed.
+			//
+			// Three things were tried here and two were wrong, so the reasoning
+			// is written down. Comparing the typed name against the
+			// deployment's server name refuses `delegated.test` even when it
+			// delegates to this very deployment — what matters is where the
+			// delegation *lands*, not what was typed. And comparing a typed
+			// address against a server name is the mistake #130 cost an
+			// evening: `127.0.0.1:8009` is where a homeserver answers,
+			// `test.twalk` is who it is.
+			//
+			// A client cannot learn a homeserver's server name before signing
+			// in — Matrix offers no such endpoint. So the comparison is
+			// between two browser-reachable base URLs, and when this browser
+			// does not know its own deployment's, there is no question to ask
+			// and nothing is refused: the failure then arrives at the
+			// invitation, as it did before.
+			const ours = get(homeserver);
+			if (ours !== '' && found.homeserver.baseUrl !== ours) {
+				foreignHomeserver = value;
+				flows = null;
+				baseUrl = '';
+				return;
+			}
+			foreignHomeserver = null;
+
 			baseUrl = found.homeserver.baseUrl;
 			delegated = found.homeserver.delegated;
 			await readFlows();
@@ -469,6 +519,28 @@
 				{/if}
 			</button>
 		</form>
+
+		{#if foreignHomeserver !== null}
+			<!--
+				Refused before a credential is asked for, which is the whole
+				point: the owner completed SSO against their corporate
+				homeserver and only then discovered the Sensor could not be
+				invited into its rooms (#138, ADR 0020).
+			-->
+			<div class="card card--warning" role="alert" data-testid="matrix-foreign-homeserver">
+				<p class="card__title">
+					<Icon name="warning" size="dense" />
+					{$t('matrix.foreign.title')}
+				</p>
+				<p>
+					{$t('matrix.foreign.body', {
+						wanted: foreignHomeserver,
+						deployment: get(homeserver)
+					})}
+				</p>
+				<p class="small muted">{$t('matrix.foreign.why')}</p>
+			</div>
+		{/if}
 
 		{#if baseUrl !== '' && delegated}
 			<!-- Where the delegation led, because the user typed one thing and

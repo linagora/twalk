@@ -236,6 +236,57 @@ test('an SSO-only homeserver gets its provider’s own button and no password fo
 	await expect(page.getByTestId('matrix-problem')).toHaveCount(0);
 });
 
+test('a homeserver this deployment does not drive is refused before any credential', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// The journey this pins is the owner's, and it cost them an evening: they
+	// completed SSO against their corporate homeserver, listed two hundred
+	// rooms, picked one, and only then learned the Sensor could not be invited
+	// into a room this deployment cannot federate to (#138, ADR 0020).
+	//
+	// `.well-known` is stubbed because the test stack has one homeserver and
+	// the point is a second one existing at all.
+	// Both halves of Matrix discovery: the delegation, and the
+	// `/_matrix/client/versions` that proves something is really there. Stubbing
+	// only the first leaves discovery failing, and the screen then refuses for
+	// the wrong reason — which is how this test first failed.
+	await page.route('https://elsewhere.example/.well-known/matrix/client', async (route) => {
+		await route.fulfill({ json: { 'm.homeserver': { base_url: 'https://matrix.elsewhere.example' } } });
+	});
+	await page.route('https://matrix.elsewhere.example/_matrix/client/versions', async (route) => {
+		await route.fulfill({ json: { versions: ['v1.11'] } });
+	});
+
+	// The guard compares base URLs, so the browser has to know its own
+	// deployment's — which onboarding remembers and this test context never
+	// ran. Seeded here rather than mocked: it is the same key onboarding
+	// writes, and a browser that does not know it is the case the guard stays
+	// silent for, deliberately.
+	await page.addInitScript((url) => {
+		window.localStorage.setItem('twalk:homeserver', url);
+	}, stack!.synapseUrl);
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill('elsewhere.example');
+	await page.getByTestId('matrix-homeserver').blur();
+
+	// It says so, naming both servers.
+	const refusal = page.getByTestId('matrix-foreign-homeserver');
+	await expect(refusal).toBeVisible();
+	await expect(refusal).toContainText('elsewhere.example');
+
+	// And nothing is asked for: no password form, no identity provider, no
+	// button that would take a credential. That absence is the ticket.
+	await expect(page.getByTestId('matrix-username')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-password')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-sso')).toHaveCount(0);
+	await expect(page.locator('[data-testid^="matrix-sso-"]')).toHaveCount(0);
+});
+
 test('an SSO round trip keeps its homeserver, and refuses the token anywhere else', async ({
 	context,
 	page,
