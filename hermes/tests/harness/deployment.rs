@@ -1,5 +1,4 @@
-//! The reference deployment, with Hermes joining it from the host
-//! (ticket #25).
+//! The reference deployment, Hermes included (tickets #25 and #158).
 //!
 //! [`PersonaRun`](super::PersonaRun) drives a persona alone and
 //! [`RuntimeRun`](super::RuntimeRun) drives the runtime that starts one;
@@ -11,28 +10,39 @@
 //!
 //! So this harness brings up the reference deployment itself —
 //! `deploy/docker-compose/compose.yaml`, the same file an operator runs,
-//! configured only through an environment file — and starts the real
-//! `twalk-hermes` binary on the host beside it, because that compose file
-//! has no Hermes service yet (#158 — the gap this suite makes visible: the
-//! loop is proven and an operator following `deploy/README.md` still cannot
-//! run it). Everything else is the deployment's own: the
-//! Sensor that observes the room and posts the approved reply, the Gateway
-//! that serves the approval, the bus between them, and Synapse underneath.
+//! configured only through an environment file. Every process in the loop is
+//! the deployment's own, including the runtime: #158 gave that compose file a
+//! `hermes` service, which starts the persona's container through the host's
+//! Docker socket (ADR 0023), so this harness starts **no process on the
+//! host** at all. It sets the same variables `.env.example` documents and
+//! runs `docker compose up -d --wait hermes`, which is what an operator runs.
+//!
+//! Two things are still the test's own rather than an operator's, and both
+//! are named so that a reader does not mistake them for the deployment: the
+//! model is [`StubLlm`], because a real one answers differently every run
+//! (and it is on this host's loopback, which is the reference deployment's
+//! own shape — see ADR 0023's network section); and the persona's container
+//! name and image tag carry this run's stack, so that two stacks on one
+//! daemon never fight over a container or an image.
 //!
 //! Nothing here reaches inside any of those processes. A test asks the
 //! homeserver what is in the room, asks the bus what was published, asks the
-//! Gateway over HTTP, and asks the stub LLM what it was sent.
+//! Gateway over HTTP, reads the runtime's logs the way an operator does
+//! (`docker compose logs hermes`), and asks the stub LLM what it was sent.
 //!
 //! # What this stack costs, and what it gives back
 //!
-//! One compose project, four containers, one Docker network and four
-//! volumes. The host this suite runs on has filled its disk and exhausted
-//! its address pools doing less (#128), so the stack is **torn down at the
-//! end of every run, passing or failing**, along with the two images this
-//! project tags for itself. What a failure needs in order to be diagnosed —
-//! the runtime's logs, the deployment's logs — is attached to the failure
-//! itself rather than left behind on the host. `TWALK_LOOP_TEST_KEEP=1`
-//! keeps the stack up for an operator who would rather poke at it by hand.
+//! One compose project, six containers, one Docker network and four
+//! volumes — plus the persona container the runtime starts beside them, which
+//! belongs to no compose project because nothing in compose started it. The
+//! host this suite runs on has filled its disk and exhausted its address
+//! pools doing less (#128), so the stack is **torn down at the end of every
+//! run, passing or failing**, along with the persona's container and the four
+//! images this project tags for itself. What a failure needs in order to be
+//! diagnosed — the runtime's logs, the deployment's logs — is attached to the
+//! failure itself rather than left behind on the host.
+//! `TWALK_LOOP_TEST_KEEP=1` keeps the stack up for an operator who would
+//! rather poke at it by hand.
 //!
 //! # Isolation
 //!
@@ -41,10 +51,11 @@
 //! test and the Gateway's never collide with it:
 //! `TWALK_LOOP_TEST_STACK` (default `twalk-h25-loop`),
 //! `TWALK_LOOP_TEST_SYNAPSE_PORT` (19508), `TWALK_LOOP_TEST_GATEWAY_PORT`
-//! (19518), `TWALK_LOOP_TEST_NATS_PORT` (19522). Both local images are
+//! (19518), `TWALK_LOOP_TEST_NATS_PORT` (19522). All four local images are
 //! tagged per compose project (`twalk/companion-gateway:<stack>`,
-//! `twalk/sensor:<stack>`, issue #38), so a build here never overwrites
-//! another stack's image or an operator's `:local`.
+//! `twalk/sensor:<stack>`, `twalk/hermes:<stack>`,
+//! `twalk/persona-assistant:<stack>`, issue #38), so a build here never
+//! overwrites another stack's image or an operator's `:local`.
 //!
 //! The credentials below are throwaway constants for this ephemeral stack,
 //! in the same category as the test bots' passwords; the environment file
@@ -52,16 +63,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::process::Command;
-use tokio::sync::Mutex;
 use twalk_test_harness::{Bus, StoredMessage, StubLlm};
 
-use super::runtime::{ensure_persona_image, forward, persona_wrapper, PERSONA_IMAGE};
 use super::{CONSENT_CHANGED_TYPE, INBOUND_TYPE, LLM_API_KEY, MODEL, PERSONA_ID};
 
 /// The Matrix server name this deployment answers for. Deliberately not the
@@ -127,6 +135,28 @@ fn sensor_image() -> String {
     format!("twalk/sensor:{}", stack())
 }
 
+fn hermes_image() -> String {
+    format!("twalk/hermes:{}", stack())
+}
+
+/// The tag this stack's persona image is built under, and the image the
+/// runtime is configured to start. Per stack like the other three: the
+/// runtime starts this container on the host's daemon (ADR 0023), where an
+/// operator's own `:local` image may be sitting beside it.
+fn persona_image() -> String {
+    format!("twalk/persona-assistant:{}", stack())
+}
+
+/// Every image this stack builds and therefore owns the removal of.
+fn stack_images() -> [String; 4] {
+    [
+        gateway_image(),
+        sensor_image(),
+        hermes_image(),
+        persona_image(),
+    ]
+}
+
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -180,7 +210,7 @@ pub struct Contact {
     pub token: String,
 }
 
-/// The reference deployment, plus the Hermes runtime on the host.
+/// The reference deployment, Hermes included.
 pub struct Deployment {
     /// The deployment's bus, connected from the test side.
     pub bus: Bus,
@@ -198,9 +228,11 @@ pub struct Deployment {
     pub device_token: String,
     client: reqwest::Client,
     env_file: PathBuf,
+    /// The container the runtime starts for the persona. It is a sibling of
+    /// the stack's containers rather than one of them — nothing in compose
+    /// started it — so `compose down` does not remove it and the teardown
+    /// below does.
     persona_container: String,
-    hermes: Option<tokio::process::Child>,
-    hermes_log_lines: Arc<Mutex<Vec<String>>>,
     stopped: bool,
 }
 
@@ -213,13 +245,24 @@ impl Deployment {
     /// user activated before the runtime reads that decision, which is the
     /// order a deployment is really in (ADR 0013).
     pub async fn start(canned_reply: &str) -> Result<Self> {
-        let env_file = write_env_file()?;
+        let llm = StubLlm::start_with_reply(canned_reply).await?;
+        let persona_container = format!("h25-{}-{PERSONA_ID}", std::process::id());
+        let env_file = write_env_file(&llm.base_url(), &persona_container)?;
         // Build first, so a build failure is attributed to the build. The
         // image tags are this stack's own; their layers are the daemon's
-        // shared cache, so a warm host rebuilds nothing.
+        // shared cache, so a warm host rebuilds nothing. Hermes and the
+        // persona are built here too, although neither starts until
+        // `start_hermes`: a build is minutes and belongs before the
+        // deployment is walked, not in the middle of it.
         compose_with(
             &env_file,
-            &["build", "companion-gateway", "sensor"],
+            &[
+                "build",
+                "companion-gateway",
+                "sensor",
+                "hermes",
+                "persona-assistant-image",
+            ],
             "build",
         )
         .await?;
@@ -232,15 +275,13 @@ impl Deployment {
 
         let mut run = Self {
             bus: Bus::connect_to(&format!("nats://localhost:{}", nats_port())).await?,
-            llm: StubLlm::start_with_reply(canned_reply).await?,
+            llm,
             room_id: String::new(),
             owner_token: String::new(),
             device_token: String::new(),
             client: reqwest::Client::new(),
             env_file,
-            persona_container: format!("h25-{}-{PERSONA_ID}", std::process::id()),
-            hermes: None,
-            hermes_log_lines: Arc::new(Mutex::new(Vec::new())),
+            persona_container,
             stopped: false,
         };
         run.owner_token = run.register_owner().await?;
@@ -827,94 +868,53 @@ impl Deployment {
             .collect()
     }
 
-    // -- Hermes, on the host ----------------------------------------------
+    // -- Hermes, in the deployment ----------------------------------------
 
-    /// Starts the real `twalk-hermes` binary against this deployment: the
-    /// bus it publishes on, the stream it publishes to, and the persona
-    /// image the deployment would run as a service if the compose file had
-    /// one yet.
+    /// Starts the deployment's own `hermes` service, exactly as an operator
+    /// does: `docker compose up -d --wait hermes`, against the environment
+    /// file this run was configured through. The runtime then starts the
+    /// persona's container itself, through the host's Docker socket
+    /// (ADR 0023).
     ///
     /// Called by a test *after* the user's activation decision has reached
     /// the bus: a persona nobody decided about is paused, and a paused
     /// persona's messages are not replayed to it when it is activated
     /// (`hermes/README.md`), so the order is the deployment's own and not a
-    /// convenience.
+    /// convenience. It is also why this is a separate step rather than part
+    /// of the `up` above — the deployment's own order is the same one, since
+    /// the user activates a persona from the Companion before the runtime
+    /// ever sees the decision.
     pub async fn start_hermes(&mut self) -> Result<()> {
-        ensure_persona_image().await?;
-        let personas = json!([{
-            "id": PERSONA_ID,
-            "command": [
-                persona_wrapper(),
-                self.persona_container.clone(),
-                PERSONA_IMAGE.to_owned(),
-            ],
-        }]);
-        let environment: Vec<(String, String)> = vec![
-            ("HERMES_PERSONAS".to_owned(), personas.to_string()),
-            ("HERMES_DOMAIN".to_owned(), DEPLOY_SERVER_NAME.to_owned()),
-            (
-                "HERMES_NATS_URL".to_owned(),
-                format!("nats://localhost:{}", nats_port()),
-            ),
-            ("HERMES_BUS_STREAM".to_owned(), DEPLOY_STREAM.to_owned()),
-            (
-                "HERMES_BUS_SUBJECT_PREFIX".to_owned(),
-                DEPLOY_STREAM.to_owned(),
-            ),
-            ("HERMES_LLM_BASE_URL".to_owned(), self.llm.base_url()),
-            ("HERMES_LLM_MODEL".to_owned(), MODEL.to_owned()),
-            ("HERMES_LLM_API_KEY".to_owned(), LLM_API_KEY.to_owned()),
-            ("HERMES_LOG_LEVEL".to_owned(), "info".to_owned()),
-            ("HERMES_PERSONA_LOG_LEVEL".to_owned(), "debug".to_owned()),
-            // A test must not sit through a production backoff.
-            (
-                "HERMES_RESTART_BACKOFF_BASE_MS".to_owned(),
-                "200".to_owned(),
-            ),
-            (
-                "HERMES_RESTART_BACKOFF_MAX_MS".to_owned(),
-                "1000".to_owned(),
-            ),
-            (
-                "HERMES_PERSONA_HEALTHY_AFTER_MS".to_owned(),
-                "5000".to_owned(),
-            ),
-            ("HERMES_SHUTDOWN_GRACE_MS".to_owned(), "8000".to_owned()),
-            // `docker` is what the persona's argv runs; it needs the host's
-            // PATH and its own client configuration, and nothing else.
-            (
-                "HERMES_PERSONA_ENV_PASSTHROUGH".to_owned(),
-                "PATH,HOME,DOCKER_HOST,XDG_RUNTIME_DIR".to_owned(),
-            ),
-        ];
-        let mut child = Command::new(env!("CARGO_BIN_EXE_twalk-hermes"))
-            .envs(environment)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .context("failed to start the hermes binary")?;
-        forward(
-            child.stdout.take().expect("stdout is piped"),
-            false,
-            self.hermes_log_lines.clone(),
-        );
-        forward(
-            child.stderr.take().expect("stderr is piped"),
-            true,
-            self.hermes_log_lines.clone(),
-        );
-        self.hermes = Some(child);
+        self.compose(&["up", "-d", "--wait", "hermes"], "up hermes")
+            .await?;
         self.wait_for_hermes_log("hermes running").await?;
         // The persona's own line, forwarded through the runtime's stdio: it
         // has its durable consumer and is pulling.
         self.wait_for_hermes_log("persona ready").await
     }
 
-    /// The runtime's captured output so far — the persona's forwarded lines
-    /// included, exactly as an operator sees them.
+    /// Whether the runtime is running as a container of this deployment —
+    /// asked of Docker, not of the harness.
+    ///
+    /// The whole point of #158 is that nothing in the loop is a process
+    /// somebody started on the host beside the stack, and the only way to
+    /// say that as an assertion is to ask the deployment what it is running.
+    pub async fn hermes_container_state(&self) -> Result<String> {
+        Ok(self
+            .compose(&["ps", "--format", "{{.Service}} {{.State}}"], "ps")
+            .await?
+            .lines()
+            .find(|line| line.starts_with("hermes "))
+            .map(|line| line["hermes ".len()..].trim().to_owned())
+            .unwrap_or_default())
+    }
+
+    /// The runtime's log so far — the persona's forwarded lines included,
+    /// exactly as an operator reads them.
     pub async fn hermes_logs(&self) -> String {
-        self.hermes_log_lines.lock().await.join("\n")
+        self.compose(&["logs", "--no-color", "hermes"], "logs hermes")
+            .await
+            .unwrap_or_else(|error| format!("(the runtime's logs could not be read: {error})"))
     }
 
     async fn wait_for_hermes_log(&self, needle: &str) -> Result<()> {
@@ -934,18 +934,19 @@ impl Deployment {
 
     // -- teardown ----------------------------------------------------------
 
-    /// Stops Hermes, removes the persona's container, and takes the whole
-    /// deployment down — containers, volumes, network and this stack's two
-    /// images — unless the operator asked to keep it.
+    /// Takes the whole deployment down — containers, volumes, network, this
+    /// stack's four images — and with it the persona container the runtime
+    /// started outside compose's knowledge, unless the operator asked to keep
+    /// it all.
     pub async fn shutdown(mut self) -> Result<()> {
         self.stopped = true;
-        self.stop_hermes().await;
         if keep_requested() {
             return Ok(());
         }
         self.compose(&["down", "-v", "--remove-orphans"], "down")
             .await?;
-        for image in [gateway_image(), sensor_image()] {
+        self.remove_persona_container().await;
+        for image in stack_images() {
             let output = Command::new("docker")
                 .args(["image", "rm", &image])
                 .output()
@@ -964,14 +965,11 @@ impl Deployment {
         Ok(())
     }
 
-    async fn stop_hermes(&mut self) {
-        if let Some(child) = &mut self.hermes {
-            if let Some(pid) = child.id() {
-                let _ = Command::new("kill").arg(pid.to_string()).status().await;
-                let _ = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
-            }
-        }
-        self.hermes = None;
+    /// `compose down` stops the runtime, and the runtime stops its persona —
+    /// but a runtime killed rather than asked has no chance to, and the
+    /// container is nothing compose knows about. So it is removed by name,
+    /// always, and tolerating its absence.
+    async fn remove_persona_container(&self) {
         let _ = Command::new("docker")
             .args(["rm", "-f", &self.persona_container])
             .stdout(Stdio::null())
@@ -987,22 +985,7 @@ impl Drop for Deployment {
     /// teardown happens here too. Blocking, deliberately — a teardown that
     /// runs is worth the seconds it takes on a test thread.
     fn drop(&mut self) {
-        if self.stopped {
-            return;
-        }
-        if let Some(child) = &mut self.hermes {
-            if let Some(pid) = child.id() {
-                let _ = std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .status();
-            }
-        }
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", &self.persona_container])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if keep_requested() {
+        if self.stopped || keep_requested() {
             return;
         }
         let _ = std::process::Command::new("docker")
@@ -1010,7 +993,12 @@ impl Drop for Deployment {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        for image in [gateway_image(), sensor_image()] {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.persona_container])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        for image in stack_images() {
             let _ = std::process::Command::new("docker")
                 .args(["image", "rm", &image])
                 .stdout(Stdio::null())
@@ -1079,8 +1067,13 @@ fn teardown_argv(env_file: &Path) -> Vec<String> {
 
 /// Writes the environment file this deployment is configured through:
 /// exactly what `.env.example` documents, with throwaway test values and
-/// this run's own host ports.
-fn write_env_file() -> Result<PathBuf> {
+/// this run's own host ports, images and persona container.
+///
+/// The Hermes half is written here rather than added when the runtime starts,
+/// so that this file is the whole configuration of the whole deployment —
+/// one file, readable beside `.env.example`, and no variable that only
+/// exists halfway through a run.
+fn write_env_file(llm_base_url: &str, persona_container: &str) -> Result<PathBuf> {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -1090,7 +1083,16 @@ fn write_env_file() -> Result<PathBuf> {
     ));
     let owner = owner_user_id();
     let (gateway_image, sensor_image) = (gateway_image(), sensor_image());
+    let (hermes_image, persona_image) = (hermes_image(), persona_image());
     let (synapse_port, gateway_port, nats_port) = (synapse_port(), gateway_port(), nats_port());
+    // The argv the runtime is configured with, as `.env.example` shows it:
+    // the wrapper the Hermes image ships, this run's container name, and
+    // this run's image tag.
+    let personas = json!([{
+        "id": PERSONA_ID,
+        "command": ["run-persona", persona_container, persona_image],
+    }])
+    .to_string();
     let contents = format!(
         "MATRIX_DOMAIN={DEPLOY_SERVER_NAME}\n\
          MATRIX_HTTP_PORT={synapse_port}\n\
@@ -1112,8 +1114,19 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_SENSOR_USER_ID=@sensor:{DEPLOY_SERVER_NAME}\n\
          GATEWAY_NATS_URL=nats://nats:4222\n\
          GATEWAY_SERVICE_TOKEN={SERVICE_TOKEN}\n\
+         HERMES_PERSONAS={personas}\n\
+         HERMES_LLM_BASE_URL={llm_base_url}\n\
+         HERMES_LLM_MODEL={MODEL}\n\
+         HERMES_LLM_API_KEY={LLM_API_KEY}\n\
+         HERMES_PERSONA_LOG_LEVEL=debug\n\
+         HERMES_RESTART_BACKOFF_BASE_MS=200\n\
+         HERMES_RESTART_BACKOFF_MAX_MS=1000\n\
+         HERMES_PERSONA_HEALTHY_AFTER_MS=5000\n\
+         HERMES_SHUTDOWN_GRACE_MS=8000\n\
          TWALK_GATEWAY_IMAGE={gateway_image}\n\
-         TWALK_SENSOR_IMAGE={sensor_image}\n"
+         TWALK_SENSOR_IMAGE={sensor_image}\n\
+         TWALK_HERMES_IMAGE={hermes_image}\n\
+         TWALK_PERSONA_IMAGE={persona_image}\n"
     );
     std::fs::write(&path, contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
