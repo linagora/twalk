@@ -77,6 +77,10 @@ describe('the catalogues', () => {
 			// The deployment's own address, as /recover reports it when nothing
 			// answered there (ticket #115).
 			url: 'http://twalk.example:8009',
+			// The two homeservers a refused Matrix connection names (#138):
+			// the one the user asked for, and the one this deployment drives.
+			wanted: 'linagora.com',
+			deployment: 'twalk.example',
 			// An identity provider as a homeserver advertises it: the sign-in
 			// screen labels its button with the provider's own name, because
 			// that is what a user recognises (ticket #112).
