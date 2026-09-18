@@ -23,6 +23,7 @@ mod harness;
 
 use anyhow::Result;
 use harness::crypto::{make_encrypted_whatsapp_portal, wait_for_user_devices, CryptoBot};
+use harness::gateway::{contact_entry, sensor_env_granting};
 use harness::{
     ensure_stack, fresh_state_dir, poll_until, sensor_env_with, sha256_hex,
     validate_against_contract, Bot, Bus, SensorProc, StoredMessage, SENSOR_USER_ID,
@@ -448,9 +449,18 @@ async fn a_reaction_in_an_encrypted_room_carries_the_decrypted_excerpt() -> Resu
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
     let state_dir = fresh_state_dir("encryption-reaction");
-    let env = sensor_env_with(&[("SENSOR_STATE_DIR", &state_dir.to_string_lossy())]);
-    let mut sensor = SensorProc::start(&env)?;
+    // The excerpt is alpha's message, quoted inside beta's reaction event, so
+    // it is published only once *alpha* has granted (issue #110) — which is
+    // what this test is about proving is the decrypted body and not the
+    // ciphertext.
     let alpha = CryptoBot::login("bot_alpha").await?;
+    let (_gateway, env) = sensor_env_granting(
+        &bus,
+        vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
+        &[("SENSOR_STATE_DIR", &state_dir.to_string_lossy())],
+    )
+    .await?;
+    let mut sensor = SensorProc::start(&env)?;
     let alpha_http = Bot::login("bot_alpha").await?;
     let beta = Bot::login("bot_beta").await?;
 

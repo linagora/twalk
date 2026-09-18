@@ -359,13 +359,16 @@ async fn main() -> Result<()> {
                         // A revoked sender's event keeps the relation and
                         // publishes no excerpt (ADR 0012), so the quoted
                         // message is not even fetched: the Sensor collects
-                        // nothing it would not publish. Otherwise an
-                        // unreachable parent is not an error either: the
-                        // reply still publishes, with an empty excerpt.
-                        excerpt: if consent.reduces_publication() {
-                            String::new()
+                        // nothing it would not publish. Otherwise it is
+                        // fetched with the author it belongs to, and the
+                        // builder publishes it only if that author is
+                        // granted (issue #110). An unreachable parent is not an error
+                        // either: the reply still publishes, with an empty
+                        // excerpt.
+                        quoted: if consent.reduces_publication() {
+                            None
                         } else {
-                            target_excerpt(&room, &parent_id).await.unwrap_or_default()
+                            quoted_message(&room, &parent_id, &own_user, &consent_cache).await
                         },
                     }),
                     None => None,
@@ -470,11 +473,14 @@ async fn main() -> Result<()> {
                     network::ghost_network_identifier(network, reactor.localpart());
                 let target_event_id = event.content.relates_to.event_id.clone();
                 // An excerpt quotes a message: for a revoked reactor it is
-                // neither published nor fetched (ADR 0012).
+                // neither published nor fetched (ADR 0012). For every other
+                // reactor it is fetched with the author it belongs to, and
+                // the builder publishes it only if that author is granted
+                // (issue #110).
                 let excerpt = if consent.reduces_publication() {
                     None
                 } else {
-                    target_excerpt(&room, &target_event_id).await
+                    quoted_message(&room, &target_event_id, &own_user, &consent_cache).await
                 };
                 let input = normalize::InboundReaction {
                     matrix_event_id: event.event_id.to_string(),
@@ -1124,9 +1130,24 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
 }
 
 /// Fetches the target of a relation from the homeserver (via the SDK's
-/// `Room::event`) and extracts a contract-capped excerpt of its body: the
-/// plain text for a text message, the caption or filename for media, the
-/// geo description for a location.
+/// `Room::event`) and extracts a contract-capped excerpt of its body — the
+/// plain text for a text message, the caption or filename for media, the geo
+/// description for a location — **together with the author it belongs to**.
+///
+/// The author is the point (issue #110). An excerpt is the quoted person's
+/// content, and the event that will carry it is labelled by whoever quoted
+/// them: in a group those are two different contacts, so the excerpt has to
+/// travel with its own author's consent state for the builder to decide. The
+/// author is resolved on the network the *quoted* message is attributable to,
+/// which is the key consent state is held under — a room's own network in
+/// practice, but derived per author rather than assumed.
+///
+/// Three answers, and two of them withhold: the deployment's own account
+/// (`QuotedAuthor::Owner`, the user's own words, about whom there is no
+/// decision to consult), a contact with the state of the user's decision
+/// about them, or `Unknown` for an author no network can be attributed to. A
+/// target that cannot be fetched or read at all yields `None` — one more way
+/// an excerpt simply does not exist.
 ///
 /// In an encrypted room — every portal room — the fetched event is
 /// `m.room.encrypted`, and `Room::event` decrypts it with the Megolm session
@@ -1136,7 +1157,12 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
 /// excerpt is omitted: an unreachable or unreadable target is not an error,
 /// the event still publishes, and ciphertext is never published as an
 /// excerpt.
-async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
+async fn quoted_message(
+    room: &Room,
+    event_id: &EventId,
+    own_user: &OwnedUserId,
+    consent_cache: &ConsentCache,
+) -> Option<normalize::QuotedExcerpt> {
     let timeline_event = room.event(event_id, None).await.ok()?;
     let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
         SyncMessageLikeEvent::Original(message),
@@ -1144,7 +1170,41 @@ async fn target_excerpt(room: &Room, event_id: &EventId) -> Option<String> {
     else {
         return None;
     };
-    Some(normalize::excerpt(message.content.body()))
+    let author = if &message.sender == own_user {
+        normalize::QuotedAuthor::Owner
+    } else {
+        match resolve_network(room, &message.sender).await {
+            Some(network) => normalize::QuotedAuthor::Contact(
+                consent_cache.state(message.sender.as_str(), network),
+            ),
+            None => normalize::QuotedAuthor::Unknown,
+        }
+    };
+    if !author.is_granted() {
+        // The builder is what decides, and it decides the same way for every
+        // call site — but the text is dropped here all the same, so the
+        // Sensor keeps holding nothing it would not publish, as it already
+        // does by not fetching a revoked sender's quotation at all.
+        //
+        // Logged because the withholding is invisible in the published event
+        // by construction: an operator seeing an excerpt go missing should be
+        // able to tell "the person quoted is not granted" from "the Sensor
+        // could not read the message".
+        tracing::debug!(
+            room = %room.room_id(),
+            quoted_event = %event_id,
+            quoted_author = %message.sender,
+            "withholding the excerpt: the quoted author is not granted"
+        );
+        return Some(normalize::QuotedExcerpt {
+            text: String::new(),
+            author,
+        });
+    }
+    Some(normalize::QuotedExcerpt {
+        text: normalize::excerpt(message.content.body()),
+        author,
+    })
 }
 
 /// Publishes a CloudEvents envelope on the bus with the contract's headers:

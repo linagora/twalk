@@ -107,13 +107,81 @@ fn contact_entry(display_name: &str, consent: Consent, network_identifier: Optio
     contact
 }
 
+/// Who wrote the message an excerpt quotes, as far as the Sensor could tell.
+///
+/// An excerpt is the *quoted* author's content, while the event carrying it
+/// is labelled by the contact who quoted them — two different people in any
+/// group conversation. So whether it may be published turns on the user's
+/// decision about the **quoted** author, and not on the one about the contact
+/// quoting them (issue #110). Consent here is the user's decision about a
+/// contact and never the contact's own agreement (CONTEXT.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotedAuthor {
+    /// The deployment's own account: the user's own message, or a reply the
+    /// Sensor sent on their behalf. Their own words are not a third party's,
+    /// and there is no decision about the user to consult. Today this is the
+    /// Sensor's Matrix ID alone; the user's own network ghosts still resolve
+    /// as contacts, so a message they sent from their phone is quoted like
+    /// anybody else's until ADR 0018 lands ([#109]).
+    ///
+    /// [#109]: https://github.com/linagora/twalk/issues/109
+    Owner,
+    /// A contact the Sensor resolved, with the consent state that applies to
+    /// them on the network the quoted message arrived on — the state of the
+    /// user's decision about that contact.
+    Contact(Consent),
+    /// Nobody the Sensor can name: a message older than what it can fetch or
+    /// decrypt, an author it cannot attribute to a network. Unknown is not
+    /// consent.
+    Unknown,
+}
+
+impl QuotedAuthor {
+    /// Whether this author's words may travel inside an event that somebody
+    /// else's consent label describes. Only a decision the user actually
+    /// took, and took as `granted`, says yes.
+    ///
+    /// `pending` does not: in the Sensor's cache it is exactly the absence of
+    /// a decision (CONTEXT.md — an absent subject means "never decided"), so
+    /// it is the "unknown" of the paragraph above under another name. And a
+    /// consumer gates on the envelope's one `consent` extension (ADR 0012,
+    /// `sdk/python/twalk_sdk/consent.py`): a `granted` label on somebody
+    /// else's event would carry this author's content straight past a gate
+    /// that would have refused their own.
+    pub fn is_granted(self) -> bool {
+        matches!(self, Self::Owner | Self::Contact(Consent::Granted))
+    }
+}
+
+/// An excerpt of a quoted message: the text, and the author whose consent
+/// state — the user's decision about *them* — governs whether it may be
+/// published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotedExcerpt {
+    /// The quoted message's body, capped at 512 chars by the builder.
+    pub text: String,
+    pub author: QuotedAuthor,
+}
+
+impl QuotedExcerpt {
+    /// The text to publish inside an event the `carrier` contact's consent
+    /// labels — or `None` when it must not be published at all: the carrier's
+    /// own state reduces publication (ADR 0012), or the author being quoted
+    /// is not granted (issue #110). Two decisions, both of which have to be
+    /// in the right state, and this is the one place that consults them.
+    fn publishable(&self, carrier: Consent) -> Option<String> {
+        (!carrier.reduces_publication() && self.author.is_granted()).then(|| excerpt(&self.text))
+    }
+}
+
 /// A structured reply reference: the parent event id plus an excerpt of its
 /// body, so consumers never need a bus lookup to reason about a reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyTo {
     pub matrix_event_id: String,
-    /// The parent's body, capped at 512 chars by the builder.
-    pub excerpt: String,
+    /// The quoted parent, when the Sensor could read it. `None` for a parent
+    /// it could not fetch or decrypt.
+    pub quoted: Option<QuotedExcerpt>,
 }
 
 /// The contract's `data.attachments[].kind` values the Sensor produces.
@@ -387,15 +455,30 @@ pub struct InboundMessage {
 /// no excerpt of the quoted message, nothing that resolves to media. The
 /// reduction lives here, at the single point every published message goes
 /// through, so no call site can forget it; `pending` is unchanged.
+///
+/// The excerpt answers to a second person as well — the author of the message
+/// it quotes, who is not the sender in a group (issue #110) — which is why it
+/// arrives as a [`QuotedExcerpt`] carrying that author's consent rather than
+/// as a bare string.
 pub fn build_message_received(input: &InboundMessage) -> Value {
     let reduced = input.consent.reduces_publication();
     let reply_to = match &input.reply_to {
         // The relation is what the reduced event keeps: an excerpt quotes a
         // message, and a quote of a revoked contact's message is content too.
         Some(reply) if reduced => json!({ "matrix_event_id": reply.matrix_event_id }),
+        // For every other sender the contract *requires* the field on a
+        // reply (`inbound.message.received.schema.json`, the `else` branch of
+        // the reduction rule), so what is withheld is the quoted text and not
+        // the key: a parent the Sensor could not read and an author who has
+        // not granted both publish the empty excerpt the Sensor has always
+        // published for an unreachable parent (issue #110).
         Some(reply) => json!({
             "matrix_event_id": reply.matrix_event_id,
-            "excerpt": excerpt(&reply.excerpt),
+            "excerpt": reply
+                .quoted
+                .as_ref()
+                .and_then(|quoted| quoted.publishable(input.consent))
+                .unwrap_or_default(),
         }),
         None => Value::Null,
     };
@@ -450,8 +533,9 @@ pub struct InboundReaction {
     pub reaction: String,
     /// Event id of the message the reaction applies to.
     pub target_event_id: String,
-    /// Excerpt of the target message, when it could be fetched.
-    pub target_excerpt: Option<String>,
+    /// The targeted message, when the Sensor could read it — its excerpt and
+    /// the author whose consent governs it.
+    pub target_excerpt: Option<QuotedExcerpt>,
     pub network: Network,
     pub consent: Consent,
     pub display_name: String,
@@ -467,15 +551,20 @@ pub struct InboundReaction {
 
 /// Builds the `inbound.reaction.added.v1` envelope. A reaction key is the
 /// reactor's own gesture, not the message it points at, so it is published
-/// whatever the consent label. The target's excerpt is not: it quotes a
-/// message, so a revoked reactor's event carries the target's event id
-/// alone (ADR 0012).
+/// whatever the consent label, and so is the target's event id. The target's
+/// excerpt is neither: it is the words of whoever wrote the targeted message,
+/// so it is published only when that author is granted (issue #110) and the
+/// reactor's own consent does not reduce publication (ADR 0012). The contract
+/// leaves `target.excerpt` optional unconditionally, so here the field simply
+/// goes.
 pub fn build_reaction_added(input: &InboundReaction) -> Value {
     let mut target = json!({ "matrix_event_id": input.target_event_id });
-    if let Some(excerpt) = &input.target_excerpt {
-        if !input.consent.reduces_publication() {
-            target["excerpt"] = json!(excerpt);
-        }
+    if let Some(excerpt) = input
+        .target_excerpt
+        .as_ref()
+        .and_then(|quoted| quoted.publishable(input.consent))
+    {
+        target["excerpt"] = json!(excerpt);
     }
     let mut data = json!({
         "reaction": cap_chars(&input.reaction, 64),
@@ -729,12 +818,22 @@ mod tests {
         })
     }
 
+    /// A quoted message whose author the user granted: what every test below
+    /// that is not itself about the quoted author needs, since without a
+    /// grant the excerpt is withheld whoever the sender is (issue #110).
+    fn granted_quote(text: &str) -> QuotedExcerpt {
+        QuotedExcerpt {
+            text: text.to_owned(),
+            author: QuotedAuthor::Contact(Consent::Granted),
+        }
+    }
+
     #[test]
     fn reply_to_carries_the_parent_id_and_a_capped_excerpt() {
         let mut input = sample_input();
         input.reply_to = Some(ReplyTo {
             matrix_event_id: "$PaReNt9876".to_owned(),
-            excerpt: "é".repeat(600),
+            quoted: Some(granted_quote(&"é".repeat(600))),
         });
         let event = build_message_received(&input);
         assert_eq!(event["data"]["reply_to"]["matrix_event_id"], "$PaReNt9876");
@@ -1057,7 +1156,7 @@ mod tests {
             reactor: "@whatsapp_33612345678:example.com".to_owned(),
             reaction: "👍".to_owned(),
             target_event_id: "$AbCdEfGh1234".to_owned(),
-            target_excerpt: Some("On décale à 20h ?".to_owned()),
+            target_excerpt: Some(granted_quote("On décale à 20h ?")),
             network: Network::Whatsapp,
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
@@ -1176,7 +1275,7 @@ mod tests {
         input.body = "on décale à 20h ?".to_owned();
         input.reply_to = Some(ReplyTo {
             matrix_event_id: "$PaReNt9876".to_owned(),
-            excerpt: "et le cadeau ?".to_owned(),
+            quoted: Some(granted_quote("et le cadeau ?")),
         });
         input.thread_root = Some("$RoOtThReAd1".to_owned());
         input.network_timestamp = Some("2026-09-17T09:59:58Z".to_owned());
@@ -1235,7 +1334,7 @@ mod tests {
             input.consent = consent;
             input.reply_to = Some(ReplyTo {
                 matrix_event_id: "$PaReNt9876".to_owned(),
-                excerpt: "et le cadeau ?".to_owned(),
+                quoted: Some(granted_quote("et le cadeau ?")),
             });
             input.attachments = vec![sample_attachment()];
             let event = build_message_received(&input);
@@ -1268,6 +1367,102 @@ mod tests {
             event["data"]["target"].get("excerpt").is_none(),
             "an excerpt of the reacted-to message is content"
         );
+    }
+
+    /// Issue #110, the whole rule in one table: an excerpt answers to the
+    /// person it quotes, never to the one quoting them. The quoter here is
+    /// `granted` throughout, because their label is exactly what cannot vouch
+    /// for somebody else's words — that is what the bug was.
+    #[test]
+    fn an_excerpt_is_published_only_when_the_quoted_author_is_granted() {
+        let cases = [
+            (
+                QuotedAuthor::Contact(Consent::Granted),
+                true,
+                "a granted author",
+            ),
+            (QuotedAuthor::Owner, true, "the deployment's own account"),
+            (
+                QuotedAuthor::Contact(Consent::Revoked),
+                false,
+                "an author the user revoked",
+            ),
+            (
+                QuotedAuthor::Contact(Consent::Pending),
+                false,
+                "an author the user never decided about",
+            ),
+            (
+                QuotedAuthor::Unknown,
+                false,
+                "an author who cannot be resolved at all",
+            ),
+        ];
+        for (author, published, what) in cases {
+            let quoted = Some(QuotedExcerpt {
+                text: "et le cadeau ?".to_owned(),
+                author,
+            });
+
+            let mut reaction = sample_reaction();
+            reaction.consent = Consent::Granted;
+            reaction.target_excerpt = quoted.clone();
+            let target = build_reaction_added(&reaction)["data"]["target"].clone();
+            assert_eq!(
+                target.get("excerpt").is_some(),
+                published,
+                "the reaction target's excerpt for {what}: {target}"
+            );
+            assert_eq!(
+                target["matrix_event_id"], "$AbCdEfGh1234",
+                "the reference to what the reaction points at always survives: \
+                 the reduction removes the quoted content, not the event"
+            );
+
+            let mut message = sample_input();
+            message.consent = Consent::Granted;
+            message.reply_to = Some(ReplyTo {
+                matrix_event_id: "$PaReNt9876".to_owned(),
+                quoted: quoted.clone(),
+            });
+            let reply_to = build_message_received(&message)["data"]["reply_to"].clone();
+            // Unlike the reaction's, this field is required by the contract on
+            // a non-revoked sender's reply, so withholding is an empty excerpt
+            // rather than an absent one — and it publishes no content either
+            // way.
+            assert_eq!(
+                reply_to["excerpt"] == json!("et le cadeau ?"),
+                published,
+                "the reply's excerpt for {what}: {reply_to}"
+            );
+            assert_eq!(reply_to["matrix_event_id"], "$PaReNt9876");
+        }
+    }
+
+    #[test]
+    fn a_revoked_quoter_publishes_no_excerpt_even_of_a_granted_author() {
+        // Both decisions have to be in the right state — ADR 0012 about the
+        // contact carrying the event, issue #110 about the one being quoted.
+        let mut reaction = sample_reaction();
+        reaction.consent = Consent::Revoked;
+        reaction.target_excerpt = Some(granted_quote("et le cadeau ?"));
+        assert!(build_reaction_added(&reaction)["data"]["target"]
+            .get("excerpt")
+            .is_none());
+    }
+
+    #[test]
+    fn a_parent_the_sensor_could_not_read_still_publishes_a_reply() {
+        // The behaviour that predates #110 and is what its withholding reuses:
+        // no quotation to publish, an event that still says a reply arrived.
+        let mut input = sample_input();
+        input.reply_to = Some(ReplyTo {
+            matrix_event_id: "$PaReNt9876".to_owned(),
+            quoted: None,
+        });
+        let reply_to = build_message_received(&input)["data"]["reply_to"].clone();
+        assert_eq!(reply_to["matrix_event_id"], "$PaReNt9876");
+        assert_eq!(reply_to["excerpt"], "");
     }
 
     #[test]
