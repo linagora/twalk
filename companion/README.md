@@ -143,6 +143,15 @@ every other tab gets the "open in another tab" screen with a way to take over
 (a `BroadcastChannel` message; the holder lets go of its client *and* its lock).
 `/diagnostics` is exempt: it is where a user is sent when something is wrong.
 
+The take-over has a terminal state, and the reason is worth keeping (#135). It
+used to spin for ever when nothing answered, and the obvious diagnosis — "the
+holder is gone" — is the wrong one: a Web Lock dies with its tab, so a lock
+still held is a tab still alive. It is a tab the browser has **frozen**, which
+keeps the document and its lock while running none of its JavaScript. So
+`takeOver` answers within five seconds either way, and the screen names the
+remedy that works on a frozen tab: find it and close it (switching to it wakes
+it), or restart the browser.
+
 ### The Gateway client is generated, and checked
 
 `companion-gateway/openapi.yaml` is the source of truth (ticket #63): the
@@ -212,6 +221,25 @@ session (`session-refused`), or it answered something else (`refused`) — and
 every screen that reports a failed read says which. The retry button is offered
 for the two a retry can help; the third offers signing in.
 
+### An action's answer is rendered where the action is
+
+A refusal that nobody reads is not better than no refusal. The owner ticked a
+room out of about a hundred, scrolled to the bottom, pressed the invite button,
+and reported that nothing happened: the Gateway had refused, the screen had set
+its message, and the message was three thousand pixels above the button (#139).
+The code was right, the string was right, and the user was told nothing.
+
+So `$lib/components/ActionProblem.svelte` is the one decision, applied to every
+screen whose action can be scrolled away from its message: the alert is rendered
+beside the control that caused it, carries `role="alert"` so it is announced
+wherever it is, and scrolls itself into view with `block: 'nearest'` — which
+moves nothing when it is already visible. A screen with two actions a page apart
+has two message surfaces and keeps them apart; screen 3d is the example.
+
+Note what could not catch this: four hundred tests that click by selector. The
+test that does asserts `toBeInViewport` after acting at the bottom of a hundred
+rooms.
+
 ### Browser-only code stays out of module scope
 
 Prerendering imports every statically reachable module in **Node**, where
@@ -270,7 +298,11 @@ direction: a control in a privacy screen that the runtime does not enforce is a
 protection the user is told about and does not have.
 
 The scope is fixed at the moment the user presses the button, from the bridges
-whose login is `complete`. It never widens: a network connected next week is in
+`$lib/networks/connection.ts` says are connected — the bridge's own answer, and
+never `ConfiguredBridge.login`, which is a login *process* the Gateway holds in
+memory and forgets. Reading the latter left this screen offering an empty
+perimeter on a deployment with two networks connected, so no persona could be
+activated at all (#142). It never widens: a network connected next week is in
 no decision the user took, and the persona stays inactive on it. Matrix is the
 one network the Companion cannot prove is connected — the Gateway forgets the
 access token that invited the Sensor as soon as the call returns (ADR 0011), and
@@ -308,6 +340,22 @@ that does not exist would be worse than one that explains itself.
 
 `null` (the deployment projects no inbound stream, or the read failed) and `0`
 (nobody is waiting) are different facts and both draw nothing.
+
+### The picker describes where the user is, and asks before it says
+
+Screen 3 read "Connect your first network — step 1 of 3" to an owner with
+WhatsApp connected for two hours and Signal for two minutes (#120). The
+onboarding wizard's copy was shown unconditionally to anyone who reached the
+picker. The Gateway knows how many networks are connected; the screen did not
+ask.
+
+It asks now, through `connection.ts`, and has three modes rather than two: with
+nothing connected it is step 1 of onboarding, with something connected it is
+"Add a network" with no step counter and the way back to the dashboard, and with
+an unanswered `GET /api/bridges` it is the second — because "I could not ask" is
+not "nothing is connected", and the heading that can be false is the one
+withheld. The branch is never read from browser storage: spec #65 derives
+onboarding progress from what exists on the Gateway.
 
 ### The dashboard says what it cannot know
 
@@ -439,12 +487,37 @@ Two things that bite:
   and leaves `state` empty, because the room's whole history fits. Reading only
   `state` lists every new room as nameless. Both are read, newest wins.
 
+The homeserver field starts **empty**, and that is a decision rather than an
+omission (#124). It used to arrive holding the Twalk deployment's own
+homeserver, which is the one account this screen is not for; since the screen
+reads the login flows of whatever is in the field, the local deployment's
+password form was offered to an owner whose account signs in through their
+organisation's identity provider, and nothing suggested their homeserver was
+supported at all. The only value ever offered is the homeserver of an account
+this browser has already connected here.
+
+It accepts a **server name or an address**, because `.well-known` delegation
+exists so that `linagora.com` — the half of a Matrix ID a person can recite — is
+enough. `discoverHomeserver` does both: a bare name is resolved as screen 1
+resolves one, a value carrying a scheme is taken as the address it is (port and
+path included), and the screen says where a delegation led, since the
+credentials are about to go somewhere the user did not type.
+
 Sign-in covers SSO as well as a password, and offers one button per advertised
 identity provider, labelled with the provider's own name and redirecting to
 `/sso/redirect/{idpId}`: a homeserver with SSO usually has *only* SSO, and a
-password form there is a dead end. The `loginToken` the homeserver redirects
-back with is a short-lived credential, so it is spent and stripped from the
-address bar at once — a copied or bookmarked URL must not carry one.
+password form there is a dead end. The screen also states the return address the
+homeserver will be asked to use: a production Synapse with an
+`sso.client_whitelist` refuses one it has not been told about, which is not
+Twalk's to fix but is the user's to be told about.
+
+The `loginToken` the homeserver redirects back with is a short-lived credential,
+so it is taken out of the address bar at once — a copied or bookmarked URL must
+not carry one. That happens in `$lib/matrix/login-token.ts`, called while the
+root layout initialises, and **not** in this route: the route did not always
+mount (the tab-lock screen rendered instead) and the credential stayed in the
+URL. A precaution that only runs when the page it guards is allowed to run is
+not a precaution (#135).
 
 ### Screen 3c asks the user to copy cookies, and says why
 
