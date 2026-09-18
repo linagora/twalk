@@ -4,12 +4,67 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { gridFor, looksLikeIos, NETWORK_CARDS, type BridgeRow } from './catalogue';
+import { gridFor, looksLikeIos, manageRouteFor, NETWORK_CARDS, cardFor, type BridgeRow } from './catalogue';
+import type { BridgeConnection } from './connection';
+
+/** A bridge that answered, holding no login: the not-connected state. */
+function noLogins(): BridgeConnection {
+	return {
+		reachable: true,
+		state: 'disconnected',
+		reported: null,
+		reason: 'the bridge holds no login',
+		logins: [],
+		unreachable_because: null
+	};
+}
+
+/** A bridge holding one login in a given state. */
+function holding(state: BridgeConnection['state'], reported: string): BridgeConnection {
+	return {
+		reachable: true,
+		state,
+		reported,
+		reason: null,
+		logins: [
+			{
+				login_id: '33660469852',
+				name: '+33660469852',
+				profile: { phone: '+33660469852' },
+				state: state ?? 'disconnected',
+				reported,
+				reason: null,
+				since: '2026-09-18T07:27:59.000Z'
+			}
+		],
+		unreachable_because: null
+	};
+}
+
+/** A bridge the Gateway could not ask. */
+function unreachable(): BridgeConnection {
+	return {
+		reachable: false,
+		state: null,
+		reported: null,
+		reason: null,
+		logins: [],
+		unreachable_because: 'bridge_unreachable'
+	};
+}
+
+function bridge(
+	bridgeId: string,
+	network: string,
+	connection: BridgeConnection = noLogins()
+): BridgeRow {
+	return { bridge_id: bridgeId, network, connection, login: null };
+}
 
 const configured: BridgeRow[] = [
-	{ bridge_id: 'mautrix-whatsapp', network: 'whatsapp', login: null },
-	{ bridge_id: 'mautrix-signal', network: 'signal', login: null },
-	{ bridge_id: 'mautrix-gmessages', network: 'sms', login: null }
+	bridge('mautrix-whatsapp', 'whatsapp'),
+	bridge('mautrix-signal', 'signal'),
+	bridge('mautrix-gmessages', 'sms')
 ];
 
 function card(network: string, options: Parameters<typeof gridFor>[0]) {
@@ -68,16 +123,116 @@ describe('the network grid', () => {
 		expect(card('whatsapp', state).blockedBy).toBeNull();
 		expect(card('signal', state).blockedBy).toBeNull();
 	});
+});
 
-	it('marks a network whose bridge holds a completed login', () => {
-		const connected: BridgeRow[] = [
-			{ bridge_id: 'mautrix-whatsapp', network: 'whatsapp', login: { state: 'complete' } },
-			{ bridge_id: 'mautrix-signal', network: 'signal', login: { state: 'cancelled' } }
-		];
-		const state = { bridges: connected, bridgesKnown: true, ios: false };
+// The defect of #108, at the one place it was computed. Every case below used
+// to be decided by `bridge.login.state === 'complete'` — the state of a login
+// *process* in the Gateway's memory — and so got the answer wrong whenever the
+// process and the link disagreed, which is most of the time.
+describe('the connected state of a network', () => {
+	it('comes from the bridge, never from the login process', () => {
+		const state = {
+			bridges: [bridge('mautrix-whatsapp', 'whatsapp', holding('connected', 'CONNECTED'))],
+			bridgesKnown: true,
+			ios: false
+		};
 		expect(card('whatsapp', state).connected).toBe(true);
-		// A login that was cancelled is still reported; it is not a connection.
-		expect(card('signal', state).connected).toBe(false);
+		expect(card('whatsapp', state).connection.account?.name).toBe('+33660469852');
+	});
+
+	it('survives a login being started on a connected bridge', () => {
+		// The live incident, in one assertion: a QR scan is in flight and the
+		// account is still linked. The old code read `login.state` here, found
+		// `awaiting_remote`, and dropped the badge.
+		const row: BridgeRow = {
+			...bridge('mautrix-whatsapp', 'whatsapp', holding('connected', 'CONNECTED')),
+			login: {
+				bridge_id: 'mautrix-whatsapp',
+				network: 'whatsapp',
+				process_id: 'p1',
+				flow_id: 'qr',
+				login_id: null,
+				state: 'awaiting_remote',
+				started_at: '2026-09-18T08:00:00.000Z',
+				started_by: { device_id: 'd1', device_name: 'a phone' },
+				expires_at: '2026-09-18T08:30:00.000Z',
+				generation: 2,
+				step: null,
+				login: null,
+				error: null
+			}
+		};
+		const state = { bridges: [row], bridgesKnown: true, ios: false };
+		expect(card('whatsapp', state).connected).toBe(true);
+	});
+
+	it('survives a cancelled login, and a Gateway that has forgotten every process', () => {
+		for (const login of [
+			{ state: 'cancelled' as const },
+			null
+		]) {
+			const row = {
+				...bridge('mautrix-whatsapp', 'whatsapp', holding('connected', 'CONNECTED')),
+				login: login === null ? null : ({ ...login } as unknown as BridgeRow['login'])
+			};
+			const state = { bridges: [row], bridgesKnown: true, ios: false };
+			expect(card('whatsapp', state).connected).toBe(true);
+		}
+	});
+
+	it('is not claimed for a bridge that answered "no login"', () => {
+		const state = { bridges: configured, bridgesKnown: true, ios: false };
+		expect(card('whatsapp', state).connected).toBe(false);
+		expect(card('whatsapp', state).linked).toBe(false);
+	});
+
+	it('is unknown, not disconnected, when the bridge could not be asked', () => {
+		// Guessing `disconnected` here is the same lie in a new place: it tells
+		// a user with a working link that it is broken.
+		const state = {
+			bridges: [bridge('mautrix-whatsapp', 'whatsapp', unreachable())],
+			bridgesKnown: true,
+			ios: false
+		};
+		expect(card('whatsapp', state).connection.state).toBe('unknown');
+		expect(card('whatsapp', state).connected).toBe(false);
+		expect(card('whatsapp', state).linked).toBe(false);
+	});
+
+	it('keeps the other mautrix states apart instead of rounding them to a tick', () => {
+		for (const [reported, expected] of [
+			['CONNECTING', 'starting'],
+			['BACKFILLING', 'starting'],
+			['TRANSIENT_DISCONNECT', 'degraded'],
+			// A session revoked from the user's phone. `BAD_CREDENTIALS` is what
+			// says so; no mautrix bridge emits `LOGGED_OUT`.
+			['BAD_CREDENTIALS', 'session_expired']
+		] as const) {
+			const state = {
+				bridges: [bridge('mautrix-whatsapp', 'whatsapp', holding(expected, reported))],
+				bridgesKnown: true,
+				ios: false
+			};
+			expect(card('whatsapp', state).connection.state).toBe(expected);
+			expect(card('whatsapp', state).connected).toBe(false);
+			// …but the link exists, so the card offers Manage and not Connect.
+			expect(card('whatsapp', state).linked).toBe(true);
+		}
+	});
+});
+
+describe('where Manage leads', () => {
+	it('is the management screen of that network', () => {
+		expect(manageRouteFor(cardFor('whatsapp')!)).toBe('/networks/whatsapp/manage');
+		expect(manageRouteFor(cardFor('signal')!)).toBe('/networks/signal/manage');
+		expect(manageRouteFor(cardFor('sms')!)).toBe('/networks/sms/manage');
+	});
+
+	it('is nowhere for Matrix, which has no login to manage', () => {
+		// The bring-your-own-account path reaches Twalk by the Sensor being
+		// invited into the user's rooms (ADR 0009): no bridge, no login, no
+		// disconnect.
+		expect(manageRouteFor(cardFor('matrix')!)).toBeNull();
 	});
 });
 

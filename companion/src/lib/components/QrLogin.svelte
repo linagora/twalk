@@ -35,6 +35,8 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 
+	import { page } from '$app/state';
+
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import Icon from '$lib/icons/Icon.svelte';
@@ -49,6 +51,19 @@
 	}
 
 	let { copy }: Props = $props();
+
+	/**
+	 * The login this flow should **repair** rather than replace, from
+	 * `?relink=`, which is where the management screen's *Re-link* button
+	 * sends the user (ticket #108).
+	 *
+	 * It becomes the Gateway's `login_id` on the start call — mautrix's
+	 * `?login_id=` — so the bridge re-logs in to the session it already holds
+	 * instead of creating a second one. Without it a network that caps linked
+	 * devices refuses the login outright, and the user's working session is
+	 * still the one that is broken.
+	 */
+	const relink = $derived(page.url.searchParams.get('relink') ?? undefined);
 
 	/** `null` until `GET /api/bridges` has answered. */
 	let bridgeId = $state<string | null>(null);
@@ -112,7 +127,7 @@
 			session = new LoginSession(bridgeId);
 			unsubscribe = session.state.subscribe((next: LoginState) => (loginState = next));
 			if (disclosureAccepted) {
-				await session.start({ prefer: 'qr' });
+				await session.start({ prefer: 'qr', loginId: relink });
 			}
 		}
 	}
@@ -148,12 +163,12 @@
 				// Nothing to do: the card comes back next time, which is safe.
 			}
 		}
-		await session?.start({ prefer: 'qr' });
+		await session?.start({ prefer: 'qr', loginId: relink });
 	}
 
 	/** The *Refresh* button, and the way out of every dead end on this screen. */
 	async function restart() {
-		await session?.start({ prefer: 'qr', takeOver: true });
+		await session?.start({ prefer: 'qr', loginId: relink, takeOver: true });
 	}
 
 	async function cancel() {

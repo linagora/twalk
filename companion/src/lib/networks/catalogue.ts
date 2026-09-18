@@ -12,9 +12,21 @@
 // Matrix is in the table and in no bridge list: the bring-your-own-account path
 // (ADR 0009) needs no bridge, so its card is always active and its screen talks
 // to the homeserver and to `/api/bootstrap/rooms`.
+//
+// What a card says about being connected comes from `connection.ts`, which
+// reads the bridge's own answer. It must never come from the login *process*
+// the Gateway may have in flight: that was the defect in #108, where starting
+// a login, cancelling one or restarting the Gateway each made a live WhatsApp
+// link read as no link at all.
 
 import type { IconName } from '$lib/icons';
 import type { MessageKey } from '$lib/i18n';
+import {
+	connectionOf,
+	isConnected,
+	type ConfiguredBridge,
+	type NetworkConnection
+} from './connection';
 
 /** The milestone a card belongs to. v0.2 cards are shown, never interactive. */
 export type Milestone = 'v0.1' | 'v0.2';
@@ -118,12 +130,28 @@ export function cardFor(network: string): NetworkCard | undefined {
 	return NETWORK_CARDS.find((card) => card.network === network);
 }
 
-/** One row of `GET /api/bridges`, reduced to what screen 3 needs from it. */
-export interface BridgeRow {
-	readonly bridge_id: string;
-	readonly network: string;
-	readonly login: { readonly state: string } | null;
+/**
+ * Where *Manage* leads for a card that has a link to manage.
+ *
+ * `null` for a network with no bridge behind it: Matrix reaches Twalk by the
+ * Sensor being invited into the user's own rooms (ADR 0009), so there is no
+ * login to disconnect and no management screen to open. Its card keeps
+ * leading to its own screen.
+ */
+export function manageRouteFor(card: NetworkCard): string | null {
+	return card.needsBridge && card.route !== null ? `${card.route}/manage` : null;
 }
+
+/**
+ * One row of `GET /api/bridges`.
+ *
+ * The whole row, not a reduction of it: the two members that matter here have
+ * confusable names, and a hand-written subset is how the wrong one got read.
+ * `connection` is the bridge's own answer about the link it holds;
+ * `login` is a login *process* in the Gateway's memory and is not this
+ * screen's business at all.
+ */
+export type BridgeRow = ConfiguredBridge;
 
 /** Why a card cannot be tapped, or `null` when it can. */
 export type CardBlock = 'coming-soon' | 'no-bridge' | 'ios';
@@ -133,8 +161,20 @@ export interface CardState {
 	readonly card: NetworkCard;
 	/** The bridge instance serving it, when the deployment has one. */
 	readonly bridgeId: string | null;
-	/** The login already completed on it: the wireframe's green check. */
+	/**
+	 * The link the bridge holds, read from `connection` and from nothing else
+	 * (#108). Survives a login being started, cancelled, or the Gateway being
+	 * restarted, because none of those is a thing that can unlink an account.
+	 */
+	readonly connection: NetworkConnection;
+	/** The wireframe's green check: `connection.state === 'connected'`. */
 	readonly connected: boolean;
+	/**
+	 * Whether the bridge holds a login at all — what decides between
+	 * *Connect* and *Manage*. An expired session is still a link, and what
+	 * the user wants for it is the management screen, not a fresh QR flow.
+	 */
+	readonly linked: boolean;
 	readonly blockedBy: CardBlock | null;
 }
 
@@ -154,7 +194,7 @@ export function gridFor(options: {
 }): CardState[] {
 	return NETWORK_CARDS.map((card) => {
 		const bridge = options.bridges.find((row) => row.network === card.network) ?? null;
-		const connected = bridge?.login?.state === 'complete';
+		const connection = connectionOf(bridge);
 		let blockedBy: CardBlock | null = null;
 		if (card.milestone === 'v0.2') {
 			blockedBy = 'coming-soon';
@@ -166,7 +206,9 @@ export function gridFor(options: {
 		return {
 			card,
 			bridgeId: bridge?.bridge_id ?? null,
-			connected,
+			connection,
+			connected: isConnected(connection),
+			linked: connection.linked,
 			blockedBy
 		};
 	});

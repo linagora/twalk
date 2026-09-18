@@ -22,9 +22,12 @@ export async function connectWhatsApp(page: Page, request: APIRequestContext): P
 	await page.goto('/networks/whatsapp');
 	await page.getByTestId('accept-disclosure').click();
 	await expect(page.getByTestId('qr-code')).toBeVisible();
-	await bridge.releaseCompletion('33612345678');
+	await bridge.releaseCompletion(CONNECTED_LOGIN);
 	await expect(page.getByTestId('login-complete')).toBeVisible();
 }
+
+/** The login the bridge is left holding once that journey has run. */
+export const CONNECTED_LOGIN = '33612345678';
 
 /** One more signed-in device, and the ids a test needs to talk about it. */
 export interface ExtraDevice {
@@ -102,14 +105,15 @@ export async function pendingTotal(
 }
 
 /**
- * Loses the bridge's session: a login started on the bridge and refused with
- * the `410` mautrix answers when it has ended one, which the Gateway records
- * as `login_expired` — the wireframe's amber state.
+ * Loses the bridge's session, the way one is really lost: the bridge reports
+ * `BAD_CREDENTIALS` for the login it holds — the wireframe's amber state.
  *
- * Driven through the Gateway's API rather than through screen 3a, because the
- * screen under test here is the dashboard. What it has to show is a bridge
- * state the Gateway holds; how that state came to be is screen 3a's own
- * journey, and `tests/e2e/networks/whatsapp.spec.ts` walks it.
+ * That, and not a failed login attempt, is what an expired session is. A
+ * session revoked from the user's own phone reports `BAD_CREDENTIALS`; no
+ * mautrix bridge emits `LOGGED_OUT` at all (#56's mapping table). This helper
+ * used to start a login and have it refused with a `410`, which made the
+ * dashboard's amber banner a statement about a *login process* rather than
+ * about the link — the confusion #108 is about.
  */
 export async function expireWhatsAppSession(
 	request: APIRequestContext,
@@ -117,29 +121,15 @@ export async function expireWhatsAppSession(
 ): Promise<void> {
 	const bridge = new StubBridge(request, WHATSAPP_BRIDGE);
 	const cookie = `twalk_device=${token}`;
-	const started = request.post(`/api/bridges/${WHATSAPP_BRIDGE}/login`, {
-		headers: { cookie },
-		data: { flow_id: 'qr' }
-	});
-	// The Gateway holds the bridge's blocking step itself, so the refusal is
-	// queued while that request is in flight rather than before it.
-	await expect
-		.poll(async () => (await bridge.stats()).blocking_arrivals)
-		.toBeGreaterThanOrEqual(1);
-	await bridge.releaseRefusal(410, 'LOGIN_TIMED_OUT');
-	await started;
+	await bridge.setLoginState(CONNECTED_LOGIN, 'BAD_CREDENTIALS');
 
 	await expect
 		.poll(async () => {
 			const answer = await request.get('/api/bridges', { headers: { cookie } });
 			const body = (await answer.json()) as {
-				bridges: {
-					network: string;
-					login: { state: string; error: { code: string } | null } | null;
-				}[];
+				bridges: { network: string; connection: { state: string | null } }[];
 			};
-			const row = body.bridges.find((entry) => entry.network === 'whatsapp');
-			return row?.login?.error?.code ?? row?.login?.state ?? 'none';
+			return body.bridges.find((entry) => entry.network === 'whatsapp')?.connection.state ?? 'none';
 		})
-		.toBe('login_expired');
+		.toBe('session_expired');
 }

@@ -128,8 +128,22 @@ export class StubBridge {
 		await this.post('restart', {});
 	}
 
-	async addExistingLogin(loginId: string, name: string) {
-		await this.post('add-login', { login_id: loginId, name });
+	/**
+	 * Gives the bridge a login it already holds — a link that exists, of the
+	 * kind a Gateway restart cannot lose.
+	 *
+	 * `stateEvent` is mautrix's own word for how the link is doing, and it is
+	 * what the Companion's connected badge is read from (#108). `null` is a
+	 * bridge that holds the login and has not reported on it yet, which is
+	 * what one looks like just after it restarts.
+	 */
+	async addExistingLogin(loginId: string, name: string, stateEvent: string | null = 'CONNECTED') {
+		await this.post('add-login', { login_id: loginId, name, state_event: stateEvent });
+	}
+
+	/** Moves an existing login into another mautrix state. */
+	async setLoginState(loginId: string, stateEvent: string | null) {
+		await this.post('set-login-state', { login_id: loginId, state_event: stateEvent });
 	}
 
 	async reset() {
@@ -147,7 +161,9 @@ export class StubBridge {
 			body: { cookies?: Record<string, string> } | null;
 		}[];
 		cancelled: string[];
-		logins: { id: string }[];
+		/** The login ids the bridge was told to log out — the disconnect journey's proof. */
+		logged_out: string[];
+		logins: { id: string; name: string; state?: { state_event: string } }[];
 	}> {
 		const answer = await this.request.get(`/stub-control/${this.bridgeId}/stats`);
 		expect(answer.ok(), await answer.text()).toBeTruthy();

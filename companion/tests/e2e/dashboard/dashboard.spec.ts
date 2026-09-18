@@ -72,8 +72,9 @@ test('a bridge state change surfaces in the dashboard, with the amber banner and
 	await expect(page.getByTestId('bridge-whatsapp')).toHaveAttribute('data-state', 'connected');
 	await expect(page.getByTestId('expired-whatsapp')).toHaveCount(0);
 
-	// The bridge loses the session — mautrix answers `410` on the held step,
-	// which the Gateway records as `login_expired`.
+	// The bridge loses the session: it reports `BAD_CREDENTIALS`, which is
+	// what a session revoked from the user's own phone reports — and what the
+	// Gateway maps to `session_expired` (#56).
 	await expireWhatsAppSession(request, deviceToken);
 
 	await page.goto('/dashboard');
@@ -83,7 +84,12 @@ test('a bridge state change surfaces in the dashboard, with the amber banner and
 	const banner = page.getByTestId('expired-whatsapp');
 	await expect(banner).toBeVisible();
 	await expect(banner).toContainText(/expired|expiré/i);
-	await expect(page.getByTestId('reconnect')).toHaveAttribute('href', '/networks/whatsapp');
+	// The way back is the management screen, where *Re-link* repairs the
+	// session the bridge still holds — not a fresh QR flow against it (#108).
+	await expect(page.getByTestId('reconnect')).toHaveAttribute(
+		'href',
+		'/networks/whatsapp/manage'
+	);
 
 	// And the overall indicator stops being calm.
 	await expect(page.getByTestId('screen-dashboard')).toHaveAttribute('data-health', 'attention');
