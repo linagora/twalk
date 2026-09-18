@@ -35,7 +35,7 @@
 		normaliseDomain
 	} from '$lib/onboarding/domain';
 	import { homeserver, restoreHomeserver, matrixSession } from '$lib/onboarding/progress';
-	import { localpartOf, matrixIdFor } from '$lib/onboarding/account';
+	import { localpartOf } from '$lib/onboarding/account';
 	import { decodeRecoveryKey, groupRecoveryKey, type RecoveryKeyProblem } from '$lib/recovery/key';
 
 	type Stage = 'form' | 'working' | 'done';
@@ -125,7 +125,17 @@
 			const { restoreFromRecoveryKey } = await import('$lib/crypto/bootstrap');
 			const result = await restoreFromRecoveryKey({
 				baseUrl,
-				userId: owner ?? matrixIdFor(username, effectiveDomain),
+				// The localpart the user typed, not an id built from it. Matrix's
+				// `m.id.user` takes either, and the homeserver qualifies a bare
+				// localpart with **its own** server name — which is the only
+				// party that knows it. Building `@michel:<typed domain>` was
+				// right only when the address and the server name happen to be
+				// the same string; through a tunnel, or on loopback, they are
+				// not, and the homeserver answered 403 on a user it had never
+				// heard of while the screen reported a refused password
+				// (#96, #115). `matrixIdFor` stays for the display it was
+				// written for.
+				userId: owner ?? username.trim(),
 				password,
 				privateKey: decoded.bytes,
 				onStep: (next) => {
@@ -173,11 +183,10 @@
 	}
 
 	/**
-	 * A failure the homeserver never saw is not a failure of the password or
-	 * the key, and must not be reported as one. `Failed to fetch` on this
-	 * screen means the address is wrong or unreachable — the one thing the user
-	 * can fix — and saying so is the difference between a corrected port and a
-	 * hunt for a password that was right all along (#112).
+	 * A cause that is not a `RestoreError` at all. The classification of a
+	 * failure the homeserver never saw is `$lib/crypto/bootstrap`'s job now —
+	 * it is the only place that can tell a rejected `fetch` from a refusal —
+	 * and this is the last resort for anything else that reaches here.
 	 */
 	function classify(cause: unknown): string {
 		const message = cause instanceof Error ? cause.message : String(cause);

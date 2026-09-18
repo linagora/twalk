@@ -145,6 +145,15 @@ export type RestoreProblem =
 	| 'wrong-recovery-key'
 	/** The account has no secret storage: there is nothing to recover from. */
 	| 'no-secret-storage'
+	/**
+	 * Nothing answered at the homeserver's address, so nothing has seen the
+	 * password or the key.
+	 *
+	 * Its own problem rather than a flavour of `failed`, because a failure the
+	 * homeserver never saw must not be reported as a refusal it made — that is
+	 * what sent a user hunting for a password that was correct all along.
+	 */
+	| 'unreachable'
 	/** Anything else, with the message in `detail`. */
 	| 'failed';
 
@@ -325,7 +334,15 @@ export async function restoreFromRecoveryKey(options: {
  * `client.login()`: this runs *before* there is a client, and building one to
  * throw it away would mean two clients in a tab.
  */
-async function passwordLogin(
+/**
+ * Exported for its own test, and for nothing else.
+ *
+ * The classification below is the whole point of it: only the code that
+ * calls `fetch` can tell a request that never reached a server from a server
+ * that refused. Everything downstream sees a `RestoreProblem` and must not
+ * be re-deriving it from message text.
+ */
+export async function passwordLogin(
 	baseUrl: string,
 	userId: string,
 	password: string,
@@ -345,7 +362,14 @@ async function passwordLogin(
 			})
 		});
 	} catch (cause) {
-		throw new RestoreError('failed', cause instanceof Error ? cause.message : 'login failed');
+		// `fetch` rejects when the request never reached a server: a wrong
+		// address, a port left out, no route. Classified here, at the only
+		// place that can tell, rather than left to a caller matching on the
+		// message text.
+		throw new RestoreError(
+			'unreachable',
+			cause instanceof Error ? cause.message : 'the homeserver did not answer'
+		);
 	}
 	const body: unknown = await response.json().catch(() => ({}));
 	if (!response.ok) {
