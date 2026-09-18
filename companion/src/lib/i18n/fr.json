@@ -356,5 +356,139 @@
 
 	"error.title": "Cette page n'existe pas",
 	"error.body": "Rien dans Twalk ne répond à {path}.",
-	"error.home": "Revenir au début"
+	"error.home": "Revenir au début",
+
+	"persona.assistant.name": "Assistant",
+	"persona.assistant.description": "Votre assistant lit les messages qui arrivent sur les réseaux que vous avez connectés et vous propose des réponses à relire. Il n’envoie jamais rien sans votre accord.",
+
+	"persona.ability.read.label": "Lire les messages entrants",
+	"persona.ability.read.detail": "Sur les réseaux que vous choisissez ci-dessous, et sur aucun autre.",
+	"persona.ability.read.locked": "Toujours actif : un assistant qui ne lit rien n’a rien à proposer.",
+	"persona.ability.suggest.label": "Proposer des réponses à relire",
+	"persona.ability.suggest.detail": "Une proposition vous attend. Rien ne quitte votre déploiement tant que vous ne l’avez pas approuvé.",
+	"persona.ability.suggest.locked": "Toujours actif : lire et proposer sont une seule décision dans cette version — l’assistant est actif, ou il est en pause.",
+
+	"persona.title": "Activez votre premier agent",
+
+	"persona.step": "Étape 2 sur 3",
+
+	"persona.back": "Retour aux réseaux",
+
+	"persona.scope.title": "Ce qu’il peut lire",
+	"persona.scope.intro": "L’assistant est activé exactement sur les réseaux que vous cochez ici. Si vous connectez un autre réseau plus tard, il y restera inactif tant que vous n’en aurez pas décidé autrement.",
+	"persona.scope.proven": "Connecté",
+	"persona.scope.matrixHint": "Votre déploiement Twalk ne garde aucune trace des salons dans lesquels vous avez invité le Sensor : le jeton d’accès qui l’a fait a été oublié dès l’invitation envoyée. Cochez cette case si vous avez connecté votre compte Matrix existant.",
+	"persona.scope.none": "Aucun réseau n’est encore connecté. Connectez-en un, et l’assistant aura quelque chose à lire.",
+	"persona.scope.connectFirst": "Connecter un réseau",
+
+	"persona.consent.title": "Qui l’assistant peut lire, par défaut",
+	"persona.consent.body": "Chaque contact démarre à « en attente ». L’assistant ne lit rien de quelqu’un tant que vous n’avez pas décidé à son sujet, et aucune règle n’accorde l’accès automatiquement — cette version n’importe aucun carnet d’adresses.",
+
+	"persona.removed.title": "Deux réglages que la maquette prévoyait, et que cet écran n’a pas",
+	"persona.removed.autoSend": "L’envoi automatique des réponses approuvées. C’est la seule chose dans Twalk qui laisserait un agent envoyer sans vous : ce n’est pas un interrupteur d’écran d’installation.",
+	"persona.removed.hours": "Les heures d’activité. Une plage horaire est une règle à appliquer et à auditer à l’exécution ; un réglage cosmétique ici laisserait croire à une protection qui n’existe pas.",
+
+	"persona.runtime.title": "Ce qui se passe après l’activation",
+	"persona.runtime.body": "La décision est enregistrée et publiée sur votre bus, où le moteur d’agents la lira. Ce moteur n’est pas encore déployé : l’assistant ne produira donc aucune proposition aujourd’hui. L’activer maintenant garantit qu’il partira des réseaux que vous avez choisis, et de rien d’autre, le jour où il tournera.",
+
+	"persona.pause.meaning": "Mettre un assistant en pause signifie qu’il ne reçoit plus rien. Il continue de tourner et reste supervisé : il est privé d’événements, pas arrêté.",
+
+	"persona.activate": "Activer l’assistant",
+
+	"persona.activating": "Réveil de l’assistant…",
+
+	"persona.activated.title": "Votre assistant surveille désormais {networks}.",
+	"persona.activated.body": "Il est activé sur ces réseaux et sur aucun autre.",
+	"persona.activated.continue": "Aller à mon tableau de bord",
+
+	"persona.error.noNetworks": "Cochez au moins un réseau : un assistant sans périmètre n’est pas une décision que le déploiement peut enregistrer.",
+	"persona.error.refused": "Votre déploiement a refusé la décision ({error}). Rien n’a été enregistré.",
+	"persona.error.unreachable": "Votre déploiement est injoignable. Rien n’a été enregistré — réessayez.",
+
+	"persona.skip": "Plus tard",
+
+	"dashboard.title": "Votre Twalk",
+
+	"dashboard.refresh": "Actualiser",
+
+	"dashboard.refreshing": "Actualisation…",
+
+	"dashboard.unreachable": "Votre déploiement est injoignable. Ce qui suit est sa dernière réponse connue.",
+
+	"dashboard.health.ok": "Tout fonctionne",
+	"dashboard.health.attention": "Quelque chose demande votre attention",
+	"dashboard.health.setup": "Presque terminé",
+	"dashboard.health.setupDetail": "Connectez un réseau et activez votre assistant pour finir l’installation de Twalk.",
+
+	"dashboard.banner.expired.title": "Votre session {network} a expiré.",
+	"dashboard.banner.expired.body": "Reconnectez-vous pour continuer à en recevoir les messages.",
+	"dashboard.banner.expired.cta": "Reconnecter",
+
+	"dashboard.chip.pending": "{count, plural, one {# décision de consentement vous attend} other {# décisions de consentement vous attendent}}",
+
+	"dashboard.bridges.title": "Réseaux",
+	"dashboard.bridges.none": "Aucune passerelle n’est configurée sur ce déploiement.",
+	"dashboard.bridges.note": "Ces états sont ceux de la dernière connexion tenue par chaque passerelle, pas un battement de cœur : l’état réel des passerelles et la date du dernier message ne sont pas encore rapportés par ce déploiement.",
+
+	"dashboard.bridge.state.connected": "Connecté",
+	"dashboard.bridge.state.connecting": "Connexion…",
+	"dashboard.bridge.state.expired": "Session expirée",
+	"dashboard.bridge.state.failed": "Échec de connexion",
+	"dashboard.bridge.state.never": "Non connecté",
+	"dashboard.bridge.lastMessage.unknown": "Dernier message : pas encore rapporté",
+	"dashboard.bridge.manage": "Gérer {network}",
+
+	"dashboard.personas.title": "Agents",
+
+	"dashboard.persona.active": "Actif",
+	"dashboard.persona.paused": "En pause",
+	"dashboard.persona.never": "Jamais activé",
+	"dashboard.persona.on": "Sur {networks}",
+	"dashboard.persona.nowhere": "Sur aucun réseau",
+	"dashboard.persona.pause": "Mettre en pause",
+	"dashboard.persona.activate": "Activer",
+	"dashboard.persona.working": "Enregistrement…",
+	"dashboard.persona.pausedMeaning": "Un agent en pause ne reçoit plus rien. Il continue de tourner et reste supervisé : il est privé d’événements, pas arrêté.",
+	"dashboard.persona.noRuntime": "Aucun moteur d’agents n’est encore déployé ici : un agent actif ne produit donc rien aujourd’hui. Votre décision est enregistrée et publiée, et le moteur la respectera dès son démarrage.",
+	"dashboard.persona.failed": "La décision a été refusée ({error}). Rien n’a changé.",
+
+	"dashboard.messages.title": "Messages transportés",
+	"dashboard.messages.unknown": "Non comptés sur ce déploiement.",
+	"dashboard.messages.count": "{count, plural, one {# message} other {# messages}}",
+
+	"dashboard.feed.title": "Activité récente",
+	"dashboard.feed.empty": "Il ne s’est encore rien passé.",
+	"dashboard.feed.privacy": "Événements techniques uniquement : passerelles, consentement et agents, plus un décompte. Twalk ne garde pas la liste de qui vous écrit : cet écran ne peut donc pas l’afficher.",
+	"dashboard.feed.bridge.connected": "{network} a été connecté",
+	"dashboard.feed.bridge.connecting": "{network} est en cours de connexion",
+	"dashboard.feed.bridge.expired": "La session {network} a expiré",
+	"dashboard.feed.bridge.failed": "Une connexion {network} a échoué",
+	"dashboard.feed.bridge.never": "{network} n’a pas été connecté",
+	"dashboard.feed.persona.activated": "{persona} a été activé sur {network}",
+	"dashboard.feed.persona.paused": "{persona} a été mis en pause sur {network}",
+	"dashboard.feed.consent.network": "Le réglage par défaut de {network} est passé à {state}",
+	"dashboard.feed.consent.contact": "Le consentement d’un contact sur {network} est passé à {state}",
+	"dashboard.feed.device.signedIn": "{device} s’est connecté",
+	"dashboard.feed.device.revoked": "{device} a été révoqué",
+
+	"dashboard.devices.title": "Vos appareils",
+	"dashboard.devices.current": "Cet appareil",
+	"dashboard.devices.revokedOn": "Révoqué {when}",
+	"dashboard.devices.lastSeen": "Vu {when}",
+	"dashboard.devices.revoke": "Révoquer",
+	"dashboard.devices.revoking": "Révocation…",
+	"dashboard.devices.confirmCurrent": "C’est l’appareil que vous utilisez. Le révoquer vous déconnectera ici. Continuer ?",
+	"dashboard.devices.failed": "Cet appareil n’a pas pu être révoqué ({error}).",
+	"dashboard.devices.none": "Aucun appareil ne s’est encore connecté.",
+
+	"dashboard.messagr.title": "Associer à Messagr",
+	"dashboard.messagr.body": "Messagr est l’interface de messagerie de LINAGORA. L’association du Companion avec Messagr n’est pas disponible dans cette version.",
+
+	"dashboard.addNetwork": "Ajouter un réseau",
+
+	"dashboard.activateAgent": "Activer votre assistant",
+
+	"dashboard.version": "Version du déploiement {version}",
+
+	"networks.toAssistant": "Passer à votre assistant"
 }

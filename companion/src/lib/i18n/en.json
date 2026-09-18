@@ -357,5 +357,139 @@
 	"tabs.title": "Twalk is open in another tab",
 	"tabs.body": "Twalk keeps your encryption keys in one place, and two tabs writing to it at once would damage them. Go back to the other tab, or take over here.",
 	"tabs.takeOver": "Use this tab instead",
-	"tabs.waiting": "Taking over…"
+	"tabs.waiting": "Taking over…",
+
+	"persona.assistant.name": "Assistant",
+	"persona.assistant.description": "Your assistant reads the messages arriving on the networks you connected, and suggests replies for you to review. It never sends anything without your approval.",
+
+	"persona.ability.read.label": "Read incoming messages",
+	"persona.ability.read.detail": "On the networks you choose below, and on no others.",
+	"persona.ability.read.locked": "Always on: an assistant that reads nothing has nothing to suggest.",
+	"persona.ability.suggest.label": "Suggest replies for your review",
+	"persona.ability.suggest.detail": "A suggestion waits for you. Nothing leaves your deployment until you approve it.",
+	"persona.ability.suggest.locked": "Always on: reading and suggesting are one decision in this version — the assistant is active, or it is paused.",
+
+	"persona.title": "Activate your first agent",
+
+	"persona.step": "Step 2 of 3",
+
+	"persona.back": "Back to networks",
+
+	"persona.scope.title": "What it may read",
+	"persona.scope.intro": "The assistant is activated on exactly the networks you tick here. Connecting another network later leaves it inactive there until you say otherwise.",
+	"persona.scope.proven": "Connected",
+	"persona.scope.matrixHint": "Your Twalk deployment keeps no record of the rooms you invited the Sensor into — the access token that did it was forgotten as soon as the invitation was sent. Tick this if you connected your existing Matrix account.",
+	"persona.scope.none": "No network is connected yet. Connect one first, and the assistant will have something to read.",
+	"persona.scope.connectFirst": "Connect a network",
+
+	"persona.consent.title": "Who the assistant may read, by default",
+	"persona.consent.body": "Every contact starts at pending. The assistant reads nothing from someone until you decide about them, and there is no rule that grants anyone automatically — this version imports no address book.",
+
+	"persona.removed.title": "Two settings the wireframe had, and this screen does not",
+	"persona.removed.autoSend": "Auto-sending approved replies. It is the one thing in Twalk that would let an agent send without you, so it is not a toggle in an onboarding flow.",
+	"persona.removed.hours": "Active hours. A time window is a rule to be enforced and audited at runtime; a cosmetic control here would suggest a protection that does not exist.",
+
+	"persona.runtime.title": "What happens after you activate it",
+	"persona.runtime.body": "The decision is recorded and published on your bus, where the agent runtime will read it. That runtime is not deployed yet, so the assistant will produce no suggestions today — activating it now means it starts from the networks you chose, and from nothing else, on the day it runs.",
+
+	"persona.pause.meaning": "Pausing an assistant means it receives nothing. It keeps running and stays supervised — it is starved, not stopped.",
+
+	"persona.activate": "Activate the assistant",
+
+	"persona.activating": "Waking up the assistant…",
+
+	"persona.activated.title": "Your assistant is now watching {networks}.",
+	"persona.activated.body": "It is activated on those networks and on no others.",
+	"persona.activated.continue": "Go to my dashboard",
+
+	"persona.error.noNetworks": "Tick at least one network: an assistant with no perimeter is not a decision the deployment can record.",
+	"persona.error.refused": "Your deployment refused the decision ({error}). Nothing was recorded.",
+	"persona.error.unreachable": "Your deployment could not be reached. Nothing was recorded — try again.",
+
+	"persona.skip": "Skip for now",
+
+	"dashboard.title": "Your Twalk",
+
+	"dashboard.refresh": "Refresh",
+
+	"dashboard.refreshing": "Refreshing…",
+
+	"dashboard.unreachable": "Your deployment could not be reached. What you see below is the last answer it gave.",
+
+	"dashboard.health.ok": "All systems operational",
+	"dashboard.health.attention": "Something needs you",
+	"dashboard.health.setup": "Almost there",
+	"dashboard.health.setupDetail": "Connect a network and activate your assistant to finish setting Twalk up.",
+
+	"dashboard.banner.expired.title": "Your {network} session expired.",
+	"dashboard.banner.expired.body": "Reconnect to keep receiving messages from it.",
+	"dashboard.banner.expired.cta": "Reconnect",
+
+	"dashboard.chip.pending": "{count, plural, one {# consent decision waiting for you} other {# consent decisions waiting for you}}",
+
+	"dashboard.bridges.title": "Networks",
+	"dashboard.bridges.none": "No bridge is configured on this deployment.",
+	"dashboard.bridges.note": "These read the last login each bridge holds, which is not a heartbeat: live bridge state and the time of the last message are not reported by this deployment yet.",
+
+	"dashboard.bridge.state.connected": "Connected",
+	"dashboard.bridge.state.connecting": "Connecting…",
+	"dashboard.bridge.state.expired": "Session expired",
+	"dashboard.bridge.state.failed": "Login failed",
+	"dashboard.bridge.state.never": "Not connected",
+	"dashboard.bridge.lastMessage.unknown": "Last message: not reported yet",
+	"dashboard.bridge.manage": "Manage {network}",
+
+	"dashboard.personas.title": "Agents",
+
+	"dashboard.persona.active": "Active",
+	"dashboard.persona.paused": "Paused",
+	"dashboard.persona.never": "Never activated",
+	"dashboard.persona.on": "On {networks}",
+	"dashboard.persona.nowhere": "On no network",
+	"dashboard.persona.pause": "Pause",
+	"dashboard.persona.activate": "Activate",
+	"dashboard.persona.working": "Recording…",
+	"dashboard.persona.pausedMeaning": "A paused agent receives nothing. It keeps running and stays supervised — it is starved, not stopped.",
+	"dashboard.persona.noRuntime": "No agent runtime is deployed here yet, so an active agent produces nothing today. Your decision is recorded and published, and the runtime honours it from the day it starts.",
+	"dashboard.persona.failed": "The decision was refused ({error}). Nothing changed.",
+
+	"dashboard.messages.title": "Messages carried",
+	"dashboard.messages.unknown": "Not counted on this deployment.",
+	"dashboard.messages.count": "{count, plural, one {# message} other {# messages}}",
+
+	"dashboard.feed.title": "Recent activity",
+	"dashboard.feed.empty": "Nothing has happened yet.",
+	"dashboard.feed.privacy": "Operational events only: bridges, consent and agents, plus a count. Twalk does not keep a list of who writes to you, so this screen cannot show one.",
+	"dashboard.feed.bridge.connected": "{network} was connected",
+	"dashboard.feed.bridge.connecting": "{network} is being connected",
+	"dashboard.feed.bridge.expired": "The {network} session expired",
+	"dashboard.feed.bridge.failed": "A {network} login failed",
+	"dashboard.feed.bridge.never": "{network} was not connected",
+	"dashboard.feed.persona.activated": "{persona} was activated on {network}",
+	"dashboard.feed.persona.paused": "{persona} was paused on {network}",
+	"dashboard.feed.consent.network": "The {network} default became {state}",
+	"dashboard.feed.consent.contact": "A contact's consent on {network} became {state}",
+	"dashboard.feed.device.signedIn": "{device} signed in",
+	"dashboard.feed.device.revoked": "{device} was revoked",
+
+	"dashboard.devices.title": "Your devices",
+	"dashboard.devices.current": "This device",
+	"dashboard.devices.revokedOn": "Revoked {when}",
+	"dashboard.devices.lastSeen": "Last seen {when}",
+	"dashboard.devices.revoke": "Revoke",
+	"dashboard.devices.revoking": "Revoking…",
+	"dashboard.devices.confirmCurrent": "This is the device you are using. Revoking it signs you out here. Continue?",
+	"dashboard.devices.failed": "That device could not be revoked ({error}).",
+	"dashboard.devices.none": "No device has signed in yet.",
+
+	"dashboard.messagr.title": "Pair with Messagr",
+	"dashboard.messagr.body": "Messagr is LINAGORA's messaging interface. Pairing the Companion with it is not available in this version.",
+
+	"dashboard.addNetwork": "Add another network",
+
+	"dashboard.activateAgent": "Activate your assistant",
+
+	"dashboard.version": "Deployment version {version}",
+
+	"networks.toAssistant": "Continue to your assistant"
 }

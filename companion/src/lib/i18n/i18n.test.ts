@@ -63,7 +63,17 @@ describe('the catalogues', () => {
 			sensor: '@sensor:example.com',
 			user: '@you:example.com',
 			names: '__Secure-1PSID, __Secure-1PSIDTS',
-			emoji: '🐢'
+			emoji: '🐢',
+			// Screens 4 and 5 (ticket #69). `networks` is a list the screen has
+			// already joined, `state` a consent state, `when` a formatted
+			// relative time — never a contact, which is the whole point of the
+			// dashboard's feed.
+			networks: 'WhatsApp, Signal',
+			persona: 'assistant',
+			state: 'granted',
+			when: '2 minutes ago',
+			error: 'consent_store_unavailable',
+			version: '0.1.0'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();
