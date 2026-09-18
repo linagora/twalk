@@ -70,6 +70,23 @@ const NOT_REFRESHABLE = new Set(['/api/session/refresh']);
  */
 const originals = new Map<string, Request>();
 
+/**
+ * Whether a `401` is about this origin's own session.
+ *
+ * Read from a clone, so the caller still gets an unread body. A `401` with no
+ * readable error code is treated as an expiry, which is the conservative
+ * reading: refreshing a session that did not need it costs one request.
+ */
+async function looksUnauthenticated(response: Response): Promise<boolean> {
+	try {
+		const body: unknown = await response.clone().json();
+		const code = (body as { error?: unknown })?.error;
+		return typeof code !== 'string' || code === 'unauthenticated';
+	} catch {
+		return true;
+	}
+}
+
 const repairUnauthenticated: Middleware = {
 	onRequest({ request, id }) {
 		originals.set(id, request.clone());
@@ -89,6 +106,18 @@ const repairUnauthenticated: Middleware = {
 			return;
 		}
 		if (sessionStatus().kind === 'signed-out') {
+			return;
+		}
+		// A `401` whose error code says something other than "your session is
+		// not good" is not this middleware's business. The Gateway used to
+		// answer `401 matrix_token_rejected` when a *homeserver* refused a
+		// Matrix token carried in a request body — a credential for another
+		// server entirely — and this handler dutifully refreshed a healthy
+		// session, replayed, failed again, and reported an expiry that had not
+		// happened (#141). That status is a `400` now, and this guard is here
+		// so the next endpoint to make the same mistake costs a confusing
+		// message rather than a loop.
+		if (!(await looksUnauthenticated(response))) {
 			return;
 		}
 		if (original === undefined || !(await refreshSession())) {

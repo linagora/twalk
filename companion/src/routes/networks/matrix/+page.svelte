@@ -269,7 +269,17 @@
 		});
 		if (answer.error !== undefined) {
 			stage = 'rooms';
-			problem = $t('matrix.error.invite');
+			// The homeserver refused the Matrix token. Two causes, and the
+			// user can act on both: the Matrix session expired, or — the one
+			// found live — this account is on a homeserver that is not this
+			// deployment's, which it cannot invite the Sensor into at all
+			// (#138). Saying "the invitation failed" for either was true and
+			// useless.
+			const code = (answer.error as { error?: string } | undefined)?.error;
+			problem =
+				code === 'matrix_token_rejected'
+					? $t('matrix.error.tokenRejected')
+					: $t('matrix.error.invite');
 			return;
 		}
 		outcomes = answer.data.rooms;

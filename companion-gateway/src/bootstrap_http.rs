@@ -345,8 +345,16 @@ async fn invite_sensor(State(gateway): State<Gateway>, body: Bytes) -> Response 
                 InvitationRefusal::NotConfigured => invitation_not_configured(),
                 InvitationRefusal::TokenRejected => {
                     warn!("the homeserver rejected the Matrix access token sent with an invitation request");
+                    // `400`, not `401`. A `401` from this origin means "your
+                    // credentials *to me* are not good", and a client is
+                    // entitled to read it as an expired session and repair it
+                    // by refreshing — which the Companion's central handler
+                    // does, so a rejected third-party token sent it refreshing
+                    // a session that was never the problem, twice per click
+                    // (#141). What was refused is a credential the caller put
+                    // in the request body, for a different server.
                     refused(
-                        StatusCode::UNAUTHORIZED,
+                        StatusCode::BAD_REQUEST,
                         "matrix_token_rejected",
                         Some(
                             "the homeserver does not accept this Matrix access token: nothing was \
