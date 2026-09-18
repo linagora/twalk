@@ -127,6 +127,33 @@ impl Outbox {
         Ok(committed)
     }
 
+    /// Records one bridge state change and wakes the publication loop
+    /// (ticket #56).
+    ///
+    /// The same three steps as a decision, for the same reason: commit,
+    /// publish, mark published. A bridge transition is not an audit trail,
+    /// but it is a fact the dashboard is about to be told, and a crash
+    /// between the commit and the publication must republish rather than
+    /// lose it — the contract's deterministic id makes the bus absorb the
+    /// duplicate.
+    ///
+    /// This is deliberately the *same* outbox: one loop, one connection, one
+    /// set of exactly-once rules. See [`crate::bridge_status`] for why the
+    /// Gateway is the only producer of these events.
+    pub fn record_bridge_status(
+        &self,
+        transition: &crate::bridge_status::Transition,
+    ) -> Result<crate::store::BridgeStatusCommitted> {
+        let at = consent::rfc3339_millis((self.now)());
+        let committed = self
+            .store
+            .record_bridge_status(transition, &self.domain, &at)
+            .context("failed to record the bridge status change")?;
+        self.observe_pending();
+        self.awake.notify_one();
+        Ok(committed)
+    }
+
     /// Republishes the outbox gauge from the store. Cheap (one indexed
     /// count), and it keeps the number an operator scrapes honest whoever
     /// moved the outbox.
@@ -134,6 +161,10 @@ impl Outbox {
         match self.store.unpublished_count() {
             Ok(pending) => self.metrics.set_consent_outbox_pending(pending),
             Err(error) => warn!(%error, "failed to count the consent outbox"),
+        }
+        match self.store.unpublished_bridge_status_count() {
+            Ok(pending) => self.metrics.set_bridge_status_outbox_pending(pending),
+            Err(error) => warn!(%error, "failed to count the bridge status outbox"),
         }
     }
 }
@@ -162,7 +193,13 @@ pub async fn publish_until_shutdown(outbox: Arc<Outbox>, nats_url: String) {
     };
     let jetstream = async_nats::jetstream::new(client);
     let subject = consent::bus_subject(consent::CONSENT_CHANGED_TYPE);
-    info!(%nats_url, %subject, "the consent outbox is publishing");
+    let bridge_subject = consent::bus_subject(crate::bridge_status::BRIDGE_STATUS_CHANGED_TYPE);
+    info!(
+        %nats_url,
+        %subject,
+        %bridge_subject,
+        "the gateway outbox is publishing"
+    );
     let mut stream_ready = false;
     loop {
         if !stream_ready {
@@ -194,6 +231,14 @@ pub async fn publish_until_shutdown(outbox: Arc<Outbox>, nats_url: String) {
                 // Not fatal and not lost: the rows are still unpublished and
                 // the next sweep tries again.
                 warn!(%error, "the consent outbox could not drain; retrying");
+            }
+            // The bridge transitions ride the same loop and the same
+            // connection (ticket #56). Drained after the decisions and in
+            // their own call, so a bus that refuses one kind still delivers
+            // the other — a bridge outage must not stall a consent decision,
+            // and the reverse would be just as wrong.
+            if let Err(error) = drain_bridge_status(&outbox, &jetstream, &bridge_subject).await {
+                warn!(%error, "the bridge status outbox could not drain; retrying");
             }
         }
         tokio::select! {
@@ -249,6 +294,61 @@ async fn drain(
             stream_sequence = ack.sequence,
             duplicate = ack.duplicate,
             "published a consent decision"
+        );
+    }
+    outbox.observe_pending();
+    Ok(())
+}
+
+/// Publishes every waiting bridge transition, oldest first (ticket #56).
+///
+/// The same shape as [`drain`], with one difference worth naming: a bridge
+/// transition has no snapshot to be consistent with, so the stream sequence
+/// it records is bookkeeping an operator can read and nothing depends on it.
+/// What it shares is the part that matters — the `Nats-Msg-Id` header, which
+/// is the contract's deterministic id, so a row republished after a crash
+/// between the publish and the mark is absorbed by the bus instead of
+/// becoming a second state change on somebody's dashboard.
+async fn drain_bridge_status(
+    outbox: &Arc<Outbox>,
+    jetstream: &async_nats::jetstream::Context,
+    subject: &str,
+) -> Result<()> {
+    let waiting = outbox.store.unpublished_bridge_status(DRAIN_BATCH)?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    for change in waiting {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(
+            async_nats::header::NATS_MESSAGE_ID,
+            change.event_id.as_str(),
+        );
+        let payload = serde_json::to_vec(&change.envelope)?;
+        let ack = jetstream
+            .publish_with_headers(subject.to_owned(), headers, payload.into())
+            .await
+            .with_context(|| {
+                format!("failed to publish bridge status change {}", change.sequence)
+            })?;
+        let ack = ack.await.with_context(|| {
+            format!(
+                "the bus did not ack bridge status change {}",
+                change.sequence
+            )
+        })?;
+        outbox.store.mark_bridge_status_published(
+            change.sequence,
+            &consent::rfc3339_millis((outbox.now)()),
+            ack.sequence,
+        )?;
+        outbox.metrics.record_bridge_status_published();
+        info!(
+            event_id = %change.event_id,
+            sequence = change.sequence,
+            stream_sequence = ack.sequence,
+            duplicate = ack.duplicate,
+            "published a bridge status change"
         );
     }
     outbox.observe_pending();

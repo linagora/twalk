@@ -282,9 +282,25 @@ services:
       # The network the user experiences, which is what the Companion labels
       # the screen with — never the bridge's name (CONTEXT.md).
       GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_NETWORK: whatsapp
+      # Bridge status (ticket #56): the same value as that bridge's own
+      # appservice.as_token, which is what it authenticates its status pushes
+      # with. The Gateway holds it to VERIFY those pushes and for nothing
+      # else — it never acts as the appservice. Unset, that bridge's webhook
+      # is refused rather than trusted: every container on this network can
+      # reach the Gateway's port, so the network is not a credential
+      # (docs/architecture/security-model.md).
+      GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_AS_TOKEN: ${WHATSAPP_AS_TOKEN:-}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL: ${GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL:-http://bridge-signal:29328}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_NETWORK: signal
+      GATEWAY_BRIDGE_MAUTRIX_SIGNAL_AS_TOKEN: ${SIGNAL_AS_TOKEN:-}
+      # The bridge_id each one's events carry, and the segment of its status
+      # webhook's URL. Left to the Gateway's own default here — the instance
+      # id with `mautrix-` stripped under a `bridge-` prefix — which is
+      # exactly what WHATSAPP_STATUS_ENDPOINT and SIGNAL_STATUS_ENDPOINT in
+      # .env.example already point at. Set GATEWAY_BRIDGE_<ID>_STATUS_ID only
+      # to name one yourself, and change the endpoint with it: it is the
+      # identity third parties read off the bus, so it must not move.
       # The consent snapshot (ticket #50): the token a consumer reads
       # GET /api/consent/snapshot with — the whole consent state and the bus
       # sequence it reflects, which is how a component with a cold cache

@@ -46,6 +46,12 @@ use serde_json::{json, Value};
 /// bridge answers `M_FORBIDDEN` to the whole provisioning API.
 pub const STUB_PROVISIONING_SECRET: &str = "test-only-stub-bridge-provisioning-secret";
 
+/// The appservice token the stub bridge authenticates its **status pushes**
+/// with (ticket #56), and the one the Gateway is configured with for it.
+/// A throwaway constant for the local test stack; in a deployment this is
+/// `openssl rand -hex 32` and impersonates the appservice.
+pub const STUB_AS_TOKEN: &str = "test-only-stub-bridge-as-token-0123456789abcdef";
+
 /// The flow ids the stub offers.
 pub const QR_FLOW: &str = "qr";
 pub const PHONE_FLOW: &str = "phone";
@@ -250,6 +256,36 @@ impl StubBridge {
                 "name": name,
                 "profile": { "id": login_id, "name": name },
             }));
+    }
+
+    /// Gives a login the `state` a real bridge reports under `whoami`
+    /// (ticket #56): the same `BridgeState` document the status webhook
+    /// carries, nested under the login. This is what startup reconciliation
+    /// reads, and it is the only thing `whoami` says about health.
+    ///
+    /// A login with no `state` at all is a bridge that has just restarted —
+    /// its state lives in memory — and the stub leaves one that way until a
+    /// test says otherwise.
+    pub fn set_login_state(&self, login_id: &str, state: Value) {
+        let mut inner = self.state.inner.lock().expect("the stub is not poisoned");
+        if let Some(login) = inner
+            .logins
+            .iter_mut()
+            .find(|login| login["id"] == json!(login_id))
+        {
+            login["state"] = state;
+        }
+    }
+
+    /// Forgets every login: what a `whoami` on a bridge nobody has logged in
+    /// to answers, and what a logout leaves behind.
+    pub fn clear_logins(&self) {
+        self.state
+            .inner
+            .lock()
+            .expect("the stub is not poisoned")
+            .logins
+            .clear();
     }
 
     /// How many times a held blocking request has arrived: the count that

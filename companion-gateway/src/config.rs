@@ -94,7 +94,17 @@ pub struct Config {
 ///   (`whatsapp`, `signal`, `sms`). Defaults to the id with a `mautrix-`
 ///   prefix stripped, which is right for the reference deployment and wrong
 ///   for `mautrix-gmessages`, whose network is `sms` (CONTEXT.md) — so that
-///   one sets it.
+///   one sets it. It has to be one of the contract's networks, because it is
+///   what `bridge.status.changed` carries (ticket #56).
+/// - `GATEWAY_BRIDGE_<ID>_AS_TOKEN` — the same value as that bridge's own
+///   `appservice.as_token`, which is what the bridge authenticates its
+///   status pushes with (ticket #56). Unset: that bridge's webhook is
+///   **refused**, because an unverified push is not accepted — see
+///   [`crate::bridge_status`].
+/// - `GATEWAY_BRIDGE_<ID>_STATUS_ID` — the `bridge_id` this instance's
+///   events carry, and the segment of its webhook URL. Defaults to
+///   [`default_status_bridge_id`], which is what the reference deployment
+///   already points its bridges at, so a deployment normally sets nothing.
 ///
 /// A bridge that is named and then left without a URL or a secret is a
 /// startup error naming the variable: a facade that silently has no bridge
@@ -130,14 +140,57 @@ pub fn bridges_from_env() -> Result<Vec<crate::bridge::BridgeConfig>> {
                 .unwrap_or(bridge_id)
                 .to_owned()
         });
+        let status_bridge_id = env(&format!("GATEWAY_BRIDGE_{slug}_STATUS_ID"))
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|| default_status_bridge_id(bridge_id));
         bridges.push(crate::bridge::BridgeConfig {
             bridge_id: bridge_id.to_owned(),
+            status_bridge_id,
             network,
             base_url,
             provisioning_secret,
+            as_token: env(&format!("GATEWAY_BRIDGE_{slug}_AS_TOKEN"))
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
         });
     }
     Ok(bridges)
+}
+
+/// The contract's `bridge_id` for an instance the operator has not named one
+/// for: the instance id with a `mautrix-` prefix stripped, lower-cased,
+/// anything outside `[a-z0-9-]` folded to `-`, under a `bridge-` prefix.
+///
+/// Deterministic, so it is stable across restarts — the property the
+/// contract needs from a `bridge_id` — and it is the id the reference
+/// deployment's `.env.example` already points each bridge's
+/// `status_endpoint` at, so a working deployment sets nothing.
+///
+/// ```
+/// # use twalk_companion_gateway::config::default_status_bridge_id;
+/// assert_eq!(default_status_bridge_id("mautrix-whatsapp"), "bridge-whatsapp");
+/// assert_eq!(default_status_bridge_id("mautrix-signal"), "bridge-signal");
+/// // An id that is already the contract's is kept as it is.
+/// assert_eq!(default_status_bridge_id("bridge-sms-android-1"), "bridge-sms-android-1");
+/// assert_eq!(default_status_bridge_id("WhatsApp_2"), "bridge-whatsapp-2");
+/// ```
+pub fn default_status_bridge_id(bridge_id: &str) -> String {
+    let slug: String = bridge_id
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.strip_prefix("mautrix-").unwrap_or(&slug);
+    match slug.strip_prefix("bridge-") {
+        Some(_) => slug.to_owned(),
+        None => format!("bridge-{slug}"),
+    }
 }
 
 /// The variable-name half of a `bridge_id`: upper case, and every character

@@ -107,6 +107,31 @@ The whole surface, with every status and every error code, is in `openapi.yaml`.
 
 **What the tests do not prove.** A real mautrix bridge needs a live WhatsApp or Signal account and a human with a phone, so it is never in the suite. `tests/bridges.rs` runs against a **stub bridge** implementing the provisioning contract (`tests/harness/stub_bridge.rs`), whose blocking step the test releases on command: a full login, a refresh mid-flow, a cancellation, the concurrent-login refusal, a login lost when the bridge restarts, and that no credential reaches the store or the logs. The facade's *network* side is therefore not proven by tests — an accepted limitation of spec #47, stated rather than discovered.
 
+## Bridge health: the status webhook (ticket #56)
+
+The other half of the facade, and the sole producer of `bridge.status.changed.v1` on the bus. Mautrix offers exactly **one** push channel — each bridge's `homeserver.status_endpoint` — and this is its other end.
+
+- **The webhook is the channel.** A bridge POSTs its `BridgeState` to `POST /_twalk/bridges/{bridge_id}/status`. It is outside `/api/` because its caller is a bridge and not a browser, and it is the one route on this origin that a device token does not open.
+- **The push is verified, never trusted.** The credential is that bridge's own `as_token` (`GATEWAY_BRIDGE_<ID>_AS_TOKEN`), as `Authorization: Bearer`. Trusting the compose network was explicitly refused: every container on it can reach this port, and a forged push could tell the user a dead session was healthy. A bridge the Gateway holds no token for is refused with `as_token_not_configured`, not accepted. The requirement is declared in the guard's own table (`session_http::requirement`, `Requirement::BridgeToken`), so the authentication policy stays one function with no hole in it.
+- **Startup reconciles, it does not poll.** `GET /_matrix/provision/v3/whoami` runs once per bridge at startup, so a Gateway that restarts does not carry a stale `connected` forward. It is not a heartbeat: a bridge's state lives in the bridge's memory, is empty right after a bridge restart and carries no "last connected" field, so polling would miss every transition between two reads. A bridge that cannot be reached keeps its last known state and logs why — in a compose stack everything starts at once, and "I could not ask" must not become "it is down".
+- **Management-room notices are not parsed.** The default `bridge_status_notices` setting suppresses a logout entirely, and what it does emit is human markdown.
+- **The mapping table is the Gateway's** (`src/bridge_status.rs`):
+
+  | mautrix `state_event` | contract state |
+  | --- | --- |
+  | `BAD_CREDENTIALS` | `session_expired` |
+  | `TRANSIENT_DISCONNECT` | `degraded` |
+  | `CONNECTING`, `BACKFILLING` | `starting` |
+  | `CONNECTED` | `connected` |
+  | `UNKNOWN_ERROR`, `LOGGED_OUT`, anything else | `disconnected` |
+
+  The first row is the one the ticket turns on: a session revoked from the user's own phone reports **`BAD_CREDENTIALS`**, and no mautrix bridge emits `LOGGED_OUT` at all. The bridge's own `message` becomes `reason` (its `error` code when there is no message), its `timestamp` becomes `occurred_at`, and `last_message_at` is filled when a bridge puts one in `info` — none does today.
+- **Only transitions are published.** The reported state is compared with the one the store holds; an identical state records nothing and publishes nothing, which is what a bridge's periodic re-push and its own retries are. A bridge nobody has heard from counts as `disconnected` — the honest prior, and what the first event's `from_state` says.
+- **The same outbox as consent.** A transition is committed to `bridge_status_change` and published by #49's loop, with the contract's deterministic id as `Nats-Msg-Id`. One publisher, one set of exactly-once rules. The store is also what makes de-duplication survive a restart: `from_state` after a restart is the state the bridge was really in.
+- **`bridge_id` is the contract's, not the instance's.** Events carry `^bridge-[a-z0-9-]+$` (`bridge-whatsapp`), which is also the segment of the webhook's URL; `/api/bridges` keeps speaking the instance id an operator configured (`mautrix-whatsapp`). The first is the identity third parties read off the bus, so it must be stable across restarts; the second names the software. `GATEWAY_BRIDGE_<ID>_STATUS_ID` sets it, and its default is the instance id with `mautrix-` stripped under a `bridge-` prefix — which is what the reference deployment already points each bridge at.
+
+`tests/bridge_status.rs` drives all of it against the stub bridge: every mautrix state through the mapping table, a repeated state producing no second event, a startup reconciliation that publishes what `whoami` reports and one that agrees and says nothing, and a push refused with no token, with the wrong one, with a device cookie, and for a bridge with no token configured. A real mautrix bridge is not in the suite, for the same reason as above.
+
 ## Consent
 
 The Gateway is the single writer of consent state, and its own store is the record of truth — the bus is the audit trail, not the memory (ADR 0010).
@@ -211,7 +236,9 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_BRIDGES` | *unset* | The bridge instances this deployment can log in to, by `bridge_id`, comma-separated and in the order the Companion offers them (`mautrix-whatsapp,mautrix-signal`). Unset: `GET /api/bridges` answers an empty list. |
 | `GATEWAY_BRIDGE_<ID>_URL` | *required per bridge* | That bridge's appservice listener, where its provisioning API is — e.g. `http://bridge-whatsapp:29318`. `<ID>` is the `bridge_id` upper-cased with every non-alphanumeric character as `_`. |
 | `GATEWAY_BRIDGE_<ID>_PROVISIONING_SECRET` | *required per bridge* | The same value as that bridge's `provisioning.shared_secret`. It drives logins and logouts on the user's account. |
-| `GATEWAY_BRIDGE_<ID>_NETWORK` | the id without `mautrix-` | The network the user experiences (`whatsapp`, `signal`, `sms`) — what the Companion labels the screen with. `mautrix-gmessages` sets it, because its network is `sms`. |
+| `GATEWAY_BRIDGE_<ID>_NETWORK` | the id without `mautrix-` | The network the user experiences (`whatsapp`, `signal`, `sms`) — what the Companion labels the screen with. `mautrix-gmessages` sets it, because its network is `sms`. It must be one of the contract's networks: it is what `bridge.status.changed` carries, so the Gateway refuses to start with anything else. |
+| `GATEWAY_BRIDGE_<ID>_AS_TOKEN` | *unset* | The same value as that bridge's `appservice.as_token`, which is what it authenticates its status pushes with. The Gateway uses it to **verify** a push and for nothing else. Unset: that bridge's webhook answers `503 as_token_not_configured` — an unverified push is refused, never trusted. |
+| `GATEWAY_BRIDGE_<ID>_STATUS_ID` | the id without `mautrix-`, under `bridge-` | The `bridge_id` this instance's events carry (`^bridge-[a-z0-9-]+$`) and the segment of its status webhook's URL. It is an identity third parties read off the bus, so it is stable across restarts. |
 
 SIGTERM (or SIGINT) drains in-flight requests, then exits `0`.
 
@@ -228,6 +255,7 @@ cargo test --test consent     # consent against the shared test stack's Synapse 
 cargo test --test bootstrap   # the registration relay and the Sensor's invitation, same stack
 cargo test --test consent_snapshot  # the snapshot, and the hand-off to the bus
 cargo test --test bridges     # the bridge login facade against a stub bridge
+cargo test --test bridge_status  # the status webhook, the mapping table and the reconciliation
 cargo test --test openapi     # the description against the running binary
 ```
 

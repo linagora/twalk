@@ -18,7 +18,13 @@
 //!   to set `GATEWAY_REGISTRATION_SHARED_SECRET` at all — see
 //!   [`crate::bootstrap`];
 //! - the consent snapshot (ticket #50), which takes a service token — the
-//!   Sensor is not a device and has no OpenID token to sign in with.
+//!   Sensor is not a device and has no OpenID token to sign in with;
+//! - the bridge status webhook (ticket #56), which takes the calling
+//!   bridge's own `as_token` — a mautrix bridge has no browser, no device
+//!   and no OpenID token either. It is the one guarded path outside `/api/`,
+//!   under the reserved `/_twalk/` prefix, and it is in this table precisely
+//!   so that it is not a hole nobody wrote down. See
+//!   [`crate::bridge_status_http`].
 //!
 //! Note what is *not* in that table: the Sensor's invitation
 //! (`POST /api/bootstrap/rooms`, ticket #53) takes a device token like
@@ -88,11 +94,26 @@ pub enum Requirement {
     /// guard authenticates nothing here and injects no device identity, so a
     /// device cookie grants no access to such a route.
     ServiceToken,
+    /// The calling bridge's own `as_token`, which the route's handler
+    /// verifies — the status webhook (#56), whose caller is a mautrix bridge
+    /// and not a browser. As above, the guard authenticates nothing and
+    /// injects no device identity: a device token opens no webhook, and an
+    /// `as_token` opens nothing else.
+    BridgeToken,
 }
 
 /// What the request at this method and path must carry. The whole
 /// authentication policy of the Gateway's API is this function.
 pub fn requirement(method: &Method, path: &str) -> Requirement {
+    // The bridge status webhook (ticket #56). It is the one route this
+    // Gateway serves that a *bridge* calls, so it can carry no device token
+    // — but it is written down here rather than left outside the policy,
+    // because a route nobody declared is how a hole gets made. Anything else
+    // under the reserved `/_twalk/` prefix falls through to the default
+    // below and is closed.
+    if crate::bridge_status::webhook_bridge_id(path).is_some() && method == Method::POST {
+        return Requirement::BridgeToken;
+    }
     match (method, path) {
         (&Method::POST, "/api/session") => Requirement::Open,
         (&Method::POST, "/api/session/refresh") => Requirement::RefreshToken,
@@ -121,7 +142,16 @@ pub fn routes() -> Router<Gateway> {
 /// logged like any other answer.
 pub async fn guard(State(gateway): State<Gateway>, mut request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    if !path.starts_with("/api/") && path != "/api" {
+    let guarded = path.starts_with("/api/")
+        || path == "/api"
+        // The Gateway's reserved prefix (ticket #56): the bridge status
+        // webhook lives under it, and so the guard runs here too — not to
+        // check a device token, but so that the one route that takes a
+        // different credential is inside the policy instead of beside it.
+        // A mistyped path under this prefix is closed, never served as the
+        // Companion's app shell.
+        || crate::bridge_status::is_reserved_path(path);
+    if !guarded {
         // The Companion's own files, the health endpoint, the metrics
         // endpoint: the origin's public half. The app shell has to load
         // before anyone can sign in.
@@ -134,9 +164,10 @@ pub async fn guard(State(gateway): State<Gateway>, mut request: Request, next: N
         return not_configured();
     };
     match requirement(request.method(), path) {
-        Requirement::Open | Requirement::RefreshToken | Requirement::ServiceToken => {
-            next.run(request).await
-        }
+        Requirement::Open
+        | Requirement::RefreshToken
+        | Requirement::ServiceToken
+        | Requirement::BridgeToken => next.run(request).await,
         Requirement::DeviceToken => {
             let Some(token) = cookie(request.headers(), DEVICE_COOKIE) else {
                 return refused(StatusCode::UNAUTHORIZED, "unauthenticated");

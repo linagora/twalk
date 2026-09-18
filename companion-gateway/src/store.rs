@@ -40,6 +40,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
+use crate::bridge_status::ContractState;
 use crate::consent::{
     Decision, Effective, Network, OldState, Recorded, State, Subject, SubjectType,
 };
@@ -53,7 +54,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 2] = [
+pub const MIGRATIONS: [&str; 3] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -198,6 +199,56 @@ pub const MIGRATIONS: [&str; 2] = [
     )
     WHERE recency = 1;
     "#,
+    // v3 — bridge state changes and their own outbox rows (ticket #56).
+    //
+    // In the same store, and drained by the same publication loop, on
+    // purpose: the outbox is the one mechanism in this service that gets
+    // exactly-once right, and a second publisher would be a second thing to
+    // get it wrong in. What this table is *not* is a second consent journal —
+    // it is operational history, so it carries no append-only trigger and
+    // nothing here is an audit trail of a promise to the user.
+    //
+    // The row is also the memory that makes de-duplication survive a
+    // restart: `from_state` after a Gateway restart is the state the bridge
+    // was really in, not whatever the first push after the restart assumed.
+    r#"
+    CREATE TABLE bridge_status_change (
+        sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- The contract's deterministic id. UNIQUE makes recording the
+        -- identical transition twice idempotent instead of doubling it.
+        event_id        TEXT NOT NULL UNIQUE,
+        -- The contract's bridge_id (^bridge-[a-z0-9-]+$), from configuration.
+        bridge_id       TEXT NOT NULL,
+        network         TEXT NOT NULL CHECK (network IN ('whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix')),
+        from_state      TEXT NOT NULL CHECK (from_state IN ('starting', 'connected', 'degraded', 'disconnected', 'session_expired')),
+        to_state        TEXT NOT NULL CHECK (to_state IN ('starting', 'connected', 'degraded', 'disconnected', 'session_expired')),
+        occurred_at     TEXT NOT NULL,
+        reason          TEXT,
+        last_message_at TEXT,
+        -- The rendered CloudEvent, published verbatim.
+        envelope        TEXT NOT NULL,
+        published_at    TEXT,
+        stream_sequence INTEGER
+    );
+
+    CREATE INDEX bridge_status_change_bridge
+        ON bridge_status_change (bridge_id, sequence);
+    CREATE INDEX bridge_status_change_unpublished
+        ON bridge_status_change (sequence) WHERE published_at IS NULL;
+
+    -- Each bridge's last known state: what a new observation is compared
+    -- with, and the `from_state` of the next transition.
+    CREATE VIEW bridge_status_current AS
+    SELECT bridge_id, network, to_state AS state, occurred_at, reason,
+           last_message_at, sequence
+    FROM (
+        SELECT c.*, ROW_NUMBER() OVER (
+                   PARTITION BY c.bridge_id ORDER BY c.sequence DESC
+               ) AS recency
+        FROM bridge_status_change c
+    )
+    WHERE recency = 1;
+    "#,
 ];
 
 /// The consent store. One connection behind a mutex: a decision is a handful
@@ -232,6 +283,19 @@ pub struct Entry {
     pub state: State,
     pub decided_at: String,
     pub decision_sequence: i64,
+}
+
+/// One bridge transition as committed (ticket #56): where it landed in the
+/// journal, the id the outbox will publish it under, and whether the
+/// identical transition had already been recorded.
+#[derive(Debug, Clone)]
+pub struct BridgeStatusCommitted {
+    pub sequence: i64,
+    pub event_id: String,
+    /// True when this exact transition — same bridge, same state, same
+    /// instant — was already in the store. Nothing was recorded and the id is
+    /// the first one's.
+    pub replayed: bool,
 }
 
 /// A committed decision the outbox has not published yet.
@@ -748,6 +812,160 @@ impl Store {
                 ],
             )
             .with_context(|| format!("failed to mark decision {sequence} published"))?;
+        Ok(())
+    }
+
+    // -- Bridge status (ticket #56) -----------------------------------------
+
+    /// The last state recorded for one bridge, or `None` when nothing has
+    /// ever been recorded for it — which the caller reads as
+    /// [`crate::bridge_status::ContractState::INITIAL`].
+    ///
+    /// This is what makes de-duplication survive a restart: the comparison a
+    /// push is made against comes from the store, not from memory.
+    pub fn bridge_status(&self, bridge_id: &str) -> Result<Option<ContractState>> {
+        let connection = self.connection();
+        let state: Option<String> = connection
+            .query_row(
+                "SELECT state FROM bridge_status_current WHERE bridge_id = ?",
+                [bridge_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to read the bridge's current status")?;
+        match state.as_deref() {
+            Some(state) => Ok(Some(ContractState::parse(state).with_context(|| {
+                format!("the store holds the unknown bridge state {state:?}")
+            })?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Records one bridge transition and its rendered envelope, in one
+    /// statement: the row is durable before anything is published, as a
+    /// consent decision is.
+    ///
+    /// The identical transition arriving twice — the same bridge, the same
+    /// state, the same instant — records nothing and returns the first row's
+    /// id, exactly as a replayed decision does. That is the second line of
+    /// defence behind the state comparison: mautrix retries a push with
+    /// backoff, so the same body genuinely does arrive twice.
+    pub fn record_bridge_status(
+        &self,
+        transition: &crate::bridge_status::Transition,
+        domain: &str,
+        produced_at: &str,
+    ) -> Result<BridgeStatusCommitted> {
+        let event_id = transition.event_id();
+        let envelope = transition.envelope(domain, produced_at);
+        let connection = self.connection();
+        let inserted = connection
+            .execute(
+                "INSERT INTO bridge_status_change \
+                 (event_id, bridge_id, network, from_state, to_state, occurred_at, reason, \
+                  last_message_at, envelope) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (event_id) DO NOTHING",
+                rusqlite::params![
+                    event_id,
+                    transition.bridge_id,
+                    transition.network.as_str(),
+                    transition.from_state.as_str(),
+                    transition.to_state.as_str(),
+                    transition.occurred_at,
+                    transition.reason,
+                    transition.last_message_at,
+                    serde_json::to_string(&envelope)?,
+                ],
+            )
+            .context("failed to record the bridge status change")?;
+        if inserted == 0 {
+            let sequence: i64 = connection
+                .query_row(
+                    "SELECT sequence FROM bridge_status_change WHERE event_id = ?",
+                    [&event_id],
+                    |row| row.get(0),
+                )
+                .context("failed to read the already-recorded bridge status change")?;
+            return Ok(BridgeStatusCommitted {
+                sequence,
+                event_id,
+                replayed: true,
+            });
+        }
+        Ok(BridgeStatusCommitted {
+            sequence: connection.last_insert_rowid(),
+            event_id,
+            replayed: false,
+        })
+    }
+
+    /// The bridge transitions the outbox has not published yet, oldest
+    /// first.
+    pub fn unpublished_bridge_status(&self, limit: usize) -> Result<Vec<Unpublished>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT sequence, event_id, envelope FROM bridge_status_change \
+                 WHERE published_at IS NULL ORDER BY sequence LIMIT ?",
+            )
+            .context("failed to prepare the bridge status outbox query")?;
+        let rows = statement
+            .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .context("failed to read the bridge status outbox")?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (sequence, event_id, envelope) = row.context("failed to read an outbox row")?;
+            pending.push(Unpublished {
+                sequence,
+                event_id,
+                envelope: serde_json::from_str(&envelope).with_context(|| {
+                    format!("bridge status change {sequence} holds an unreadable envelope")
+                })?,
+            });
+        }
+        Ok(pending)
+    }
+
+    /// How many bridge transitions are still waiting for the bus.
+    pub fn unpublished_bridge_status_count(&self) -> Result<u64> {
+        let connection = self.connection();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM bridge_status_change WHERE published_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .context("failed to count the bridge status outbox")?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// Marks a bridge transition published, at the position the bus stored
+    /// it at — the same bookkeeping [`Store::mark_published`] does for a
+    /// decision, and survivable the same way.
+    pub fn mark_bridge_status_published(
+        &self,
+        sequence: i64,
+        published_at: &str,
+        stream_sequence: u64,
+    ) -> Result<()> {
+        self.connection()
+            .execute(
+                "UPDATE bridge_status_change SET published_at = ?1, stream_sequence = ?2 \
+                 WHERE sequence = ?3 AND published_at IS NULL",
+                rusqlite::params![
+                    published_at,
+                    i64::try_from(stream_sequence).unwrap_or(i64::MAX),
+                    sequence
+                ],
+            )
+            .with_context(|| format!("failed to mark bridge status change {sequence} published"))?;
         Ok(())
     }
 
@@ -1360,5 +1578,166 @@ mod tests {
         // And the safe direction it fails in: the consumer starts at the
         // beginning of the stream and applies that decision from the bus.
         assert_eq!(snapshot.stream_sequence, 0);
+    }
+}
+
+#[cfg(test)]
+mod bridge_status_tests {
+    use super::*;
+    use crate::bridge_status::Transition;
+
+    const DOMAIN: &str = "example.com";
+
+    fn store(test_name: &str) -> Store {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "twalk-bridge-status-store-{test_name}-{}-{unique}",
+            std::process::id()
+        ));
+        Store::open(&dir).expect("the store opens")
+    }
+
+    fn transition(from: ContractState, to: ContractState, occurred_at: &str) -> Transition {
+        Transition {
+            bridge_id: "bridge-whatsapp".to_owned(),
+            network: Network::Whatsapp,
+            from_state: from,
+            to_state: to,
+            occurred_at: occurred_at.to_owned(),
+            reason: None,
+            last_message_at: None,
+        }
+    }
+
+    #[test]
+    fn a_bridge_nothing_is_known_about_has_no_recorded_state() {
+        let store = store("unknown");
+        assert_eq!(store.bridge_status("bridge-whatsapp").unwrap(), None);
+    }
+
+    #[test]
+    fn the_last_recorded_transition_is_the_bridges_current_state() {
+        let store = store("current");
+        for (from, to, at) in [
+            (
+                ContractState::Disconnected,
+                ContractState::Starting,
+                "2026-09-17T10:00:00.000Z",
+            ),
+            (
+                ContractState::Starting,
+                ContractState::Connected,
+                "2026-09-17T10:00:05.000Z",
+            ),
+            (
+                ContractState::Connected,
+                ContractState::Degraded,
+                "2026-09-17T10:10:00.000Z",
+            ),
+        ] {
+            store
+                .record_bridge_status(&transition(from, to, at), DOMAIN, at)
+                .expect("the transition is recorded");
+        }
+        assert_eq!(
+            store.bridge_status("bridge-whatsapp").unwrap(),
+            Some(ContractState::Degraded)
+        );
+        // Another bridge's history is its own: one row per bridge, and no
+        // bridge inherits a neighbour's state.
+        assert_eq!(store.bridge_status("bridge-signal").unwrap(), None);
+    }
+
+    #[test]
+    fn the_identical_transition_arriving_twice_records_once() {
+        let store = store("replay");
+        let change = transition(
+            ContractState::Connected,
+            ContractState::SessionExpired,
+            "2026-09-17T10:00:00.000Z",
+        );
+        let first = store
+            .record_bridge_status(&change, DOMAIN, "2026-09-17T10:00:00.000Z")
+            .expect("recorded");
+        // A retried push: mautrix retries with backoff, so the same body
+        // genuinely arrives twice.
+        let second = store
+            .record_bridge_status(&change, DOMAIN, "2026-09-17T10:00:09.000Z")
+            .expect("recorded");
+        assert!(!first.replayed);
+        assert!(second.replayed);
+        assert_eq!(first.sequence, second.sequence);
+        assert_eq!(first.event_id, second.event_id);
+        assert_eq!(
+            store.unpublished_bridge_status(10).unwrap().len(),
+            1,
+            "one row, so one event"
+        );
+    }
+
+    #[test]
+    fn a_recorded_transition_waits_in_the_outbox_until_it_is_marked() {
+        let store = store("outbox");
+        let change = transition(
+            ContractState::Disconnected,
+            ContractState::Connected,
+            "2026-09-17T10:00:00.000Z",
+        );
+        let committed = store
+            .record_bridge_status(&change, DOMAIN, "2026-09-17T10:00:00.000Z")
+            .expect("recorded");
+        assert_eq!(store.unpublished_bridge_status_count().unwrap(), 1);
+        let waiting = store.unpublished_bridge_status(10).unwrap();
+        assert_eq!(waiting[0].event_id, committed.event_id);
+        assert_eq!(
+            waiting[0].envelope["type"],
+            serde_json::json!("fr.linagora.twalk.bridge.status.changed.v1")
+        );
+        assert_eq!(
+            waiting[0].envelope["source"],
+            serde_json::json!("gateway://example.com/bridges/bridge-whatsapp")
+        );
+        store
+            .mark_bridge_status_published(committed.sequence, "2026-09-17T10:00:01.000Z", 42)
+            .expect("marked");
+        assert_eq!(store.unpublished_bridge_status_count().unwrap(), 0);
+        assert!(store.unpublished_bridge_status(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bridges_state_survives_the_store_being_reopened() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "twalk-bridge-status-reopen-{}-{unique}",
+            std::process::id()
+        ));
+        {
+            let store = Store::open(&dir).expect("the store opens");
+            store
+                .record_bridge_status(
+                    &transition(
+                        ContractState::Disconnected,
+                        ContractState::Connected,
+                        "2026-09-17T10:00:00.000Z",
+                    ),
+                    DOMAIN,
+                    "2026-09-17T10:00:00.000Z",
+                )
+                .expect("recorded");
+        }
+        // This is what makes de-duplication survive a Gateway restart: the
+        // state a push is compared with comes back from disk, so the first
+        // push after a restart does not become a transition out of nowhere.
+        let reopened = Store::open(&dir).expect("the store reopens");
+        assert_eq!(
+            reopened.bridge_status("bridge-whatsapp").unwrap(),
+            Some(ContractState::Connected)
+        );
     }
 }

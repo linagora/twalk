@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 use twalk_companion_gateway::bootstrap::Bootstrap;
+use twalk_companion_gateway::bridge_status::{reconcile, Statuses};
 use twalk_companion_gateway::config::{Config, Consent};
 use twalk_companion_gateway::consent_snapshot::Snapshots;
 use twalk_companion_gateway::http::{router, Gateway};
@@ -182,6 +183,57 @@ async fn main() -> Result<()> {
     // snapshot an error instead of a truncation. Independent of the bus
     // above, so that an operator who set one and not the other gets an
     // answer naming what is actually missing.
+    // The bridge status half (ticket #56). It shares the consent store and
+    // the consent bus, so it is on exactly when they are: a transition has to
+    // be recorded before it is published, and there is nowhere to publish it
+    // without a bus. Without them the webhook answers 503 naming what is
+    // missing, rather than accepting a push the Gateway would throw away.
+    let statuses = match &consent {
+        Some(outbox) => {
+            let statuses = Arc::new(
+                Statuses::new(
+                    &config.bridges,
+                    outbox.clone(),
+                    metrics.clone(),
+                    std::time::SystemTime::now,
+                )
+                .context("failed to build the bridge status half")?,
+            );
+            for bridge in statuses.bridges() {
+                info!(
+                    bridge = %bridge.bridge_id,
+                    instance = %bridge.instance_id,
+                    network = bridge.network.as_str(),
+                    webhook = %twalk_companion_gateway::bridge_status::webhook_path(&bridge.bridge_id),
+                    verified = bridge.has_as_token(),
+                    "a bridge reports its status here"
+                );
+                if !bridge.has_as_token() {
+                    // Loud, because the bridge's own pushes will be refused
+                    // until this is fixed — and accepting them unverified is
+                    // the one thing this endpoint must not do.
+                    warn!(
+                        bridge = %bridge.bridge_id,
+                        "no as_token is configured for this bridge, so its status pushes will \
+                         be refused: set GATEWAY_BRIDGE_{}_AS_TOKEN to the same value as that \
+                         bridge's appservice.as_token",
+                        twalk_companion_gateway::config::variable_slug(&bridge.instance_id)
+                    );
+                }
+            }
+            Some(statuses)
+        }
+        None => {
+            if !config.bridges.is_empty() {
+                warn!(
+                    "GATEWAY_NATS_URL is not set: the bridge status webhook answers 503, so a \
+                     bridge session that breaks stays broken silently"
+                );
+            }
+            None
+        }
+    };
+
     let snapshots = match &config.snapshot {
         Some(snapshot) => {
             info!(
@@ -225,9 +277,24 @@ async fn main() -> Result<()> {
             .with_sessions(sessions)
             .with_bootstrap(bootstrap)
             .with_consent(consent)
-            .with_bridges(bridges)
-            .with_snapshots(snapshots),
+            .with_bridges(bridges.clone())
+            .with_snapshots(snapshots)
+            .with_statuses(statuses.clone()),
     );
+    // Startup reconciliation (ticket #56): one `whoami` per bridge, after
+    // the origin is bound so a slow bridge never delays the Companion coming
+    // up. It corrects a state the Gateway was holding when it stopped; a
+    // bridge it cannot reach keeps its last known state and its own webhook
+    // corrects it.
+    if let Some(statuses) = statuses {
+        let owner = config
+            .sign_in
+            .as_ref()
+            .map(|sign_in| sign_in.owner.clone())
+            .unwrap_or_default();
+        tokio::spawn(reconcile(statuses, bridges, owner));
+    }
+
     let (shutdown, shutdown_requested) = tokio::sync::oneshot::channel::<()>();
     let mut server = tokio::spawn(
         axum::serve(listener, app)

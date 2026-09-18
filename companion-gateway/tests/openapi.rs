@@ -46,14 +46,16 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use harness::stub_bridge::{COOKIES_FLOW, COOKIES_STEP, QR_FLOW};
 use harness::{
-    companion_build, ensure_stack, fresh_owner_user_id, gateway_env, gateway_env_with,
-    gateway_env_with_bridges, gateway_env_with_consent, gateway_env_without_sign_in,
-    missing_static_dir, nats_url, owner_user_id, poll_until, GatewayProc, MatrixUser, StubBridge,
-    FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN,
-    STUB_BRIDGE_ID, UNREACHABLE_BRIDGE_ID,
+    bridge_status_path, companion_build, ensure_stack, fresh_owner_user_id, gateway_env,
+    gateway_env_with, gateway_env_with_bridges_and_consent, gateway_env_with_consent,
+    gateway_env_without_sign_in, missing_static_dir, nats_url, owner_user_id, poll_until,
+    GatewayProc, MatrixUser, StubBridge, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART,
+    OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN, STUB_AS_TOKEN, STUB_BRIDGE_ID,
+    STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID, UNREACHABLE_STATUS_BRIDGE_ID,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
+use twalk_companion_gateway::bridge_status::is_reserved_path;
 use twalk_companion_gateway::session_http::{requirement, Requirement};
 
 /// Routes the router registers that the description deliberately does not
@@ -114,6 +116,12 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "/api/consent/effective",
         "500",
         "store_unavailable, as above",
+    ),
+    (
+        "post",
+        "/_twalk/bridges/{bridge_id}/status",
+        "500",
+        "store_unavailable needs the Gateway's own SQLite file to fail under a running process: the same fault-injection seam this suite does not have",
     ),
 ];
 
@@ -795,15 +803,20 @@ fn the_described_authentication_is_the_guards_own_table() -> Result<()> {
             Some("deviceToken") => Requirement::DeviceToken,
             Some("refreshToken") => Requirement::RefreshToken,
             Some("serviceToken") => Requirement::ServiceToken,
+            Some("bridgeAsToken") => Requirement::BridgeToken,
             Some(other) => panic!("{other} is not one of the Gateway's credentials"),
         };
 
-        if !path.starts_with("/api") {
+        // The guard runs under `/api` and under the Gateway's own reserved
+        // `/_twalk/` prefix, where the bridge status webhook lives (#56).
+        // Everywhere else — the Companion's files, `/health`, `/metrics`,
+        // this description — it does not run at all, so an operation there
+        // cannot require a credential.
+        if !path.starts_with("/api") && !is_reserved_path(&path) {
             assert_eq!(
                 described,
                 Requirement::Open,
-                "{} {path} is not under /api, where the guard does not run: it cannot \
-                 require a credential",
+                "{} {path} is outside the guard's scope: it cannot require a credential",
                 method.to_uppercase()
             );
             continue;
@@ -1182,6 +1195,23 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
 
+    // And so does the bridge status webhook (#56): with no bus there is
+    // nowhere to record a transition and nowhere to publish it, and saying
+    // so beats accepting a push the Gateway would throw away. Answered
+    // before the token is looked at, as the snapshot's own 503 is.
+    call.check_with_bearer(
+        Method::POST,
+        &base,
+        "/_twalk/bridges/{bridge_id}/status",
+        "/_twalk/bridges/bridge-whatsapp/status",
+        &[],
+        Some("any-token-at-all"),
+        Some(json!({ "state_event": "CONNECTED" })),
+        503,
+        Some("bridge_status_not_configured"),
+    )
+    .await?;
+
     // --- the sign-in's own refusals
     call.check(
         Method::POST,
@@ -1459,6 +1489,14 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::DELETE,
             "/api/bridges/{bridge_id}/logins/{login_id}",
             "/api/bridges/mautrix-whatsapp/logins/a-login",
+        ),
+        // The status webhook is outside `/api`, and the guard covers it all
+        // the same (#56): a Gateway with no owner has no store and no bus,
+        // so it closes this route like every other one.
+        (
+            Method::POST,
+            "/_twalk/bridges/{bridge_id}/status",
+            "/_twalk/bridges/bridge-whatsapp/status",
         ),
     ] {
         call.check(
@@ -1894,7 +1932,11 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // description declares.
     let stub = StubBridge::start().await?;
     let bridges_static = companion_build("openapi-bridges")?;
-    let bridged = GatewayProc::start(&gateway_env_with_bridges(&bridges_static, &stub.base_url()))?;
+    let bridged = GatewayProc::start(&gateway_env_with_bridges_and_consent(
+        &bridges_static,
+        &stub.base_url(),
+        &nats_url(),
+    ))?;
     let bridged_base = bridged.base_url().await?;
     wait_until_answering(&bridged_base).await?;
     let (bridge_device, _) =
@@ -2265,6 +2307,76 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         None,
         502,
         Some("bridge_unreachable"),
+    )
+    .await?;
+    // --- the bridge status webhook (#56): the one route a bridge calls, on
+    // the same Gateway. Its credential is the bridge's own as_token, so
+    // `check_with_bearer` carries that rather than a cookie.
+    let status_path = "/_twalk/bridges/{bridge_id}/status";
+    let stub_status = bridge_status_path(STUB_STATUS_BRIDGE_ID);
+    call.check_with_bearer(
+        Method::POST,
+        &bridged_base,
+        status_path,
+        &stub_status,
+        &[],
+        Some(STUB_AS_TOKEN),
+        Some(json!({ "state_event": "CONNECTED", "timestamp": 1_789_000_000u64 })),
+        204,
+        None,
+    )
+    .await?;
+    // A body that is not a mautrix BridgeState.
+    call.check_with_bearer(
+        Method::POST,
+        &bridged_base,
+        status_path,
+        &stub_status,
+        &[],
+        Some(STUB_AS_TOKEN),
+        Some(json!({ "message": "nothing about a state" })),
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    // No credential at all: the refusal that makes the compose network not a
+    // credential.
+    call.check(
+        Method::POST,
+        &bridged_base,
+        status_path,
+        &stub_status,
+        &[],
+        Some(json!({ "state_event": "CONNECTED" })),
+        401,
+        Some("unauthenticated"),
+    )
+    .await?;
+    // A bridge nobody configured.
+    call.check_with_bearer(
+        Method::POST,
+        &bridged_base,
+        status_path,
+        &bridge_status_path("bridge-nobody-configured"),
+        &[],
+        Some(STUB_AS_TOKEN),
+        Some(json!({ "state_event": "CONNECTED" })),
+        404,
+        Some("unknown_bridge"),
+    )
+    .await?;
+    // A configured bridge this Gateway holds no as_token for: refused, never
+    // trusted.
+    call.check_with_bearer(
+        Method::POST,
+        &bridged_base,
+        status_path,
+        &bridge_status_path(UNREACHABLE_STATUS_BRIDGE_ID),
+        &[],
+        Some(STUB_AS_TOKEN),
+        Some(json!({ "state_event": "CONNECTED" })),
+        503,
+        Some("as_token_not_configured"),
     )
     .await?;
     bridged.stop().await;
