@@ -472,7 +472,7 @@ async fn start(
     match flow_id.as_str() {
         QR_FLOW => Json(qr_step(&process_id, &first_qr)).into_response(),
         PHONE_FLOW => Json(json!({
-            "login_process_id": process_id,
+            "login_id": process_id,
             "type": "user_input",
             "step_id": PHONE_STEP,
             "instructions": "Enter the phone number of the account",
@@ -484,7 +484,7 @@ async fn start(
         }))
         .into_response(),
         COOKIES_FLOW => Json(json!({
-            "login_process_id": process_id,
+            "login_id": process_id,
             "type": "cookies",
             "step_id": COOKIES_STEP,
             "instructions": "Paste the cookies from a private window",
@@ -495,7 +495,7 @@ async fn start(
         }))
         .into_response(),
         WEBAUTHN_FLOW => Json(json!({
-            "login_process_id": process_id,
+            "login_id": process_id,
             "type": "webauthn",
             "step_id": "fi.mau.stub.login.webauthn",
             "instructions": "Use your passkey",
@@ -509,9 +509,14 @@ async fn start(
     }
 }
 
+/// Shaped like a real mautrix answer: the login **process** id travels as
+/// `login_id` at the top level — the same word mautrix's `?login_id=` query
+/// parameter uses for an existing login. The Gateway was first written
+/// against a stub that called it `login_process_id`, and the real bridge
+/// then failed with "names no login process" (see the ticket in the PR).
 fn qr_step(process_id: &str, data: &str) -> Value {
     json!({
-        "login_process_id": process_id,
+        "login_id": process_id,
         "type": "display_and_wait",
         "step_id": QR_STEP,
         "instructions": "Scan this code from the phone",

@@ -1320,9 +1320,15 @@ pub fn parse_step(answer: &Value) -> Result<ParsedStep, String> {
         .unwrap_or(Value::Null);
     let complete = answer.get("complete").cloned().unwrap_or(Value::Null);
     Ok(ParsedStep {
+        // mautrix calls the process id `login_id` at the top level of a
+        // start or step answer — the same word its `?login_id=` query
+        // parameter uses for an *existing* login, which is why this reads
+        // like a trap. The other two names are accepted because a stub or
+        // another bridge implementation may use them.
         process_id: answer
             .get("login_process_id")
             .or_else(|| answer.get("process_id"))
+            .or_else(|| answer.get("login_id"))
             .and_then(Value::as_str)
             .map(str::to_owned),
         step_id: answer
@@ -1336,9 +1342,10 @@ pub fn parse_step(answer: &Value) -> Result<ParsedStep, String> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         payload,
+        // Only from the `complete` payload: the top level's `login_id` is
+        // the login *process*, not the login this flow produced.
         login_id: complete
             .get("login_id")
-            .or_else(|| answer.get("login_id"))
             .and_then(Value::as_str)
             .map(str::to_owned),
         user_id: complete
