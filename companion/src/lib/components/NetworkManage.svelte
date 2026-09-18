@@ -31,6 +31,7 @@
 	import { onMount } from 'svelte';
 
 	import { gateway } from '$lib/api/client';
+	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
@@ -51,6 +52,8 @@
 	let bridgeId = $state<string | null>(null);
 	/** `false` when `GET /api/bridges` itself could not be read. */
 	let listKnown = $state(false);
+	/** And which kind of "could not be read" it was (#111). */
+	let listTrouble = $state<ApiTrouble | null>(null);
 	let connection = $state<NetworkConnection>(UNKNOWN_CONNECTION);
 	let confirming = $state(false);
 	let working = $state(false);
@@ -64,9 +67,10 @@
 	onMount(load);
 
 	async function load() {
-		const listed = await gateway.GET('/api/bridges');
-		listKnown = listed.error === undefined;
-		const row = listed.data?.bridges.find((bridge) => bridge.network === network) ?? null;
+		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		listKnown = listed !== null && listed.error === undefined;
+		listTrouble = listKnown ? null : troubleOf(listed);
+		const row = listed?.data?.bridges.find((bridge) => bridge.network === network) ?? null;
 		bridgeId = row?.bridge_id ?? null;
 		connection = connectionOf(row);
 		loaded = true;
@@ -82,11 +86,13 @@
 		}
 		working = true;
 		trouble = null;
-		const answer = await gateway.DELETE('/api/bridges/{bridge_id}/logins/{login_id}', {
-			params: { path: { bridge_id: bridgeId, login_id: account.login_id } }
-		});
+		const answer = await gateway
+			.DELETE('/api/bridges/{bridge_id}/logins/{login_id}', {
+				params: { path: { bridge_id: bridgeId, login_id: account.login_id } }
+			})
+			.catch(() => null);
 		working = false;
-		if (answer.error !== undefined) {
+		if (answer === null || answer.error !== undefined) {
 			trouble = $t('manage.disconnect.failed');
 			return;
 		}
@@ -164,8 +170,22 @@
 			{$t('networks.loading')}
 		</p>
 	{:else if !listKnown}
-		<p class="card card--warning" role="status" data-testid="manage-list-unknown">
-			{$t('networks.unreachable')}
+		<!-- A server that refused is not a server that could not be reached, and
+		     a screen that conflates them sends the user to look at their
+		     firewall for an expired session (#111). -->
+		<p
+			class="card card--warning"
+			role="status"
+			data-testid="manage-list-unknown"
+			data-trouble={listTrouble}
+		>
+			{#if listTrouble === 'session-refused'}
+				{$t('api.trouble.sessionRefused')}
+			{:else if listTrouble === 'refused'}
+				{$t('api.trouble.refused')}
+			{:else}
+				{$t('api.trouble.unreachable')}
+			{/if}
 		</p>
 	{:else if bridgeId === null}
 		<div class="card card--warning" data-testid="no-bridge">
