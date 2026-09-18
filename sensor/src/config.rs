@@ -67,6 +67,20 @@ pub struct Config {
     /// Megolm keys with its device), history from before the device existed
     /// does not.
     pub recovery_key: Option<String>,
+    /// Origin of the Companion Gateway, e.g. `http://companion-gateway:8080`
+    /// (SENSOR_GATEWAY_URL). The Sensor reads the consent snapshot there at
+    /// startup and then follows the bus from the position it names
+    /// (ADR 0010). Unset: no snapshot is read, the consent cache starts cold
+    /// and every sender labels `pending` until a decision arrives on the bus
+    /// — which is what issue #16 is about, so a deployment that runs a
+    /// Gateway sets it.
+    pub gateway_url: Option<String>,
+    /// The Gateway's service token (SENSOR_GATEWAY_SERVICE_TOKEN), the same
+    /// secret the Gateway holds as GATEWAY_SERVICE_TOKEN. The snapshot is the
+    /// one Gateway route a service reads, and it takes this token as an
+    /// `Authorization: Bearer` credential: the Sensor has no Matrix OpenID
+    /// token to sign in with and is never given a device token (ADR 0011).
+    pub gateway_service_token: Option<String>,
 }
 
 impl Config {
@@ -101,9 +115,23 @@ impl Config {
             send_retry_base: Duration::from_millis(optional("SENSOR_SEND_RETRY_BASE_MS", 1000)?),
             send_retry_max_attempts: optional("SENSOR_SEND_RETRY_MAX_ATTEMPTS", 5)?,
             recovery_key: optional_string("SENSOR_RECOVERY_KEY"),
+            gateway_url: optional_string("SENSOR_GATEWAY_URL"),
+            gateway_service_token: optional_string("SENSOR_GATEWAY_SERVICE_TOKEN"),
         };
         config.validate_credentials()?;
+        config.validate_gateway()?;
         Ok(config)
+    }
+
+    /// Where the consent snapshot is read from, and with what: both halves or
+    /// neither. `None` is a deployment without a Companion Gateway — the
+    /// consent cache then starts cold, which is a documented degradation and
+    /// not an error.
+    pub fn consent_snapshot(&self) -> Option<(&str, &str)> {
+        match (&self.gateway_url, &self.gateway_service_token) {
+            (Some(url), Some(token)) => Some((url, token)),
+            _ => None,
+        }
     }
 
     /// One of the two credential shapes must be complete: a password to log
@@ -123,6 +151,26 @@ impl Config {
                 "no Sensor credentials: set SENSOR_PASSWORD, or SENSOR_ACCESS_TOKEN with \
                  SENSOR_DEVICE_ID on a homeserver whose password login is disabled"
             ),
+        }
+    }
+
+    /// The Gateway's two variables go together: a URL with no token reads
+    /// nothing, and a token with no URL reaches nothing. Half a configuration
+    /// would degrade exactly like no configuration at all — every sender
+    /// `pending` — but silently, which is the failure issue #16 is made of.
+    /// So it is refused on startup, with the missing name to fix.
+    fn validate_gateway(&self) -> Result<()> {
+        match (&self.gateway_url, &self.gateway_service_token) {
+            (Some(_), None) => anyhow::bail!(
+                "SENSOR_GATEWAY_URL is set without SENSOR_GATEWAY_SERVICE_TOKEN: the consent \
+                 snapshot takes the Companion Gateway's service token (its own \
+                 GATEWAY_SERVICE_TOKEN) as an Authorization: Bearer credential"
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "SENSOR_GATEWAY_SERVICE_TOKEN is set without SENSOR_GATEWAY_URL: there is no \
+                 Companion Gateway to read the consent snapshot from"
+            ),
+            _ => Ok(()),
         }
     }
 }

@@ -245,23 +245,23 @@ async fn main() -> Result<()> {
     info!(stream = normalize::STREAM_NAME, "bus ready");
 
     // Consent labelling (ticket 05): every published event carries the
-    // sender's current consent state from this cache, fed by the durable
-    // consent.state.changed consumer spawned below. The initial snapshot
-    // fetch sits behind the ConsentSnapshotSource trait; no Companion
-    // Gateway exists yet (ADR 0006), so the no-op source is wired in and
-    // every sender starts out pending. The Sensor never writes consent
-    // state.
+    // sender's current consent state from this cache. It is filled from the
+    // Companion Gateway's snapshot and then from the durable
+    // consent.state.changed consumer, in that order and without overlap
+    // (ticket #51, ADR 0010) — see `bring_up_consent`. The Sensor never
+    // writes consent state (ADR 0006).
     let consent_cache = ConsentCache::default();
-    for change in consent::NoConsentSnapshot.fetch_snapshot().await {
-        consent_cache.apply(&change);
-    }
-    {
-        let jetstream = jetstream.clone();
-        let consent_cache = consent_cache.clone();
-        tokio::spawn(async move {
-            consume_consent_changes(jetstream, consent_cache).await;
-        });
-    }
+    let snapshot_source = match config.consent_snapshot() {
+        Some((url, token)) => Some(consent::GatewaySnapshot::new(url, token)?),
+        None => None,
+    };
+    bring_up_consent(
+        jetstream.clone(),
+        consent_cache.clone(),
+        snapshot_source,
+        metrics.clone(),
+    )
+    .await;
 
     let own_user = client.user_id().unwrap().to_owned();
 
@@ -1318,22 +1318,153 @@ async fn run_approved_reply_consumer(
     Ok(())
 }
 
-/// Durably consumes `twalk.consent.state.changed.v1` and applies each
-/// contact-scoped decision to the consent cache, so subsequent events label
-/// the sender with the current state. Applying a decision is idempotent, so
-/// an event is acked as soon as it is applied; a malformed or non-contact
-/// event is acked and skipped — it can never become applicable, and
-/// redelivering it would poison the consumer.
+/// Base delay of the consent-snapshot retry backoff, and its ceiling. An
+/// unreachable Gateway is retried for as long as the Sensor runs: until it
+/// answers, every sender labels `pending`, which is a degradation to get out
+/// of and not a state to settle in.
+const SNAPSHOT_RETRY_BASE: Duration = Duration::from_secs(1);
+const SNAPSHOT_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// Brings up the consent cache: the Gateway's snapshot first, then the stream
+/// from the position it named (ADR 0010, ticket #51).
 ///
-/// Never returns: if the consumer fails to build or its message stream
-/// ends, it is rebuilt after a short delay — consent changes must keep
-/// flowing for as long as the Sensor runs.
+/// The order is the whole mechanism. The cache is last-writer-wins, so
+/// nothing arbitrates between the snapshot and the stream — they are made not
+/// to overlap: the snapshot holds every decision up to its `stream_sequence`,
+/// and the consumer is created at `next_stream_sequence`, which is the one
+/// after it. A **cold** consumer therefore starts exactly where the snapshot
+/// stops; a **warm** durable consumer already exists on the bus, and
+/// `get_or_create_consumer` leaves it alone — its ack floor is its own record
+/// of what it applied, and resetting it would either replay decisions or skip
+/// them. What a warm consumer may still hold is the decisions taken while the
+/// Sensor was down: unacked, before the snapshot's position, and already in
+/// the snapshot. `run_consent_consumer` acks and skips those, so the boundary
+/// holds on both paths and a decision is applied from exactly one of the two.
+///
+/// Startup is never blocked. One snapshot read is attempted here, before the
+/// sync loop starts, so a healthy deployment has no window at all in which a
+/// granted contact labels `pending`. If it fails, the Sensor carries on
+/// anyway and retries in the background: a Sensor that waits for its Gateway
+/// loses inbound events, which is worse than a degraded label. The stream
+/// consumer is created only once a snapshot has been applied — that is what
+/// keeps the ordering exact, and it costs nothing, because the Gateway is the
+/// single writer of consent state (ADR 0006): while it is unreachable there
+/// are no new decisions on the stream to miss, and the durable consumer holds
+/// its place for the ones taken before.
+async fn bring_up_consent<S>(
+    jetstream: async_nats::jetstream::Context,
+    consent_cache: ConsentCache,
+    source: Option<S>,
+    metrics: Arc<Metrics>,
+) where
+    S: ConsentSnapshotSource + 'static,
+{
+    let Some(source) = source else {
+        info!(
+            "no Companion Gateway configured (SENSOR_GATEWAY_URL): the consent cache starts \
+             cold and senders label pending until a decision arrives on the bus"
+        );
+        tokio::spawn(consume_consent_changes(jetstream, consent_cache, None));
+        return;
+    };
+    match source.fetch_snapshot().await {
+        Ok(snapshot) => {
+            let start = apply_consent_snapshot(&consent_cache, &snapshot, &metrics);
+            tokio::spawn(consume_consent_changes(
+                jetstream,
+                consent_cache,
+                Some(start),
+            ));
+        }
+        Err(error) => {
+            let failures = metrics.record_consent_snapshot_failure();
+            error!(
+                %error,
+                failures,
+                "could not read the Companion Gateway's consent snapshot: the Sensor starts \
+                 anyway and labels every sender pending — including contacts the user granted \
+                 — until it can; retrying in the background"
+            );
+            tokio::spawn(async move {
+                let snapshot = retry_consent_snapshot(&source, &metrics).await;
+                let start = apply_consent_snapshot(&consent_cache, &snapshot, &metrics);
+                consume_consent_changes(jetstream, consent_cache, Some(start)).await;
+            });
+        }
+    }
+}
+
+/// Applies a snapshot and returns the stream sequence the consumer starts at.
+fn apply_consent_snapshot(
+    consent_cache: &ConsentCache,
+    snapshot: &consent::ConsentSnapshot,
+    metrics: &Metrics,
+) -> u64 {
+    consent_cache.apply_snapshot(snapshot);
+    metrics.record_consent_snapshot(snapshot.entries.len());
+    info!(
+        entries = snapshot.entries.len(),
+        next_stream_sequence = snapshot.next_stream_sequence,
+        "applied the Companion Gateway's consent snapshot"
+    );
+    snapshot.next_stream_sequence
+}
+
+/// Retries the snapshot until it answers, doubling the delay up to a ceiling.
+/// Never gives up: giving up would leave the Sensor labelling `pending`
+/// forever with nothing left to say so.
+async fn retry_consent_snapshot<S: ConsentSnapshotSource>(
+    source: &S,
+    metrics: &Metrics,
+) -> consent::ConsentSnapshot {
+    let mut delay = SNAPSHOT_RETRY_BASE;
+    loop {
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(SNAPSHOT_RETRY_MAX);
+        match source.fetch_snapshot().await {
+            Ok(snapshot) => {
+                info!("the Companion Gateway's consent snapshot is readable again");
+                return snapshot;
+            }
+            Err(error) => {
+                let failures = metrics.record_consent_snapshot_failure();
+                warn!(
+                    %error,
+                    failures,
+                    retry_in_seconds = delay.as_secs(),
+                    "the Companion Gateway's consent snapshot is still unreadable; senders \
+                     keep labelling pending"
+                );
+            }
+        }
+    }
+}
+
+/// Durably consumes `twalk.consent.state.changed.v1` and applies each
+/// decision to the consent cache, so subsequent events label the sender with
+/// the current state. Applying a decision is idempotent, so an event is acked
+/// as soon as it is applied; a malformed or persona-scoped event is acked and
+/// skipped — it can never become applicable, and redelivering it would poison
+/// the consumer.
+///
+/// `start_sequence` is the position the applied snapshot handed over at. A
+/// consumer created here is created at it; an existing durable one keeps its
+/// own ack floor — it is never reset — and this loop skips (acking) anything
+/// before the boundary, which is what a warm consumer would otherwise
+/// redeliver of decisions taken while the Sensor was down and already
+/// summarised by the snapshot. `None` — no Gateway configured — means no
+/// boundary and the deliver-all default: the whole retained history.
+///
+/// Never returns: if the consumer fails to build or its message stream ends,
+/// it is rebuilt after a short delay — consent changes must keep flowing for
+/// as long as the Sensor runs.
 async fn consume_consent_changes(
     jetstream: async_nats::jetstream::Context,
     consent_cache: ConsentCache,
+    start_sequence: Option<u64>,
 ) {
     loop {
-        match run_consent_consumer(&jetstream, &consent_cache).await {
+        match run_consent_consumer(&jetstream, &consent_cache, start_sequence).await {
             Ok(()) => error!("the consent-change message stream ended; rebuilding the consumer"),
             Err(error) => error!(%error, "the consent-change consumer failed; rebuilding it"),
         }
@@ -1342,17 +1473,29 @@ async fn consume_consent_changes(
 }
 
 /// One incarnation of the consent-change consumer: builds the durable pull
-/// consumer and applies its messages until the stream ends. A freshly
-/// created consumer replays the whole consent history (the default
-/// deliver-all policy); an existing one resumes from its ack position.
+/// consumer and applies its messages until the stream ends.
+///
+/// `get_or_create_consumer` is exactly the primitive this needs: it creates
+/// the durable with the given configuration when none exists, and otherwise
+/// returns the existing one untouched. So a cold start honours
+/// `start_sequence` — the snapshot's `next_stream_sequence`, the first
+/// decision the snapshot does not already hold — and a warm one resumes at
+/// its own ack floor, which is the only record of what it has applied.
 async fn run_consent_consumer(
     jetstream: &async_nats::jetstream::Context,
     consent_cache: &ConsentCache,
+    start_sequence: Option<u64>,
 ) -> Result<()> {
     let stream = jetstream
         .get_stream(normalize::STREAM_NAME)
         .await
         .context("failed to get the twalk stream")?;
+    let deliver_policy = match start_sequence {
+        Some(start_sequence) => {
+            async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence { start_sequence }
+        }
+        None => async_nats::jetstream::consumer::DeliverPolicy::All,
+    };
     let consumer = stream
         .get_or_create_consumer(
             consent::CONSENT_CONSUMER,
@@ -1360,13 +1503,18 @@ async fn run_consent_consumer(
                 durable_name: Some(consent::CONSENT_CONSUMER.to_owned()),
                 filter_subject: normalize::bus_subject(consent::CONSENT_CHANGED_TYPE),
                 ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                deliver_policy,
                 ..Default::default()
             },
         )
         .await
         .context("failed to ensure the consent-change consumer")?;
+    let info = consumer.cached_info();
     info!(
         consumer = consent::CONSENT_CONSUMER,
+        ack_floor = info.ack_floor.stream_sequence,
+        deliver_policy = ?info.config.deliver_policy,
+        requested_start = ?start_sequence,
         "consuming consent changes"
     );
 
@@ -1382,25 +1530,40 @@ async fn run_consent_consumer(
                 continue;
             }
         };
+        // Never apply anything from before the position the snapshot handed
+        // over at. A consumer created here already starts there; a warm
+        // durable one starts at its own ack floor, which is *earlier* when
+        // decisions were taken while the Sensor was down — those are in the
+        // snapshot, and applying them again would replay a history the
+        // snapshot has already summarised. Acked and skipped, so the floor
+        // advances: the hand-off boundary is honoured on both paths.
+        if let (Some(start), Some(info)) = (start_sequence, message.info().ok()) {
+            if info.stream_sequence < start {
+                if let Err(error) = message.ack().await {
+                    warn!(%error, "consent-change ack failed, the event will be redelivered");
+                }
+                continue;
+            }
+        }
         match serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
             Ok(event) => match consent::ConsentChange::parse(&event) {
                 Some(change) => {
                     consent_cache.apply(&change);
                     info!(
-                        subject = %change.subject_id,
+                        subject = change.subject_label(),
                         state = change.new_state.as_str(),
                         networks = ?change.networks,
                         "applied a consent change"
                     );
                 }
-                // A channel- or persona-scoped decision is well-formed
-                // traffic that simply never labels a sender; a malformed
-                // contact change is worth a warning.
+                // A persona-scoped decision is well-formed traffic that
+                // simply never labels a sender (ADR 0013); a malformed
+                // contact or network change is worth a warning.
                 None => match event
                     .pointer("/data/subject/type")
                     .and_then(serde_json::Value::as_str)
                 {
-                    Some("contact") | None => warn!(
+                    Some("contact") | Some("network") | None => warn!(
                         id = event
                             .get("id")
                             .and_then(serde_json::Value::as_str)

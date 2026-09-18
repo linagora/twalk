@@ -312,6 +312,24 @@ impl Bus {
         Ok(out)
     }
 
+    /// Removes a durable consumer, so the next component that asks for it
+    /// creates it — a **cold** start, which is the side of the consent
+    /// snapshot hand-off that only exists once (ADR 0010): a durable consumer
+    /// outlives the process that made it, so without this a suite only ever
+    /// tests the warm path after its first run.
+    ///
+    /// Deleting one that is not there is not an error here: the postcondition
+    /// is that it is gone.
+    pub async fn delete_consumer(&self, stream: &str, consumer: &str) -> Result<()> {
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        let _ = stream.delete_consumer(consumer).await;
+        Ok(())
+    }
+
     /// Subscribes to a subject with core NATS, bypassing JetStream dedup:
     /// the returned receiver observes EVERY publish, including a republish
     /// that the stream later deduplicates on storage. This is how tests

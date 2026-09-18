@@ -9,6 +9,12 @@
 //! granted contact exposes its `contact.network_identifier` (derived from
 //! the ghost localpart); a consent change on the bus relabels that sender's
 //! subsequent events — on the message, reaction and presence paths alike.
+//!
+//! Ticket #51 (issue #16, ADR 0010) adds where that cache comes from on a
+//! start: the Companion Gateway's snapshot, read over HTTP and applied before
+//! the stream consumer is created at the position it names. The second half
+//! of this file is that hand-off — and above all the restart property, which
+//! is what issue #16 was.
 
 mod harness;
 
@@ -22,6 +28,9 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const STREAM: &str = "twalk";
 const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
+/// The durable consumer the Sensor feeds its consent cache from, as it leaves
+/// it on the bus.
+const CONSENT_CONSUMER: &str = "sensor-consent-state-changed";
 const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 const REACTION_SUBJECT: &str = "twalk.inbound.reaction.added.v1";
 
@@ -423,6 +432,470 @@ async fn revoked_consent_relabels_subsequent_events() -> Result<()> {
     let later = wait_for_matrix_event(&bus, &room_id, &later_id).await?;
     validate_against_contract(&later.payload, "inbound.message.received")?;
     assert_eq!(later.payload["consent"].as_str(), Some("revoked"));
+
+    sensor.stop().await;
+    Ok(())
+}
+
+// --- The consent snapshot hand-off (ticket #51, issue #16, ADR 0010) ------
+//
+// Everything above assumes a Sensor that has been running since before the
+// decision it labels by. What follows is what happens when it has not: a
+// process that starts with an empty cache, a durable consumer that will not
+// tell it again what it already applied, and a Companion Gateway that can.
+//
+// The stub Gateway (`harness::gateway`) stands in for the real one: the
+// Sensor's side of this seam is one authenticated HTTP read, and the test
+// needs to choose both what it answers and the stream position it answers
+// for — the position is the hand-off. The Gateway's own half is tested where
+// it lives (`companion-gateway/tests/consent_snapshot.rs`).
+
+use harness::gateway::{contact_entry, network_entry, StubGateway};
+
+/// The service token the Sensor presents. A throwaway constant for the local
+/// stack, the same category as the test-bot passwords, and the length the
+/// Gateway insists on for a real one.
+const SERVICE_TOKEN: &str = "test-only-service-token-0123456789abcdef";
+
+/// The Sensor environment with a Companion Gateway to read the snapshot from.
+fn sensor_env_with_gateway(url: &str) -> Vec<(String, String)> {
+    harness::sensor_env_with(&[
+        ("SENSOR_GATEWAY_URL", url),
+        ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
+    ])
+}
+
+/// Publishes one decision as the Gateway would, and returns the stream
+/// sequence it landed at — which is what the snapshot names and what the
+/// consumer resumes after.
+async fn publish_decision(
+    bus: &Bus,
+    subject_id: &str,
+    networks: &[&str],
+    old_state: &str,
+    new_state: &str,
+) -> Result<u64> {
+    publish_event(
+        bus,
+        &consent_change(subject_id, networks, old_state, new_state)?,
+    )
+    .await
+}
+
+/// A network-scoped decision, published the same way: that network's default
+/// consent state, which applies to every contact on it that has no decision
+/// of its own (the contract's `network` subject type, and the `id` it insists
+/// is the network value itself).
+async fn publish_network_default(
+    bus: &Bus,
+    network: &str,
+    old_state: &str,
+    new_state: &str,
+) -> Result<u64> {
+    let mut event = contract_fixture("consent.state.changed")?;
+    let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+    event["id"] = json!(unique_event_id());
+    event["time"] = json!(now);
+    event["subject"] = json!(network);
+    event["consent"] = json!(new_state);
+    event["network"] = json!(network);
+    event["data"]["subject"] = json!({ "type": "network", "id": network });
+    event["data"]["old_state"] = json!(old_state);
+    event["data"]["new_state"] = json!(new_state);
+    event["data"]["scope"]["networks"] = json!([network]);
+    event["data"]["occurred_at"] = json!(now);
+    validate_against_contract(&event, "consent.state.changed")?;
+    publish_event(bus, &event).await
+}
+
+async fn publish_event(bus: &Bus, event: &Value) -> Result<u64> {
+    let id = event["id"]
+        .as_str()
+        .expect("the event has an id")
+        .to_owned();
+    bus.publish(CONSENT_SUBJECT, event).await?;
+    poll_until(
+        || async {
+            bus.fetch_all_with_headers(STREAM, CONSENT_SUBJECT)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|m| m.payload["id"].as_str() == Some(id.as_str()))
+                .map(|m| m.sequence)
+        },
+        "the published decision to be stored",
+    )
+    .await
+}
+
+/// The stream sequence the consent subject currently ends at: what a Gateway
+/// that has published every decision it holds would name. `0` when nothing
+/// has ever been decided — the consumer then starts at `1`.
+async fn consent_head(bus: &Bus) -> Result<u64> {
+    Ok(bus
+        .fetch_all_with_headers(STREAM, CONSENT_SUBJECT)
+        .await?
+        .last()
+        .map(|m| m.sequence)
+        .unwrap_or(0))
+}
+
+fn logged(logs: &[String], message: &str) -> bool {
+    logs.iter().any(|line| line.contains(message))
+}
+
+fn logged_change_about(logs: &[String], subject_id: &str) -> bool {
+    logs.iter()
+        .any(|line| line.contains("applied a consent change") && line.contains(subject_id))
+}
+
+/// The hand-off itself, on a genuinely cold consumer: what the snapshot holds
+/// is applied from the snapshot, what it does not hold arrives over the
+/// stream from the position it named, and the two never overlap — the
+/// decision the snapshot accounted for is never delivered a second time.
+#[tokio::test]
+async fn a_cold_sensor_applies_the_snapshot_and_follows_the_stream_after_it() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let alpha = Bot::login("bot_alpha").await?;
+    let puppet = Bot::login("whatsapp_33612345678").await?;
+    let beta = Bot::login("bot_beta").await?;
+
+    // Two decisions, in order. The snapshot is taken between them: it
+    // accounts for the puppet's grant and not for beta's, so each contact can
+    // only have reached the Sensor one way.
+    let snapshot_sequence =
+        publish_decision(&bus, puppet.user_id(), &["whatsapp"], "pending", "granted").await?;
+    let stream_sequence =
+        publish_decision(&bus, beta.user_id(), &["whatsapp"], "pending", "granted").await?;
+    assert!(
+        stream_sequence > snapshot_sequence,
+        "the second decision is published after the position the snapshot names"
+    );
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    gateway.serve(
+        vec![contact_entry(puppet.user_id(), "whatsapp", "granted")],
+        snapshot_sequence,
+    );
+
+    // A durable consumer outlives the process that made it, so a cold start
+    // has to be made: without this the suite would only ever exercise the
+    // warm path after its first run. The durable name is spelled out rather
+    // than imported, like the subjects above: it is what the Sensor leaves on
+    // the bus, so the test names it from the outside.
+    bus.delete_consumer(STREAM, CONSENT_CONSUMER).await?;
+
+    let sensor = SensorProc::start(&sensor_env_with_gateway(&gateway.url()))?;
+    let room_id = make_whatsapp_portal(&alpha, "consent-snapshot-cold-portal").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+    alpha.invite(&room_id, puppet.user_id()).await?;
+    puppet.join_room(&room_id).await?;
+    alpha.invite(&room_id, beta.user_id()).await?;
+    beta.join_room(&room_id).await?;
+
+    // The snapshot was applied before the sync loop started, so the contact
+    // it granted is granted on its very first event — no window, no polling.
+    let first_id = puppet.send_message(&room_id, "depuis l'instantané").await?;
+    let first = wait_for_matrix_event(&bus, &room_id, &first_id).await?;
+    validate_against_contract(&first.payload, "inbound.message.received")?;
+    assert_eq!(
+        first.payload["consent"].as_str(),
+        Some("granted"),
+        "the snapshot labels the sender from the Sensor's first event on"
+    );
+    assert_eq!(
+        first.payload["data"]["contact"]["network_identifier"].as_str(),
+        Some("+33612345678"),
+        "and unlocks what a granted contact's events carry"
+    );
+
+    // The decision the snapshot did not account for is not lost: the consumer
+    // was created at the position after it, so the stream delivers it.
+    wait_for_label(&bus, &beta, &room_id, "depuis le flux", "granted").await?;
+
+    let logs = sensor.logs().await;
+    assert!(
+        logged(&logs, "applied the Companion Gateway's consent snapshot"),
+        "{logs:?}"
+    );
+    assert!(
+        logged_change_about(&logs, beta.user_id()),
+        "the decision after the snapshot's position comes off the stream: {logs:?}"
+    );
+    assert!(
+        !logged_change_about(&logs, puppet.user_id()),
+        "the decision the snapshot already held is never delivered again — snapshot and \
+         stream do not overlap: {logs:?}"
+    );
+
+    // The credential is the service token, as a bearer: the Sensor has no
+    // OpenID token to sign in with and holds no device token (ADR 0011).
+    assert_eq!(
+        gateway.requests(),
+        vec![Some(format!("Bearer {SERVICE_TOKEN}"))],
+        "one authenticated snapshot read, and only one"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// Issue #16 itself: a contact the user granted stays granted across a full
+/// Sensor restart. The durable consumer is warm — it acked that decision
+/// before the Sensor stopped and will never deliver it again — so before the
+/// snapshot existed the restarted Sensor labelled that contact `pending`
+/// until the user decided something new.
+#[tokio::test]
+async fn a_granted_contact_stays_granted_across_a_sensor_restart() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let alpha = Bot::login("bot_alpha").await?;
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    gateway.serve(Vec::new(), consent_head(&bus).await?);
+    let env = sensor_env_with_gateway(&gateway.url());
+
+    let sensor = SensorProc::start(&env)?;
+    let room_id = make_whatsapp_portal(&alpha, "consent-snapshot-restart-portal").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+
+    // The user grants the contact; the running Sensor applies it from the bus.
+    let sequence =
+        publish_decision(&bus, alpha.user_id(), &["whatsapp"], "pending", "granted").await?;
+    wait_for_label(&bus, &alpha, &room_id, "avant le redémarrage", "granted").await?;
+    // The Gateway's state now reflects that decision, at its position.
+    gateway.serve(
+        vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
+        sequence,
+    );
+
+    // A full restart: the process is killed, its cache dies with it, and the
+    // durable consumer stays where it was.
+    sensor.stop().await;
+    let sensor = SensorProc::start(&env)?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+
+    let after_id = alpha.send_message(&room_id, "après le redémarrage").await?;
+    let after = wait_for_matrix_event(&bus, &room_id, &after_id).await?;
+    validate_against_contract(&after.payload, "inbound.message.received")?;
+    assert_eq!(
+        after.payload["consent"].as_str(),
+        Some("granted"),
+        "a restart must not downgrade a granted contact to pending (issue #16)"
+    );
+    assert_eq!(after.header("consent"), Some("granted"));
+
+    assert_eq!(
+        gateway.requests().len(),
+        2,
+        "each start reads the snapshot exactly once"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// The other half of the restart: decisions taken while the Sensor was down.
+/// They are in the snapshot — the Gateway recorded and published them — so
+/// they are applied before the Sensor's first event, not after its first
+/// message from each contact.
+///
+/// The two decisions here are also what the snapshot's shape is for: one
+/// network-level default, and one contact-level decision overriding it. The
+/// precedence — the contact's own decision first, the network's default next,
+/// `pending` when neither exists — is the Gateway's, and this is the Sensor
+/// applying it to real events.
+#[tokio::test]
+async fn a_decision_taken_while_the_sensor_was_down_is_applied_after_it() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let alpha = Bot::login("bot_alpha").await?;
+    let puppet = Bot::login("whatsapp_33612345678").await?;
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    gateway.serve(Vec::new(), consent_head(&bus).await?);
+    let env = sensor_env_with_gateway(&gateway.url());
+
+    let sensor = SensorProc::start(&env)?;
+    let room_id = make_whatsapp_portal(&alpha, "consent-snapshot-downtime-portal").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+    alpha.invite(&room_id, puppet.user_id()).await?;
+    puppet.join_room(&room_id).await?;
+
+    // Unknown while the Sensor runs: pending, and no identifier leaks.
+    let before_id = puppet.send_message(&room_id, "avant la décision").await?;
+    let before = wait_for_matrix_event(&bus, &room_id, &before_id).await?;
+    assert_eq!(before.payload["consent"].as_str(), Some("pending"));
+
+    sensor.stop().await;
+
+    // The user decides while nothing is listening: the whole network granted,
+    // and one contact on it revoked.
+    publish_network_default(&bus, "whatsapp", "unset", "granted").await?;
+    let sequence =
+        publish_decision(&bus, alpha.user_id(), &["whatsapp"], "unset", "revoked").await?;
+    gateway.serve(
+        vec![
+            network_entry("whatsapp", "granted"),
+            contact_entry(alpha.user_id(), "whatsapp", "revoked"),
+        ],
+        sequence,
+    );
+
+    let sensor = SensorProc::start(&env)?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+
+    // The puppet has no decision of its own, so the network's default answers
+    // for it — and a granted contact's events carry its network identifier.
+    let after_id = puppet.send_message(&room_id, "après la décision").await?;
+    let after = wait_for_matrix_event(&bus, &room_id, &after_id).await?;
+    validate_against_contract(&after.payload, "inbound.message.received")?;
+    assert_eq!(
+        after.payload["consent"].as_str(),
+        Some("granted"),
+        "a decision taken while the Sensor was down applies as soon as it is back"
+    );
+    assert_eq!(
+        after.payload["data"]["contact"]["network_identifier"].as_str(),
+        Some("+33612345678")
+    );
+
+    // Alpha has one, and it wins over the default it contradicts — with
+    // everything a revocation takes away (ADR 0012).
+    let revoked_id = alpha.send_message(&room_id, "et moi j'ai refusé").await?;
+    let revoked = wait_for_matrix_event(&bus, &room_id, &revoked_id).await?;
+    validate_against_contract(&revoked.payload, "inbound.message.received")?;
+    assert_eq!(
+        revoked.payload["consent"].as_str(),
+        Some("revoked"),
+        "a contact's own decision overrides the network's default"
+    );
+    assert!(
+        revoked.payload["data"].get("body").is_none(),
+        "and it overrides it in the direction that removes content"
+    );
+
+    // Both decisions were taken while the Sensor was down, so its warm
+    // durable consumer still holds them — unacked, and before the position
+    // the snapshot named. They came from the snapshot, and the stream does
+    // not deliver them a second time: the hand-off boundary holds on a warm
+    // consumer too.
+    assert!(
+        !logged_change_about(&sensor.logs().await, alpha.user_id()),
+        "a decision the snapshot already held is never applied from the stream as well"
+    );
+
+    // The bus outlives this run, and a network-wide grant left on it would
+    // label every whatsapp sender in every later test. Put the default back
+    // where the other tests expect it — the user changed their mind, which is
+    // an ordinary decision.
+    publish_network_default(&bus, "whatsapp", "granted", "pending").await?;
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// An unreachable Gateway must not stop the Sensor: a Sensor that waits loses
+/// inbound events, which is worse than a degraded label. It starts, publishes
+/// everything, labels `pending`, says so loudly, counts it — and recovers on
+/// its own when the Gateway comes back.
+#[tokio::test]
+async fn an_unreachable_gateway_labels_pending_without_losing_an_event() -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let alpha = Bot::login("bot_alpha").await?;
+
+    // An address nothing answers on — and the one the Gateway will later
+    // appear at, which is how the retry is observed rather than assumed.
+    let gateway_addr = harness::free_loopback_addr()?;
+    let metrics_listen = harness::free_loopback_addr()?;
+    let sensor = SensorProc::start(&harness::sensor_env_with(&[
+        ("SENSOR_GATEWAY_URL", &format!("http://{gateway_addr}")),
+        ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
+        ("SENSOR_METRICS_LISTEN", &metrics_listen),
+    ]))?;
+
+    let room_id = make_whatsapp_portal(&alpha, "consent-snapshot-outage-portal").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+
+    // Every event still reaches the bus, and every one of them is labelled
+    // pending — the safe default, never a guess at what was granted.
+    let mut sent = Vec::new();
+    for index in 0..3 {
+        sent.push(
+            alpha
+                .send_message(&room_id, &format!("message {index}"))
+                .await?,
+        );
+    }
+    for matrix_event_id in &sent {
+        let event = wait_for_matrix_event(&bus, &room_id, matrix_event_id).await?;
+        validate_against_contract(&event.payload, "inbound.message.received")?;
+        assert_eq!(
+            event.payload["consent"].as_str(),
+            Some("pending"),
+            "an unreachable Gateway degrades the label and loses no event"
+        );
+    }
+
+    // Loudly, and counted: a degraded label is invisible in the events
+    // themselves, so it has to be visible to the operator.
+    assert!(
+        logged(
+            &sensor.logs().await,
+            "could not read the Companion Gateway's consent snapshot"
+        ),
+        "the failure is logged"
+    );
+    let metrics_url = format!("http://{metrics_listen}/metrics");
+    poll_until(
+        || async {
+            let body = reqwest::get(&metrics_url).await.ok()?.text().await.ok()?;
+            body.lines()
+                .find(|line| line.starts_with("twalk_sensor_consent_snapshot_failures_total "))
+                .and_then(|line| line.rsplit(' ').next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|failures| *failures >= 1)
+        },
+        "the consent snapshot failure counter",
+    )
+    .await?;
+
+    // The Gateway comes up at the address the Sensor has been retrying,
+    // already holding the decision — the retry must not be able to catch it
+    // between binding and knowing its own state. The retry applies the
+    // snapshot and only then creates the stream consumer, so the label flips
+    // without anything having to arbitrate.
+    let sequence =
+        publish_decision(&bus, alpha.user_id(), &["whatsapp"], "pending", "granted").await?;
+    let gateway = StubGateway::start_on(&gateway_addr, SERVICE_TOKEN).await?;
+    gateway.serve(
+        vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
+        sequence,
+    );
+
+    wait_for_label(&bus, &alpha, &room_id, "après le retour", "granted").await?;
 
     sensor.stop().await;
     Ok(())
