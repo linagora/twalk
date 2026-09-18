@@ -29,6 +29,24 @@
 // So a room with no name is not rendered blank and not hidden: it is rendered
 // as what is actually known about it — its heroes, or its id — and labelled as
 // such. `roomLabel` is pure and says which of the two it did.
+//
+// # Names, without a client
+//
+// On a real account most rooms are direct messages, so most of the list was
+// Matrix IDs: `@aelazhar:linagora.com`, `@agadji:linagora.com`, page after
+// page. A user looking for a colleague is shown a localpart (#137).
+//
+// The paragraph above conflated two things. Resolving a hero's display name
+// needs **member state or the crypto stack** only if you want it from a
+// `MatrixClient`; the homeserver also answers
+// `GET /_matrix/client/v3/profile/{userId}/displayname`, which is an ordinary
+// HTTP call with the user's own token and no client at all. What these screens
+// refuse to load is a `MatrixClient`, and that refusal is intact.
+//
+// So `resolveDisplayNames` asks for the heroes' names, with bounded
+// concurrency and a deadline, and `roomLabel` takes what it found. A
+// homeserver that will not answer, or answers too slowly, degrades to exactly
+// the behaviour above: ids, labelled as ids. The list never waits on it.
 
 /** One joined room, reduced to what the selection screen needs. */
 export interface RoomSummary {
@@ -53,13 +71,19 @@ export interface RoomLabel {
 	readonly source: LabelSource;
 }
 
+/** Display names by Matrix ID, as far as the homeserver would say. */
+export type Directory = ReadonlyMap<string, string>;
+
 /**
  * The best label this page can honestly produce for a room.
  *
  * Never empty, and never a guess presented as a name: `source` says whether the
  * room told us its name, or whether this is the id standing in for one.
+ *
+ * `directory` is what `resolveDisplayNames` found, and is optional throughout:
+ * every caller works without it, and the label is only ever better with it.
  */
-export function roomLabel(room: RoomSummary): RoomLabel {
+export function roomLabel(room: RoomSummary, directory?: Directory): RoomLabel {
 	if (room.name !== null && room.name.trim() !== '') {
 		return { text: room.name.trim(), source: 'name' };
 	}
@@ -67,11 +91,97 @@ export function roomLabel(room: RoomSummary): RoomLabel {
 		return { text: room.alias.trim(), source: 'alias' };
 	}
 	if (room.heroes.length > 0) {
-		// What a Matrix client would compute, with user ids in place of the
-		// display names that need member state we did not ask for.
-		return { text: room.heroes.slice(0, 3).join(', '), source: 'heroes' };
+		// What a Matrix client would compute. A hero the directory could not
+		// name keeps its id rather than being dropped: a room labelled with
+		// half its members named and half not is still true, and hiding the
+		// unnamed ones would misdescribe who is in it.
+		const named = room.heroes
+			.slice(0, 3)
+			.map((hero) => directory?.get(hero) ?? hero);
+		return { text: named.join(', '), source: 'heroes' };
 	}
 	return { text: room.roomId, source: 'room-id' };
+}
+
+/**
+ * Whether a room answers a search.
+ *
+ * Matches the label a user is reading, and also what they might type from
+ * memory instead: an alias, a member's display name, a Matrix ID, the room id.
+ * Accent- and case-insensitive, because a name is typed the way it sounds.
+ */
+export function matchesQuery(room: RoomSummary, query: string, directory?: Directory): boolean {
+	const needle = fold(query);
+	if (needle === '') {
+		return true;
+	}
+	const haystack = [
+		room.name ?? '',
+		room.alias ?? '',
+		room.roomId,
+		...room.heroes,
+		...room.heroes.map((hero) => directory?.get(hero) ?? '')
+	];
+	return haystack.some((straw) => fold(straw).includes(needle));
+}
+
+/** Lower-cased and stripped of diacritics, so "lorre" finds "Lorré". */
+function fold(value: string): string {
+	return value
+		.normalize('NFD')
+		.replace(/\p{Diacritic}/gu, '')
+		.toLowerCase()
+		.trim();
+}
+
+/**
+ * The display names of the users named, asked of the homeserver directly.
+ *
+ * Bounded: at most `concurrency` requests in flight, and the whole thing gives
+ * up at `deadlineMs` with whatever it has. A name is a nicety — the list is
+ * usable without it, and must never wait on it. A user the homeserver will not
+ * describe, or describes with an empty name, is simply absent from the result.
+ */
+export async function resolveDisplayNames(
+	baseUrl: string,
+	accessToken: string,
+	userIds: readonly string[],
+	options: { fetchImpl?: typeof fetch; concurrency?: number; deadlineMs?: number } = {}
+): Promise<Map<string, string>> {
+	const doFetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+	const concurrency = options.concurrency ?? 6;
+	const found = new Map<string, string>();
+	const queue = [...new Set(userIds)];
+	const deadline = Date.now() + (options.deadlineMs ?? 8000);
+
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const userId = queue.shift();
+			if (userId === undefined || Date.now() > deadline) {
+				return;
+			}
+			try {
+				const response = await doFetch(
+					`${baseUrl}/_matrix/client/v3/profile/${encodeURIComponent(userId)}/displayname`,
+					{ headers: { authorization: `Bearer ${accessToken}` } }
+				);
+				if (!response.ok) {
+					continue;
+				}
+				const body: unknown = await response.json();
+				const name = (body as { displayname?: unknown })?.displayname;
+				if (typeof name === 'string' && name.trim() !== '') {
+					found.set(userId, name.trim());
+				}
+			} catch {
+				// A profile that cannot be read leaves the id in place, which
+				// is what the screen showed before this existed.
+			}
+		}
+	};
+
+	await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, worker));
+	return found;
 }
 
 /** The filter that makes one `/sync` answer this screen's whole question. */

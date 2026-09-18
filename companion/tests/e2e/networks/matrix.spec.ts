@@ -107,6 +107,59 @@ test('lists the user’s rooms in the browser, and invites the Sensor into the c
 	await expect(page.getByTestId(`outcome-${untouched}`)).toHaveCount(0);
 });
 
+test('the search filters the list, and the bulk control touches only what it shows', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+	const token = await ownerToken(request);
+
+	// Three rooms, two of which a search can tell apart from the third. On a
+	// real work account this list is a hundred rooms of colleagues' private
+	// conversations, which is why the bulk control is scoped (#137, #122).
+	const stamp = Date.now();
+	const alpha = await createRoom(request, token, `Twalk alpha ${stamp}`);
+	const beta = await createRoom(request, token, `Twalk beta ${stamp}`);
+	const gamma = await createRoom(request, token, `Other gamma ${stamp}`);
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill(stack!.synapseUrl);
+	await page.getByTestId('matrix-homeserver').blur();
+	await page.getByTestId('matrix-username').fill('bot_alpha');
+	await page.getByTestId('matrix-password').fill(PASSWORD);
+	await page.getByTestId('matrix-signin').click();
+
+	const list = page.getByTestId('matrix-rooms');
+	await expect(list).toBeVisible();
+	await expect(page.getByTestId(`room-${gamma}`)).toBeVisible();
+
+	// The search narrows the list to what was asked for.
+	await page.getByTestId('matrix-room-search').fill(`Twalk alpha ${stamp}`);
+	await expect(page.getByTestId(`room-${alpha}`)).toBeVisible();
+	await expect(page.getByTestId(`room-${beta}`)).toHaveCount(0);
+	await expect(page.getByTestId(`room-${gamma}`)).toHaveCount(0);
+
+	// The bulk control names what it will do, and does only that. This is the
+	// assertion that matters: a room the filter is hiding must not be chosen
+	// by a click the user could not see the consequence of.
+	const bulk = page.getByTestId('matrix-rooms-toggle-shown');
+	await expect(bulk).toContainText(/1/);
+	await bulk.click();
+	await expect(page.getByTestId(`room-${alpha}`)).toBeChecked();
+
+	await page.getByTestId('matrix-room-search').fill('');
+	await expect(page.getByTestId(`room-${beta}`)).not.toBeChecked();
+	await expect(page.getByTestId(`room-${gamma}`)).not.toBeChecked();
+	await expect(page.getByTestId(`room-${alpha}`)).toBeChecked();
+
+	// And it undoes what it did, over the same scope.
+	await page.getByTestId('matrix-room-search').fill(`Twalk alpha ${stamp}`);
+	await expect(bulk).toContainText(/1/);
+	await bulk.click();
+	await expect(page.getByTestId(`room-${alpha}`)).not.toBeChecked();
+});
+
 test('asking again about a room the Sensor is already in is not an error', async ({
 	context,
 	page,

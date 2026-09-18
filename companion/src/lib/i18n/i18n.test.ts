@@ -80,7 +80,11 @@ describe('the catalogues', () => {
 			// An identity provider as a homeserver advertises it: the sign-in
 			// screen labels its button with the provider's own name, because
 			// that is what a user recognises (ticket #112).
-			provider: 'Connect with Twake'
+			provider: 'Connect with Twake',
+			// The room chooser's counts (ticket #137): how many rooms the search
+			// is showing, out of how many the account has.
+			shown: 4,
+			total: 112
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();
