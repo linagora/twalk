@@ -35,11 +35,21 @@
 //! no display name, no `network_identifier`. See the migration's own comment
 //! and [`crate::contacts`].
 //!
+//! Ticket #24 added `approval`, and it is the table where the rule above was
+//! most tempting to break: an approval is a message being sent, so the
+//! obvious row would carry the text. It does not. An approval here is the
+//! suggestion's id, the owner who approved it, a boolean saying whether they
+//! edited it, and the position the publication landed at on the bus. The text
+//! lives on the bus, where the retention is declared, and is read back from
+//! there — never from this file. See the migration's own comment and
+//! [`crate::approval`].
+//!
 //! The schema migrations are embedded in the binary ([`MIGRATIONS`]) and
 //! applied at open, so an operator upgrades the image and nothing else.
 //!
 //! No message content is stored here, ever: a decision is a subject, a state,
-//! a perimeter, two timestamps and the owner who took it.
+//! a perimeter, two timestamps and the owner who took it, and an approval is
+//! an id, an owner, a boolean and a position.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -62,7 +72,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 4] = [
+pub const MIGRATIONS: [&str; 5] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -326,6 +336,68 @@ pub const MIGRATIONS: [&str; 4] = [
             OR (c.subject_type = 'network' AND c.subject_id = s.network))
     );
     "#,
+    // v5 — the approvals this Gateway published (ticket #24).
+    //
+    // Read the columns before reading anything else about this table: there
+    // is **no column for the reply's text**, and there is not going to be
+    // one. An approval is the act of sending a message, and the message
+    // itself belongs on the bus, which is where the audit trail lives and
+    // where the retention is declared. What this table answers is the one
+    // question the bus answers slowly: "the reply I approved — did it
+    // actually go out, and where?" It holds the suggestion's id, the person
+    // who approved it, whether they edited what the persona wrote, and the
+    // stream position the publication landed at.
+    //
+    // This is **not** an outbox. `consent_decision` and
+    // `bridge_status_change` are written before they are published and
+    // drained later, because a decision the user took must survive a bus
+    // outage. An approval must not: a send held for later publication is a
+    // message the Gateway has promised to deliver after the consent it
+    // checked may have been revoked. So a row here is written unpublished,
+    // published inside the same request, and marked — and a row left
+    // unmarked by a crash is repaired by the next approval of the same
+    // suggestion, which republishes under the contract's deterministic id
+    // and is deduplicated by the bus rather than sent twice.
+    //
+    // No append-only trigger: this is operational bookkeeping, not the
+    // journal of a promise to the user. The promise's audit trail is
+    // `persona.reply.approved.v1` on the bus.
+    r#"
+    CREATE TABLE approval (
+        sequence            INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- The contract's deterministic id,
+        -- sha256(suggestion_event_id:approved_by). UNIQUE is the rule "a
+        -- given suggestion is approved at most once by a given user", in the
+        -- schema rather than in a comment.
+        event_id            TEXT NOT NULL UNIQUE,
+        -- The persona.suggest.produced event that was approved.
+        suggestion_event_id TEXT NOT NULL,
+        -- The Matrix ID of the human who approved it: this deployment's
+        -- owner, from configuration and never from the request body.
+        approved_by         TEXT NOT NULL,
+        -- Which persona proposed it, for an operator reading the table.
+        persona_id          TEXT NOT NULL,
+        network             TEXT NOT NULL CHECK (network IN ('whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix')),
+        -- The contact the reply goes to. Already in `contact_seen` — this
+        -- table adds no new category of data — and kept here because it is
+        -- what the consent check was made against.
+        contact             TEXT NOT NULL,
+        -- Whether the final content differed from what the persona wrote.
+        -- A boolean, not the text: "how often do I correct my assistant?"
+        -- is answerable without keeping a word of what was said.
+        edited              INTEGER NOT NULL CHECK (edited IN (0, 1)),
+        approved_at         TEXT NOT NULL,
+        -- NULL until the bus acknowledged the publication, and then the
+        -- instant and the position it landed at. A row that stays NULL is a
+        -- crash between the write and the publish, and it is visible on
+        -- purpose.
+        published_at        TEXT,
+        stream_sequence     INTEGER,
+        UNIQUE (suggestion_event_id, approved_by)
+    );
+
+    CREATE INDEX approval_suggestion ON approval (suggestion_event_id);
+    "#,
 ];
 
 /// The consent store. One connection behind a mutex: a decision is a handful
@@ -391,6 +463,47 @@ pub struct SeenContact {
     /// of.
     pub first_seen: String,
     pub last_seen: String,
+}
+
+/// One approval this Gateway recorded (ticket #24): what a client reads back
+/// to learn whether the reply it approved actually went out.
+///
+/// There is no `body` here, and there is none in the table it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedApproval {
+    /// The contract's deterministic id of the `persona.reply.approved.v1`.
+    pub event_id: String,
+    pub suggestion_event_id: String,
+    pub approved_by: String,
+    pub persona_id: String,
+    pub network: Network,
+    pub contact: String,
+    pub edited: bool,
+    pub approved_at: String,
+    /// `None` until the bus acknowledged the publication. A recorded
+    /// approval that is not published is a crash between the two, not a
+    /// queue: nothing retries it but another approval of the same
+    /// suggestion.
+    pub published_at: Option<String>,
+    /// Where on the bus the reply landed. `None` for the same reason.
+    pub stream_sequence: Option<u64>,
+}
+
+impl RecordedApproval {
+    /// The one word a client branches on: `published` when the bus
+    /// acknowledged the reply, `unpublished` when this Gateway wrote the row
+    /// and does not know where the reply went.
+    ///
+    /// Both are terminal. Neither is "in flight": an approval is published
+    /// inside its own request or it is refused, so there is no state here
+    /// that a screen should render as a spinner.
+    pub fn publication(&self) -> &'static str {
+        if self.published_at.is_some() {
+            "published"
+        } else {
+            "unpublished"
+        }
+    }
 }
 
 /// A committed decision the outbox has not published yet.
@@ -1062,6 +1175,141 @@ impl Store {
             )
             .with_context(|| format!("failed to mark bridge status change {sequence} published"))?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Approvals (ticket #24)
+    // -----------------------------------------------------------------
+
+    /// Records one approval, before it is published.
+    ///
+    /// Nothing about the reply's content is passed to this method, so there
+    /// is nothing here to have forgotten to drop: the signature could not
+    /// write a message body if it wanted to.
+    ///
+    /// Recording the same approval twice — the same suggestion, the same
+    /// approver — writes nothing and is not an error. That is the repair
+    /// path for a crash between this write and the publication: the next
+    /// attempt finds the row, republishes under the contract's id (which the
+    /// bus deduplicates) and marks it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_approval(
+        &self,
+        event_id: &str,
+        suggestion_event_id: &str,
+        approved_by: &str,
+        persona_id: &str,
+        network: Network,
+        contact: &str,
+        edited: bool,
+        approved_at: &str,
+    ) -> Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO approval \
+                 (event_id, suggestion_event_id, approved_by, persona_id, network, contact, \
+                  edited, approved_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT (event_id) DO NOTHING",
+                rusqlite::params![
+                    event_id,
+                    suggestion_event_id,
+                    approved_by,
+                    persona_id,
+                    network.as_str(),
+                    contact,
+                    i64::from(edited),
+                    approved_at,
+                ],
+            )
+            .context("failed to record the approval")?;
+        Ok(())
+    }
+
+    /// Marks an approval published, at the position the bus stored it at.
+    ///
+    /// `published_at IS NULL` in the predicate for the same reason the
+    /// consent outbox has it: a republish that the bus deduplicated must not
+    /// move a position that was already recorded.
+    pub fn mark_approval_published(
+        &self,
+        event_id: &str,
+        published_at: &str,
+        stream_sequence: u64,
+    ) -> Result<()> {
+        self.connection()
+            .execute(
+                "UPDATE approval SET published_at = ?1, stream_sequence = ?2 \
+                 WHERE event_id = ?3 AND published_at IS NULL",
+                rusqlite::params![
+                    published_at,
+                    i64::try_from(stream_sequence).unwrap_or(i64::MAX),
+                    event_id
+                ],
+            )
+            .with_context(|| format!("failed to mark approval {event_id} published"))?;
+        Ok(())
+    }
+
+    /// The approval of one suggestion, or `None` when it was never approved.
+    ///
+    /// One row per suggestion because one owner takes every decision on this
+    /// deployment (ADR 0011); the table's key is nevertheless (suggestion,
+    /// approver), which is the contract's own natural key.
+    pub fn approval(&self, suggestion_event_id: &str) -> Result<Option<RecordedApproval>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT event_id, suggestion_event_id, approved_by, persona_id, network, \
+                        contact, edited, approved_at, published_at, stream_sequence \
+                 FROM approval WHERE suggestion_event_id = ? ORDER BY sequence LIMIT 1",
+            )
+            .context("failed to prepare the approval query")?;
+        let row = statement
+            .query_row([suggestion_event_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                ))
+            })
+            .optional()
+            .context("failed to read the approval")?;
+        let Some((
+            event_id,
+            suggestion_event_id,
+            approved_by,
+            persona_id,
+            network,
+            contact,
+            edited,
+            approved_at,
+            published_at,
+            stream_sequence,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        Ok(Some(RecordedApproval {
+            event_id,
+            suggestion_event_id,
+            approved_by,
+            persona_id,
+            network: Network::parse(&network)
+                .with_context(|| format!("the store holds the unknown network {network:?}"))?,
+            contact,
+            edited: edited != 0,
+            approved_at,
+            published_at,
+            stream_sequence: stream_sequence.map(|sequence| sequence as u64),
+        }))
     }
 
     // -----------------------------------------------------------------
@@ -1969,6 +2217,100 @@ mod tests {
              and nothing else: see the migration's own comment and \
              docs/architecture/security-model.md"
         );
+    }
+
+    #[test]
+    fn the_approval_table_has_no_column_for_the_reply_that_was_sent() {
+        // An approval is the act of sending a message, so this is the table
+        // where holding the message would have been the natural thing to do.
+        // It is not held: the text goes on the bus and is read back from
+        // there. This test fails the day a `body`, a `final` or a `suggestion`
+        // column appears.
+        let store = store("approval-columns");
+        let connection = store.connection();
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info('approval') ORDER BY cid")
+            .unwrap();
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|column| column.unwrap())
+            .collect();
+        assert_eq!(
+            columns,
+            vec![
+                "sequence",
+                "event_id",
+                "suggestion_event_id",
+                "approved_by",
+                "persona_id",
+                "network",
+                "contact",
+                "edited",
+                "approved_at",
+                "published_at",
+                "stream_sequence",
+            ],
+            "an approval is an id, an owner, a boolean and a position — never the text that \
+             was approved"
+        );
+    }
+
+    #[test]
+    fn an_approval_is_recorded_unpublished_and_then_marked() {
+        let store = store("approval-lifecycle");
+        let suggestion = "a".repeat(64);
+        let event = "c".repeat(64);
+        store
+            .record_approval(
+                &event,
+                &suggestion,
+                "@michel:example.com",
+                "assistant",
+                Network::Whatsapp,
+                "@whatsapp_336:example.com",
+                true,
+                "2026-09-17T10:04:37.000Z",
+            )
+            .unwrap();
+        let recorded = store.approval(&suggestion).unwrap().expect("recorded");
+        assert_eq!(recorded.event_id, event);
+        assert_eq!(recorded.publication(), "unpublished");
+        assert!(recorded.edited);
+        assert_eq!(recorded.stream_sequence, None);
+
+        store
+            .mark_approval_published(&event, "2026-09-17T10:04:37.100Z", 4242)
+            .unwrap();
+        let published = store.approval(&suggestion).unwrap().expect("recorded");
+        assert_eq!(published.publication(), "published");
+        assert_eq!(published.stream_sequence, Some(4242));
+
+        // Recording it again writes nothing and does not move the position:
+        // that is what makes the crash-repair path safe to run twice.
+        store
+            .record_approval(
+                &event,
+                &suggestion,
+                "@michel:example.com",
+                "assistant",
+                Network::Whatsapp,
+                "@whatsapp_336:example.com",
+                false,
+                "2026-09-17T11:00:00.000Z",
+            )
+            .unwrap();
+        store
+            .mark_approval_published(&event, "2026-09-17T11:00:00.000Z", 9999)
+            .unwrap();
+        let again = store.approval(&suggestion).unwrap().expect("recorded");
+        assert_eq!(again, published, "a replay changes nothing");
+    }
+
+    #[test]
+    fn a_suggestion_nobody_approved_has_no_approval() {
+        let store = store("approval-absent");
+        assert_eq!(store.approval(&"f".repeat(64)).unwrap(), None);
     }
 
     #[test]

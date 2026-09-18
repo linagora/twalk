@@ -83,7 +83,7 @@ Nine event types are defined in the v1 contract:
 | `fr.linagora.twalk.outbound.reaction.added.v1`           | Sensor            | The user added a reaction themselves, from their own phone.            |
 | `fr.linagora.twalk.persona.thinking.emitted.v1`          | Hermes            | A persona has started processing an event.                             |
 | `fr.linagora.twalk.persona.suggest.produced.v1`          | Hermes            | A persona produced a suggested reply for oversight.                    |
-| `fr.linagora.twalk.persona.reply.approved.v1`            | Hermes            | A suggestion was approved and should be sent.                          |
+| `fr.linagora.twalk.persona.reply.approved.v1`            | Companion Gateway | A suggestion was approved and should be sent. `source` still names the persona whose suggestion it was ([ADR 0022](docs/architecture/adr/0022-the-approval-api-lives-on-the-companion-gateway.md)). |
 | `fr.linagora.twalk.consent.state.changed.v1`             | Companion Gateway | The user modified the consent state of a contact, a network or a persona. |
 | `fr.linagora.twalk.bridge.status.changed.v1`             | Companion Gateway | A bridge changed state (connected, disconnected, session expired).     |
 

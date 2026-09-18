@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
+use twalk_companion_gateway::approval::Approvals;
 use twalk_companion_gateway::bootstrap::Bootstrap;
 use twalk_companion_gateway::bridge_status::{reconcile, Statuses};
 use twalk_companion_gateway::config::{Config, Consent};
@@ -137,13 +138,32 @@ async fn main() -> Result<()> {
     // and one bus: the outbox that publishes decisions (#49) and the
     // projection that consumes the inbound stream to know who is waiting for
     // one (#54).
-    let (consent, contacts) = match &config.consent {
+    let (consent, contacts, approvals) = match &config.consent {
         Some(consent) => {
             let (store, outbox) = open_consent(consent, &metrics)?;
             tokio::spawn(publish_until_shutdown(
                 outbox.clone(),
                 consent.nats_url.clone(),
             ));
+            // Approvals (ticket #24). The same store and the same bus: the
+            // question an approval asks — "is this contact granted, now?" —
+            // is a read of the consent journal's own projection, which is
+            // the whole reason this endpoint is here and not on the runtime
+            // (ADR 0022).
+            let approvals = Arc::new(Approvals::new(
+                store.clone(),
+                metrics.clone(),
+                consent.owner.clone(),
+                consent.nats_url.clone(),
+                config.approval_lookup_window,
+                std::time::SystemTime::now,
+            ));
+            info!(
+                owner = %consent.owner,
+                lookup_window = config.approval_lookup_window,
+                "approvals are on: POST /api/approvals turns one suggestion into an outbound \
+                 reply, refused if the sender's consent is no longer granted at that moment"
+            );
             let projection = Arc::new(Contacts::new(
                 store,
                 metrics.clone(),
@@ -159,7 +179,7 @@ async fn main() -> Result<()> {
                  network identifier"
             );
             tokio::spawn(project_until_shutdown(projection.clone()));
-            (Some(outbox), Some(projection))
+            (Some(outbox), Some(projection), Some(approvals))
         }
         None => {
             if config.sign_in.is_some() {
@@ -167,10 +187,11 @@ async fn main() -> Result<()> {
                     "GATEWAY_NATS_URL is not set: the consent endpoints answer 503, because a \
                      decision the bus never hears is a decision no persona can honour — and so \
                      do the pending-contact endpoints, because the list of who is waiting is \
-                     read from the bus"
+                     read from the bus, and so do the approval endpoints, because a suggestion \
+                     is read from the bus and the reply is published on it"
                 );
             }
-            (None, None)
+            (None, None, None)
         }
     };
 
@@ -302,7 +323,8 @@ async fn main() -> Result<()> {
             .with_bridges(bridges.clone())
             .with_snapshots(snapshots)
             .with_statuses(statuses.clone())
-            .with_contacts(contacts),
+            .with_contacts(contacts)
+            .with_approvals(approvals),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming

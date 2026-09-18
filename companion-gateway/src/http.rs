@@ -28,6 +28,8 @@ use tower::ServiceExt;
 use tower_http::services::ServeFile;
 use tracing::{debug, warn};
 
+use crate::approval::Approvals;
+use crate::approval_http;
 use crate::bootstrap::Bootstrap;
 use crate::bootstrap_http;
 use crate::bridge::Bridges;
@@ -90,6 +92,14 @@ pub struct Gateway {
     /// has written to you" and "this Gateway is not watching" are very
     /// different claims.
     contacts: Option<Arc<Contacts>>,
+    /// The approval half ([`crate::approval`], ticket #24): the act that
+    /// turns a suggestion into an outbound reply. `None` on the same terms
+    /// as [`Self::consent`] — it reads suggestions from the same bus and
+    /// checks the same consent store — and the approval endpoints then
+    /// answer `503 approvals_not_configured`, because "this Gateway cannot
+    /// send" and "that suggestion cannot be approved" are very different
+    /// claims and only one of them is about the suggestion.
+    approvals: Option<Arc<Approvals>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -110,6 +120,7 @@ impl Gateway {
             snapshots: None,
             statuses: None,
             contacts: None,
+            approvals: None,
             now_unix_seconds,
         }
     }
@@ -198,6 +209,18 @@ impl Gateway {
         self.contacts.clone()
     }
 
+    /// Adds the approval half (ticket #24), the same way. Configured
+    /// together with consent — same store, same bus — and kept as its own
+    /// half so that the endpoints say which of them a deployment is missing.
+    pub fn with_approvals(mut self, approvals: Option<Arc<Approvals>>) -> Self {
+        self.approvals = approvals;
+        self
+    }
+
+    pub fn approvals(&self) -> Option<Arc<Approvals>> {
+        self.approvals.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -255,6 +278,11 @@ pub fn router(gateway: Gateway) -> Router {
         // The pending contacts (ticket #54): the same merge, the same
         // guard. The owner's own read of who is waiting for a decision.
         .merge(contacts_http::routes())
+        // Approvals (ticket #24): the same merge, the same guard. The one
+        // act on this origin that causes a message to be sent — deliberate,
+        // one suggestion at a time, and refused when the sender's consent is
+        // no longer granted at that moment.
+        .merge(approval_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))

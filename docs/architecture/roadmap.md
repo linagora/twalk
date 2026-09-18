@@ -85,13 +85,13 @@ Configurations and appservice registrations for mautrix-whatsapp, mautrix-signal
 
 ### Companion Gateway · specced
 
-The Companion's backend, in Rust: bridge provisioning facade, persona orchestrator, and **sole writer of consent state** ([ADR 0006](adr/0006-consent-state-owned-by-companion-gateway.md)). It produces two of the ten event types — `consent.state.changed.v1` and `bridge.status.changed.v1` — and it owns the consent snapshot the Sensor needs to label events correctly after a restart, which is the real fix for [#16](https://github.com/linagora/twalk/issues/16).
+The Companion's backend, in Rust: bridge provisioning facade, persona orchestrator, and **sole writer of consent state** ([ADR 0006](adr/0006-consent-state-owned-by-companion-gateway.md)). It produces three of the ten event types — `consent.state.changed.v1`, `bridge.status.changed.v1` and, since [#24](https://github.com/linagora/twalk/issues/24), `persona.reply.approved.v1` ([ADR 0022](adr/0022-the-approval-api-lives-on-the-companion-gateway.md): the approval is refused unless the sender's consent is still granted at that moment, and the single writer of consent state should not have to ask another service what it wrote) — and it owns the consent snapshot the Sensor needs to label events correctly after a restart, which is the real fix for [#16](https://github.com/linagora/twalk/issues/16).
 
 It blocks the Companion lot: the PWA is a client of this API and has nothing to call without it.
 
 Spec [#46](https://github.com/linagora/twalk/issues/46), tickets #48–#54, mostly sequential: **G1** service skeleton with the Sensor's operational parity → **G2** consent store, journal and outbox → **G3** snapshot endpoint naming its stream position → **G4** the Sensor reading it, which closes [#16](https://github.com/linagora/twalk/issues/16); **G5** sign-in and per-device tokens → **G6** registration relay and Sensor invitation; **G7** the pending-contact projection.
 
-The design decisions behind it: [ADR 0010](adr/0010-consent-snapshot-then-deltas.md) (snapshot then deltas, arbitrated by the stream sequence), [ADR 0011](adr/0011-gateway-authenticates-with-matrix-openid.md) (Matrix OpenID, no access token held, one owner per deployment) and [ADR 0013](adr/0013-persona-activation-is-a-consent-decision.md) (persona activation is a consent decision).
+The design decisions behind it: [ADR 0010](adr/0010-consent-snapshot-then-deltas.md) (snapshot then deltas, arbitrated by the stream sequence), [ADR 0011](adr/0011-gateway-authenticates-with-matrix-openid.md) (Matrix OpenID, no access token held, one owner per deployment), [ADR 0013](adr/0013-persona-activation-is-a-consent-decision.md) (persona activation is a consent decision) and [ADR 0022](adr/0022-the-approval-api-lives-on-the-companion-gateway.md) (the approval API is here rather than on the Hermes runtime, overriding spec [#19](https://github.com/linagora/twalk/issues/19)).
 
 ### Bridge provisioning facade · specced
 

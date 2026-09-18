@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.twalk.dev/cloudevents/v1/persona.reply.approved.schema.json",
   "title": "fr.linagora.twalk.persona.reply.approved.v1",
-  "description": "A suggested reply was approved by the user and should be sent back to the external network through the bridge that owns the target portal room. Emitted by Hermes when an oversight interface (Buzz Dialogue Room, the Companion) records the approval. This is the only v1 event that triggers an outbound message.",
+  "description": "A suggested reply was approved by the user and should be sent back to the external network through the bridge that owns the target portal room. Emitted by the Companion Gateway, which serves the approval endpoint an oversight interface (the Companion, Buzz's Dialogue Room) calls: the approval is refused unless the sender's consent is still 'granted' at that moment, and the Gateway is the single writer of consent state, so the check is a read of its own journal rather than a question asked of another service (ADR 0022). 'source' still names the persona whose suggestion was approved, not the publisher. This is the only v1 event that triggers an outbound message.",
   "type": "object",
   "required": [
     "specversion",

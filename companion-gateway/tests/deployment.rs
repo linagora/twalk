@@ -26,6 +26,17 @@
 //! which is also where "the Sensor's startup does not depend on the Gateway"
 //! is asserted — from compose's own resolved configuration.
 //!
+//! Since ticket #24 the same test closes the loop: a suggestion is published
+//! against the correspondent's **real** message, the deployed Gateway is
+//! asked to approve it, and the approved reply is asserted to appear in the
+//! real Matrix room — posted by the real Sensor, read back from the
+//! homeserver. The persona is the one part stood in for, because Hermes does
+//! not run in this compose stack yet; everything downstream of the suggestion
+//! is the deployment's own. The owner's own message, in the same test, is
+//! `outbound.message.sent.v1` with no consent extension at all: the owner is
+//! not a contact (tickets #109 and #147, ADR 0018 and ADR 0021), and this
+//! test had gone on expecting `inbound.message.received` for it.
+//!
 //! The deploy stack runs under its own compose project and host ports, next
 //! to the harness's own stack: TWALK_DEPLOY_TEST_STACK (default
 //! twalk-deploy-test), TWALK_DEPLOY_TEST_GATEWAY_PORT (default 18318 —
@@ -87,6 +98,18 @@ fn homeserver_url() -> String {
 /// The bus as the deploy stack publishes to it (`sensor/src/normalize.rs`).
 const STREAM: &str = "twalk";
 const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
+/// Where the **owner's own** message lands. The deploy stack's Sensor takes
+/// its operator from `SENSOR_OWNER`, which defaults to `GATEWAY_OWNER`, so a
+/// message the owner sends in the room they invited the Sensor into is
+/// published here and not on [`MESSAGE_SUBJECT`] — the owner is not a contact
+/// and never has a consent state (tickets #109 and #147, ADR 0018 and
+/// ADR 0021).
+const OWN_MESSAGE_SUBJECT: &str = "twalk.outbound.message.sent.v1";
+/// The two subjects ticket #24's half of this test uses: the suggestion a
+/// persona would have published, and the approval the deployed Gateway
+/// publishes and the deployed Sensor posts.
+const SUGGEST_SUBJECT: &str = "twalk.persona.suggest.produced.v1";
+const APPROVED_SUBJECT: &str = "twalk.persona.reply.approved.v1";
 
 /// [`poll_until`] with the patience a cold deploy stack needs: the Sensor has
 /// to log in, bootstrap its crypto store and sync before it can act on an
@@ -725,7 +748,7 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     send_message(&client, &owner_token, &room_id, &body).await?;
     let stored = poll_deploy(
         || async {
-            bus.fetch_room_messages_on(SERVER_NAME, STREAM, MESSAGE_SUBJECT, &room_id)
+            bus.fetch_room_messages_on(SERVER_NAME, STREAM, OWN_MESSAGE_SUBJECT, &room_id)
                 .await
                 .ok()?
                 .into_iter()
@@ -735,7 +758,7 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     )
     .await?;
     let event = &stored.payload;
-    validate_against_contract(event, "inbound.message.received")?;
+    validate_against_contract(event, "outbound.message.sent")?;
     assert_eq!(
         event["network"].as_str(),
         Some("matrix"),
@@ -748,6 +771,16 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     );
     assert_eq!(event["subject"].as_str(), Some(owner_user_id().as_str()));
     assert_eq!(event["data"]["body"].as_str(), Some(body.as_str()));
+    // The owner is not a contact, so their own message carries no consent
+    // state at all — not `granted`, not `pending`, nothing (ADR 0018,
+    // ADR 0021). Asserted here because this is the only place in this
+    // repository where a real Sensor publishes the real owner's own traffic
+    // into a bus a real Gateway consumes.
+    assert!(
+        event.get("consent").is_none(),
+        "the owner's own message carries no consent extension: {event}"
+    );
+    assert_eq!(stored.header("consent"), None);
 
     // --- ticket #54, at the only seam where the whole chain is real: a
     // correspondent writes in that room, the Sensor publishes it, and the
@@ -866,6 +899,85 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
         still_waiting.is_none(),
         "a contact the user decided about is not waiting for a decision: {still_waiting:?}"
     );
+
+    // --- ticket #24, the loop closing in the reference deployment: a
+    // suggestion on the bus, an approval through the deployed Gateway, and
+    // the reply appearing in the real Matrix room, posted by the real Sensor.
+    //
+    // The persona is the one part stood in for — Hermes does not run in this
+    // compose stack yet — so the test publishes the `persona.suggest.produced`
+    // a persona would, against the correspondent's **real** message above.
+    // Everything after that is the deployment: the Gateway reads the
+    // suggestion and its trigger off the bus, checks that the correspondent's
+    // consent is still granted (it was decided `granted` a few lines up),
+    // publishes `persona.reply.approved.v1`, and the Sensor's outbound
+    // consumer posts it into the room.
+    let trigger_id = written.payload["id"]
+        .as_str()
+        .context("the correspondent's event has an id")?
+        .to_owned();
+    let suggestion = suggestion_event(&trigger_id);
+    let suggestion_id = suggestion["id"]
+        .as_str()
+        .context("the suggestion has an id")?
+        .to_owned();
+    validate_against_contract(&suggestion, "persona.suggest.produced")?;
+    bus.publish_event(SUGGEST_SUBJECT, &suggestion).await?;
+
+    let reply_body = format!("bonjour — réponse approuvée {}", std::process::id());
+    let approval = client
+        .post(format!("{base}/api/approvals"))
+        .header("cookie", format!("twalk_device={device_token}"))
+        .json(&serde_json::json!({
+            "suggestion_event_id": suggestion_id,
+            "final": { "body": reply_body, "format": "text/plain" }
+        }))
+        .send()
+        .await?;
+    let status = approval.status();
+    let approved: serde_json::Value = serde_json::from_str(&approval.text().await?)?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CREATED,
+        "the deployed Gateway must approve a granted contact's suggestion: {approved}"
+    );
+    assert_eq!(approved["publication"].as_str(), Some("published"));
+    assert_eq!(approved["edited"].as_bool(), Some(true));
+
+    // The event the Sensor consumes, schema-valid on the deployment's own bus.
+    let published = poll_deploy(
+        || async {
+            bus.fetch_all(STREAM, APPROVED_SUBJECT)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|event| event["id"] == approved["event_id"])
+        },
+        "the approved reply to reach the deployment's bus",
+    )
+    .await?;
+    validate_against_contract(&published, "persona.reply.approved")?;
+    assert_eq!(
+        published["data"]["target"]["room_id"].as_str(),
+        Some(room_id.as_str()),
+        "the reply is addressed to the room the message it answers came from: {published}"
+    );
+
+    // And the loop closes: the Sensor posts it, so the correspondent sees it
+    // in the room. Asserted against the homeserver's own state rather than
+    // against anything Twalk says about itself.
+    poll_deploy(
+        || async {
+            room_bodies(&client, &correspondent_token, &room_id)
+                .await
+                .ok()?
+                .into_iter()
+                .any(|body| body == reply_body)
+                .then_some(())
+        },
+        "the approved reply to appear in the room, posted by the Sensor",
+    )
+    .await?;
 
     // The deployed Gateway logged the bootstrap and none of its credentials.
     // (The store is asserted at the process boundary, in tests/bootstrap.rs,
@@ -1121,6 +1233,76 @@ async fn membership(
 }
 
 /// Sends a text message as the user typing in their own client does.
+/// One `persona.suggest.produced.v1` for a real trigger event, as the
+/// assistant would publish it (ticket #24). Hermes does not run in this
+/// compose stack yet, so this is the one part of the loop the test stands in
+/// for; everything downstream of it is the deployment's own.
+fn suggestion_event(trigger_id: &str) -> serde_json::Value {
+    let now = std::time::SystemTime::now();
+    let produced_at = format_rfc3339(now);
+    let expires_at = format_rfc3339(now + std::time::Duration::from_secs(3600));
+    serde_json::json!({
+        "specversion": "1.0",
+        "id": harness::sha256_hex(&format!("assistant:{trigger_id}:1")),
+        "source": format!("hermes://{SERVER_NAME}/personas/assistant"),
+        "type": "fr.linagora.twalk.persona.suggest.produced.v1",
+        "time": produced_at,
+        "subject": trigger_id,
+        "datacontenttype": "application/json",
+        "network": "matrix",
+        "consent": "granted",
+        "data": {
+            "persona_id": "assistant",
+            "trigger": {
+                "event_id": trigger_id,
+                "event_type": "fr.linagora.twalk.inbound.message.received.v1"
+            },
+            "suggestion": { "body": "bonjour !", "format": "text/plain" },
+            "attempt": 1,
+            "expires_at": expires_at
+        }
+    })
+}
+
+/// RFC 3339, whole seconds, UTC — the spelling every producer in this
+/// repository stamps.
+fn format_rfc3339(at: std::time::SystemTime) -> String {
+    let seconds = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs();
+    time::OffsetDateTime::from_unix_timestamp(seconds as i64)
+        .expect("a unix timestamp is an instant")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("an instant formats as RFC 3339")
+}
+
+/// The text of the recent messages in a room, as an account that is in it
+/// reads them. How this test asks the **homeserver** whether the approved
+/// reply was really posted, rather than believing Twalk's own account of it.
+async fn room_bodies(client: &reqwest::Client, token: &str, room_id: &str) -> Result<Vec<String>> {
+    let response = client
+        .get(format!(
+            "{}/_matrix/client/v3/rooms/{room_id}/messages?dir=b&limit=50",
+            homeserver_url()
+        ))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "the homeserver refused to list the room's messages: {}",
+        response.text().await.unwrap_or_default()
+    );
+    let document: serde_json::Value = serde_json::from_str(&response.text().await?)?;
+    Ok(document["chunk"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|event| event["content"]["body"].as_str().map(str::to_owned))
+        .collect())
+}
+
 async fn send_message(
     client: &reqwest::Client,
     owner_token: &str,

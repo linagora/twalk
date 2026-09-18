@@ -67,6 +67,17 @@ pub struct Metrics {
     /// no contact series at all.
     contacts_observed: Mutex<u64>,
     pending_contacts: Mutex<Option<u64>>,
+    /// Approved replies published on the bus (#24), and the approvals that
+    /// were refused, by the code the caller was given
+    /// (`suggestion_expired`, `consent_revoked`, `bus_unreachable`, …).
+    ///
+    /// The refusal counter is the one an operator reads after "my assistant
+    /// stopped answering": it says whether the approvals are being refused
+    /// and for which of a dozen different reasons, rather than leaving a
+    /// silence to be interpreted. The labels are the refusal codes, a closed
+    /// set of static strings, so the cardinality is bounded.
+    approvals_published: Mutex<u64>,
+    approval_refusals: Mutex<BTreeMap<&'static str, u64>>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -127,6 +138,8 @@ impl Metrics {
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
             bridge_status_outbox_pending: Mutex::new(None),
+            approvals_published: Mutex::new(0),
+            approval_refusals: Mutex::new(BTreeMap::new()),
             contacts_observed: Mutex::new(0),
             pending_contacts: Mutex::new(None),
             started_unix_seconds: now_unix_seconds,
@@ -190,6 +203,25 @@ impl Metrics {
     /// One committed decision published on the bus and marked as such. This
     /// counter is how a test — and an operator after a crash — sees that a
     /// decision reached the bus exactly once.
+    /// One approved reply reached the bus (#24).
+    pub fn record_approval_published(&self) {
+        *self
+            .approvals_published
+            .lock()
+            .expect("the metrics mutex is never poisoned") += 1;
+    }
+
+    /// One approval was refused, under the code the caller was given — so a
+    /// refusal an operator sees here is the same word the user saw.
+    pub fn record_approval_refusal(&self, outcome: &'static str) {
+        *self
+            .approval_refusals
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
     pub fn record_consent_published(&self) {
         *self
             .consent_published
@@ -327,6 +359,36 @@ impl Metrics {
             out.push_str(&format!(
                 "twalk_companion_gateway_consent_outbox_pending {pending}\n"
             ));
+            // The approval series (#24), inside the same guard: approvals
+            // are configured exactly when consent is — they read the same
+            // store and publish on the same bus — so a Gateway that writes
+            // no consent exposes no approval series either.
+            //
+            // The refusal counter is the one an operator reads after "my
+            // assistant stopped answering". Its label is the code the caller
+            // was given, so an expired suggestion, a revoked contact and a
+            // bus that did not answer are three different samples and not
+            // one silence.
+            out.push_str("# HELP twalk_companion_gateway_approvals_published_total Approved replies published on the bus.\n");
+            out.push_str("# TYPE twalk_companion_gateway_approvals_published_total counter\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_approvals_published_total {}\n",
+                self.approvals_published
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            out.push_str("# HELP twalk_companion_gateway_approval_refusals_total Approvals refused, by the code the caller was given.\n");
+            out.push_str("# TYPE twalk_companion_gateway_approval_refusals_total counter\n");
+            for (outcome, count) in self
+                .approval_refusals
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_approval_refusals_total{{outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
         }
         // The pending-contact series (#54), on the same terms: present once
         // the projection is configured, absent otherwise.

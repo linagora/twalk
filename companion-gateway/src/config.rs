@@ -82,6 +82,19 @@ pub struct Config {
     /// stream's whole history into a store that already holds it (harmless,
     /// because the sightings are idempotent, and slow).
     pub inbound_consumer: String,
+    /// How many stream positions back an approval looks for the suggestion
+    /// it names, and for the message that suggestion answers
+    /// (GATEWAY_APPROVAL_LOOKUP_WINDOW, default
+    /// [`crate::approval::DEFAULT_LOOKUP_WINDOW`], ticket #24).
+    ///
+    /// The bus has no index from a CloudEvents id to a stream position, so
+    /// finding a suggestion means reading the stream, and the read is
+    /// bounded. The bound is visible in the answer rather than hidden in it:
+    /// a suggestion the window did not reach is refused as
+    /// `suggestion_out_of_reach`, never as `suggestion_not_found`. Widen it
+    /// on a deployment whose bus carries far more traffic than one person's
+    /// conversations; the cost is a longer read on the approval path alone.
+    pub approval_lookup_window: u64,
 }
 
 /// The bridges from the environment.
@@ -465,6 +478,18 @@ impl Config {
                 .map(|name| name.trim().to_owned())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| crate::contacts::DEFAULT_INBOUND_CONSUMER.to_owned()),
+            approval_lookup_window: {
+                let window: u64 = optional(
+                    "GATEWAY_APPROVAL_LOOKUP_WINDOW",
+                    &crate::approval::DEFAULT_LOOKUP_WINDOW.to_string(),
+                )?;
+                anyhow::ensure!(
+                    window > 0,
+                    "environment variable GATEWAY_APPROVAL_LOOKUP_WINDOW must be at least 1: \
+                     a window of zero would refuse every approval as out of reach"
+                );
+                window
+            },
             sign_in,
             bootstrap,
         })
