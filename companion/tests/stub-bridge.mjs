@@ -91,10 +91,34 @@ function qrStep(processId, data) {
 	};
 }
 
+/**
+ * A login the bridge holds, shaped as `whoami` describes one.
+ *
+ * `state` is the nested `BridgeState` the reference bridges put there, and it
+ * is what the Companion's connected badge is read from since #108. A login
+ * with no `state` is a bridge that has just restarted — its state lives in
+ * memory — and reads as `starting`, not as disconnected.
+ */
+function heldLogin(loginId, name, stateEvent = 'CONNECTED') {
+	const login = { id: loginId, name, profile: { phone: name } };
+	if (stateEvent !== null) {
+		login.state = {
+			state_event: stateEvent,
+			timestamp: 1789706879,
+			ttl: 21600,
+			source: 'bridge'
+		};
+	}
+	return login;
+}
+
 function completion(bridge, processId, loginId) {
 	bridge.processes.delete(processId);
 	if (!bridge.logins.some((login) => login.id === loginId)) {
-		bridge.logins.push({ id: loginId, name: 'the stub’s account', profile: { id: loginId } });
+		// A real bridge connects the session it has just been given, and then
+		// reports `CONNECTED`. The stub does both at once, so a journey that
+		// scans a code can assert the card that follows.
+		bridge.logins.push(heldLogin(loginId, 'the stub’s account'));
 	}
 	return {
 		type: 'complete',
@@ -231,11 +255,18 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 		}
 
 		if (head === 'logins' && request.method === 'GET') {
-			json(response, 200, bridge.logins);
+			// Bare id strings under `login_ids` — what mautrix-whatsapp and
+			// mautrix-signal v26.09 really answer (#106). No name, no profile,
+			// no state: those live in whoami and nowhere else.
+			json(response, 200, { login_ids: bridge.logins.map((login) => login.id) });
 			return;
 		}
 
 		if (head === 'whoami' && request.method === 'GET') {
+			// The only call that describes a login, and therefore the only
+			// honest source of "is this network connected?" (#108). Each entry
+			// carries the same nested `BridgeState` document the status
+			// webhook pushes.
 			json(response, 200, {
 				network: { id: 'stub', display_name: 'Stub' },
 				logins: bridge.logins
@@ -440,13 +471,37 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 				return;
 			}
 			case 'add-login':
-				bridge.logins.push({
-					id: body.login_id ?? 'existing-login',
-					name: body.name ?? 'an account the bridge already holds',
-					profile: { id: body.login_id ?? 'existing-login' }
-				});
+				bridge.logins.push(
+					heldLogin(
+						body.login_id ?? 'existing-login',
+						body.name ?? 'an account the bridge already holds',
+						body.state_event === undefined ? 'CONNECTED' : body.state_event
+					)
+				);
 				json(response, 200, { added: true });
 				return;
+			case 'set-login-state': {
+				// The state a bridge reports for one of its logins, in
+				// mautrix's own vocabulary. `null` is a bridge that holds the
+				// login and has said nothing about it yet.
+				const target = bridge.logins.find((login) => login.id === body.login_id);
+				if (target === undefined) {
+					json(response, 404, { error: 'no such login', login_id: body.login_id });
+					return;
+				}
+				if (body.state_event === null) {
+					delete target.state;
+				} else {
+					target.state = {
+						state_event: body.state_event,
+						timestamp: body.timestamp ?? 1789706879,
+						ttl: 21600,
+						source: 'bridge'
+					};
+				}
+				json(response, 200, { set: true });
+				return;
+			}
 			case 'stats':
 				json(response, 200, {
 					blocking_arrivals: bridge.blockingArrivals,

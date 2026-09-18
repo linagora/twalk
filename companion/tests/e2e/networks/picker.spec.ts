@@ -8,12 +8,27 @@
 
 import { expect, test } from '@playwright/test';
 
-import { bridgeStack, NO_STACK, signIn } from './harness';
+import {
+	bridgeStack,
+	NO_STACK,
+	signIn,
+	SIGNAL_BRIDGE,
+	SMS_BRIDGE,
+	StubBridge,
+	WHATSAPP_BRIDGE
+} from './harness';
 
 test.skip(bridgeStack() === null, NO_STACK);
 
 test.beforeEach(async ({ context, request }) => {
 	await signIn(context, request, 'the picker’s device');
+	// What a card says now depends on what its bridge holds (#108), and every
+	// spec in this project shares one stub. So this one states the world it is
+	// asserting about instead of inheriting whatever ran before it: no bridge
+	// holds a login, so no card is connected.
+	for (const bridgeId of [WHATSAPP_BRIDGE, SIGNAL_BRIDGE, SMS_BRIDGE]) {
+		await new StubBridge(request, bridgeId).reset();
+	}
 });
 
 test('shows the four v0.1 networks, Telegram and Discord as v0.2, and a skip link', async ({
@@ -40,8 +55,12 @@ test('shows the four v0.1 networks, Telegram and Discord as v0.2, and a skip lin
 	await expect(page.getByTestId('skip-networks')).toBeVisible();
 });
 
-test('the WhatsApp card leads to screen 3a', async ({ page }) => {
+test('an unconnected WhatsApp card leads to screen 3a', async ({ page }) => {
+	// Nothing is linked, so the card offers *Continue* and leads to the
+	// login. A card with a link on it leads to the management screen instead;
+	// that is `manage.spec.ts`.
 	await page.goto('/networks');
+	await expect(page.getByTestId('card-whatsapp')).toHaveAttribute('data-linked', 'no');
 	await page.getByTestId('card-whatsapp').getByRole('link').click();
 	await expect(page).toHaveURL(/\/networks\/whatsapp$/);
 	await expect(page.getByTestId('screen-whatsapp')).toBeVisible();

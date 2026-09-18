@@ -76,11 +76,23 @@ export default defineConfig({
 			}
 		},
 		{
-			// Screens 3 and 3a–3d, against the real Gateway and the stub
-			// bridge. These specs skip themselves without the stack, like
-			// every other spec that needs it.
+			// Screens 3, 3a–3d and the management screen, against the real
+			// Gateway and the stub bridge. These specs skip themselves without
+			// the stack, like every other spec that needs it.
+			//
+			// One worker, for the reason the `dashboard` project gives below:
+			// there is one Gateway and one stub bridge for the whole suite, and
+			// **one login per bridge instance** (#55). Running these files at
+			// once only appeared to work because each drove a different bridge;
+			// as soon as two specs touch one bridge, a login started by either
+			// is a `409 login_in_flight` for the other, and a login one of them
+			// leaves behind is a link the picker then reports. Ordering them is
+			// cheaper than teaching every spec to tolerate another's state
+			// (#108).
 			name: 'networks',
 			testMatch: 'networks/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',

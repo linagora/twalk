@@ -29,14 +29,13 @@
 // stands, and the dashboard states their absence rather than drawing a
 // plausible zero:
 //
-//   - **live bridge state and last message time.** `GET /api/bridges` reports
-//     the login a bridge holds, which is the last login *process*, not a
-//     heartbeat. #56 has landed the *producing* half — each bridge pushes its
-//     connection state to the Gateway's webhook and the Gateway publishes
-//     `bridge.status.changed.v1` — but it added no read for the Companion, so
-//     nothing on this origin can be asked what state a bridge is in now. That
-//     read, or the merged event stream the wireframe names, is what turns this
-//     row's dot into the wireframe's dot.
+//   - **the time of the last message.** Nothing between the bus and the
+//     Companion reports it, so the row says so rather than drawing a plausible
+//     zero. The *state* beside it is no longer in that category: since #108
+//     `GET /api/bridges` carries each bridge's own answer about the logins it
+//     holds, read from its `whoami`, and [`bridgeRows`] reads that. It used to
+//     read the last login *process* — which meant a live WhatsApp link showed
+//     as never connected as soon as the Gateway had been restarted.
 //   - **a message count.** Nothing between the bus and the Companion counts
 //     messages; the Gateway exposes no such read. The pending-decision count
 //     beside it *is* real (#54), and is a count of people waiting rather than
@@ -48,23 +47,44 @@
 import type { components } from '$lib/api/schema';
 import type { IconName } from '$lib/icons';
 import type { MessageKey } from '$lib/i18n';
+import { cardFor, manageRouteFor } from '$lib/networks/catalogue';
+import { connectionOf } from '$lib/networks/connection';
 
 export type ConfiguredBridge = components['schemas']['ConfiguredBridge'];
 export type ConsentEntry = components['schemas']['ConsentStateEntry'];
 export type Device = components['schemas']['Device'];
 
-/** What a bridge row says, derived from the login the Gateway holds for it. */
+/**
+ * What a bridge row says — the state of the **link** the bridge holds, in the
+ * five words this screen has always used for it.
+ *
+ * The values are unchanged; where they are read from is not. They used to
+ * describe the last login *process* the Gateway had in memory, so a bridge
+ * with a live session read `never` the moment the Gateway restarted (#108).
+ * They now describe what the bridge itself reports, translated from the
+ * contract's vocabulary by [`bridgeStateOf`].
+ */
 export type BridgeState =
-	/** A login completed: as connected as the Gateway can tell. */
+	/** The bridge is connected to the network with this account. */
 	| 'connected'
-	/** A login is in flight right now. */
+	/** Coming up, backfilling, or reconnecting by itself. Nothing to do. */
 	| 'connecting'
-	/** The last login expired or was lost — the wireframe's amber state. */
+	/**
+	 * The network no longer accepts this session — the wireframe's amber
+	 * "Your WhatsApp session expired". This is what a session revoked from
+	 * the user's own phone reports.
+	 */
 	| 'expired'
-	/** The last login failed for another reason. */
+	/** The bridge holds a login and the link is down for another reason. */
 	| 'failed'
-	/** Nothing was ever connected on this bridge. */
-	| 'never';
+	/** No account is linked on this bridge. */
+	| 'never'
+	/**
+	 * The bridge could not be reached, so its state is genuinely not known.
+	 * Deliberately **not** folded into `never`: telling a user with a working
+	 * link that nothing is connected is the defect this screen was part of.
+	 */
+	| 'unknown';
 
 export interface BridgeRow {
 	readonly bridgeId: string;
@@ -117,54 +137,67 @@ export interface ActivityEntry {
 export const FEED_LENGTH = 10;
 
 /**
- * One row per configured bridge.
+ * One row per configured bridge, saying what the **bridge** says.
  *
- * The state is read off the login the Gateway holds, and the row is honest
- * about what that is: `GET /api/bridges` "reads configuration and the
- * Gateway's own memory: no bridge is contacted". A bridge that is down but
- * whose last login completed therefore reads `connected` here — which is why
- * the screen's own copy names this as the login's state and not as a
- * heartbeat. The live state exists on the bus (#56 publishes it) and has no
- * read on this origin; when one lands, it is this function that reads it.
+ * `GET /api/bridges` carries a `connection` per bridge, read live from that
+ * bridge's own `whoami`: the logins it holds and the state of each. That is
+ * the link, it lives in the bridge, and neither a login in flight nor a
+ * restart of the Gateway can change it. This row reads that and nothing else.
+ *
+ * What it used to read was `bridge.login` — the last login *process* in the
+ * Gateway's memory — which is why this screen and the networks picker could
+ * both report a live WhatsApp session as never connected (#108).
  */
 export function bridgeRows(bridges: readonly ConfiguredBridge[]): BridgeRow[] {
 	return bridges.map((bridge) => {
+		const connection = connectionOf(bridge);
 		const state = bridgeStateOf(bridge);
+		const card = cardFor(bridge.network);
+		const manage = card === undefined ? null : manageRouteFor(card);
 		return {
 			bridgeId: bridge.bridge_id,
 			network: bridge.network,
 			state,
 			tone: bridgeTone(state),
 			lastMessageAt: null,
-			since: bridge.login?.started_at ?? null,
-			route: `/networks/${bridge.network}`
+			// When the link last changed state, as the bridge timestamped it.
+			// For a connected login that is when it connected.
+			since: connection.account?.since ?? null,
+			// A link the user has is managed, not re-established: *Manage*
+			// opens the management screen rather than starting a QR flow
+			// against a working connection (#108).
+			route: connection.linked && manage !== null ? manage : `/networks/${bridge.network}`
 		};
 	});
 }
 
+/**
+ * The contract's five states, as this screen's five words.
+ *
+ * `starting` and `degraded` are both `connecting`: one is a bridge coming up
+ * and the other is one reconnecting by itself, and neither asks anything of
+ * the user. `session_expired` is `expired`, which is what drives the amber
+ * banner — and it is `BAD_CREDENTIALS` that reports it, never `LOGGED_OUT`,
+ * which no mautrix bridge emits.
+ *
+ * `disconnected` splits: a bridge holding a login whose link is down is a
+ * `failed` row the user should see, and a bridge holding none has simply
+ * never been connected.
+ */
 function bridgeStateOf(bridge: ConfiguredBridge): BridgeState {
-	const login = bridge.login;
-	if (login === null || login === undefined) {
-		return 'never';
-	}
-	switch (login.state) {
-		case 'complete':
+	const connection = connectionOf(bridge);
+	switch (connection.state) {
+		case 'connected':
 			return 'connected';
-		case 'awaiting_input':
-		case 'awaiting_remote':
+		case 'starting':
+		case 'degraded':
 			return 'connecting';
-		case 'cancelled':
-			return 'never';
-		case 'failed':
-			// `login_expired` and `login_lost` are the session the user has to
-			// re-establish — the wireframe's "Your WhatsApp session expired"
-			// banner. Anything else is a failure to report as such rather than
-			// as an expiry the user can simply retry.
-			return login.error?.code === 'login_expired' || login.error?.code === 'login_lost'
-				? 'expired'
-				: 'failed';
+		case 'session_expired':
+			return 'expired';
+		case 'disconnected':
+			return connection.linked ? 'failed' : 'never';
 		default:
-			return 'never';
+			return 'unknown';
 	}
 }
 
@@ -179,7 +212,38 @@ function bridgeTone(state: BridgeState): Tone {
 		case 'failed':
 			return 'bad';
 		case 'never':
+		case 'unknown':
 			return 'idle';
+	}
+}
+
+/**
+ * What a login *process* was doing, for the activity feed — which is the one
+ * place on this screen where it belongs.
+ *
+ * A login attempt is an event with an instant: "WhatsApp was connected at
+ * 08:12" is a true thing to put on a timeline. What it is not is an answer to
+ * "is WhatsApp connected now", which is why it is a separate function from
+ * [`bridgeStateOf`] rather than the same one read twice.
+ */
+function loginActivityOf(login: NonNullable<ConfiguredBridge['login']>): BridgeState {
+	switch (login.state) {
+		case 'complete':
+			return 'connected';
+		case 'awaiting_input':
+		case 'awaiting_remote':
+			return 'connecting';
+		case 'cancelled':
+			return 'never';
+		case 'failed':
+			// `login_expired` and `login_lost` are the session the user has to
+			// re-establish. Anything else is a failure to report as such
+			// rather than as an expiry the user can simply retry.
+			return login.error?.code === 'login_expired' || login.error?.code === 'login_lost'
+				? 'expired'
+				: 'failed';
+		default:
+			return 'never';
 	}
 }
 
@@ -300,7 +364,9 @@ export function activityFeed(options: {
 		if (login === null || login === undefined) {
 			continue;
 		}
-		const state = bridgeStateOf(bridge);
+		// The feed is a timeline of things that happened, so here — and only
+		// here — the login process is the subject.
+		const state = loginActivityOf(login);
 		entries.push({
 			id: `bridge:${bridge.bridge_id}:${login.started_at}:${login.state}`,
 			icon: 'bridge',

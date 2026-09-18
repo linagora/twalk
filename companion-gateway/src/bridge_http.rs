@@ -35,6 +35,8 @@
 //! `not_found_on_bridge`, `bridge_refused` and `bridge_unreachable`;
 //! `unauthenticated` and `sign_in_not_configured` come from the guard.
 
+use std::time::SystemTime;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
@@ -44,6 +46,7 @@ use serde_json::{json, Value};
 use tracing::{debug, info};
 
 use crate::bridge::{login_json, redacted, BridgeRefusal, StartLogin};
+use crate::bridge_status::{linked_logins, whoami_state};
 use crate::http::Gateway;
 use crate::session::Device;
 
@@ -63,27 +66,94 @@ pub fn routes() -> Router<Gateway> {
         .route("/api/bridges/{bridge_id}/logins/{login_id}", delete(logout))
 }
 
-/// `GET /api/bridges` — the bridges this deployment has configured, and the
-/// login each one has in flight.
+/// `GET /api/bridges` — the bridges this deployment has configured, what each
+/// one is **connected** to, and the login each one has in flight.
 ///
-/// Reads configuration and the Gateway's own memory: no bridge is contacted,
-/// so the Companion can draw the networks screen while every bridge is down.
+/// # The two things this answer keeps apart
+///
+/// `connection` is the bridge's own answer, read live from its `whoami`: the
+/// logins it holds, each with the account's name and the state of the link.
+/// `login` is the login *process* this Gateway has in flight — a QR scan in
+/// somebody's browser right now.
+///
+/// They are separate members because conflating them was the bug (#108). The
+/// Companion computed its connected badge from `login.state == "complete"`,
+/// so starting a login, cancelling one or restarting the Gateway each made a
+/// live WhatsApp link read as no link at all. A `connection` survives all
+/// three, because it is not this process's to lose.
+///
+/// # A bridge that cannot be asked
+///
+/// `connection.reachable` is `false` and `connection.state` is `null`: the
+/// Gateway does not know, and says so. It deliberately does not fall back to
+/// `disconnected` — telling a user with a working link that it is broken is
+/// exactly what this endpoint is being fixed for. The list itself never
+/// fails: the other bridges answer, and the networks screen draws.
+///
 /// A deployment with no bridge configured answers an empty list — that is
 /// the honest answer, not an error.
 async fn list_bridges(State(gateway): State<Gateway>) -> Response {
-    let bridges = gateway.bridges();
-    let listed: Vec<Value> = bridges
-        .list()
+    let owner = gateway.owner();
+    let now = SystemTime::now();
+    let listed: Vec<Value> = gateway
+        .bridges()
+        .connections(&owner)
+        .await
         .iter()
-        .map(|(config, login)| {
+        .map(|bridge| {
             json!({
-                "bridge_id": config.bridge_id,
-                "network": config.network,
-                "login": login.as_ref().map(login_json),
+                "bridge_id": bridge.config.bridge_id,
+                "network": bridge.config.network,
+                "connection": connection_json(&bridge.logins, now),
+                "login": bridge.login.as_ref().map(login_json),
             })
         })
         .collect();
     Json(json!({ "bridges": listed })).into_response()
+}
+
+/// One bridge's `whoami` answer, as the networks screen reads it.
+///
+/// The state vocabulary is #56's and only #56's — `connected`, `starting`,
+/// `degraded`, `disconnected`, `session_expired` — because a second
+/// vocabulary for the same fact is a second thing to keep in step. In
+/// particular a session revoked from the user's own phone arrives as
+/// `BAD_CREDENTIALS` and comes out here as `session_expired`; no mautrix
+/// bridge emits `LOGGED_OUT`, so nothing waits for it.
+fn connection_json(logins: &Result<Vec<Value>, BridgeRefusal>, now: SystemTime) -> Value {
+    let logins = match logins {
+        Ok(logins) => logins,
+        Err(refusal) => {
+            return json!({
+                "reachable": false,
+                "state": Value::Null,
+                "reported": Value::Null,
+                "reason": Value::Null,
+                "logins": [],
+                "unreachable_because": refusal.label(),
+            })
+        }
+    };
+    let observed = whoami_state(logins, now);
+    json!({
+        "reachable": true,
+        "state": observed.state.as_str(),
+        "reported": observed.reported,
+        "reason": observed.reason,
+        "logins": linked_logins(logins, now)
+            .iter()
+            .map(|login| json!({
+                "login_id": login.login_id,
+                "name": login.name,
+                "profile": login.profile,
+                "state": login.state.as_str(),
+                "reported": login.reported,
+                "reason": login.reason,
+                "since": login.since,
+            }))
+            .collect::<Vec<_>>(),
+        "unreachable_because": Value::Null,
+    })
 }
 
 /// `GET /api/bridges/{bridge_id}/login/flows` — the login flows this bridge

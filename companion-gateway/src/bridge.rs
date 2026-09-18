@@ -91,6 +91,16 @@ const BRIDGE_TIMEOUT: Duration = Duration::from_secs(15);
 /// never outlives the process it belongs to.
 const BLOCKING_STEP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// How long `GET /api/bridges` will wait on one bridge's `whoami` before
+/// answering "cannot tell" for it (#108).
+///
+/// Shorter than [`BRIDGE_TIMEOUT`] on purpose. That one is what a user's own
+/// click is allowed to cost; this one is on the path of a *screen drawing*,
+/// and the networks picker must not sit blank because one bridge is wedged.
+/// The read is concurrent across bridges, so this is the whole budget and not
+/// a per-bridge share of one.
+pub const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The step types bridgev2 can hand back. `Complete` ends the flow; the two
 /// input types wait for the browser; `DisplayAndWait` is the blocking one the
 /// Gateway holds; `ClientHttp` and `Webauthn` are the two the Companion
@@ -415,6 +425,28 @@ pub struct Flow {
     pub description: Option<String>,
 }
 
+/// One configured bridge, with both of the things the networks screen has to
+/// keep apart (#108):
+///
+/// - [`Self::login`], the login **process** this Gateway may have in flight —
+///   a QR scan somebody is in the middle of, in memory, gone on a restart;
+/// - [`Self::logins`], the logins the **bridge** holds — the persistent
+///   links, with the network's credentials behind them, which is what the
+///   user means by "my WhatsApp is connected".
+///
+/// Keeping them in one struct with two names is the point: the defect this
+/// ticket fixes was reading the first where the second was meant.
+pub struct BridgeConnection {
+    pub config: BridgeConfig,
+    /// The login process in flight, or `None`. Never an answer to "is this
+    /// network connected".
+    pub login: Option<LoginView>,
+    /// `whoami`'s `logins` array, or the refusal that means the bridge could
+    /// not be asked. `Err` is "we do not know", which the Companion shows as
+    /// such — it is not `disconnected`.
+    pub logins: Result<Vec<Value>, BridgeRefusal>,
+}
+
 /// One login the bridge already holds, as `GET /v3/logins` lists it.
 #[derive(Debug, Clone)]
 pub struct ExistingLogin {
@@ -565,6 +597,82 @@ impl Bridges {
                 (bridge.config.clone(), login)
             })
             .collect()
+    }
+
+    /// The same list, with each bridge's **`whoami`** answer beside it: the
+    /// logins it actually holds, which is what "is this network connected?"
+    /// is a question about (#108).
+    ///
+    /// # Why this one does contact the bridges
+    ///
+    /// [`Self::list`] deliberately does not, and for a while nothing did —
+    /// which is how the Companion ended up computing a network's connected
+    /// badge from [`LoginView::phase`], the state of a login *process* living
+    /// in this process's memory. Starting a login cleared the badge.
+    /// Cancelling one cleared it. Restarting the Gateway cleared it. All
+    /// three while the bridge reported `logins: 1, CONNECTED` throughout.
+    ///
+    /// A login is persistent and the bridge is the only thing that knows
+    /// about it, so the answer has to be asked for. It is asked for the way a
+    /// screen can afford:
+    ///
+    /// - **every bridge at once**, not one after another, so the cost is one
+    ///   bridge's latency and not the sum of them;
+    /// - **on a short leash** ([`CONNECTION_TIMEOUT`], well under the
+    ///   15-second timeout a login call gets), because this is a page's
+    ///   first paint and not a user-initiated action;
+    /// - **and never fatally**: a bridge that cannot be reached comes back as
+    ///   `Err`, the other bridges still answer, and the networks screen still
+    ///   draws. A Gateway that could not ask says so; it does not report
+    ///   `disconnected`, which would be the same lie in a new place.
+    pub async fn connections(&self, acting_as: &str) -> Vec<BridgeConnection> {
+        let reads = self.bridges.iter().map(|bridge| async move {
+            let login = match &*bridge
+                .slot
+                .lock()
+                .expect("the slot mutex is never poisoned")
+            {
+                Slot::Idle => None,
+                Slot::Active(active) => Some(active.read()),
+            };
+            let query = [("user_id", acting_as)];
+            let call = call_bridge(
+                &bridge.config,
+                &self.clients.http,
+                reqwest::Method::GET,
+                &["whoami"],
+                &query,
+                None,
+            );
+            let logins = match tokio::time::timeout(CONNECTION_TIMEOUT, call).await {
+                Ok(Ok(body)) => Ok(body
+                    .get("logins")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()),
+                Ok(Err(refusal)) => Err(refusal),
+                Err(_elapsed) => Err(BridgeRefusal::BridgeUnreachable {
+                    detail: format!(
+                        "the bridge did not answer whoami within {}s",
+                        CONNECTION_TIMEOUT.as_secs()
+                    ),
+                }),
+            };
+            if let Err(refusal) = &logins {
+                debug!(
+                    bridge = %bridge.config.bridge_id,
+                    outcome = refusal.label(),
+                    "could not read a bridge's logins for the networks list; \
+                     the list still answers, and says the state is unknown"
+                );
+            }
+            BridgeConnection {
+                config: bridge.config.clone(),
+                login,
+                logins,
+            }
+        });
+        futures::future::join_all(reads).await
     }
 
     fn bridge(&self, bridge_id: &str) -> Result<&Arc<Bridge>, BridgeRefusal> {
