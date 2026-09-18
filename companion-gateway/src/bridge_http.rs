@@ -32,8 +32,33 @@
 //! `detail` for an operator's logs. The codes are `unknown_bridge`,
 //! `no_login_in_flight`, `login_in_flight`, `invalid_request`,
 //! `too_many_logins`, `login_expired`, `step_cancelled`,
-//! `not_found_on_bridge`, `bridge_refused` and `bridge_unreachable`;
-//! `unauthenticated` and `sign_in_not_configured` come from the guard.
+//! `not_found_on_bridge`, `bridge_refused`, `bridge_unreachable` and
+//! `bridge_answer_unusable`; `unauthenticated` and `sign_in_not_configured`
+//! come from the guard.
+//!
+//! # The last two are not the same fact, and must never be rendered as one
+//!
+//! `bridge_unreachable` means **nothing answered**: connection refused,
+//! timeout, no route. `bridge_answer_unusable` means **the bridge answered
+//! and this build could not use the answer** — it replied in milliseconds,
+//! correctly as far as it is concerned, and the Gateway went looking for a
+//! field it does not send.
+//!
+//! They shared a code once. The first live WhatsApp login (#106) failed on
+//! the second and was reported as the first, and a whole debugging session
+//! went to networking, containers and ports — the one place the fault was
+//! not. So a client branches on the code, and the message for the second one
+//! has to say that the bridge is running: that is the sentence that gets the
+//! right bug report instead of the wrong investigation.
+//!
+//! # What a refusal never carries
+//!
+//! The bridge's answer. Not a quoted field, not a truncated one, not a serde
+//! error that echoes the bytes it choked on: a provisioning answer can hold a
+//! phone number as a login id, an account's display name, or a QR payload.
+//! `bridge_answer_unusable` names the endpoint and what the Gateway was
+//! looking for — and [`crate::bridge::BridgeRefusal::BridgeAnswerUnusable`]
+//! has nowhere to put anything else, by construction.
 
 use std::time::SystemTime;
 
@@ -468,13 +493,34 @@ fn refused(refusal: BridgeRefusal) -> Response {
                 _ => format!("the bridge refused the provisioning call with {errcode} ({status})"),
             },
         ),
+        // Nothing answered. This is the one refusal that is worth checking
+        // containers, ports and networking for.
         BridgeRefusal::BridgeUnreachable { detail } => api_error(
             StatusCode::BAD_GATEWAY,
             "bridge_unreachable",
             &format!(
-                "the bridge's provisioning API could not be reached: {detail}. Is the \
-                 bridge running, and is its provisioning secret the one this Gateway is \
-                 configured with?"
+                "nothing answered at the bridge's provisioning API: {detail}. Is the \
+                 bridge running, and is this Gateway configured with its address?"
+            ),
+        ),
+        // The bridge answered. Everything about this message is chosen so
+        // that the reader does not go and look at the network (#116): it
+        // says the bridge replied, it names the call and the field, and it
+        // says whose defect this is. It names nothing out of the answer —
+        // the variant cannot carry any of it.
+        BridgeRefusal::BridgeAnswerUnusable { call, looked_for } => api_error(
+            StatusCode::BAD_GATEWAY,
+            "bridge_answer_unusable",
+            &format!(
+                "the bridge answered {} and this Gateway could not use its answer: it \
+                 looked for {looked_for} and did not find it. The bridge is reachable \
+                 and replied, so this is a defect in Twalk's reading of that bridge's \
+                 provisioning API, not a broken deployment — checking containers, ports \
+                 or the provisioning secret will find nothing. Please report it with \
+                 this message and the bridge's version. The answer itself is not \
+                 repeated here, because a bridge's answer can carry identifiers from a \
+                 network account; its shape is in this Gateway's log",
+                call.endpoint()
             ),
         ),
     }

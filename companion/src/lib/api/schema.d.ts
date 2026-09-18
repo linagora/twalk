@@ -901,8 +901,11 @@ export interface components {
              */
             logins: components["schemas"]["BridgeLinkedLogin"][];
             /**
-             * @description Whether the bridge answered at all. `false` means the Gateway
-             *     could not ask — not that the network is disconnected.
+             * @description Whether the Gateway got an answer it could read. `false` means it
+             *     does not know the state of this link — **not** that the network
+             *     is disconnected, and not necessarily that nothing answered:
+             *     `unreachable_because` says which of the three it was, and only
+             *     `bridge_unreachable` means the bridge itself did not reply.
              */
             reachable: boolean;
             /** @description The bridge's own human-readable message for that state. */
@@ -929,9 +932,15 @@ export interface components {
              */
             state: ("starting" | "connected" | "degraded" | "disconnected" | "session_expired") | null;
             /**
-             * @description Why the bridge could not be asked, as one of the same stable
-             *     codes the error answers use (`bridge_unreachable`,
-             *     `bridge_refused`, …). `null` when it was reached.
+             * @description Why this bridge's logins could not be read, as one of the same
+             *     stable codes the error answers use. `null` when they were.
+             *
+             *     `bridge_unreachable` is the only one that means nothing
+             *     answered. `bridge_refused` is the bridge's own error, and
+             *     `bridge_answer_unusable` is a bridge that answered a `whoami`
+             *     this build could not read (#116) — the bridge is running, and a
+             *     screen that says otherwise is repeating the defect this member's
+             *     name predates.
              */
             unreachable_because: string | null;
         };
@@ -1002,11 +1011,19 @@ export interface components {
                  *       one step earlier.
                  *     - `unsupported_step` — a step type this facade does not
                  *       drive (`client_http`).
-                 *     - `bridge_refused` / `bridge_unreachable` — the bridge
-                 *       answered something unusable, or nothing at all.
+                 *     - `bridge_refused` — the bridge answered an error of its
+                 *       own, with its own errcode.
+                 *     - `bridge_unreachable` — nothing answered at all.
+                 *     - `bridge_answer_unusable` — the bridge answered
+                 *       successfully and this build could not use the answer.
+                 *       **The bridge is running**: this is a defect in Twalk,
+                 *       not a broken deployment, and the screen must not say
+                 *       the bridge could not be reached (#116). `detail` names
+                 *       the provisioning call and the field that was looked
+                 *       for, and never repeats the answer itself.
                  * @enum {string}
                  */
-                code: "login_lost" | "login_expired" | "webauthn_required" | "unsupported_step" | "bridge_refused" | "bridge_unreachable";
+                code: "login_lost" | "login_expired" | "webauthn_required" | "unsupported_step" | "bridge_refused" | "bridge_unreachable" | "bridge_answer_unusable";
                 /**
                  * @description For an operator's logs. Not for display, and never
                  *     matched on.
@@ -1750,14 +1767,33 @@ export interface components {
     };
     responses: {
         /**
-         * @description The bridge itself is the problem, not the request.
+         * @description The bridge itself is the problem, not the request. The three codes
+         *     are three different investigations, and telling them apart without
+         *     reading `detail` is the point of having three.
          *
-         *     - `bridge_unreachable` — its provisioning API did not answer. The
-         *       operator checks that the bridge is running and that its
-         *       `provisioning.shared_secret` is the one this Gateway is configured
-         *       with.
-         *     - `bridge_refused` — it answered something the facade cannot use;
-         *       `detail` carries the bridge's own error code.
+         *     - `bridge_unreachable` — **nothing answered**: connection refused,
+         *       timeout, no route. This is the one an operator checks containers,
+         *       ports and addresses for.
+         *     - `bridge_refused` — it answered an **error of its own**, with its
+         *       own mautrix errcode; `detail` names the code and what it usually
+         *       means (a wrong provisioning secret, a user without login
+         *       permissions, a stale transaction id).
+         *     - `bridge_answer_unusable` — it answered **successfully**, and this
+         *       build could not use the answer: it looked for a field and did not
+         *       find it. The bridge is running and replied, so this is a defect in
+         *       Twalk's reading of that bridge's provisioning API rather than a
+         *       broken deployment, and nothing about the deployment will explain
+         *       it. `detail` names the provisioning call and what was looked for.
+         *
+         *       It exists because it used to be `bridge_unreachable` (#116): the
+         *       first live WhatsApp login failed here, was reported as a bridge
+         *       that could not be reached, and sent a debugging session to
+         *       networking and ports — the one place the fault was not.
+         *
+         *       `detail` never repeats the bridge's answer, not even a fragment of
+         *       it: a provisioning answer can carry identifiers from a network
+         *       account — a phone number as a login id, an account name, a QR
+         *       payload. It names what was missing, not what was received.
          */
         BridgeUnavailable: {
             headers: {
@@ -1766,7 +1802,7 @@ export interface components {
             content: {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
-                    error?: "bridge_unreachable" | "bridge_refused";
+                    error?: "bridge_unreachable" | "bridge_refused" | "bridge_answer_unusable";
                 };
             };
         };

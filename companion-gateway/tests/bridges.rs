@@ -842,6 +842,156 @@ async fn a_step_the_companion_cannot_drive_fails_explicitly_instead_of_hanging()
 // The refusals an operator and a client have to be able to tell apart
 // ---------------------------------------------------------------------------
 
+/// Ticket #116: **"I could not reach the bridge" and "the bridge answered
+/// something I could not read" are two different facts**, and they are driven
+/// here one after the other against the same Gateway — one bridge with
+/// nothing listening on its port, one bridge answering well-formed JSON of
+/// the wrong shape.
+///
+/// The second is what actually happened on the first live WhatsApp login
+/// (#106): the bridge answered in about 200 ms, correctly, and the Gateway
+/// went looking for a field mautrix does not call by that name. Because both
+/// came back as `bridge_unreachable`, the Companion said *your Twalk server
+/// could not reach this network's bridge*, and a whole debugging session went
+/// to networking, containers and ports — the one place the fault was not.
+///
+/// So this test asserts three things, and the third is the one that is easy
+/// to break: the two have different codes; the unusable one names the call,
+/// says the bridge answered and does not accuse the deployment; and **no
+/// fragment of the bridge's answer comes back to the browser**, because a
+/// provisioning answer can carry identifiers from a network account.
+#[tokio::test]
+async fn a_bridge_that_answers_unreadably_is_not_a_bridge_that_could_not_be_reached() -> Result<()> {
+    let fixture = Fixture::start("bridges-unreadable-answer").await?;
+
+    // 1. Nothing is listening on that port. This one really is a bridge that
+    //    could not be reached, and it keeps the name and the message.
+    let (status, nothing_listening) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{UNREACHABLE_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 502, "{nothing_listening}");
+    assert_eq!(
+        nothing_listening["error"],
+        json!("bridge_unreachable"),
+        "nothing answered at all: {nothing_listening}"
+    );
+
+    // 2. A bridge that answers, promptly and in well-formed JSON, a document
+    //    this build cannot use. Everything in it is the sort of thing a real
+    //    provisioning answer carries and that must not come back out.
+    let answered = json!({
+        "ok": true,
+        "login": {
+            "id": "33612345678",
+            "name": "+33612345678",
+            "profile": { "phone": "+33612345678" }
+        },
+        "code": "2@a-qr-payload-that-is-a-network-credential",
+        "hint": "M_SOMETHING_THE_BRIDGE_SAID"
+    });
+    let secrets = [
+        "33612345678",
+        "2@a-qr-payload-that-is-a-network-credential",
+        "M_SOMETHING_THE_BRIDGE_SAID",
+    ];
+    fixture.stub.answer_next_start_with(answered);
+
+    let started = std::time::Instant::now();
+    let (status, unusable) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    // The bridge answered at once. Asserting this is not decoration: the
+    // failure mode being fixed is a prompt, correct answer reported as a
+    // connection problem, and the Gateway's own timeout is fifteen seconds.
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the bridge answered immediately; nothing here timed out: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(status, 502, "{unusable}");
+    assert_eq!(
+        unusable["error"],
+        json!("bridge_answer_unusable"),
+        "the bridge answered, and that is a different refusal from not answering: {unusable}"
+    );
+    assert_ne!(
+        unusable["error"], nothing_listening["error"],
+        "an API caller tells the two apart on the code alone, without reading prose"
+    );
+
+    let detail = unusable["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("/login/start/"),
+        "the refusal names which provisioning call answered: {detail}"
+    );
+    assert!(
+        detail.contains("answered"),
+        "and says the bridge did answer: {detail}"
+    );
+    assert!(
+        detail.contains("not a broken deployment"),
+        "and says whose defect this is, which is the sentence that gets the right bug \
+         report instead of the wrong investigation: {detail}"
+    );
+    assert!(
+        !detail.contains("could not be reached") && !detail.contains("nothing answered"),
+        "and never the sentence that sent #106's debugging session to look at ports: {detail}"
+    );
+
+    // The acceptance criterion that is easiest to break: a bridge's answer
+    // can carry a phone number as a login id, an account name or a QR
+    // payload, so **none** of it is quoted back — not a field, not a
+    // fragment, not a truncated one.
+    let whole_answer = unusable.to_string();
+    for secret in secrets {
+        assert!(
+            !whole_answer.contains(secret),
+            "a refusal names what was missing, never what was received, and this one \
+             carries {secret:?}: {whole_answer}"
+        );
+    }
+
+    // 3. And the same distinction on the networks screen's own read. A
+    //    `whoami` this build cannot read is a bridge that answered; the list
+    //    still draws, and it says which of the two happened.
+    fixture.stub.answer_next_whoami_with(json!({
+        "bridge_bot": "@whatsappbot:twalk.localhost",
+        "accounts": [{ "id": "33612345678" }]
+    }));
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(
+        row["connection"]["unreachable_because"],
+        json!("bridge_answer_unusable"),
+        "the bridge answered its whoami; what failed is our reading of it: {row}"
+    );
+    assert_eq!(
+        row["connection"]["state"],
+        Value::Null,
+        "and the Gateway still does not guess a state it does not know: {row}"
+    );
+    let dead = fixture.bridge_row(UNREACHABLE_BRIDGE_ID).await?;
+    assert_eq!(
+        dead["connection"]["unreachable_because"],
+        json!("bridge_unreachable"),
+        "while the bridge with nothing listening keeps the other code: {dead}"
+    );
+    assert!(
+        !row.to_string().contains("33612345678"),
+        "and no part of the answer the Gateway could not read reaches the browser: {row}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_facades_refusals_name_what_is_wrong() -> Result<()> {
     let fixture = Fixture::start("bridges-refusals").await?;

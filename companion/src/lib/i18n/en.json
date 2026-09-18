@@ -124,6 +124,7 @@
 	"networks.trouble.unauthenticated": "Your session on this Twalk server has expired. Sign in again to continue.",
 	"networks.trouble.tooManyLogins": "The network refuses another linked device on this account. Remove one on the network itself, then try again.",
 	"networks.trouble.bridge": "Your Twalk server could not reach the bridge for this network. Check that it is running, then try again.",
+	"networks.trouble.bridgeAnswerUnusable": "The bridge for this network is running and answered your Twalk server — Twalk could not make sense of the answer. Nothing is wrong with your server, your bridge or your connection, so there is nothing for you to fix: this is a defect in Twalk. Please report it, and include what your Twalk server logged.",
 	"networks.trouble.network": "The connection to your Twalk server dropped. Retrying…",
 	"networks.trouble.unexpected": "Something went wrong on your Twalk server. Try again, and open the diagnostics if it persists.",
 
