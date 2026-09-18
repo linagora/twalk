@@ -1,7 +1,6 @@
-//! A stub bridge implementing mautrix bridgev2's provisioning contract
-//! (ticket #55): the flows, the start, a **blocking** step the test releases
-//! on command, the completion, the cancels, the logout, the logins list and
-//! `whoami`.
+//! A stub bridge that answers **recorded mautrix documents** (#106): the
+//! flows, the start, a blocking step the test releases on command, the
+//! completion, the cancels, the logout, the logins list and `whoami`.
 //!
 //! # Why a stub and not a real bridge
 //!
@@ -12,6 +11,34 @@
 //! state, and every one of those properties is provable against a stub that
 //! answers like the real thing. What is therefore never proven by tests is
 //! the network side — an accepted limitation, stated rather than discovered.
+//!
+//! # Why every document here is recorded rather than written
+//!
+//! Because a hand-written stub cost three bugs in a row. Each time, the stub
+//! answered a shape no mautrix bridge produces, the ten tests below went
+//! green, and a real WhatsApp login failed: on the name of the login process
+//! id, on the `?user_id=` the bridge wants on *every* call, and on the
+//! `txn_id` the bridge issues and then validates. So the bodies this stub
+//! sends come out of `harness::bridge_fixtures`, captured from
+//! mautrix-whatsapp and mautrix-signal v26.09 on the reference deployment.
+//! Only what a live bridge would invent per call — the process id, the
+//! transaction id, the QR payload — is substituted.
+//!
+//! The corollary is the rule for changing this file: **a shape that is not in
+//! a fixture does not go in here.** Capture it from a bridge first.
+//!
+//! # And why it refuses as much as it answers
+//!
+//! A stub that accepts more than the real thing is exactly how all three bugs
+//! got through, so every refusal a reference bridge was observed to give is
+//! enforced here: the acting user on every endpoint, the transaction id
+//! issued with a step and validated on the call that advances it, the step id
+//! and step type that have to match, `404` for a process the bridge has
+//! forgotten, and the step-cancel endpoint answering `500 M_BAD_STATE`
+//! because neither reference bridge supports cancelling a `display_and_wait`
+//! step. What releases a held request is the *process* cancel, and the held
+//! request then comes back `410 FI.MAU.BRIDGE.LOGIN_CANCELLED` — the real
+//! sequence, not a convenient one.
 //!
 //! # The blocking step
 //!
@@ -41,6 +68,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::{json, Value};
 
+use super::bridge_fixtures::{self, Bridge};
+
 /// The provisioning secret the stub expects, and the Gateway is configured
 /// with. Sixteen characters or more, as mautrix requires — below that a real
 /// bridge answers `M_FORBIDDEN` to the whole provisioning API.
@@ -52,22 +81,31 @@ pub const STUB_PROVISIONING_SECRET: &str = "test-only-stub-bridge-provisioning-s
 /// `openssl rand -hex 32` and impersonates the appservice.
 pub const STUB_AS_TOKEN: &str = "test-only-stub-bridge-as-token-0123456789abcdef";
 
-/// The flow ids the stub offers.
+/// The flow ids the stub offers. `qr` and `phone` are mautrix-whatsapp's own
+/// two, served from its captured answers; `cookies` and `webauthn` have no
+/// counterpart on either reference bridge and are the stub's own, kept
+/// because the Gateway has to refuse a step type it cannot drive and there is
+/// no recorded bridge that offers one.
 pub const QR_FLOW: &str = "qr";
 pub const PHONE_FLOW: &str = "phone";
 pub const COOKIES_FLOW: &str = "cookies";
 pub const WEBAUTHN_FLOW: &str = "webauthn";
 
-/// The step ids the stub uses, which the Companion submits against.
-pub const QR_STEP: &str = "fi.mau.stub.login.qr";
-pub const PHONE_STEP: &str = "fi.mau.stub.login.phone";
+/// The step ids the stub uses, which the Companion submits against. The first
+/// two are mautrix-whatsapp's real ones — step ids are namespaced per
+/// connector, and a Signal stub answers `fi.mau.signal.login.qr` instead, so
+/// nothing may hard-code these beyond the default persona.
+pub const QR_STEP: &str = "fi.mau.whatsapp.login.qr";
+pub const PHONE_STEP: &str = "fi.mau.whatsapp.login.phone";
 pub const COOKIES_STEP: &str = "fi.mau.stub.login.cookies";
+pub const WEBAUTHN_STEP: &str = "fi.mau.stub.login.webauthn";
 
 /// What the stub should answer a held `display_and_wait` with.
 #[derive(Debug, Clone)]
 pub enum Release {
-    /// A refreshed code: the same step, a new payload. This is what a real
-    /// bridge does every ~20 seconds while nobody has scanned yet.
+    /// A refreshed code: the same step, a new payload, and — as a real bridge
+    /// does — a new `txn_id`. This is what a bridge answers every ~20 seconds
+    /// while nobody has scanned yet.
     RefreshedQr { data: String },
     /// The network accepted the login.
     Complete { login_id: String },
@@ -94,22 +132,37 @@ pub struct SubmitRecord {
     pub step_id: String,
     pub step_type: String,
     pub body: Value,
-    /// The `txn_id` query parameter, which makes a retry idempotent.
+    /// The `txn_id` query parameter, which makes a retry idempotent and which
+    /// the stub validates exactly as a bridge does.
     pub txn_id: Option<String>,
+}
+
+/// A login process the stub is running, and the step it is on. A real bridge
+/// keeps all of this, which is why it can refuse a call that names the wrong
+/// step or a stale transaction.
+#[derive(Debug, Clone)]
+struct Process {
+    flow_id: String,
+    step_id: String,
+    step_type: String,
+    /// Re-issued with every answer this process gives, as mautrix does.
+    txn_id: String,
 }
 
 #[derive(Default)]
 struct Inner {
-    /// Live login processes, by id: the flow each one is running.
-    processes: HashMap<String, String>,
+    /// Live login processes, by id.
+    processes: HashMap<String, Process>,
     /// Queued answers for the held blocking step.
     releases: VecDeque<Release>,
     /// How many times the Gateway has sat down in the blocking step.
     blocking_arrivals: u64,
     /// How many held requests are inside the stub right now.
     held: u64,
-    /// The logins the stub pretends to hold.
+    /// The logins the stub pretends to hold, as `whoami` describes them.
     logins: Vec<Value>,
+    /// A cap on those, so a test can provoke the network's own refusal.
+    max_logins: Option<usize>,
     starts: Vec<StartRecord>,
     submits: Vec<SubmitRecord>,
     /// Canned refusals for the next start calls.
@@ -120,10 +173,13 @@ struct Inner {
     cancelled: Vec<String>,
     logged_out: Vec<String>,
     next_process: u64,
+    next_txn: u64,
     next_qr: u64,
 }
 
 struct StubState {
+    /// Whose captured answers this stub serves.
+    bridge: Bridge,
     inner: Mutex<Inner>,
     /// Woken when a release is queued, so the held request answers at once.
     released: tokio::sync::Notify,
@@ -138,13 +194,23 @@ pub struct StubBridge {
 }
 
 impl StubBridge {
-    /// Starts the stub on a free loopback port.
+    /// Starts the stub on a free loopback port, answering mautrix-whatsapp's
+    /// captured documents.
     pub async fn start() -> Result<Self> {
+        Self::start_as(Bridge::Whatsapp).await
+    }
+
+    /// Starts a stub wearing the other reference bridge's face. Worth doing
+    /// because the two do not agree: Signal offers one flow where WhatsApp
+    /// offers two, its step ids are namespaced differently, and an unknown
+    /// flow id is a `404` there and a silent fallback to QR on WhatsApp.
+    pub async fn start_as(bridge: Bridge) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .context("failed to bind the stub bridge")?;
         let addr = listener.local_addr()?;
         let state = Arc::new(StubState {
+            bridge,
             inner: Mutex::new(Inner::default()),
             released: tokio::sync::Notify::new(),
         });
@@ -160,6 +226,27 @@ impl StubBridge {
     /// listener.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    /// Which bridge's answers this stub serves.
+    pub fn bridge(&self) -> Bridge {
+        self.state.bridge
+    }
+
+    /// The QR step id this stub's captured answers use.
+    pub fn qr_step_id(&self) -> &'static str {
+        self.state.bridge.qr_step_id()
+    }
+
+    /// The QR payload prefix this bridge's network really uses — WhatsApp's
+    /// `https://wa.me/...` versus Signal's `sgnl://linkdevice?...`. A test
+    /// that wants to prove the payload reached the browser unchanged asserts
+    /// against this rather than against a shape somebody imagined.
+    pub fn qr_payload_prefix(&self) -> &'static str {
+        match self.state.bridge {
+            Bridge::Whatsapp => "https://wa.me/settings/linked_devices#",
+            Bridge::Signal => "sgnl://linkdevice?",
+        }
     }
 
     /// A bridge restart, as the Gateway can tell one: every login process is
@@ -243,8 +330,26 @@ impl StubBridge {
             .push_back((status, errcode.to_owned()));
     }
 
+    /// Caps how many logins this bridge will hold, so a start beyond the cap
+    /// answers `403 FI.MAU.BRIDGE.TOO_MANY_LOGINS` — the network refusing
+    /// another linked device. bridgev2 has this as `max_logins`; the
+    /// reference deployment sets no cap, so it is the one refusal in this
+    /// stub that no capture confirms.
+    pub fn set_max_logins(&self, max: usize) {
+        self.state
+            .inner
+            .lock()
+            .expect("the stub is not poisoned")
+            .max_logins = Some(max);
+    }
+
     /// Adds a login the stub pretends to already hold: what the Companion
     /// reads to offer "reconnect".
+    ///
+    /// The object is `whoami`'s shape, because that is the only call that
+    /// describes a login. `GET /logins` answers bare id strings, so the name
+    /// given here never comes back from *that* endpoint — which is the
+    /// divergence #106 found.
     pub fn add_existing_login(&self, login_id: &str, name: &str) {
         self.state
             .inner
@@ -254,7 +359,7 @@ impl StubBridge {
             .push(json!({
                 "id": login_id,
                 "name": name,
-                "profile": { "id": login_id, "name": name },
+                "profile": { "phone": name },
             }));
     }
 
@@ -374,11 +479,21 @@ fn serve(listener: tokio::net::TcpListener, state: Arc<StubState>) -> tokio::tas
     })
 }
 
-/// mautrix's own answer to a call without the provisioning secret.
-fn forbidden() -> Response {
-    mautrix_error(StatusCode::FORBIDDEN, "M_FORBIDDEN")
+/// One of the error documents a real bridge gave, served with the status it
+/// gave it under. Looked up by name in the fixture for the endpoint, so a
+/// refusal is never invented either.
+fn refusal(bridge: Bridge, endpoint: &str, name: &str) -> Response {
+    let answer = bridge_fixtures::answer(bridge, endpoint, name);
+    (
+        StatusCode::from_u16(answer.status).expect("a captured status is a status"),
+        Json(answer.body),
+    )
+        .into_response()
 }
 
+/// mautrix's own `{errcode, error}` for a code no capture covers — a test's
+/// canned refusal, or one of the two codes bridgev2 defines that the
+/// reference deployment never provoked.
 fn mautrix_error(status: StatusCode, errcode: &str) -> Response {
     (
         status,
@@ -387,9 +502,12 @@ fn mautrix_error(status: StatusCode, errcode: &str) -> Response {
         .into_response()
 }
 
-/// The bearer check every endpoint starts with. A real bridge would also
-/// accept a Matrix access token; the reference configuration turns that off
-/// (`provisioning.allow_matrix_auth: false`), so the stub does not have it.
+/// The bearer check every endpoint starts with, and the answer a real bridge
+/// gives a bad one: `401 M_UNKNOWN_TOKEN`, not a 403.
+///
+/// A real bridge would also accept a Matrix access token; the reference
+/// configuration turns that off (`provisioning.allow_matrix_auth: false`), so
+/// the stub does not have it.
 fn authorised(headers: &HeaderMap) -> bool {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -399,28 +517,62 @@ fn authorised(headers: &HeaderMap) -> bool {
 }
 
 /// mautrix requires the acting user in `?user_id=` on **every** provisioning
-/// call, and answers `403 M_FORBIDDEN` without it — including on a step or a
-/// cancel, which is how a real WhatsApp login failed while ten tests here
-/// passed (#106). The stub refuses it too, so that cannot happen again.
+/// call, and answers `403 M_FORBIDDEN "User does not have login permissions"`
+/// without it — including on a step, a cancel and a logout, which is how a
+/// real WhatsApp login failed while ten tests here passed (#106). The stub
+/// refuses it too, so that cannot happen again.
 fn acting_user_named(query: &HashMap<String, String>) -> bool {
     query
         .get("user_id")
         .is_some_and(|user_id| user_id.starts_with('@') && user_id.contains(':'))
 }
 
-async fn flows(headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Response {
-    if !authorised(&headers) || !acting_user_named(&query) {
-        return forbidden();
+/// The two checks every endpoint makes, in the order and with the answers a
+/// real bridge makes them: the token first, then the acting user.
+fn admitted(
+    bridge: Bridge,
+    endpoint: &str,
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+) -> Option<Response> {
+    if !authorised(headers) {
+        // Every endpoint answers the same document for this, so whoami's
+        // captured one stands for all of them.
+        return Some(refusal(bridge, "whoami", "bad_secret"));
     }
-    Json(json!({
-        "flows": [
-            { "id": QR_FLOW, "name": "Scan a QR code", "description": "Link a device by scanning" },
-            { "id": PHONE_FLOW, "name": "Phone number" },
-            { "id": COOKIES_FLOW, "name": "Paste cookies" },
-            { "id": WEBAUTHN_FLOW, "name": "Passkey" },
-        ]
-    }))
-    .into_response()
+    if !acting_user_named(query) {
+        return Some(refusal(bridge, endpoint, "no_user_id"));
+    }
+    None
+}
+
+async fn flows(
+    headers: HeaderMap,
+    State(state): State<Arc<StubState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if let Some(refused) = admitted(state.bridge, "login-flows", &headers, &query) {
+        return refused;
+    }
+    let name = match state.bridge {
+        Bridge::Whatsapp => "two_flows",
+        Bridge::Signal => "one_flow",
+    };
+    let mut body = bridge_fixtures::body(state.bridge, "login-flows", name);
+    // The two flows no reference bridge offers, appended so the Gateway can
+    // still be shown refusing a step type it cannot drive. Marked as the
+    // stub's own in the flow name, so nobody mistakes them for captured.
+    if let Some(list) = body.get_mut("flows").and_then(Value::as_array_mut) {
+        list.push(json!({
+            "id": COOKIES_FLOW,
+            "name": "Paste cookies (stub-only, no captured bridge offers this)",
+        }));
+        list.push(json!({
+            "id": WEBAUTHN_FLOW,
+            "name": "Passkey (stub-only, no captured bridge offers this)",
+        }));
+    }
+    Json(body).into_response()
 }
 
 async fn whoami(
@@ -428,8 +580,8 @@ async fn whoami(
     State(state): State<Arc<StubState>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) || !acting_user_named(&query) {
-        return forbidden();
+    if let Some(refused) = admitted(state.bridge, "whoami", &headers, &query) {
+        return refused;
     }
     let logins = state
         .inner
@@ -437,8 +589,12 @@ async fn whoami(
         .expect("the stub is not poisoned")
         .logins
         .clone();
-    Json(json!({ "network": { "id": "stub", "display_name": "Stub" }, "logins": logins }))
-        .into_response()
+    // The captured document, with only the login list swapped for the one
+    // this test set up: the network block, the flow list, the homeserver and
+    // the bridge bot are the bridge's own words.
+    let mut body = bridge_fixtures::body(state.bridge, "whoami", "no_logins");
+    body["logins"] = Value::Array(logins);
+    Json(body).into_response()
 }
 
 async fn logins(
@@ -446,16 +602,24 @@ async fn logins(
     State(state): State<Arc<StubState>>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) || !acting_user_named(&query) {
-        return forbidden();
+    if let Some(refused) = admitted(state.bridge, "logins", &headers, &query) {
+        return refused;
     }
-    let logins = state
+    let ids: Vec<Value> = state
         .inner
         .lock()
         .expect("the stub is not poisoned")
         .logins
-        .clone();
-    Json(Value::Array(logins)).into_response()
+        .iter()
+        .filter_map(|login| login.get("id").cloned())
+        .collect();
+    // `login_ids`, bare strings, and nothing else — the shape the Gateway
+    // used to reject, which made the reconnect list report every bridge
+    // unreachable (#106). A name or a profile here would be a fiction: the
+    // real endpoint has neither, and whoami is where they live.
+    let mut body = bridge_fixtures::body(state.bridge, "logins", "no_logins");
+    body["login_ids"] = Value::Array(ids);
+    Json(body).into_response()
 }
 
 async fn start(
@@ -464,10 +628,10 @@ async fn start(
     Path(flow_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) || !acting_user_named(&query) {
-        return forbidden();
+    if let Some(refused) = admitted(state.bridge, "login-start", &headers, &query) {
+        return refused;
     }
-    let (process_id, first_qr) = {
+    let (process_id, txn_id, qr) = {
         let mut inner = state.inner.lock().expect("the stub is not poisoned");
         inner.starts.push(StartRecord {
             flow_id: flow_id.clone(),
@@ -480,29 +644,58 @@ async fn start(
                 &errcode,
             );
         }
+        // The network refusing another linked device, before any process
+        // exists. Uncaptured: bridgev2 defines it, the deployment set no cap.
+        if inner
+            .max_logins
+            .is_some_and(|max| inner.logins.len() >= max)
+        {
+            return mautrix_error(StatusCode::FORBIDDEN, "FI.MAU.BRIDGE.TOO_MANY_LOGINS");
+        }
         inner.next_process += 1;
         inner.next_qr += 1;
-        let process_id = format!("stub-process-{}", inner.next_process);
-        inner.processes.insert(process_id.clone(), flow_id.clone());
-        let qr = inner.next_qr;
-        (process_id, format!("2@stub-qr-payload-{qr}"))
+        inner.next_txn += 1;
+        (
+            format!("stub-process-{}", inner.next_process),
+            format!("bls_stub-txn-{}", inner.next_txn),
+            inner.next_qr,
+        )
     };
-    match flow_id.as_str() {
-        QR_FLOW => Json(qr_step(&process_id, &first_qr)).into_response(),
-        PHONE_FLOW => Json(json!({
+
+    // An unknown flow id, which the two reference bridges disagree about:
+    // Signal answers 404, and WhatsApp answers 200 with the QR flow. The
+    // disagreement is served rather than smoothed over, because a flow-id
+    // typo being invisible on one bridge is the sort of thing this stub
+    // exists to expose.
+    let flow_id = match flow_id.as_str() {
+        QR_FLOW | PHONE_FLOW | COOKIES_FLOW | WEBAUTHN_FLOW => flow_id,
+        _ if state.bridge == Bridge::Whatsapp => QR_FLOW.to_owned(),
+        _ => return refusal(state.bridge, "login-start", "unknown_flow"),
+    };
+    // Signal has no phone flow at all, so asking for one is asking for a
+    // flow it does not have.
+    if flow_id == PHONE_FLOW && state.bridge == Bridge::Signal {
+        return refusal(state.bridge, "login-start", "unknown_flow");
+    }
+
+    let answer = match flow_id.as_str() {
+        QR_FLOW => qr_step(
+            state.bridge,
+            &process_id,
+            &txn_id,
+            &format!("{}stub-qr-payload-{qr}", prefix(state.bridge)),
+        ),
+        PHONE_FLOW => {
+            let mut body = bridge_fixtures::body(state.bridge, "login-start", "phone");
+            body["login_id"] = json!(process_id);
+            body["txn_id"] = json!(txn_id);
+            body
+        }
+        // The stub's own two, which no capture covers. bridgev2's declared
+        // shapes; the Gateway refuses both without reading their payloads.
+        COOKIES_FLOW => json!({
             "login_id": process_id,
-            "type": "user_input",
-            "step_id": PHONE_STEP,
-            "instructions": "Enter the phone number of the account",
-            "user_input": {
-                "fields": [
-                    { "type": "phone_number", "id": "phone_number", "name": "Phone number" }
-                ]
-            }
-        }))
-        .into_response(),
-        COOKIES_FLOW => Json(json!({
-            "login_id": process_id,
+            "txn_id": txn_id,
             "type": "cookies",
             "step_id": COOKIES_STEP,
             "instructions": "Paste the cookies from a private window",
@@ -510,42 +703,60 @@ async fn start(
                 "url": "https://messages.google.com/web/authentication",
                 "fields": [{ "type": "cookie", "cookie_domain": ".google.com", "id": "SID" }]
             }
-        }))
-        .into_response(),
-        WEBAUTHN_FLOW => Json(json!({
+        }),
+        _ => json!({
             "login_id": process_id,
+            "txn_id": txn_id,
             "type": "webauthn",
-            "step_id": "fi.mau.stub.login.webauthn",
+            "step_id": WEBAUTHN_STEP,
             "instructions": "Use your passkey",
             "webauthn": { "publicKey": {} }
-        }))
-        .into_response(),
-        unknown => mautrix_error(
-            StatusCode::NOT_FOUND,
-            &format!("M_NOT_FOUND (no flow {unknown})"),
-        ),
+        }),
+    };
+
+    remember(&state, &process_id, &flow_id, &answer, &txn_id);
+    Json(answer).into_response()
+}
+
+/// The QR payload prefix each network really uses, so a refreshed code the
+/// test supplies without one still looks like the network's own.
+fn prefix(bridge: Bridge) -> &'static str {
+    match bridge {
+        Bridge::Whatsapp => "https://wa.me/settings/linked_devices#",
+        Bridge::Signal => "sgnl://linkdevice?pub_key=",
     }
 }
 
-/// Shaped like a real mautrix answer: the login **process** id travels as
-/// `login_id` at the top level — the same word mautrix's `?login_id=` query
-/// parameter uses for an existing login. The Gateway was first written
-/// against a stub that called it `login_process_id`, and the real bridge
-/// then failed with "names no login process" (see the ticket in the PR).
-fn qr_step(process_id: &str, data: &str) -> Value {
-    json!({
-        "login_id": process_id,
-        // Issued with the step and validated on the call that advances it,
-        // exactly as mautrix does — it answers `500 M_BAD_STATE:
-        // Transaction ID does not match` for anything else (#106).
-        "txn_id": format!("stub-txn-{process_id}"),
-        "type": "display_and_wait",
-        "step_id": QR_STEP,
-        "instructions": "Scan this code from the phone",
-        // `data` is the raw payload: a real bridge renders no image, so the
-        // browser is what draws the code.
-        "display_and_wait": { "type": "qr", "data": data, "can_cancel": true }
-    })
+/// The captured `display_and_wait` answer, with the three values a live
+/// bridge would have made up fresh substituted.
+///
+/// Everything else is the bridge's own: the login **process** id travelling
+/// as `login_id` at the top level (the same word mautrix's `?login_id=` query
+/// parameter uses for an existing login — the trap of #106), the namespaced
+/// step id, the connector's instructions, and a payload object with `type`
+/// and `data` and nothing else. There is no `can_cancel`; the stub used to
+/// invent one.
+fn qr_step(bridge: Bridge, process_id: &str, txn_id: &str, data: &str) -> Value {
+    let mut body = bridge_fixtures::body(bridge, "login-start", "qr");
+    body["login_id"] = json!(process_id);
+    body["txn_id"] = json!(txn_id);
+    body["display_and_wait"]["data"] = json!(data);
+    body
+}
+
+/// Records what step a process is now on, so the stub can refuse a call that
+/// names the wrong one — as a real bridge does with `M_BAD_STATE`.
+fn remember(state: &Arc<StubState>, process_id: &str, flow_id: &str, answer: &Value, txn_id: &str) {
+    let mut inner = state.inner.lock().expect("the stub is not poisoned");
+    inner.processes.insert(
+        process_id.to_owned(),
+        Process {
+            flow_id: flow_id.to_owned(),
+            step_id: answer["step_id"].as_str().unwrap_or_default().to_owned(),
+            step_type: answer["type"].as_str().unwrap_or_default().to_owned(),
+            txn_id: txn_id.to_owned(),
+        },
+    );
 }
 
 async fn step(
@@ -555,38 +766,43 @@ async fn step(
     Query(query): Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
-    if !authorised(&headers) || !acting_user_named(&query) {
-        return forbidden();
+    if let Some(refused) = admitted(state.bridge, "login-step", &headers, &query) {
+        return refused;
     }
-    // A process the stub does not know: what a restarted bridge answers, and
-    // the one case the Gateway must report as a lost login.
-    {
+    // Every check a reference bridge was observed to make, in its order and
+    // with its own errcode. A process the stub does not know comes first:
+    // that is what a restarted bridge answers, and the one case the Gateway
+    // must report as a lost login.
+    let process = {
         let inner = state.inner.lock().expect("the stub is not poisoned");
-        if !inner.processes.contains_key(&process_id) {
-            return mautrix_error(StatusCode::NOT_FOUND, "M_NOT_FOUND");
+        match inner.processes.get(&process_id) {
+            Some(process) => process.clone(),
+            None => return refusal(state.bridge, "login-step", "unknown_process"),
         }
+    };
+    if step_id != process.step_id {
+        return refusal(state.bridge, "login-step", "wrong_step_id");
+    }
+    // The step cancel is not usable for a `display_and_wait` step: both
+    // reference bridges answer `500 M_BAD_STATE: Login process does not
+    // support cancelling steps`. What releases a held request is the process
+    // cancel, and the held request then comes back `410`.
+    if step_type == "cancel" {
+        return refusal(state.bridge, "login-step", "step_cancel_unsupported");
+    }
+    if step_type != process.step_type {
+        return refusal(state.bridge, "login-step", "wrong_step_type");
     }
     // The transaction id must be the one issued with the step being
-    // advanced. A caller that invents one gets mautrix's own answer (#106):
-    // this is what a real WhatsApp login failed on while the tests passed.
+    // advanced — and a bridge issues a fresh one with every answer, so the
+    // caller has to echo the latest rather than the first. A caller that
+    // invents one gets mautrix's own answer (#106): this is what a real
+    // WhatsApp login failed on while the tests passed. Omitting it skips the
+    // check, exactly as the real bridges do.
     if let Some(txn_id) = query.get("txn_id") {
-        if txn_id != &format!("stub-txn-{process_id}") {
-            return mautrix_error(StatusCode::INTERNAL_SERVER_ERROR, "M_BAD_STATE");
+        if txn_id != &process.txn_id {
+            return refusal(state.bridge, "login-step", "wrong_txn_id");
         }
-    }
-    if step_type == "cancel" {
-        // Cancelling the step releases whatever request is held on it.
-        state
-            .inner
-            .lock()
-            .expect("the stub is not poisoned")
-            .releases
-            .push_back(Release::Refusal {
-                status: 409,
-                errcode: "FI.MAU.LOGIN_STEP_CANCELLED".to_owned(),
-            });
-        state.released.notify_waiters();
-        return StatusCode::NO_CONTENT.into_response();
     }
 
     let parsed: Value = serde_json::from_str(body.trim()).unwrap_or(Value::Null);
@@ -601,7 +817,7 @@ async fn step(
     }
 
     if step_type == "display_and_wait" {
-        return held_step(state, &process_id).await;
+        return held_step(state, &process_id, &process.flow_id).await;
     }
 
     // A non-blocking step: a canned refusal if the test asked for one, and
@@ -623,7 +839,7 @@ async fn step(
 }
 
 /// The blocking step: it does not answer until the test releases it.
-async fn held_step(state: Arc<StubState>, process_id: &str) -> Response {
+async fn held_step(state: Arc<StubState>, process_id: &str, flow_id: &str) -> Response {
     {
         let mut inner = state.inner.lock().expect("the stub is not poisoned");
         inner.blocking_arrivals += 1;
@@ -646,7 +862,19 @@ async fn held_step(state: Arc<StubState>, process_id: &str) -> Response {
     };
     state.inner.lock().expect("the stub is not poisoned").held -= 1;
     match release {
-        Release::RefreshedQr { data } => Json(qr_step(process_id, &data)).into_response(),
+        Release::RefreshedQr { data } => {
+            // A fresh code comes with a fresh transaction id, as a real
+            // bridge's refresh does — so a Gateway that echoed the id from
+            // the *first* answer would be refused on the next call.
+            let txn_id = {
+                let mut inner = state.inner.lock().expect("the stub is not poisoned");
+                inner.next_txn += 1;
+                format!("bls_stub-txn-{}", inner.next_txn)
+            };
+            let answer = qr_step(state.bridge, process_id, &txn_id, &data);
+            remember(&state, process_id, flow_id, &answer, &txn_id);
+            Json(answer).into_response()
+        }
         Release::Complete { login_id } => complete(state, process_id, &login_id),
         Release::Refusal { status, errcode } => mautrix_error(
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
@@ -656,6 +884,12 @@ async fn held_step(state: Arc<StubState>, process_id: &str) -> Response {
 }
 
 /// The completion step, and the login it leaves behind on the bridge.
+///
+/// **The one shape here no capture covers**: completing a login needs a human
+/// with the account's phone, so this is bridgev2's declared `complete`
+/// document (`tests/harness/fixtures/*/login-step.json`, answer `complete`)
+/// and not a recorded one. It is therefore the one place in this stub where
+/// the failure mode of #106 could still be hiding.
 fn complete(state: Arc<StubState>, process_id: &str, login_id: &str) -> Response {
     {
         let mut inner = state.inner.lock().expect("the stub is not poisoned");
@@ -668,49 +902,86 @@ fn complete(state: Arc<StubState>, process_id: &str, login_id: &str) -> Response
             inner.logins.push(json!({
                 "id": login_id,
                 "name": "the stub's account",
-                "profile": { "id": login_id },
+                "profile": { "phone": login_id },
             }));
         }
     }
-    Json(json!({
-        "type": "complete",
-        "step_id": "fi.mau.stub.login.complete",
-        "instructions": "Connected",
-        "complete": { "login_id": login_id, "user_login_id": login_id }
-    }))
-    .into_response()
+    let mut body = bridge_fixtures::body(state.bridge, "login-step", "complete");
+    body["complete"]["login_id"] = json!(login_id);
+    body["complete"]["user_login_id"] = json!(login_id);
+    Json(body).into_response()
 }
 
 async fn cancel_process(
     headers: HeaderMap,
     State(state): State<Arc<StubState>>,
     Path(process_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) {
-        return forbidden();
+    // The acting user is required here too — the cancel is one of the two
+    // calls that got `403 M_FORBIDDEN` from a real bridge while the stub
+    // waved it through (#106).
+    if let Some(refused) = admitted(state.bridge, "login-cancel", &headers, &query) {
+        return refused;
     }
-    let mut inner = state.inner.lock().expect("the stub is not poisoned");
-    if inner.processes.remove(&process_id).is_none() {
-        return mautrix_error(StatusCode::NOT_FOUND, "M_NOT_FOUND");
+    let held = {
+        let mut inner = state.inner.lock().expect("the stub is not poisoned");
+        if inner.processes.remove(&process_id).is_none() {
+            return refusal(state.bridge, "login-cancel", "already_gone");
+        }
+        inner.cancelled.push(process_id);
+        inner.held
+    };
+    // Cancelling the process is what releases a held `display_and_wait`,
+    // since the step cancel refuses — and the held request comes back
+    // `410 FI.MAU.BRIDGE.LOGIN_CANCELLED`.
+    for _ in 0..held {
+        state
+            .inner
+            .lock()
+            .expect("the stub is not poisoned")
+            .releases
+            .push_back(Release::Refusal {
+                status: 410,
+                errcode: "FI.MAU.BRIDGE.LOGIN_CANCELLED".to_owned(),
+            });
     }
-    inner.cancelled.push(process_id);
-    StatusCode::NO_CONTENT.into_response()
+    if held > 0 {
+        state.released.notify_waiters();
+    }
+    // `200 {}`, not `204`: what both reference bridges answer.
+    let answer = bridge_fixtures::answer(state.bridge, "login-cancel", "cancelled");
+    (
+        StatusCode::from_u16(answer.status).expect("a captured status is a status"),
+        Json(answer.body),
+    )
+        .into_response()
 }
 
 async fn logout(
     headers: HeaderMap,
     State(state): State<Arc<StubState>>,
     Path(login_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) {
-        return forbidden();
+    if let Some(refused) = admitted(state.bridge, "logout", &headers, &query) {
+        return refused;
     }
-    let mut inner = state.inner.lock().expect("the stub is not poisoned");
-    let before = inner.logins.len();
-    inner.logins.retain(|login| login["id"] != json!(login_id));
-    if inner.logins.len() == before {
-        return mautrix_error(StatusCode::NOT_FOUND, "M_NOT_FOUND");
+    {
+        let mut inner = state.inner.lock().expect("the stub is not poisoned");
+        let before = inner.logins.len();
+        inner.logins.retain(|login| login["id"] != json!(login_id));
+        if inner.logins.len() == before {
+            return refusal(state.bridge, "logout", "unknown_login");
+        }
+        inner.logged_out.push(login_id);
     }
-    inner.logged_out.push(login_id);
-    StatusCode::NO_CONTENT.into_response()
+    // Uncaptured: the only login on the reference deployment was the owner's.
+    // See `fixtures/mautrix-whatsapp/logout.json`.
+    let answer = bridge_fixtures::answer(state.bridge, "logout", "logged_out");
+    (
+        StatusCode::from_u16(answer.status).expect("a captured status is a status"),
+        Json(answer.body),
+    )
+        .into_response()
 }

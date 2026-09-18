@@ -1,0 +1,27 @@
+{
+  "endpoint": "GET /_matrix/provision/v3/logins?user_id={mxid}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "one_login": {
+      "status": 200,
+      "note": "Ids, as bare strings, under `login_ids`. Not a list of objects, and not under `logins`. Nothing else is here: for a login's name, profile or state, call whoami. This is the shape the Gateway did not read, which made the reconnect list report the bridge unreachable (#106).",
+      "substituted": ["login_ids[0] held the deployment owner's real phone number"],
+      "body": { "login_ids": ["33612345678"] }
+    },
+    "no_logins": {
+      "status": 200,
+      "note": "A bridge nobody has logged in to, and what a logout leaves behind. Captured verbatim from the Signal bridge; the WhatsApp bridge answers the same document.",
+      "substituted": [],
+      "body": { "login_ids": [] }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}

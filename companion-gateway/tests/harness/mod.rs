@@ -19,8 +19,10 @@
 // Every test binary compiles this module but uses only a subset of it.
 #![allow(dead_code, unused_imports)]
 
+pub mod bridge_fixtures;
 pub mod stub_bridge;
 
+pub use bridge_fixtures::Bridge as FixtureBridge;
 pub use stub_bridge::{StubBridge, STUB_AS_TOKEN, STUB_PROVISIONING_SECRET};
 pub use twalk_test_harness::*;
 

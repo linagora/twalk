@@ -1,0 +1,39 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/login/start/{flow}?user_id={mxid}",
+  "bridge": "mautrix-signal v26.09",
+  "answers": {
+    "qr": {
+      "status": 200,
+      "note": "The same document shape as WhatsApp's, with everything network-specific different: the step id is namespaced `fi.mau.signal.login.qr`, the instructions are the connector's own, and the payload is an `sgnl://linkdevice` URI rather than an https one.",
+      "substituted": [
+        "display_and_wait.data is a placeholder of the real length and prefix: the real value is a Signal device-linking credential"
+      ],
+      "body": {
+        "login_id": "damc5s8muijs73ah0140",
+        "type": "display_and_wait",
+        "step_id": "fi.mau.signal.login.qr",
+        "txn_id": "bls_damc5sgmuijs73ah014g",
+        "instructions": "Scan the QR code on your Signal app to log in",
+        "display_and_wait": {
+          "type": "qr",
+          "data": "sgnl://linkdevice?pub_key=PLACEHOLDER0000000000000000000000000000000&uuid=PLACEHOLDER00000000000000"
+        }
+      }
+    },
+    "unknown_flow": {
+      "status": 404,
+      "note": "POST /login/start/nosuchflow. Signal validates the flow id. The WhatsApp bridge does not: it answers 200 and gives you the QR flow instead. Same call, same mautrix version, opposite outcomes.",
+      "substituted": [],
+      "body": { "errcode": "M_NOT_FOUND", "error": "Invalid login flow ID" }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}
