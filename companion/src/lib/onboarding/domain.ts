@@ -8,15 +8,14 @@
 // Not sensitive, but not nothing either: it is remembered in `localStorage`
 // rather than `sessionStorage`, because `sessionStorage` is per tab — opening
 // /recover in a new tab lost the domain and the screen then failed with a raw
-// `Failed to fetch` on an empty homeserver URL (#112).
-// so a reload of the next screen does not send the user back to type it again,
-// and it dies with the tab. Nothing else about the user's progress is stored —
+// `Failed to fetch` on an empty homeserver URL (#112). So a reload of the next
+// screen does not send the user back to type it again. Nothing else about the user's progress is stored —
 // spec #65 is explicit that onboarding progress is derived from what exists on
 // the Gateway, never from a browser-side state machine.
 
-import { writable } from "svelte/store";
+import { writable } from 'svelte/store';
 
-const STORAGE_KEY = "twalk:domain";
+const STORAGE_KEY = 'twalk:domain';
 
 /**
  * Whether this is a hostname the Companion can talk to.
@@ -42,27 +41,25 @@ const STORAGE_KEY = "twalk:domain";
  * difference is spent.
  */
 export function isValidDomain(value: string): boolean {
-  const authority = normaliseDomain(value);
-  if (authority.length === 0 || authority.length > 253) {
-    return false;
-  }
-  const { host, port } = splitAuthority(authority);
-  if (port !== null && !isLoopbackHost(host)) {
-    return false;
-  }
-  if (isLoopbackHost(host)) {
-    return true;
-  }
-  const labels = host.split(".");
-  if (labels.length < 2) {
-    return false;
-  }
-  if (/^[0-9]+$/.test(labels[labels.length - 1] ?? "")) {
-    return false;
-  }
-  return labels.every((label) =>
-    /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
-  );
+	const authority = normaliseDomain(value);
+	if (authority.length === 0 || authority.length > 253) {
+		return false;
+	}
+	const { host, port } = splitAuthority(authority);
+	if (port !== null && !isLoopbackHost(host)) {
+		return false;
+	}
+	if (isLoopbackHost(host)) {
+		return true;
+	}
+	const labels = host.split('.');
+	if (labels.length < 2) {
+		return false;
+	}
+	if (/^[0-9]+$/.test(labels[labels.length - 1] ?? '')) {
+		return false;
+	}
+	return labels.every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
 }
 
 /**
@@ -73,14 +70,14 @@ export function isValidDomain(value: string): boolean {
  * itself, for [`isValidDomain`] to reject.
  */
 export function normaliseDomain(value: string): string {
-  let authority = value.trim().toLowerCase();
-  authority = authority.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
-  authority = authority.split("/")[0] ?? "";
-  authority = authority.split("?")[0] ?? "";
-  authority = authority.split("#")[0] ?? "";
-  const { host, port } = splitAuthority(authority);
-  const bare = host.replace(/\.$/, "");
-  return port !== null && isLoopbackHost(bare) ? `${bare}:${port}` : bare;
+	let authority = value.trim().toLowerCase();
+	authority = authority.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+	authority = authority.split('/')[0] ?? '';
+	authority = authority.split('?')[0] ?? '';
+	authority = authority.split('#')[0] ?? '';
+	const { host, port } = splitAuthority(authority);
+	const bare = host.replace(/\.$/, '');
+	return port !== null && isLoopbackHost(bare) ? `${bare}:${port}` : bare;
 }
 
 /**
@@ -90,13 +87,13 @@ export function normaliseDomain(value: string): string {
  * spelling for a deployment running on this machine.
  */
 export function isLoopbackHost(host: string): boolean {
-  return (
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host === "::1" ||
-    host === "[::1]" ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
-  );
+	return (
+		host === 'localhost' ||
+		host.endsWith('.localhost') ||
+		host === '::1' ||
+		host === '[::1]' ||
+		/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+	);
 }
 
 /**
@@ -106,42 +103,39 @@ export function isLoopbackHost(host: string): boolean {
  * this machine has no certificate and needs none.
  */
 export function homeserverBaseUrl(value: string): string {
-  const authority = normaliseDomain(value);
-  const { host } = splitAuthority(authority);
-  return `${isLoopbackHost(host) ? "http" : "https"}://${authority}`;
+	const authority = normaliseDomain(value);
+	const { host } = splitAuthority(authority);
+	return `${isLoopbackHost(host) ? 'http' : 'https'}://${authority}`;
 }
 
 /** Splits `host[:port]`, leaving an IPv6 literal's colons alone. */
-function splitAuthority(authority: string): {
-  host: string;
-  port: string | null;
-} {
-  const match = /^(.*?):(\d+)$/u.exec(authority);
-  if (match === null || match[1] === undefined || match[1].includes(":")) {
-    return { host: authority, port: null };
-  }
-  return { host: match[1], port: match[2] ?? null };
+function splitAuthority(authority: string): { host: string; port: string | null } {
+	const match = /^(.*?):(\d+)$/u.exec(authority);
+	if (match === null || match[1] === undefined || match[1].includes(':')) {
+		return { host: authority, port: null };
+	}
+	return { host: match[1], port: match[2] ?? null };
 }
 
-export const domain = writable<string>("");
+export const domain = writable<string>('');
 
 /** Reads the remembered domain. Browser-only; called from a component. */
 export function restoreDomain(): void {
-  try {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (stored !== null && isValidDomain(stored)) {
-      domain.set(stored);
-    }
-  } catch {
-    // Storage can be switched off; the user retypes it.
-  }
+	try {
+		const stored = window.localStorage.getItem(STORAGE_KEY);
+		if (stored !== null && isValidDomain(stored)) {
+			domain.set(stored);
+		}
+	} catch {
+		// Storage can be switched off; the user retypes it.
+	}
 }
 
 /** Remembers the domain for this browser, across tabs. Browser-only. */
 export function rememberDomain(value: string): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, value);
-  } catch {
-    // See above.
-  }
+	try {
+		window.localStorage.setItem(STORAGE_KEY, value);
+	} catch {
+		// See above.
+	}
 }
