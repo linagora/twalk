@@ -2253,7 +2253,20 @@ export interface operations {
              *     field, or any member the request object does not declare
              *     (`invalid_request`) — or it named more rooms than one request
              *     may carry (`too_many_rooms`), or it carried something
-             *     recovery-key-shaped (`recovery_key_refused`).
+             *     recovery-key-shaped (`recovery_key_refused`), or the homeserver
+             *     rejected the **Matrix** access token it carried, in which case
+             *     nothing was invited anywhere (`matrix_token_rejected`).
+             *
+             *     That last one is a `400` and not a `401` deliberately. A `401`
+             *     from this origin means the caller's credentials *to this Gateway*
+             *     are not good, and a client is entitled to read it as an expired
+             *     session and repair it by refreshing — which the Companion's
+             *     central handler does. A rejected Matrix token therefore sent it
+             *     refreshing a perfectly healthy session, twice per click, and
+             *     reporting a session expiry that had not happened (#141). What was
+             *     refused is a credential the caller put in the request body, for a
+             *     different server: refreshing repairs nothing, and the user's move
+             *     is to sign in to Matrix again, not here.
              */
             400: {
                 headers: {
@@ -2262,18 +2275,11 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "invalid_request" | "too_many_rooms" | "recovery_key_refused";
+                        error?: "invalid_request" | "too_many_rooms" | "recovery_key_refused" | "matrix_token_rejected";
                     };
                 };
             };
-            /**
-             * @description No device token, or one that is unknown, expired or revoked
-             *     (`unauthenticated`) — or the homeserver rejected the *Matrix*
-             *     access token in the body, in which case nothing was invited
-             *     anywhere (`matrix_token_rejected`). The second is the user's
-             *     Matrix session having expired, not their Gateway session: the
-             *     client's move is to log in to Matrix again, not to sign in here.
-             */
+            /** @description No device token, or one that is unknown, expired or revoked. */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2281,7 +2287,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "unauthenticated" | "matrix_token_rejected";
+                        error?: "unauthenticated";
                     };
                 };
             };

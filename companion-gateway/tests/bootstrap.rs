@@ -601,7 +601,12 @@ async fn the_sensor_is_invited_into_the_rooms_the_user_selects() -> Result<()> {
         }),
     )
     .await?;
-    assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+    // `400`, not `401`: a `401` from this origin means the caller's own
+    // credentials are not good, and a client is entitled to repair that by
+    // refreshing. This is a credential the caller put in the body, for a
+    // different server — the Companion's central handler refreshed a healthy
+    // session twice per click over it (#141).
+    assert_eq!(rejected.status(), reqwest::StatusCode::BAD_REQUEST);
     assert_eq!(
         json(rejected).await?["error"].as_str(),
         Some("matrix_token_rejected")

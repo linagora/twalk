@@ -347,6 +347,7 @@
 	"matrix.error.rateLimited": "Le serveur limite les tentatives de connexion. Patientez un instant, puis réessayez.",
 	"matrix.error.refused": "Le serveur a refusé la connexion. Réessayez, et ouvrez les diagnostics si cela persiste.",
 	"matrix.error.invite": "Votre serveur Twalk n'a pas pu inviter le Sensor. Votre session Matrix a peut-être expiré — reconnectez-vous, puis réessayez.",
+	"matrix.error.tokenRejected": "Votre serveur Matrix n'a pas accepté cette connexion : rien n'a été invité. Soit votre session Matrix a expiré — reconnectez-vous ci-dessus — soit ce compte est sur un serveur où ce déploiement Twalk ne peut pas faire entrer le Sensor.",
 
 	"matrix.rooms.intro": "Voici les salons que {user} a rejoints. Twalk ne connaîtra que ceux que vous cochez : la liste elle-même reste dans ce navigateur.",
 	"matrix.rooms.loading": "Lecture de vos salons depuis votre serveur…",

@@ -226,6 +226,7 @@
 	"matrix.error.rateLimited": "The homeserver is rate-limiting sign-in attempts. Wait a moment, then try again.",
 	"matrix.error.refused": "The homeserver refused the sign-in. Try again, and open the diagnostics if it persists.",
 	"matrix.error.invite": "Your Twalk server could not invite the Sensor. Your Matrix session may have expired — sign in again, then retry.",
+	"matrix.error.tokenRejected": "Your homeserver would not accept this sign-in, so nothing was invited. Either your Matrix session expired — sign in again above — or this account lives on a homeserver this Twalk deployment cannot reach the Sensor into.",
 
 	"matrix.rooms.intro": "These are the rooms {user} has joined. Twalk only learns the ones you tick: the list itself stays in this browser.",
 	"matrix.rooms.loading": "Reading your rooms from your homeserver…",

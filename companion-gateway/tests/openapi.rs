@@ -1480,7 +1480,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "matrix_access_token": "syt_not_a_token_this_homeserver_minted",
             "rooms": ["!a-room:test.twalk"],
         })),
-        401,
+        400,
         Some("matrix_token_rejected"),
     )
     .await?;
