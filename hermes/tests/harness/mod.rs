@@ -33,6 +33,13 @@
 /// drives the real `twalk-hermes` binary and lets *it* start the persona.
 mod runtime;
 
+/// The deployment's own half of the harness (ticket #25): [`Deployment`],
+/// which brings up the reference deployment — a real Sensor, a real
+/// Companion Gateway, a real homeserver — and starts the runtime beside it,
+/// because only that stack can answer whether a reply reached the contact.
+mod deployment;
+
+pub use deployment::*;
 pub use runtime::*;
 pub use twalk_test_harness::*;
 

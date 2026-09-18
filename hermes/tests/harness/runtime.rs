@@ -70,7 +70,7 @@ fn repository_root() -> PathBuf {
         .expect("the hermes package sits inside the repository")
 }
 
-fn persona_wrapper() -> String {
+pub(crate) fn persona_wrapper() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("run-persona-image.sh")
@@ -92,7 +92,7 @@ fn run_id(test_name: &str) -> String {
 }
 
 /// Builds the persona image once per test binary.
-async fn ensure_persona_image() -> Result<()> {
+pub(crate) async fn ensure_persona_image() -> Result<()> {
     static IMAGE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     IMAGE
         .get_or_try_init(|| async {
@@ -582,7 +582,7 @@ fn remove_containers(personas: &[PersonaFixture]) {
     }
 }
 
-fn forward<S>(stream: S, is_stderr: bool, store: Arc<Mutex<Vec<String>>>)
+pub(crate) fn forward<S>(stream: S, is_stderr: bool, store: Arc<Mutex<Vec<String>>>)
 where
     S: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
