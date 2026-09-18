@@ -11,43 +11,43 @@
 // Pure, so the rules are unit-tested rather than clicked through.
 
 /** Why a username will not do. One message per value, in the catalogues. */
-export type UsernameProblem = 'empty' | 'too-short' | 'too-long' | 'charset';
+export type UsernameProblem = "empty" | "too-short" | "too-long" | "charset";
 
 export const USERNAME_MIN = 3;
 export const USERNAME_MAX = 30;
 export const PASSWORD_MIN = 12;
 
 export function checkUsername(value: string): UsernameProblem | null {
-	const username = value.trim();
-	if (username.length === 0) {
-		return 'empty';
-	}
-	if (username.length < USERNAME_MIN) {
-		return 'too-short';
-	}
-	if (username.length > USERNAME_MAX) {
-		return 'too-long';
-	}
-	// Lowercase because a Matrix localpart is case-sensitive and a homeserver
-	// will happily create `Alice` beside `alice`; the wireframe forbids the
-	// confusion rather than resolving it later.
-	return /^[a-z0-9_-]+$/.test(username) ? null : 'charset';
+  const username = value.trim();
+  if (username.length === 0) {
+    return "empty";
+  }
+  if (username.length < USERNAME_MIN) {
+    return "too-short";
+  }
+  if (username.length > USERNAME_MAX) {
+    return "too-long";
+  }
+  // Lowercase because a Matrix localpart is case-sensitive and a homeserver
+  // will happily create `Alice` beside `alice`; the wireframe forbids the
+  // confusion rather than resolving it later.
+  return /^[a-z0-9_-]+$/.test(username) ? null : "charset";
 }
 
 /** Why a password will not do. `weak` is the wireframe's floor, not taste. */
-export type PasswordProblem = 'empty' | 'too-short' | 'needs-letter-and-digit';
+export type PasswordProblem = "empty" | "too-short" | "needs-letter-and-digit";
 
 export function checkPassword(value: string): PasswordProblem | null {
-	if (value.length === 0) {
-		return 'empty';
-	}
-	if (value.length < PASSWORD_MIN) {
-		return 'too-short';
-	}
-	if (!/[a-zA-Z]/.test(value) || !/[0-9]/.test(value)) {
-		return 'needs-letter-and-digit';
-	}
-	return null;
+  if (value.length === 0) {
+    return "empty";
+  }
+  if (value.length < PASSWORD_MIN) {
+    return "too-short";
+  }
+  if (!/[a-zA-Z]/.test(value) || !/[0-9]/.test(value)) {
+    return "needs-letter-and-digit";
+  }
+  return null;
 }
 
 /**
@@ -58,26 +58,26 @@ export function checkPassword(value: string): PasswordProblem | null {
  * WebAssembly already.
  */
 export function passwordStrength(value: string): 0 | 1 | 2 | 3 | 4 {
-	if (value.length === 0) {
-		return 0;
-	}
-	let score = 0;
-	if (value.length >= PASSWORD_MIN) {
-		score += 1;
-	}
-	if (value.length >= 16) {
-		score += 1;
-	}
-	const kinds = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((kind) =>
-		kind.test(value)
-	).length;
-	if (kinds >= 3) {
-		score += 1;
-	}
-	if (kinds === 4 && value.length >= 14) {
-		score += 1;
-	}
-	return Math.min(score, 4) as 0 | 1 | 2 | 3 | 4;
+  if (value.length === 0) {
+    return 0;
+  }
+  let score = 0;
+  if (value.length >= PASSWORD_MIN) {
+    score += 1;
+  }
+  if (value.length >= 16) {
+    score += 1;
+  }
+  const kinds = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((kind) =>
+    kind.test(value),
+  ).length;
+  if (kinds >= 3) {
+    score += 1;
+  }
+  if (kinds === 4 && value.length >= 14) {
+    score += 1;
+  }
+  return Math.min(score, 4) as 0 | 1 | 2 | 3 | 4;
 }
 
 /**
@@ -86,8 +86,8 @@ export function passwordStrength(value: string): 0 | 1 | 2 | 3 | 4 {
  * and to name the account in the recovery-key document.
  */
 export function localpartOf(userId: string): string {
-	const match = /^@([^:]+):/u.exec(userId.trim());
-	return match?.[1] ?? '';
+  const match = /^@([^:]+):/u.exec(userId.trim());
+  return match?.[1] ?? "";
 }
 
 /**
@@ -95,5 +95,24 @@ export function localpartOf(userId: string): string {
  * decides the real one and answers with it.
  */
 export function matrixIdFor(username: string, serverName: string): string {
-	return `@${username.trim()}:${serverName}`;
+  // The domain the user typed is where the client API answers, and it may
+  // carry a port (`twalk.localhost:8009` on a tunnelled deployment). A
+  // Matrix ID's domain is the **server name**, which is the host: building
+  // `@michel:twalk.localhost:8009` produced a user the homeserver had never
+  // heard of, and the recovery screen reported it as a refused password
+  // (#96). Stripping the port is right whenever the port is only how the
+  // API is reached; a deployment whose server name genuinely includes a
+  // port must take it from the homeserver rather than from this input.
+  return `@${username.trim()}:${serverNameOf(serverName)}`;
+}
+
+/** The server name in a typed domain: the host, without the API's port. */
+export function serverNameOf(domain: string): string {
+  const trimmed = domain.trim();
+  const colon = trimmed.lastIndexOf(":");
+  if (colon === -1) {
+    return trimmed;
+  }
+  const after = trimmed.slice(colon + 1);
+  return /^[0-9]+$/.test(after) ? trimmed.slice(0, colon) : trimmed;
 }
