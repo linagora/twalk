@@ -897,6 +897,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The suggestions personas have proposed, newest first.
+         * @description What #100's approval screen draws: what each persona proposed, for
+         *     which message, when, whether it has expired and whether it was
+         *     already approved.
+         *
+         *     **This is a projection of the bus, not a second store.** The
+         *     suggestion lives in the stream; the Gateway keeps no copy of it, so
+         *     there is nothing here that a replay could disagree with. The cost is
+         *     that the read is bounded — the same window an approval's lookup uses
+         *     (`GATEWAY_APPROVAL_LOOKUP_WINDOW`) — and the bound is in the answer
+         *     rather than in the release notes: `window.reached_start_of_stream`
+         *     is `false` when older suggestions may exist and were not read.
+         *
+         *     **It carries nothing of the message being answered.** A suggestion
+         *     quotes a contact's message, and an excerpt belongs to the author of
+         *     the quoted message rather than to whoever sent the event carrying it
+         *     (ticket #110, ADR 0012) — so a listing that resolved the trigger and
+         *     showed its text would re-publish a revoked contact's words through a
+         *     new door. The trigger appears here as its CloudEvents id and type,
+         *     which is identity and not content. The persona's own proposed text
+         *     *is* carried: it is the thing being approved.
+         *
+         *     Whether a suggestion can actually be approved also depends on the
+         *     sender's consent **at that moment**, which is not a property of the
+         *     suggestion and is not reported here. `POST /api/approvals` is the
+         *     only thing that can answer it, and it answers it as a refusal that
+         *     names the contact.
+         */
+        get: operations["getSuggestions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/suggestions/{suggestion_event_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One suggestion, by the id of the event that proposed it.
+         * @description For a screen that was handed an id — a deep link, a reload, the
+         *     answer to an approval that was refused.
+         *
+         *     This is where three situations are three answers, which is the whole
+         *     reason the route exists beside the listing:
+         *
+         *     - `200` with `standing: "expired"` - it is there, and it is no
+         *       longer approvable (ticket #22's policy).
+         *     - `200` with `standing: "approved"` - it was approved, and the
+         *       `approval` member says where the reply landed.
+         *     - `404 suggestion_not_found` - the whole retained stream was read and
+         *       no suggestion has this id.
+         *     - `410 suggestion_out_of_reach` - the bounded read gave up first, so
+         *       it may exist further back than this Gateway looks.
+         *
+         *     Collapsing any two of those into one signal is the defect this
+         *     project has spent eight incidents on. They are the same codes and the
+         *     same statuses `POST /api/approvals` answers with, because they are
+         *     the same facts about the same bounded read.
+         */
+        get: operations["getSuggestion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -1956,6 +2039,171 @@ export interface components {
              */
             step_id: string;
         };
+        /**
+         * @description One suggestion as it stands on the bus right now. The same shape from
+         *     `GET /api/suggestions` and from `GET /api/suggestions/{id}`, so a
+         *     client renders one thing.
+         */
+        Suggestion: {
+            /**
+             * @description The approval this Gateway recorded, or `null` when there is none.
+             *     Its own `publication` member says whether the reply reached the
+             *     bus, which is the answer to "did it actually go out?" — the same
+             *     document `GET /api/approvals/{id}` answers with.
+             */
+            approval: null | components["schemas"]["Approval"];
+            /**
+             * @description Which suggestion this is for that trigger, starting at 1. Several
+             *     may exist for one message; each attempt has its own id.
+             */
+            attempt: number | null;
+            /**
+             * @description The consent label the trigger carried **when the Sensor observed
+             *     it**. An audit fact about the past, and never the current state:
+             *     consent can have been revoked since, which is exactly why
+             *     `POST /api/approvals` re-reads it rather than trusting this.
+             * @enum {string}
+             */
+            consent: "granted" | "pending" | "revoked";
+            /**
+             * @description The CloudEvents id of the `persona.suggest.produced.v1`. This is
+             *     what `POST /api/approvals` takes as `suggestion_event_id`.
+             */
+            event_id: string;
+            /**
+             * @description When it goes stale (ticket #22). `null` when the persona set
+             *     none, which the contract allows and the first-party SDK never
+             *     does — a suggestion with no expiry can be approved at any later
+             *     date.
+             */
+            expires_at: string | null;
+            /**
+             * @description The network the message it answers arrived on.
+             * @enum {string}
+             */
+            network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+            /** @description The persona that proposed it. */
+            persona_id: string;
+            /**
+             * Format: date-time
+             * @description When the persona produced the suggestion.
+             */
+            produced_at: string;
+            /**
+             * @description `hermes://<domain>/personas/<persona id>` — the persona that
+             *     proposed it, and the `source` the approved reply will carry
+             *     (ADR 0022).
+             */
+            source: string;
+            /**
+             * @description Where this suggestion stands, as far as approving it goes.
+             *
+             *     - `approvable` - nothing about the suggestion itself stops it.
+             *     - `expired` - its `expires_at` has passed. Still readable, no
+             *       longer approvable.
+             *     - `approved` - this Gateway recorded an approval of it, and
+             *       `approval` says where the reply landed.
+             *
+             *     A suggestion that does not exist is not a fourth value here: it
+             *     is `404` from `GET /api/suggestions/{id}` and an absence from the
+             *     listing, so a screen cannot confuse "gone stale" with "never
+             *     was". Nor is the sender's consent folded in: that is a different
+             *     fact about a different subject, read at the moment of approval.
+             * @enum {string}
+             */
+            standing: "approvable" | "expired" | "approved";
+            /** @description Where on the bus this suggestion was found. */
+            stream_sequence: number;
+            /**
+             * @description What the persona proposed — the text the screen draws and the
+             *     user approves, edits or refuses. It is the persona's own words,
+             *     which is why it is here when the quoted message's are not.
+             */
+            suggestion: {
+                /** @description The suggested reply in its canonical text form. */
+                body: string;
+                /**
+                 * @description Content type of the body.
+                 * @enum {string}
+                 */
+                format: "text/plain" | "text/markdown" | "text/html";
+            };
+            trigger: components["schemas"]["SuggestionTrigger"];
+        };
+        /**
+         * @description The suggestions in the read window, newest first, and what the read
+         *     covered.
+         */
+        SuggestionListing: {
+            /** @description Newest first. */
+            suggestions: components["schemas"]["Suggestion"][];
+            /**
+             * @description `true` when `limit` cut the list: more suggestions were found
+             *     inside the window than were answered with. Distinct from
+             *     `window.reached_start_of_stream`, which is about the bus rather
+             *     than about the request.
+             */
+            truncated: boolean;
+            /**
+             * @description Suggestions found in the window that this build could not read —
+             *     an unknown network, an unknown consent state, a content type the
+             *     contract does not name. Counted rather than dropped in silence,
+             *     so a screen missing a row has somewhere to look. A single read of
+             *     one of these answers `409 suggestion_unreadable` instead.
+             */
+            unreadable: number;
+            window: components["schemas"]["SuggestionReadWindow"];
+        };
+        /**
+         * @description The stretch of the stream an answer was computed from.
+         *
+         *     The bus has no index from a CloudEvents id to a stream position, so
+         *     finding suggestions means reading the stream, so the read is bounded.
+         *     A bound nobody can see is a bound that lies, which is why it is here
+         *     and not only in the configuration.
+         */
+        SuggestionReadWindow: {
+            /** @description The first stream position read. `0` when the stream is empty. */
+            from_sequence: number;
+            /**
+             * @description `true` when the read began at the stream's first retained
+             *     message, so nothing older exists to have been missed. `false`
+             *     means there may be older suggestions this Gateway did not read —
+             *     a fact about this answer, not about the bus.
+             */
+            reached_start_of_stream: boolean;
+            /**
+             * @description The configured width of the read
+             *     (`GATEWAY_APPROVAL_LOOKUP_WINDOW`), shared with the approval
+             *     lookup because it is the same bus and the same question.
+             */
+            sequences: number;
+            /**
+             * @description The last, which is the stream's head at the moment of the read.
+             *     `0` when the stream is empty.
+             */
+            to_sequence: number;
+        };
+        /**
+         * @description The message a suggestion answers, **by identity alone**.
+         *
+         *     There is no member here for its text, its sender, its room or an
+         *     excerpt of what it was itself quoting, and there will not be one. An
+         *     excerpt belongs to the author of the quoted message rather than to
+         *     whoever sent the event carrying it, and a listing that re-published a
+         *     revoked contact's words would be ticket #110's defect one layer up
+         *     (ADR 0012). The enforcement is not this schema: the Gateway's
+         *     projection never opens an inbound event at all.
+         */
+        SuggestionTrigger: {
+            /** @description The CloudEvents id of the event the suggestion replies to. */
+            event_id: string;
+            /**
+             * @description Its CloudEvents type, e.g.
+             *     `fr.linagora.twalk.inbound.message.received.v1`.
+             */
+            event_type: string;
+        };
     };
     responses: {
         /**
@@ -2117,6 +2365,23 @@ export interface components {
             };
         };
         /**
+         * @description This deployment reads no suggestions: `GATEWAY_NATS_URL` is unset, so
+         *     there is no bus to project. An empty list would claim that no persona
+         *     has proposed anything, which is a very different statement from "this
+         *     Gateway is not watching"; `detail` names the variable.
+         */
+        SuggestionsNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "suggestions_not_configured";
+                };
+            };
+        };
+        /**
          * @description No device token, or one that is unknown, expired or revoked — one
          *     answer for all three. Also what an unknown `/api` path answers to a
          *     caller with no device token.
@@ -2166,8 +2431,10 @@ export interface components {
          */
         statusBridgeId: string;
         /**
-         * @description The CloudEvents id of the `persona.suggest.produced` event that was
-         *     approved: 64 lowercase hex characters, the contract's own id shape.
+         * @description The CloudEvents id of a `persona.suggest.produced` event: 64
+         *     lowercase hex characters, the contract's own id shape. The same
+         *     parameter names the suggestion being read (`GET /api/suggestions/{id}`)
+         *     and the one whose approval is being asked about.
          * @example 319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b
          */
         suggestionEventId: string;
@@ -2575,8 +2842,10 @@ export interface operations {
             header?: never;
             path: {
                 /**
-                 * @description The CloudEvents id of the `persona.suggest.produced` event that was
-                 *     approved: 64 lowercase hex characters, the contract's own id shape.
+                 * @description The CloudEvents id of a `persona.suggest.produced` event: 64
+                 *     lowercase hex characters, the contract's own id shape. The same
+                 *     parameter names the suggestion being read (`GET /api/suggestions/{id}`)
+                 *     and the one whose approval is being asked about.
                  * @example 319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b
                  */
                 suggestion_event_id: components["parameters"]["suggestionEventId"];
@@ -3852,6 +4121,210 @@ export interface operations {
                 };
             };
             503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    getSuggestions: {
+        parameters: {
+            query?: {
+                /**
+                 * @description How many suggestions to answer with, newest first. A screen draws
+                 *     a page; reading further back is the deployment's window, not this
+                 *     parameter.
+                 */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The suggestions in the read window, and what the read covered. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuggestionListing"];
+                };
+            };
+            /**
+             * @description `malformed_request` - `limit` is not a whole number between 1 and
+             *     200.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `store_unavailable` - the Gateway's own store could not be read,
+             *     so whether a suggestion was already approved is unknown rather
+             *     than no. Nothing is answered half-known.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            /**
+             * @description `bus_unreachable` - the suggestions are on the bus and the bus
+             *     did not answer. A `502` and not a `503`: this deployment does
+             *     read suggestions, and what failed is the thing behind it.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            503: components["responses"]["SuggestionsNotConfigured"];
+        };
+    };
+    getSuggestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The CloudEvents id of a `persona.suggest.produced` event: 64
+                 *     lowercase hex characters, the contract's own id shape. The same
+                 *     parameter names the suggestion being read (`GET /api/suggestions/{id}`)
+                 *     and the one whose approval is being asked about.
+                 * @example 319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b
+                 */
+                suggestion_event_id: components["parameters"]["suggestionEventId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The suggestion, and where it stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Suggestion"];
+                };
+            };
+            /**
+             * @description `malformed_request` - the path names something that is not a
+             *     contract event id (64 lowercase hex characters).
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `suggestion_not_found` - the whole retained stream was read and
+             *     no suggestion has this id. Not the same answer as the one below.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_not_found";
+                    };
+                };
+            };
+            /**
+             * @description `suggestion_unreadable` - the suggestion is on the bus and this
+             *     build cannot read it: a network, a consent state or a content
+             *     type it does not know. "I found it and do not understand it" is
+             *     not "it is not there", so it is neither a `404` nor a silence. In
+             *     a listing the same suggestion is counted under `unreadable`
+             *     instead, because one bad message must not blank a screen.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_unreadable";
+                    };
+                };
+            };
+            /**
+             * @description `suggestion_out_of_reach` - the read is bounded
+             *     (`GATEWAY_APPROVAL_LOOKUP_WINDOW`) and the bound was reached
+             *     before the stream's first retained message. The suggestion may
+             *     exist, further back than the Gateway looks; `detail` names the
+             *     variable that widens the search.
+             */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_out_of_reach";
+                    };
+                };
+            };
+            /**
+             * @description `store_unavailable` - the Gateway's own store could not be read,
+             *     so whether this suggestion was already approved is unknown.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            /**
+             * @description `bus_unreachable` - the suggestion is on the bus and the bus did
+             *     not answer.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            503: components["responses"]["SuggestionsNotConfigured"];
         };
     };
     getHealth: {

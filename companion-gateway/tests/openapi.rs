@@ -146,6 +146,18 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "500",
         "store_unavailable needs the pending-contact store to fail under a running process: the same fault-injection seam this suite does not have",
     ),
+    (
+        "get",
+        "/api/suggestions",
+        "500",
+        "store_unavailable here is the approval rows failing to be read while the bus answers: the same fault-injection seam this suite does not have. `suggestions_http::tests` asserts the shape of the answer",
+    ),
+    (
+        "get",
+        "/api/suggestions/{suggestion_event_id}",
+        "500",
+        "store_unavailable, as above",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -586,6 +598,39 @@ fn approval_suggestion_event(trigger: &Value, expires_in_seconds: i64) -> Value 
     validate_against_contract(&event, "persona.suggest.produced")
         .expect("the fixture is an event the contract allows");
     event
+}
+
+/// A suggestion from a contract version this build does not have: its
+/// network is one nobody has heard of (#97).
+///
+/// Deliberately not validated against today's contract — the schemas' enums
+/// are closed, so there is no way to write this event and have it pass, and
+/// that is the point. A Gateway that fell over on one would blank the whole
+/// approval screen; this one counts it in a listing and answers `409
+/// suggestion_unreadable` when asked about it directly, which is the third
+/// thing "it is not there" must not be confused with.
+fn unreadable_suggestion_event() -> Value {
+    let trigger_id = sha256_hex("openapi-g97-unreadable-trigger");
+    json!({
+        "specversion": "1.0",
+        "id": sha256_hex("openapi-g97-unreadable-suggest"),
+        "source": format!("hermes://{SERVER_NAME}/personas/assistant"),
+        "type": "fr.linagora.twalk.persona.suggest.produced.v1",
+        "time": "2026-09-17T10:00:00Z",
+        "subject": trigger_id,
+        "datacontenttype": "application/json",
+        "network": "carrierpigeon",
+        "consent": "granted",
+        "data": {
+            "persona_id": "assistant",
+            "trigger": {
+                "event_id": trigger_id,
+                "event_type": "fr.linagora.twalk.inbound.message.received.v1"
+            },
+            "suggestion": { "body": "Par retour de pigeon.", "format": "text/plain" },
+            "attempt": 1
+        }
+    })
 }
 
 /// A client that follows no redirect and keeps no cookie: the tests drive
@@ -1202,6 +1247,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
 
     // --- the refusals every /api endpoint shares: no credential at all
     let absent_approval = format!("/api/approvals/{}", "a".repeat(64));
+    let absent_suggestion = format!("/api/suggestions/{}", "a".repeat(64));
     for (method, template, target) in [
         (Method::GET, "/api/session", "/api/session"),
         (Method::DELETE, "/api/session", "/api/session"),
@@ -1240,6 +1286,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::GET,
             "/api/contacts/display-names",
             "/api/contacts/display-names?contact=%40a%3Atest.twalk",
+        ),
+        (Method::GET, "/api/suggestions", "/api/suggestions"),
+        (
+            Method::GET,
+            "/api/suggestions/{suggestion_event_id}",
+            absent_suggestion.as_str(),
         ),
         (Method::POST, "/api/approvals", "/api/approvals"),
         (
@@ -1400,6 +1452,32 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         None,
         503,
         Some("approvals_not_configured"),
+    )
+    .await?;
+    // And reading suggestions (#97) is the same half again: they live on the
+    // bus, so with no bus there is nothing to project. An empty list would
+    // claim that no persona has proposed anything, which is a different
+    // statement with a different fix.
+    call.check(
+        Method::GET,
+        &base,
+        "/api/suggestions",
+        "/api/suggestions",
+        &consent_cookie,
+        None,
+        503,
+        Some("suggestions_not_configured"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &base,
+        "/api/suggestions/{suggestion_event_id}",
+        &absent_suggestion,
+        &consent_cookie,
+        None,
+        503,
+        Some("suggestions_not_configured"),
     )
     .await?;
     // The snapshot answers the same way, to the service token this Gateway
@@ -2335,6 +2413,114 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("malformed_request"),
     )
     .await?;
+
+    // --- reading suggestions (#97), on the same Gateway and the same bus:
+    // the listing the approval screen draws from, and one suggestion by id.
+    // Its behaviour is `tests/suggestions.rs`'s; what is driven here is every
+    // answer the description declares.
+    //
+    // One suggestion this build cannot read, so that the listing's tolerance
+    // and the single read's refusal are both exercised against a real
+    // message on the real bus.
+    bus.publish_event(
+        "twalk.persona.suggest.produced.v1",
+        &unreadable_suggestion_event(),
+    )
+    .await?;
+    let unreadable_id = unreadable_suggestion_event()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let listing = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/suggestions",
+            "/api/suggestions?limit=200",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        listing.body["suggestions"]
+            .as_array()
+            .is_some_and(|entries| entries
+                .iter()
+                .any(|entry| entry["event_id"].as_str() == Some(&suggestion_id))),
+        "the suggestion this suite published is not in the listing: {}",
+        listing.body
+    );
+    // It was approved above, so the listing says so rather than offering it
+    // again — and the record is the same document `GET /api/approvals/{id}`
+    // answered with.
+    let single = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/suggestions/{suggestion_event_id}",
+            &format!("/api/suggestions/{suggestion_id}"),
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(single.body["standing"].as_str(), Some("approved"));
+    assert_eq!(
+        single.body["approval"]["stream_sequence"], approved.body["stream_sequence"],
+        "the suggestion's approval names the same position the approval did: {}",
+        single.body
+    );
+    // Found and not understood: neither a 404 nor a silence.
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/suggestions/{suggestion_event_id}",
+        &format!("/api/suggestions/{unreadable_id}"),
+        &deciding_cookie,
+        None,
+        409,
+        Some("suggestion_unreadable"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/suggestions/{suggestion_event_id}",
+        &format!(
+            "/api/suggestions/{}",
+            sha256_hex("openapi-no-such-suggestion")
+        ),
+        &deciding_cookie,
+        None,
+        404,
+        Some("suggestion_not_found"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/suggestions/{suggestion_event_id}",
+        "/api/suggestions/not-an-event-id",
+        &deciding_cookie,
+        None,
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/suggestions",
+        "/api/suggestions?limit=0",
+        &deciding_cookie,
+        None,
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
     consenting.stop().await;
 
     // --- a Gateway whose approval search is bounded to one stream position:
@@ -2375,6 +2561,20 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("suggestion_out_of_reach"),
     )
     .await?;
+    // The same fact through the read door (#97), with the same code and the
+    // same status: a bounded read that gave up is not a suggestion that does
+    // not exist, whichever endpoint is asked.
+    call.check(
+        Method::GET,
+        &narrow_base,
+        "/api/suggestions/{suggestion_event_id}",
+        &format!("/api/suggestions/{suggestion_id}"),
+        &[("twalk_device", narrow_device.as_str())],
+        None,
+        410,
+        Some("suggestion_out_of_reach"),
+    )
+    .await?;
     narrow.stop().await;
 
     // --- a Gateway whose bus is configured and does not answer: `502`, and
@@ -2397,6 +2597,28 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         "/api/approvals",
         &[("twalk_device", busless_device.as_str())],
         Some(json!({ "suggestion_event_id": suggestion_id })),
+        502,
+        Some("bus_unreachable"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &busless_base,
+        "/api/suggestions",
+        "/api/suggestions",
+        &[("twalk_device", busless_device.as_str())],
+        None,
+        502,
+        Some("bus_unreachable"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &busless_base,
+        "/api/suggestions/{suggestion_event_id}",
+        &format!("/api/suggestions/{suggestion_id}"),
+        &[("twalk_device", busless_device.as_str())],
+        None,
         502,
         Some("bus_unreachable"),
     )

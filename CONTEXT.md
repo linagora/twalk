@@ -33,7 +33,7 @@ _Avoid_: bot, agent (as a product term; "agent" stays acceptable for the generic
 The user's decision that a persona may read a given network, recorded as a consent decision on that persona and nothing else (ADR 0013). A paused persona is one whose consent was revoked: it still runs, and receives no events. Activation never spreads to a newly connected network on its own.
 
 **Suggestion**:
-A reply a persona proposes and never sends: it exists to be read, edited or refused by a human. Written in the language of the message it answers, not the user's (ADR 0016). Contract type: `persona.suggest.produced`.
+A reply a persona proposes and never sends: it exists to be read, edited or refused by a human. Written in the language of the message it answers, not the user's (ADR 0016). Read from the bus, never kept: the listing the Companion Gateway serves is a projection of the stream and holds no copy, so a replay and the list cannot disagree — and what it says about the message being answered is that message's identity, never its words, because an excerpt belongs to the author of the quoted message and not to whoever sent the event carrying it (ADR 0012). Contract type: `persona.suggest.produced`.
 
 **Approval**:
 The human act that turns a suggestion into an outbound reply, carrying the identity of whoever approved it. Deliberate by construction — an explicit call, never a default, never a batch — and refused if the sender's consent is no longer `granted` at that moment. Served and published by the Companion Gateway, because that last clause is a read of the consent state and the Gateway is its single writer (ADR 0022); the event's `source` names the persona whose suggestion was approved, not the publisher. Contract type: `persona.reply.approved`.

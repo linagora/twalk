@@ -50,6 +50,20 @@
 //! own request or it is refused, because a send held for later is a send
 //! whose consent check has gone stale.
 //!
+//! Ticket #97 gave that act something to act on ([`suggestions`],
+//! [`suggestions_http`]): `GET /api/suggestions` and `GET
+//! /api/suggestions/{id}`, the listing #100's approval screen draws from.
+//! It is a **projection of the bus** and not a second store — the suggestion
+//! lives in the stream, and a Gateway that kept its own copy would disagree
+//! with a replay with nobody able to say which was true. It reads the same
+//! bounded window an approval's lookup does and puts that bound in the
+//! answer, and it tells an expired suggestion, a missing one and an
+//! already-approved one apart by three different answers. What it says about
+//! the message being answered is that message's id and type, and nothing
+//! else: an excerpt belongs to the author of the quoted message rather than
+//! to whoever sent the event carrying it (#110), so this projection never
+//! opens an inbound event at all.
+//!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
 //! the origin itself ([`openapi`]) and checked against the running binary by
@@ -83,6 +97,8 @@ pub mod session;
 pub mod session_http;
 pub mod static_files;
 pub mod store;
+pub mod suggestions;
+pub mod suggestions_http;
 pub mod trace;
 
 /// The Gateway's version, as the health endpoint reports it: the package
