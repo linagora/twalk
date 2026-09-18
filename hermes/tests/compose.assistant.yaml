@@ -37,6 +37,10 @@ services:
       TWALK_LLM_BASE_URL: ${TWALK_TEST_PERSONA_LLM_URL:?the harness names the stub LLM}
       TWALK_LLM_API_KEY: ${TWALK_TEST_PERSONA_LLM_KEY:-test-only-llm-key}
       TWALK_LLM_MODEL: ${TWALK_TEST_PERSONA_MODEL:-stub-model}
+      # The operator's provider parameters, passed through to the endpoint
+      # untouched (ADR 0015). The suite sets them to the shape that matters:
+      # one field added, one the client would otherwise send removed.
+      TWALK_LLM_PARAMS: ${TWALK_TEST_PERSONA_LLM_PARAMS:-}
       TWALK_LOG_LEVEL: debug
     # A crash must be visible to the test, not papered over by a restart:
     # supervision is the runtime's job (H4), and asserting it needs a

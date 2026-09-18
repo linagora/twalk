@@ -26,6 +26,13 @@ from twalk_sdk.llm import system, user
 #: to the user as a ready-to-send reply, so anything but the reply itself
 #: (a preamble, an explanation, quotes around it) is noise the user has to
 #: delete before approving.
+#:
+#: It stays in the code, versioned and reviewed, rather than in
+#: configuration: the prompt *is* the persona's behaviour, and two
+#: deployments running this file must behave the same way (ADR 0015). The
+#: language instruction is the conversation's, not the user's — a
+#: suggestion exists to be sent to someone else, so a French user answering
+#: an English contact must not be handed French (ADR 0016).
 SYSTEM_PROMPT = (
     "You draft replies to personal messages on behalf of the user. "
     "Answer with the reply text only: no preamble, no explanation, no quotes. "

@@ -60,6 +60,12 @@ pub const MODEL: &str = "stub-model";
 /// reached the endpoint they configured.
 pub const LLM_API_KEY: &str = "test-only-llm-key";
 
+/// The provider parameters the persona is configured with, as an operator
+/// sets them (ADR 0015): one field the endpoint wants, and one the client
+/// would otherwise send that this provider rejects. A test asserts both
+/// halves in the request the stub actually received.
+pub const LLM_PARAMS: &str = r#"{"top_p": 0.9, "temperature": null}"#;
+
 pub const INBOUND_TYPE: &str = "fr.linagora.twalk.inbound.message.received.v1";
 pub const THINKING_TYPE: &str = "fr.linagora.twalk.persona.thinking.emitted.v1";
 pub const SUGGEST_TYPE: &str = "fr.linagora.twalk.persona.suggest.produced.v1";
@@ -209,6 +215,7 @@ impl PersonaRun {
                 ("TWALK_TEST_PERSONA_DOMAIN", HERMES_DOMAIN.to_owned()),
                 ("TWALK_TEST_PERSONA_MODEL", MODEL.to_owned()),
                 ("TWALK_TEST_PERSONA_LLM_KEY", LLM_API_KEY.to_owned()),
+                ("TWALK_TEST_PERSONA_LLM_PARAMS", LLM_PARAMS.to_owned()),
             ],
         );
         let run = PersonaRun {

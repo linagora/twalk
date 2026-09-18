@@ -10,10 +10,11 @@ consumer will accept.
 
 from __future__ import annotations
 
+import json
 import os
 import re
-from dataclasses import dataclass
-from typing import Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 #: ``data.persona_id`` and the last segment of ``source`` in every
 #: ``persona.*`` schema.
@@ -26,11 +27,6 @@ DEFAULT_SUBJECT_PREFIX = "twalk"
 DEFAULT_STREAM = "twalk"
 DEFAULT_NATS_URL = "nats://localhost:4222"
 
-#: The model name reported for oversight when the operator names none. The
-#: endpoint is what decides which model answers; a local llama.cpp or
-#: Ollama ignores the field entirely.
-DEFAULT_MODEL = "local-model"
-
 CONTRACT_TYPE_PREFIX = "fr.linagora.twalk."
 
 
@@ -40,22 +36,59 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class LlmConfig:
-    """Where the persona reasons, and with what credentials.
+    """Where the persona reasons, with which model, and with what
+    credentials.
 
     Any OpenAI-compatible chat-completions endpoint will do — that is the
     point: the operator develops against a model on their own machine and
-    deploys against whichever endpoint they chose, and no message content
-    reaches an endpoint they did not configure.
+    deploys against whichever endpoint they chose. There is no default, for
+    either the endpoint or the model: Twalk ships no LLM and never sends a
+    message to a model the operator did not name, so a persona refuses to
+    start rather than choose one (ADR 0015).
     """
 
     base_url: str
-    model: str = DEFAULT_MODEL
+    model: str
     api_key: Optional[str] = None
     timeout_seconds: float = 60.0
+    #: The operator's provider parameters, passed through to the endpoint
+    #: untouched. Providers differ in what they reject — the first endpoint
+    #: tried in practice needed fields dropped that an OpenAI client sends
+    #: by default (ADR 0015) — so a parameter set to ``None`` removes a
+    #: field the request would otherwise carry.
+    params: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def chat_completions_url(self) -> str:
         return f"{self.base_url.rstrip('/')}/chat/completions"
+
+    def chat_completions_payload(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """The request body for one completion.
+
+        Pure, and here rather than in the HTTP client, because what the
+        operator's parameters do to a request is a configuration decision
+        and the one part of the model call worth testing without a network.
+        """
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [dict(message) for message in messages],
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        for key, value in self.params.items():
+            if value is None:
+                payload.pop(key, None)
+            else:
+                payload[key] = value
+        return payload
 
 
 @dataclass(frozen=True)
@@ -86,6 +119,8 @@ class Config:
             )
         if not self.llm.base_url:
             raise ConfigError("TWALK_LLM_BASE_URL must name a chat-completions endpoint")
+        if not self.llm.model:
+            raise ConfigError("TWALK_LLM_MODEL must name the model to reason with")
 
     @property
     def source(self) -> str:
@@ -140,15 +175,32 @@ class Config:
                 f"{timeout_raw!r}"
             ) from error
 
+        params_raw = optional("TWALK_LLM_PARAMS", "")
+        params: Dict[str, Any] = {}
+        if params_raw:
+            try:
+                params = json.loads(params_raw)
+            except ValueError as error:
+                raise ConfigError(
+                    "TWALK_LLM_PARAMS must be a JSON object of provider "
+                    f"parameters: {error}"
+                ) from error
+            if not isinstance(params, dict):
+                raise ConfigError(
+                    "TWALK_LLM_PARAMS must be a JSON object, got "
+                    f"{type(params).__name__}"
+                )
+
         api_key = (env.get("TWALK_LLM_API_KEY") or "").strip() or None
         return cls(
             persona_id=required("TWALK_PERSONA_ID"),
             hermes_domain=required("TWALK_HERMES_DOMAIN"),
             llm=LlmConfig(
                 base_url=required("TWALK_LLM_BASE_URL").rstrip("/"),
-                model=optional("TWALK_LLM_MODEL", DEFAULT_MODEL),
+                model=required("TWALK_LLM_MODEL"),
                 api_key=api_key,
                 timeout_seconds=timeout_seconds,
+                params=params,
             ),
             nats_url=optional("TWALK_NATS_URL", DEFAULT_NATS_URL),
             stream=optional("TWALK_BUS_STREAM", DEFAULT_STREAM),

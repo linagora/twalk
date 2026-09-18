@@ -197,6 +197,20 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
         Some(format!("Bearer {LLM_API_KEY}").as_str()),
         "the credentials the operator configured reach the endpoint they chose"
     );
+    // The operator's provider parameters, in the request the endpoint
+    // actually received (ADR 0015): one added, and one the client would
+    // otherwise have sent removed — which is what made the first endpoint
+    // tried in practice work at all.
+    assert_eq!(
+        request.body["top_p"],
+        json!(0.9),
+        "a provider parameter reaches the endpoint untouched"
+    );
+    assert!(
+        request.body.get("temperature").is_none(),
+        "a parameter set to null removes a field the provider rejects, got {}",
+        request.body
+    );
 
     run.shutdown().await
 }

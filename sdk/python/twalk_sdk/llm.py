@@ -10,7 +10,7 @@ ever leaves their infrastructure.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence
+from typing import Dict, Mapping, Optional, Sequence
 
 import httpx
 
@@ -58,14 +58,12 @@ class Llm:
         answer with no choices, an empty completion. A persona that cannot
         reason produces no suggestion; it never invents one.
         """
-        payload: Dict[str, Any] = {
-            "model": self._config.model,
-            "messages": [dict(message) for message in messages],
-        }
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_tokens is not None:
-            payload["max_tokens"] = max_tokens
+        # The body, including the operator's provider parameters (ADR 0015),
+        # is assembled by the configuration itself — see
+        # `LlmConfig.chat_completions_payload`.
+        payload = self._config.chat_completions_payload(
+            messages, temperature=temperature, max_tokens=max_tokens
+        )
 
         headers = {"content-type": "application/json"}
         if self._config.api_key:
