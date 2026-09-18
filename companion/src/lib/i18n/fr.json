@@ -245,6 +245,7 @@
 	"networks.trouble.unauthenticated": "Votre session sur ce serveur Twalk a expiré. Reconnectez-vous pour continuer.",
 	"networks.trouble.tooManyLogins": "Le réseau refuse un appareil lié de plus sur ce compte. Retirez-en un depuis le réseau lui-même, puis réessayez.",
 	"networks.trouble.bridge": "Votre serveur Twalk n'a pas pu joindre la passerelle de ce réseau. Vérifiez qu'elle fonctionne, puis réessayez.",
+	"networks.trouble.bridgeAnswerUnusable": "La passerelle de ce réseau fonctionne et a répondu à votre serveur Twalk — c'est Twalk qui n'a pas su interpréter sa réponse. Ni votre serveur, ni la passerelle, ni votre connexion ne sont en cause : vous n'avez rien à corriger, c'est un défaut de Twalk. Merci de le signaler, en joignant ce que votre serveur Twalk a consigné.",
 	"networks.trouble.network": "La liaison avec votre serveur Twalk s'est interrompue. Nouvelle tentative…",
 	"networks.trouble.unexpected": "Quelque chose s'est mal passé sur votre serveur Twalk. Réessayez, et ouvrez les diagnostics si cela persiste.",
 

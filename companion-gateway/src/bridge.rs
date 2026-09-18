@@ -200,10 +200,14 @@ pub enum LoginFailure {
     WebauthnRequired,
     /// The flow asked for a step type this facade does not drive.
     UnsupportedStep,
-    /// The bridge answered something that is not a login step.
+    /// The bridge refused, with its own error code and an HTTP status.
     BridgeRefused,
     /// The bridge could not be reached at all.
     BridgeUnreachable,
+    /// The bridge **answered**, and the Gateway could not use the answer.
+    /// The bridge is running; this is a defect in Twalk's reading of that
+    /// bridge's provisioning API. See [`BridgeRefusal::BridgeAnswerUnusable`].
+    BridgeAnswerUnusable,
 }
 
 impl LoginFailure {
@@ -215,6 +219,74 @@ impl LoginFailure {
             LoginFailure::UnsupportedStep => "unsupported_step",
             LoginFailure::BridgeRefused => "bridge_refused",
             LoginFailure::BridgeUnreachable => "bridge_unreachable",
+            LoginFailure::BridgeAnswerUnusable => "bridge_answer_unusable",
+        }
+    }
+}
+
+/// One endpoint of a bridge's provisioning API, as the Gateway calls it.
+///
+/// It exists so that a refusal can say **which call** it is about without
+/// anybody having to remember to pass a label alongside the path segments:
+/// the call is the method and the endpoint, and [`call_bridge`] takes it
+/// instead of a [`reqwest::Method`]. The strings are the ones
+/// `tests/harness/fixtures/*/*.json` key their captured answers on, so the
+/// endpoint a refusal names is the endpoint whose recorded answers a reader
+/// can go and look at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvisioningCall {
+    Flows,
+    Logins,
+    Whoami,
+    Start,
+    Step,
+    CancelStep,
+    CancelProcess,
+    Logout,
+}
+
+impl ProvisioningCall {
+    /// The method this endpoint is called with. Derived rather than passed,
+    /// so a call site cannot name one endpoint and use another's verb.
+    fn method(self) -> reqwest::Method {
+        match self {
+            ProvisioningCall::Flows | ProvisioningCall::Logins | ProvisioningCall::Whoami => {
+                reqwest::Method::GET
+            }
+            _ => reqwest::Method::POST,
+        }
+    }
+
+    /// The endpoint as `fixtures/README.md` writes it: what a refusal names,
+    /// and what a reader greps the fixture corpus for.
+    pub fn endpoint(self) -> &'static str {
+        match self {
+            ProvisioningCall::Flows => "GET /_matrix/provision/v3/login/flows",
+            ProvisioningCall::Logins => "GET /_matrix/provision/v3/logins",
+            ProvisioningCall::Whoami => "GET /_matrix/provision/v3/whoami",
+            ProvisioningCall::Start => "POST /_matrix/provision/v3/login/start/{flow}",
+            ProvisioningCall::Step => {
+                "POST /_matrix/provision/v3/login/step/{process}/{step}/{type}"
+            }
+            ProvisioningCall::CancelStep => {
+                "POST /_matrix/provision/v3/login/step/{process}/{step}/cancel"
+            }
+            ProvisioningCall::CancelProcess => "POST /_matrix/provision/v3/login/cancel/{process}",
+            ProvisioningCall::Logout => "POST /_matrix/provision/v3/logout/{login_id}",
+        }
+    }
+
+    /// A stable one-word label for a log line or a metric.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProvisioningCall::Flows => "login_flows",
+            ProvisioningCall::Logins => "logins",
+            ProvisioningCall::Whoami => "whoami",
+            ProvisioningCall::Start => "login_start",
+            ProvisioningCall::Step => "login_step",
+            ProvisioningCall::CancelStep => "login_step_cancel",
+            ProvisioningCall::CancelProcess => "login_cancel",
+            ProvisioningCall::Logout => "logout",
         }
     }
 }
@@ -393,9 +465,47 @@ pub enum BridgeRefusal {
     NotFoundOnBridge { errcode: String },
     /// The bridge refused, with its own error code.
     BridgeRefused { errcode: String, status: u16 },
-    /// The bridge could not be reached, or answered something that is not a
-    /// provisioning document.
+    /// **Nothing answered.** The connection was refused, timed out, found no
+    /// route, or died mid-body. The bridge is down, or the Gateway is
+    /// pointed at the wrong address.
+    ///
+    /// This is the refusal an operator should go and look at containers,
+    /// ports and networking for — and it is the *only* one. See
+    /// [`Self::BridgeAnswerUnusable`] for the other half of what this
+    /// variant used to mean.
     BridgeUnreachable { detail: String },
+    /// **The bridge answered, and the Gateway could not use the answer.**
+    ///
+    /// The connection was fine and the bridge replied — promptly, usually
+    /// with a `200` — and this build then looked for something in that
+    /// answer and did not find it. That is a defect in Twalk's reading of
+    /// the bridge's provisioning API, not a broken deployment, and the two
+    /// must never again arrive under one name: the first live WhatsApp login
+    /// (#106) failed here, was reported as "could not reach this network's
+    /// bridge", and cost a debugging session spent on networking, containers
+    /// and ports — the one place the fault was not.
+    ///
+    /// # Why both members are what they are
+    ///
+    /// [`ProvisioningCall`] is a closed set and `looked_for` is a
+    /// `&'static str`: **neither can carry a byte of the bridge's answer**.
+    /// That is deliberate and it is the acceptance criterion. A bridge's
+    /// answer can hold identifiers from a network account — a phone number
+    /// as a login id, a display name, a QR payload — so a refusal names what
+    /// was *missing*, never what was received. The answer's shape goes to
+    /// the operator's log through [`redacted`]; nothing of it reaches the
+    /// browser.
+    ///
+    /// Adding a case therefore means adding a `&'static str` literal. There
+    /// is no `format!` to reach for, which is the point.
+    BridgeAnswerUnusable {
+        /// Which provisioning call answered.
+        call: ProvisioningCall,
+        /// What the Gateway was looking for in that answer and did not find
+        /// — a field name or a shape this build knows about, never a value
+        /// the bridge sent.
+        looked_for: &'static str,
+    },
 }
 
 impl BridgeRefusal {
@@ -413,6 +523,7 @@ impl BridgeRefusal {
             BridgeRefusal::NotFoundOnBridge { .. } => "not_found_on_bridge",
             BridgeRefusal::BridgeRefused { .. } => "bridge_refused",
             BridgeRefusal::BridgeUnreachable { .. } => "bridge_unreachable",
+            BridgeRefusal::BridgeAnswerUnusable { .. } => "bridge_answer_unusable",
         }
     }
 }
@@ -639,17 +750,13 @@ impl Bridges {
             let call = call_bridge(
                 &bridge.config,
                 &self.clients.http,
-                reqwest::Method::GET,
+                ProvisioningCall::Whoami,
                 &["whoami"],
                 &query,
                 None,
             );
             let logins = match tokio::time::timeout(CONNECTION_TIMEOUT, call).await {
-                Ok(Ok(body)) => Ok(body
-                    .get("logins")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()),
+                Ok(Ok(body)) => whoami_logins(&body),
                 Ok(Err(refusal)) => Err(refusal),
                 Err(_elapsed) => Err(BridgeRefusal::BridgeUnreachable {
                     detail: format!(
@@ -696,16 +803,14 @@ impl Bridges {
             .call(
                 bridge,
                 &self.clients.http,
-                reqwest::Method::GET,
+                ProvisioningCall::Flows,
                 &["login", "flows"],
                 &[("user_id", acting_as)],
                 None,
             )
             .await?;
         let flows = body.get("flows").and_then(Value::as_array).ok_or_else(|| {
-            BridgeRefusal::BridgeUnreachable {
-                detail: "the bridge's flows answer names no flows".to_owned(),
-            }
+            unusable(ProvisioningCall::Flows, "a `flows` array", &body)
         })?;
         Ok(flows
             .iter()
@@ -764,7 +869,7 @@ impl Bridges {
             .call(
                 bridge,
                 &self.clients.http,
-                reqwest::Method::GET,
+                ProvisioningCall::Logins,
                 &["logins"],
                 &[("user_id", acting_as)],
                 None,
@@ -793,10 +898,12 @@ impl Bridges {
                 .get("logins")
                 .and_then(Value::as_array)
                 .cloned()
-                .ok_or_else(|| BridgeRefusal::BridgeUnreachable {
-                    detail: "the bridge's logins answer names neither login_ids nor a list \
-                             of logins"
-                        .to_owned(),
+                .ok_or_else(|| {
+                    unusable(
+                        ProvisioningCall::Logins,
+                        "a `login_ids` array, or a list of logins",
+                        &body,
+                    )
                 })?,
         };
         Ok(logins
@@ -854,17 +961,13 @@ impl Bridges {
             .call(
                 bridge,
                 &self.clients.http,
-                reqwest::Method::GET,
+                ProvisioningCall::Whoami,
                 &["whoami"],
                 &[("user_id", acting_as)],
                 None,
             )
             .await?;
-        Ok(body
-            .get("logins")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
+        whoami_logins(&body)
     }
 
     /// The login in flight on this bridge, as the Companion polls it.
@@ -912,15 +1015,14 @@ impl Bridges {
             .call(
                 bridge,
                 &self.clients.http,
-                reqwest::Method::POST,
+                ProvisioningCall::Start,
                 &["login", "start", &request.flow_id],
                 &query,
                 Some(json!({})),
             )
             .await?;
-        let step = parse_step(&answer).map_err(|detail| BridgeRefusal::BridgeUnreachable {
-            detail: format!("the bridge's start answer is not a login step: {detail}"),
-        })?;
+        let step = parse_step(&answer)
+            .map_err(|looked_for| unusable(ProvisioningCall::Start, looked_for, &answer))?;
         let started_at = (self.clients.now)();
         let view = LoginView {
             bridge_id: bridge.config.bridge_id.clone(),
@@ -949,9 +1051,12 @@ impl Bridges {
         // The process id travels on every later call; a bridge that answered
         // a non-complete step without one cannot be driven.
         if step.process_id.is_none() && step.step_type != StepType::Complete {
-            return Err(BridgeRefusal::BridgeUnreachable {
-                detail: "the bridge's start answer names no login process".to_owned(),
-            });
+            return Err(unusable(
+                ProvisioningCall::Start,
+                "a `login_id`, which is what mautrix calls the id of the login process \
+                 it just started",
+                &answer,
+            ));
         }
         info!(
             bridge = %bridge.config.bridge_id,
@@ -1024,7 +1129,7 @@ impl Bridges {
             .call(
                 bridge,
                 &self.clients.http,
-                reqwest::Method::POST,
+                ProvisioningCall::Step,
                 &["login", "step", &process_id, &step_id, step_type.as_str()],
                 &query,
                 Some(data),
@@ -1037,8 +1142,12 @@ impl Bridges {
                 return Err(refusal);
             }
         };
-        let next = parse_step(&answer).map_err(|detail| BridgeRefusal::BridgeUnreachable {
-            detail: format!("the bridge's step answer is not a login step: {detail}"),
+        let next = parse_step(&answer).map_err(|looked_for| {
+            let refusal = unusable(ProvisioningCall::Step, looked_for, &answer);
+            // The login is over either way, and a browser that is polling
+            // has to learn *why* rather than watch a step that never moves.
+            record_refusal(&active, &refusal);
+            refusal
         })?;
         debug!(
             bridge = %bridge.config.bridge_id,
@@ -1085,7 +1194,7 @@ impl Bridges {
                     .call(
                         bridge,
                         &self.clients.http,
-                        reqwest::Method::POST,
+                        ProvisioningCall::CancelStep,
                         &["login", "step", &process_id, step_id, "cancel"],
                         &[],
                         Some(json!({})),
@@ -1097,7 +1206,7 @@ impl Bridges {
             .call(
                 bridge,
                 &self.clients.http,
-                reqwest::Method::POST,
+                ProvisioningCall::CancelProcess,
                 &["login", "cancel", &process_id],
                 &[],
                 Some(json!({})),
@@ -1126,7 +1235,7 @@ impl Bridges {
         self.call(
             bridge,
             &self.clients.http,
-            reqwest::Method::POST,
+            ProvisioningCall::Logout,
             &["logout", login_id],
             &[("user_id", acting_as)],
             Some(json!({})),
@@ -1145,13 +1254,56 @@ impl Bridges {
         &self,
         bridge: &Arc<Bridge>,
         http: &reqwest::Client,
-        method: reqwest::Method,
+        call: ProvisioningCall,
         segments: &[&str],
         query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<Value, BridgeRefusal> {
-        call_bridge(&bridge.config, http, method, segments, query, body).await
+        call_bridge(&bridge.config, http, call, segments, query, body).await
     }
+}
+
+/// `whoami`'s `logins` array — the one call that describes a login (#108).
+///
+/// Strict on purpose. Every captured answer from both reference bridges
+/// carries `logins`, as `[]` when nobody has logged in, so a `whoami` without
+/// it is not "no logins": it is an answer this build cannot read, and that is
+/// precisely the mistake #106 was — a missing field read as an empty one, or
+/// as a bridge that was down.
+fn whoami_logins(body: &Value) -> Result<Vec<Value>, BridgeRefusal> {
+    body.get("logins")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            unusable(
+                ProvisioningCall::Whoami,
+                "a `logins` array — empty when nobody is logged in, but always present",
+                body,
+            )
+        })
+}
+
+/// Builds a [`BridgeRefusal::BridgeAnswerUnusable`] and tells the operator's
+/// log about it.
+///
+/// The split this function exists to enforce: the **log** gets the shape of
+/// what the bridge actually sent ([`redacted`] — key names and lengths, never
+/// a value), and the **refusal**, which reaches a browser, gets only the
+/// endpoint and the `&'static str` naming what was missing. `answer` is
+/// therefore borrowed and dropped here; it cannot escape into the refusal,
+/// because the refusal has nowhere to put it.
+fn unusable(call: ProvisioningCall, looked_for: &'static str, answer: &Value) -> BridgeRefusal {
+    warn!(
+        call = call.label(),
+        endpoint = call.endpoint(),
+        looked_for,
+        // Shapes only: a bridge's answer can carry a phone number as a login
+        // id, a display name, or a QR payload.
+        answer = %redacted(answer),
+        "the bridge answered and this build could not use its answer; the bridge is \
+         running — this is a defect in Twalk's reading of its provisioning API"
+    );
+    BridgeRefusal::BridgeAnswerUnusable { call, looked_for }
 }
 
 /// Takes the bridge's answer and turns it into the pollable state,
@@ -1215,7 +1367,7 @@ fn apply(clients: &Clients, bridge: &Arc<Bridge>, active: &Arc<ActiveLogin>, ste
                 let _ = call_bridge(
                     &config,
                     &http,
-                    reqwest::Method::POST,
+                    ProvisioningCall::CancelProcess,
                     &["login", "cancel", &process_id],
                     &[],
                     Some(json!({})),
@@ -1295,7 +1447,7 @@ fn hold(
         let answer = call_bridge(
             &bridge.config,
             &clients.blocking_http,
-            reqwest::Method::POST,
+            ProvisioningCall::Step,
             &[
                 "login",
                 "step",
@@ -1313,10 +1465,9 @@ fn hold(
         match answer {
             Ok(answer) => match parse_step(&answer) {
                 Ok(next) => apply(&clients, &bridge, &active, next),
-                Err(detail) => fail(
+                Err(looked_for) => record_refusal(
                     &active,
-                    LoginFailure::BridgeRefused,
-                    format!("the bridge's answer to the held step is not a step: {detail}"),
+                    &unusable(ProvisioningCall::Step, looked_for, &answer),
                 ),
             },
             Err(refusal) => record_refusal(&active, &refusal),
@@ -1346,6 +1497,22 @@ fn record_refusal(active: &Arc<ActiveLogin>, refusal: &BridgeRefusal) {
                 "the bridge stopped answering while the Gateway was holding this login \
                  ({detail}). A login in flight does not survive a restart of the bridge \
                  or of the Gateway: start again"
+            ),
+        ),
+        // The other half of what `BridgeUnreachable` used to mean, and the
+        // reason this ticket exists: the bridge answered, this build could
+        // not read the answer, and telling the user their bridge could not
+        // be reached sent a whole debugging session to look at networking
+        // (#106). Nothing here is the deployment's fault and the detail says
+        // so — while naming only the call and the missing field, never the
+        // answer.
+        BridgeRefusal::BridgeAnswerUnusable { call, looked_for } => (
+            LoginFailure::BridgeAnswerUnusable,
+            format!(
+                "the bridge answered {} and this Gateway could not use its answer: it \
+                 looked for {looked_for} and did not find it. The bridge is running and \
+                 replied — this is a defect in Twalk, not a broken deployment",
+                call.endpoint()
             ),
         ),
         // A process the bridge no longer knows is the restart case seen
@@ -1424,7 +1591,7 @@ fn in_flight(bridge: &Arc<Bridge>) -> Option<(StartedBy, SystemTime)> {
 async fn call_bridge(
     config: &BridgeConfig,
     http: &reqwest::Client,
-    method: reqwest::Method,
+    call: ProvisioningCall,
     segments: &[&str],
     query: &[(&str, &str)],
     body: Option<Value>,
@@ -1455,7 +1622,7 @@ async fn call_bridge(
         url.query_pairs_mut().append_pair(name, value);
     }
     let mut request = http
-        .request(method, url)
+        .request(call.method(), url)
         // The provisioning secret: impersonation-grade, so it goes in the
         // header of an outbound call and nowhere else.
         .bearer_auth(&config.provisioning_secret);
@@ -1475,14 +1642,30 @@ async fn call_bridge(
         let text = response
             .text()
             .await
+            // The connection died part-way through the body: nothing usable
+            // arrived, so this is still "could not reach", not "answered
+            // something I could not read".
             .map_err(|error| BridgeRefusal::BridgeUnreachable {
                 detail: error.without_url().to_string(),
             })?;
         if text.trim().is_empty() {
             return Ok(Value::Null);
         }
-        return serde_json::from_str(&text).map_err(|error| BridgeRefusal::BridgeUnreachable {
-            detail: format!("the bridge's answer is not JSON: {error}"),
+        // The bridge answered, with a body that is not JSON. That is the
+        // unusable half, not the unreachable one — and the serde error is
+        // not repeated, because it can quote the bytes it choked on.
+        return serde_json::from_str(&text).map_err(|error| {
+            warn!(
+                call = call.label(),
+                endpoint = call.endpoint(),
+                bytes = text.len(),
+                %error,
+                "the bridge answered a body that is not JSON"
+            );
+            BridgeRefusal::BridgeAnswerUnusable {
+                call,
+                looked_for: "a JSON document",
+            }
         });
     }
     let (errcode, _) = mautrix_error(response).await;
@@ -1557,13 +1740,28 @@ pub struct ParsedStep {
 
 /// Reads bridgev2's `RespLoginStep`: a `type`, a `step_id`, optional
 /// `instructions`, and one member named after the type carrying its payload.
-pub fn parse_step(answer: &Value) -> Result<ParsedStep, String> {
+///
+/// The error is a `&'static str` naming **what was looked for**, not what was
+/// found. It is the message that ends up in an HTTP answer to a browser, and
+/// a bridge's answer can carry identifiers from a network account, so the
+/// type forbids interpolating any of it. The unrecognised value itself goes
+/// to the operator's log below and no further.
+pub fn parse_step(answer: &Value) -> Result<ParsedStep, &'static str> {
     let step_type = answer
         .get("type")
         .and_then(Value::as_str)
-        .ok_or_else(|| "the step names no type".to_owned())?;
-    let step_type = StepType::parse(step_type)
-        .ok_or_else(|| format!("the step has the unknown type {step_type:?}"))?;
+        .ok_or("a `type` naming the step")?;
+    let step_type = StepType::parse(step_type).ok_or_else(|| {
+        // A step type is a protocol token rather than a credential, so the
+        // operator's log may name it — and wants to, since a bridge growing
+        // a new step type is exactly what this branch catches.
+        warn!(
+            step_type,
+            "the bridge answered a login step type this build does not know"
+        );
+        "a step `type` this build knows: user_input, cookies, display_and_wait, \
+         client_http, webauthn or complete"
+    })?;
     let payload = answer
         .get(step_type.as_str())
         .cloned()
@@ -1742,7 +1940,168 @@ mod tests {
     #[test]
     fn an_unknown_step_type_is_refused_rather_than_guessed() {
         let answer = json!({ "type": "telepathy", "step_id": "x" });
-        assert!(parse_step(&answer).is_err());
+        let looked_for = parse_step(&answer).expect_err("an unknown type is not guessed at");
+        assert!(
+            !looked_for.contains("telepathy"),
+            "what was looked for is named, never what was received: {looked_for}"
+        );
+    }
+
+    /// The defect this ticket is about (#116): "I could not connect" and "the
+    /// bridge answered something I could not read" were one refusal with one
+    /// name, and the Companion rendered both as *your Twalk server could not
+    /// reach this network's bridge* — false for the first live WhatsApp
+    /// login, and worth a debugging session spent on ports and containers.
+    #[test]
+    fn nothing_answering_and_an_answer_that_cannot_be_read_are_different_refusals() {
+        let nothing_answered = BridgeRefusal::BridgeUnreachable {
+            detail: "connection refused".to_owned(),
+        };
+        let answered_unusably = BridgeRefusal::BridgeAnswerUnusable {
+            call: ProvisioningCall::Start,
+            looked_for: "a `login_id`",
+        };
+        assert_eq!(nothing_answered.label(), "bridge_unreachable");
+        assert_eq!(answered_unusably.label(), "bridge_answer_unusable");
+        assert_ne!(
+            nothing_answered.label(),
+            answered_unusably.label(),
+            "an API caller must tell these apart without reading prose"
+        );
+        // In the polled login state they are equally distinct: one is a lost
+        // login the user should start again, the other is a Twalk defect.
+        assert_eq!(
+            LoginFailure::BridgeAnswerUnusable.as_str(),
+            "bridge_answer_unusable"
+        );
+        assert_ne!(
+            LoginFailure::BridgeAnswerUnusable.as_str(),
+            LoginFailure::BridgeUnreachable.as_str()
+        );
+    }
+
+    /// A bridge's answer can carry identifiers from a network account — a
+    /// phone number as a login id, a display name, a QR payload. None of it
+    /// may ride out to the browser inside a refusal, so the refusal is built
+    /// from a body stuffed with such values and then searched for them.
+    ///
+    /// The type is what actually enforces this — `looked_for` is a
+    /// `&'static str` and there is no member an answer could go in — and
+    /// this is the test that fails if somebody ever widens it.
+    #[test]
+    fn an_unusable_answer_names_the_call_and_the_missing_field_and_nothing_else() {
+        let answer = json!({
+            "login_ids": ["33612345678"],
+            "name": "+33612345678",
+            "display_and_wait": { "type": "qr", "data": "2@a-real-qr-payload" },
+            "unexpected": "M_SOMETHING_THE_BRIDGE_SAID",
+        });
+        let refusal = unusable(
+            ProvisioningCall::Whoami,
+            "a `logins` array — empty when nobody is logged in, but always present",
+            &answer,
+        );
+        let (call, looked_for) = match &refusal {
+            BridgeRefusal::BridgeAnswerUnusable { call, looked_for } => (*call, *looked_for),
+            other => panic!("an unusable answer is its own refusal: {other:?}"),
+        };
+        assert_eq!(call.endpoint(), "GET /_matrix/provision/v3/whoami");
+        assert!(looked_for.contains("`logins`"));
+        // Everything a refusal can say, as the browser would see it.
+        let said = format!("{} {looked_for} {refusal:?}", call.endpoint());
+        for from_the_answer in [
+            "33612345678",
+            "2@a-real-qr-payload",
+            "M_SOMETHING_THE_BRIDGE_SAID",
+        ] {
+            assert!(
+                !said.contains(from_the_answer),
+                "a refusal repeats nothing out of the bridge's answer, and this one has \
+                 {from_the_answer:?} in it: {said}"
+            );
+        }
+    }
+
+    /// The same distinction where it is hardest to keep: inside the task
+    /// holding a QR step, whose only report to the user is the polled state.
+    #[test]
+    fn a_held_step_that_comes_back_unreadable_is_not_a_bridge_that_went_away() {
+        let login = || {
+            Arc::new(ActiveLogin {
+                view: Mutex::new(LoginView {
+                    bridge_id: "mautrix-whatsapp".to_owned(),
+                    network: "whatsapp".to_owned(),
+                    process_id: "process-1".to_owned(),
+                    flow_id: "qr".to_owned(),
+                    login_id: None,
+                    phase: LoginPhase::AwaitingRemote,
+                    started_at: SystemTime::UNIX_EPOCH,
+                    started_by: StartedBy {
+                        device_id: "device-1".to_owned(),
+                        device_name: "the phone".to_owned(),
+                    },
+                    expires_at: SystemTime::UNIX_EPOCH + MAX_LOGIN_LIFETIME,
+                    generation: 1,
+                    step: None,
+                    login: None,
+                    error: None,
+                    detail: None,
+                }),
+                generation: AtomicU64::new(1),
+                cancelled: std::sync::atomic::AtomicBool::new(false),
+            })
+        };
+
+        let unreadable = login();
+        record_refusal(
+            &unreadable,
+            &BridgeRefusal::BridgeAnswerUnusable {
+                call: ProvisioningCall::Step,
+                looked_for: "a `type` naming the step",
+            },
+        );
+        let view = unreadable.read();
+        assert_eq!(view.phase, LoginPhase::Failed);
+        assert_eq!(view.error, Some(LoginFailure::BridgeAnswerUnusable));
+        let detail = view.detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("answered") && detail.contains("not a broken deployment"),
+            "the detail says the bridge replied and whose defect this is: {detail}"
+        );
+        assert!(
+            detail.contains("/login/step/"),
+            "and which call it was: {detail}"
+        );
+        assert!(
+            !detail.contains("stopped answering"),
+            "it is precisely not the bridge going away: {detail}"
+        );
+
+        // Where a bridge that actually went away still lands, unchanged.
+        let gone = login();
+        record_refusal(
+            &gone,
+            &BridgeRefusal::BridgeUnreachable {
+                detail: "connection refused".to_owned(),
+            },
+        );
+        assert_eq!(gone.read().error, Some(LoginFailure::LoginLost));
+    }
+
+    /// `whoami` is the only call that describes a login (#108), and both
+    /// reference bridges always send `logins` — as `[]` when nobody has
+    /// logged in. So an answer without it is not "no logins": it is an
+    /// answer this build cannot read, and it says so rather than reporting a
+    /// deployment with a working WhatsApp link as having none.
+    #[test]
+    fn a_whoami_without_a_logins_array_is_unreadable_rather_than_empty() {
+        assert_eq!(
+            whoami_logins(&json!({ "logins": [] })).expect("an empty list is an answer"),
+            Vec::<Value>::new()
+        );
+        let refusal = whoami_logins(&json!({ "bridge_bot": "@whatsappbot:twalk.localhost" }))
+            .expect_err("a whoami with no logins array cannot be read");
+        assert_eq!(refusal.label(), "bridge_answer_unusable");
     }
 
     #[test]

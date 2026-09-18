@@ -2374,6 +2374,21 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("bridge_unreachable"),
     )
     .await?;
+    // And the other half of that 502, which used to share its code (#116):
+    // a bridge that answered, in JSON this build cannot use. Declared in
+    // `BridgeUnavailable`, so a description that forgot it fails here.
+    stub.answer_next_start_with(json!({ "ok": true, "login": { "id": "33612345678" } }));
+    call.check(
+        Method::POST,
+        &bridged_base,
+        "/api/bridges/{bridge_id}/login",
+        &stub_login,
+        &bridge_cookie,
+        Some(json!({ "flow_id": QR_FLOW })),
+        502,
+        Some("bridge_answer_unusable"),
+    )
+    .await?;
     stub.refuse_next_start(403, "FI.MAU.BRIDGE.TOO_MANY_LOGINS");
     call.check(
         Method::POST,

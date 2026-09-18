@@ -167,6 +167,11 @@ struct Inner {
     submits: Vec<SubmitRecord>,
     /// Canned refusals for the next start calls.
     refuse_start: VecDeque<(u16, String)>,
+    /// Bodies a test has told the stub to answer a start or a `whoami` with,
+    /// `200` and all, in place of the captured document. Never a bridge's
+    /// shape — that is what they are for.
+    misshape_start: VecDeque<Value>,
+    misshape_whoami: VecDeque<Value>,
     /// Canned refusals for the next submitted (non-blocking) step calls.
     refuse_step: VecDeque<(u16, String)>,
     /// Processes the test has had the stub cancel from its own side.
@@ -318,6 +323,46 @@ impl StubBridge {
             .expect("the stub is not poisoned")
             .refuse_start
             .push_back((status, errcode.to_owned()));
+    }
+
+    /// Makes the next `login/start` answer `200` with **this exact body**,
+    /// whatever it is.
+    ///
+    /// # Why this does not break the fixture rule
+    ///
+    /// The rule this file lives under is that a shape which is not in a
+    /// fixture does not go in here — because a stub that answers a document
+    /// no bridge produces is how #106's three bugs got through. This method
+    /// does not bend it: the stub still authors no provisioning document.
+    /// The body comes from the calling test, and the test's whole point is
+    /// that it is **not** a bridge's shape.
+    ///
+    /// That is the case #116 is about. A bridge that answers promptly and
+    /// well, in JSON the Gateway cannot use, must be reported as a bridge
+    /// that answered — not as one that could not be reached, which is the
+    /// sentence that sent a live WhatsApp login's debugging session to look
+    /// at containers and ports.
+    pub fn answer_next_start_with(&self, body: Value) {
+        self.state
+            .inner
+            .lock()
+            .expect("the stub is not poisoned")
+            .misshape_start
+            .push_back(body);
+    }
+
+    /// The same for `whoami`, which is the call the networks screen reads a
+    /// link's state from (#108) — so a `whoami` this build cannot read is
+    /// how a working WhatsApp link could be reported as a bridge that is
+    /// down. See [`Self::answer_next_start_with`] for why an uncaptured
+    /// shape belongs here.
+    pub fn answer_next_whoami_with(&self, body: Value) {
+        self.state
+            .inner
+            .lock()
+            .expect("the stub is not poisoned")
+            .misshape_whoami
+            .push_back(body);
     }
 
     /// Makes the next submitted (non-blocking) step answer this refusal.
@@ -583,12 +628,13 @@ async fn whoami(
     if let Some(refused) = admitted(state.bridge, "whoami", &headers, &query) {
         return refused;
     }
-    let logins = state
-        .inner
-        .lock()
-        .expect("the stub is not poisoned")
-        .logins
-        .clone();
+    let logins = {
+        let mut inner = state.inner.lock().expect("the stub is not poisoned");
+        if let Some(body) = inner.misshape_whoami.pop_front() {
+            return Json(body).into_response();
+        }
+        inner.logins.clone()
+    };
     // The captured document, with only the login list swapped for the one
     // this test set up: the network block, the flow list, the homeserver and
     // the bridge bot are the bridge's own words.
@@ -643,6 +689,11 @@ async fn start(
                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
                 &errcode,
             );
+        }
+        // A `200` with a body the test wrote: the bridge answering promptly
+        // and unusably, which is not the same failure as not answering.
+        if let Some(body) = inner.misshape_start.pop_front() {
+            return Json(body).into_response();
         }
         // The network refusing another linked device, before any process
         // exists. Uncaptured: bridgev2 defines it, the deployment set no cap.

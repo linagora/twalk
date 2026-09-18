@@ -13,6 +13,15 @@ same bytes. `harness/fixtures.rs` loads them and `harness/stub_bridge.rs`
 answers out of them; nothing in the stub hand-writes a provisioning document
 any more.
 
+The one deliberate exception, and it is the opposite of the failure above:
+`StubBridge::answer_next_start_with` and `answer_next_whoami_with` (#116) make
+the stub answer `200` with a body **the calling test wrote**, which is not any
+bridge's shape and is not meant to be. They exist to drive the case where a
+bridge answers promptly and well and the Gateway cannot read the answer — the
+failure that has to be reported as a defect in Twalk rather than as a bridge
+that could not be reached. The stub still authors no provisioning document of
+its own; a shape that claims a bridge sends it still has to be captured first.
+
 ## Where they came from
 
 | Bridge | Image | Captured |
