@@ -32,7 +32,9 @@ def user(content: str) -> Dict[str, str]:
 class Llm:
     """A chat-completions endpoint, as a persona uses it."""
 
-    def __init__(self, config: LlmConfig, client: Optional[httpx.AsyncClient] = None) -> None:
+    def __init__(
+        self, config: LlmConfig, client: Optional[httpx.AsyncClient] = None
+    ) -> None:
         self._config = config
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=config.timeout_seconds)

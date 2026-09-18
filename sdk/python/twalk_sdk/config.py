@@ -136,7 +136,8 @@ class Config:
             timeout_seconds = float(timeout_raw)
         except ValueError as error:
             raise ConfigError(
-                f"TWALK_LLM_TIMEOUT_SECONDS must be a number of seconds, got {timeout_raw!r}"
+                "TWALK_LLM_TIMEOUT_SECONDS must be a number of seconds, got "
+                f"{timeout_raw!r}"
             ) from error
 
         api_key = (env.get("TWALK_LLM_API_KEY") or "").strip() or None

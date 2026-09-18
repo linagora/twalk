@@ -264,7 +264,9 @@ class Persona:
         except (ValueError, UnicodeDecodeError):
             # Not a CloudEvent: redelivery would produce the same failure,
             # so it is terminated rather than retried.
-            logger.error("dropped a message that is not JSON, sequence=%s", _sequence(message))
+            logger.error(
+                "dropped a message that is not JSON, sequence=%s", _sequence(message)
+            )
             await message.term()
             return
         if not isinstance(event, dict):
@@ -286,6 +288,9 @@ class Persona:
             return
 
         trigger = InboundMessage(event)
+        handler = self._handler
+        if handler is None:  # serve() refuses to start without one
+            raise RuntimeError("this persona has no inbound-message handler")
         try:
             await self._publish(
                 jetstream,
@@ -296,10 +301,7 @@ class Persona:
                     model=self.llm.model,
                 ),
             )
-            assert self._handler is not None  # serve() refuses to start without one
-            suggestion = await self._handler(
-                trigger, Context(config=self.config, llm=self.llm)
-            )
+            suggestion = await handler(trigger, Context(config=self.config, llm=self.llm))
             if suggestion is None:
                 logger.info(
                     "no suggestion for event_id=%s network=%s",
