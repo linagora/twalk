@@ -53,6 +53,9 @@
 //! - **Messages that arrive while a persona is paused are not replayed** on
 //!   reactivation, which is why the user's activation decision is taken and
 //!   observed on the bus *before* the runtime starts.
+//! - **The reference deployment runs no Hermes** (#158): the runtime is
+//!   started on the host here, so what this test proves an operator cannot
+//!   yet run with `docker compose up`.
 //!
 //! The stack, its ports and its teardown are documented in
 //! `hermes/tests/harness/deployment.rs`.

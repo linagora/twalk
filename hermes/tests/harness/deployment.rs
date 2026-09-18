@@ -13,7 +13,9 @@
 //! `deploy/docker-compose/compose.yaml`, the same file an operator runs,
 //! configured only through an environment file — and starts the real
 //! `twalk-hermes` binary on the host beside it, because that compose file
-//! has no Hermes service yet. Everything else is the deployment's own: the
+//! has no Hermes service yet (#158 — the gap this suite makes visible: the
+//! loop is proven and an operator following `deploy/README.md` still cannot
+//! run it). Everything else is the deployment's own: the
 //! Sensor that observes the room and posts the approved reply, the Gateway
 //! that serves the approval, the bus between them, and Synapse underneath.
 //!
