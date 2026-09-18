@@ -95,6 +95,49 @@ pub struct Config {
     /// on a deployment whose bus carries far more traffic than one person's
     /// conversations; the cost is a longer read on the approval path alone.
     pub approval_lookup_window: u64,
+    /// Where the model configuration and the language preference live, and
+    /// the operator's credential file if there is one (ticket #98). `None`
+    /// on the same terms as [`Self::sign_in`], because the settings store is
+    /// a file in `GATEWAY_STATE_DIR` and there is nobody to set a preference
+    /// for without an owner. See [`Settings`].
+    pub settings: Option<Settings>,
+}
+
+/// What the model and language settings need (ticket #98): the state
+/// directory [`SignIn`] already names, and — optionally — the path of the
+/// credential file that **wins** over whatever the Companion last wrote.
+///
+/// The precedence is ADR 0015's, and on the reference deployment it is the
+/// ordinary combination rather than the exotic one: the model name comes
+/// from the browser and the key from a file, so a production stack can lock
+/// the credential down while a developer stays in the browser. The same rule
+/// exists one process later in the Hermes runtime
+/// (`HERMES_LLM_API_KEY_FILE` over `HERMES_LLM_API_KEY`), and the two are
+/// spelled the same way on purpose.
+#[derive(Debug, Clone)]
+pub struct Settings {
+    /// From [`SignIn::state_dir`]: `settings.sqlite3` inside it, beside the
+    /// session store and the consent journal.
+    pub state_dir: PathBuf,
+    /// `GATEWAY_LLM_API_KEY_FILE` — a path **on this host**, mounted
+    /// read-only into the container, holding the endpoint's credential and
+    /// nothing else. Unset: the credential is whatever the Companion set, or
+    /// none.
+    ///
+    /// Read once at startup, as the runtime reads its own, so a rotated file
+    /// takes effect at the next restart; an empty one is a startup error
+    /// rather than a silent fallback to the browser's value, which would be
+    /// the precedence rule failing in the direction it exists to prevent.
+    pub credential_file: Option<PathBuf>,
+}
+
+impl Settings {
+    fn from_env(sign_in: Option<&SignIn>) -> Option<Self> {
+        sign_in.map(|sign_in| Self {
+            state_dir: sign_in.state_dir.clone(),
+            credential_file: env("GATEWAY_LLM_API_KEY_FILE").map(PathBuf::from),
+        })
+    }
 }
 
 /// The bridges from the environment.
@@ -490,6 +533,10 @@ impl Config {
                 );
                 window
             },
+            // The settings store (ticket #98) needs what sign-in already
+            // names — the state directory — plus, optionally, the
+            // operator's credential file.
+            settings: Settings::from_env(sign_in.as_ref()),
             sign_in,
             bootstrap,
         })

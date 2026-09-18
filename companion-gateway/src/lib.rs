@@ -64,6 +64,28 @@
 //! to whoever sent the event carrying it (#110), so this projection never
 //! opens an inbound event at all.
 //!
+//! Ticket #98 gave the deployment its model and its language
+//! ([`settings`], [`settings_http`]): the OpenAI-compatible endpoint, the
+//! model name, the provider passthrough, the endpoint credential and the
+//! user's native language, held here because an operator must be able to
+//! change a model without shell access and because the Hermes runtime
+//! injects the result into each persona rather than letting a persona fetch
+//! it — the token that opens this configuration is the token that opens the
+//! consent snapshot (ADR 0015, ADR 0016). Three decisions in it are the ones
+//! to argue with. The credential is **write-only**: it goes in and the only
+//! read that returns it is the runtime's, behind the service token, while a
+//! browser is told which source is in force and the last four characters —
+//! and a credential the operator supplied as a file **wins** over one set
+//! from the browser, which is not a theoretical precedence but how the
+//! reference deployment runs. The provider passthrough stays and is
+//! documented as the escape hatch rather than the norm, because with an
+//! OpenAI-compatible proxy in front every provider quirk lives in the
+//! proxy's own configuration. And `POST /api/settings/model/probe` exists so
+//! that an endpoint that cannot be reached, one that refused the request,
+//! one answering something that is not a chat completion and no endpoint
+//! configured at all are **four answers** rather than one silence — the
+//! conflation behind nine incidents in two days.
+//!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
 //! the origin itself ([`openapi`]) and checked against the running binary by
@@ -95,6 +117,8 @@ pub mod openapi;
 pub mod outbox;
 pub mod session;
 pub mod session_http;
+pub mod settings;
+pub mod settings_http;
 pub mod static_files;
 pub mod store;
 pub mod suggestions;

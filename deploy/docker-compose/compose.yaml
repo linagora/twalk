@@ -338,11 +338,27 @@ services:
       # this is a choice about how far back a reply can be approved from,
       # not about whether the answer is honest.
       GATEWAY_APPROVAL_LOOKUP_WINDOW: ${GATEWAY_APPROVAL_LOOKUP_WINDOW:-}
+      # The model and the language (ticket #98): the LLM endpoint credential
+      # as a FILE, which wins over anything the Companion writes, so a
+      # production stack can lock the credential down while the model name
+      # still comes from the browser (ADR 0015). The same host path the
+      # hermes service is given below — one file, one entry in .env, and no
+      # way for the two to drift. Set only when the operator gave one; the
+      # container's side of that mount is fixed.
+      GATEWAY_LLM_API_KEY_FILE: ${HERMES_LLM_API_KEY_FILE:+/run/secrets/llm-api-key}
     volumes:
       # The device list and the session tokens' digests — a restart keeps the
-      # user signed in on every device they signed in on — and the consent
-      # decision journal, which outlives every container by design.
+      # user signed in on every device they signed in on — the consent
+      # decision journal, which outlives every container by design, and the
+      # model and language settings.
       - gateway-data:/data
+      # The endpoint credential the operator supplied as a file, read-only.
+      # Unset, /dev/null is mounted here and GATEWAY_LLM_API_KEY_FILE stays
+      # empty, so nothing reads it. Docker creates a *directory* for a path
+      # that does not exist, so a typo shows up as a Gateway that refuses to
+      # start naming the variable rather than as a credential silently
+      # falling back to the browser's.
+      - ${HERMES_LLM_API_KEY_FILE:-/dev/null}:/run/secrets/llm-api-key:ro
     #   # Serve a Companion build from the host instead of the image's.
     #   - ${GATEWAY_STATIC_SOURCE:-./companion}:/srv/companion:ro
     # No depends_on the homeserver: the Gateway talks to it only while

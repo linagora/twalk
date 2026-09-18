@@ -19,6 +19,7 @@ use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
 use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
 use twalk_companion_gateway::session::Sessions;
+use twalk_companion_gateway::settings::Settings;
 use twalk_companion_gateway::static_files::Resolver;
 use twalk_companion_gateway::store::Store;
 use twalk_companion_gateway::suggestions::Suggestions;
@@ -322,6 +323,52 @@ async fn main() -> Result<()> {
         }
     };
 
+    // The model and language settings (ticket #98). Configured with sign-in
+    // rather than with consent: naming a model needs no bus, so an operator
+    // who has not set GATEWAY_NATS_URL can still say what their personas
+    // will reason with. The credential file is read here, and an empty or
+    // unreadable one is fatal — an operator who named a file meant to supply
+    // a credential, and falling back to the browser's value would be
+    // ADR 0015's precedence failing in the direction it exists to prevent.
+    let settings = match &config.settings {
+        Some(settings) => {
+            let store = Settings::open(
+                &settings.state_dir,
+                settings.credential_file.as_deref(),
+                std::time::SystemTime::now,
+            )
+            .context("failed to open the settings store")?;
+            match store.credential_file_path() {
+                Some(path) => info!(
+                    store = %store.path().display(),
+                    credential_file = %path,
+                    "the model configuration is on, and the operator's credential file WINS \
+                     over anything set from the Companion (ADR 0015)"
+                ),
+                None => info!(
+                    store = %store.path().display(),
+                    "the model configuration is on: GATEWAY_LLM_API_KEY_FILE is unset, so the \
+                     endpoint credential is whatever the Companion set, or none"
+                ),
+            }
+            match store.model() {
+                Ok(Some(model)) => info!(
+                    base_url = %model.base_url,
+                    model = %model.model,
+                    "a model is configured: personas reason with it once the runtime reads it"
+                ),
+                Ok(None) => info!(
+                    "no model is configured yet: Twalk ships no default and a persona refuses \
+                     to start without one (ADR 0015). Set one from the Companion, or with \
+                     PUT /api/settings/model"
+                ),
+                Err(error) => warn!(%error, "failed to read the stored model configuration"),
+            }
+            Some(Arc::new(store))
+        }
+        None => None,
+    };
+
     // Binding fails fast and loud — a configured-but-unusable origin is an
     // operator error to fix, not a condition to swallow (the Sensor's
     // metrics endpoint behaves the same way).
@@ -345,7 +392,8 @@ async fn main() -> Result<()> {
             .with_statuses(statuses.clone())
             .with_contacts(contacts)
             .with_approvals(approvals)
-            .with_suggestions(suggestions),
+            .with_suggestions(suggestions)
+            .with_settings(settings),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming

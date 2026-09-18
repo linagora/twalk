@@ -354,6 +354,125 @@ so the Sensor posts it into the portal room without threading it under the origi
 inbound event carries no Matrix event ID of its own to thread under, and inventing one would be
 worse than the gap.
 
+## The model and the language (ticket #98)
+
+Twalk ships no LLM and has **no default**: nothing is ever sent to a model the operator did not
+name, and a persona refuses to start without one ([ADR 0015](../docs/architecture/adr/0015-no-default-llm-configured-through-the-companion.md)).
+The Gateway is where that choice lives, because the operator must be able to change it **without
+shell access**, and the Hermes runtime reads it here and injects it into each persona's
+environment rather than letting a persona fetch it — the token that opens this configuration is
+the token that opens the consent snapshot, the list of every contact, and a third-party persona
+takes exactly the same path as a first-party one (ADR 0008).
+
+The user's native language lives here for the same reason
+([ADR 0016](../docs/architecture/adr/0016-a-reply-follows-the-conversation-not-the-user.md)): a
+persona runs in a container and cannot read `navigator.language`, and it needs a language to fall
+back to when it cannot tell what language the message it is answering was written in. Until this
+ticket that fallback had no value to fall back to, and a French speaker writing `test` got an
+English draft ([#164](https://github.com/linagora/twalk/issues/164)).
+
+### The shape the reference deployment has, and the one to copy
+
+An **OpenAI-compatible proxy in front of the model**. The reference deployment runs LiteLLM in
+front of Qwen at OVH, so Twalk sees this and nothing more:
+
+```
+base_url : http://127.0.0.1:4000/v1
+model    : qwen
+key      : a file on the host
+```
+
+That is the recommended shape, and it is what the documentation leads with on purpose. **Every
+provider peculiarity belongs in the proxy**, not in Twalk: `drop_params`,
+`additional_drop_params`, `reasoning_effort`, the provider's real model id. An operator reading
+this project a month ago would reasonably have concluded they must enumerate their provider's
+quirks in Twalk's own configuration, and they should not.
+
+`params` — the free-form provider passthrough — stays, because an operator with no proxy needs it:
+providers differ in what they reject, and OVH's AI Endpoints, the first endpoint tried in
+practice, rejects fields OpenAI clients send by default. It is merged into every request untouched
+and **last**, and a member set to `null` removes a field the request would otherwise carry. It is
+the **escape hatch**, not the norm, and an empty one is the healthy shape.
+
+### The credential: a file wins, and it is write-only
+
+`GATEWAY_LLM_API_KEY_FILE` names a file on the host. If it is set, **that credential is the one in
+force**, whatever the Companion last wrote (ADR 0015) — so a production stack locks the credential
+down while the model name still comes from the browser, and a developer with no file stays in the
+browser entirely. That is not a theoretical precedence: it is how the reference deployment runs,
+so it is the path built first.
+
+The credential is **write-only over the API**. `PUT` takes it; no read returns it. A browser is
+told three things — that one is configured, which of the two sources is in force, and its last
+four characters — which is enough for a human to recognise the key they pasted and not enough for
+anyone to use it. The one answer that carries the credential is `GET /api/settings/runtime`,
+behind the service token, whose caller is the process that injects it.
+
+Because the credential is write-only, a client cannot round-trip it, so `PUT` has three cases:
+the `credential` member **absent** keeps what is stored (a screen that only renamed the model has
+nothing to send back), `null` forgets the one set from the browser, and a string replaces it. A
+member the shape does not have is refused rather than ignored — a client that sent `credentials`
+for `credential` would otherwise believe it had set a key it had not.
+
+An empty or unreadable credential file is a **startup failure** naming the variable, not a silent
+fall back to the browser's value: an operator who named a file meant to supply a credential, and
+falling back would be the precedence rule failing in the direction it exists to prevent.
+
+The credential lands in `settings.sqlite3` in `GATEWAY_STATE_DIR`, which **nothing encrypts at
+rest** ([#14](https://github.com/linagora/twalk/issues/14)). It is an outbound secret that bills
+money and sees message content; it is in `docs/architecture/security-model.md`'s credential table
+and residual risks, and `tests/settings.rs` reads the file's own bytes so the document and the code
+cannot drift apart quietly.
+
+### Four causes, four answers
+
+`POST /api/settings/model/probe` sends **one chat completion of one token** to the configured
+endpoint, with the operator's provider parameters merged in exactly as a persona merges them — so
+what it proves is what a persona will do. It is the only endpoint on this origin that spends the
+operator's money, and only when a human asks; the prompt is the word `ping`, and no message
+content reaches the endpoint.
+
+| answer | what happened |
+| --- | --- |
+| `200` `outcome: ok` | the endpoint answered a chat completion |
+| `409 model_not_configured` | nothing is configured to probe |
+| `502 endpoint_unreachable` | nothing answered: DNS, connection, TLS, or the ten-second deadline. `endpoint_status` is `null`, because there was no answer to have one |
+| `502 endpoint_refused` | it answered and said no; `endpoint_status` is its own status, and `detail` its own message |
+| `502 endpoint_not_compatible` | it answered a success that is not a chat completion — the wrong port, almost always |
+
+That separation is the point. A persona that cannot reach the endpoint, one whose request the
+endpoint refused, and one with no endpoint configured at all must not share a signal: this project
+has produced nine incidents in two days from failures that did
+([#116](https://github.com/linagora/twalk/issues/116),
+[#141](https://github.com/linagora/twalk/issues/141)). The same trichotomy holds one level up, for
+the runtime's own read: a Gateway it cannot reach is a transport failure, a wrong token is `401`,
+and a Gateway with no model configured answers `200` with `llm: null` — three facts, three
+signals, none of them an empty document that could be mistaken for another.
+
+A success does *not* mean the model produced text. With a budget of one token a reasoning model
+spends it thinking and answers with no content
+([#162](https://github.com/linagora/twalk/issues/162)), and that is still a reachable, willing
+endpoint that knows this model's name.
+
+### The endpoints
+
+| | |
+| --- | --- |
+| `GET /api/settings/model` | the endpoint, the model, the passthrough, and the credential *described* |
+| `PUT /api/settings/model` | name them |
+| `DELETE /api/settings/model` | forget them, and the credential set from the browser |
+| `POST /api/settings/model/probe` | the four answers above |
+| `GET /api/settings/language` | the preference, and the five the Companion ships |
+| `PUT /api/settings/language` | set it, or `null` for no preference — which is *not* English |
+| `GET /api/settings/runtime` | everything the Hermes runtime injects, in one read. **Service token** |
+
+Every document carries `personas`, and in v0.1 it is always `{}`. Shipping a working per-persona
+override with one persona would ship an unexercised path; adding the member later would change
+the shape of an endpoint clients had already generated against. The member exists and is empty,
+which is the only one of the three options that costs nothing later.
+
+`#101` is the Companion's settings screen; this is the API it draws from.
+
 ## Configuration
 
 Environment variables only, like the Sensor. They are documented for an operator in `deploy/docker-compose/.env.example`.
@@ -367,13 +486,14 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_OWNER` | *unset* | The Matrix ID of the one human this deployment serves. Unset: nobody can sign in and the API answers `503`. |
 | `GATEWAY_HOMESERVER_FEDERATION_URL` | *required with an owner* | Base URL of the homeserver's federation API, where an OpenID token is verified. |
 | `GATEWAY_NATS_URL` | *unset* | The bus the consent outbox publishes to, e.g. `nats://nats:4222`. Unset: the consent endpoints answer `503`. A bus that is down delays publication and never refuses a decision. |
-| `GATEWAY_STATE_DIR` | *required with an owner* | Directory the SQLite stores live in; the session store is `sessions.db` inside it. |
+| `GATEWAY_STATE_DIR` | *required with an owner* | Directory the SQLite stores live in: `sessions.db`, `consent.sqlite3` and `settings.sqlite3`. |
 | `GATEWAY_DEVICE_TOKEN_TTL` | `900` | Device-token lifetime in seconds. |
 | `GATEWAY_REFRESH_TOKEN_TTL` | `2592000` | Refresh-token lifetime in seconds. |
 | `GATEWAY_HOMESERVER_URL` | the federation URL | Base URL of the homeserver's **client** API, where registration is relayed and invitations are sent. Same host and port as the federation URL in the reference deployment, hence the default. |
 | `GATEWAY_REGISTRATION_SHARED_SECRET` | *unset* | The homeserver's registration shared secret. Unset: the registration relay is off and `POST /api/bootstrap/account` answers `503`. |
 | `GATEWAY_SENSOR_USER_ID` | *unset* | The Sensor's Matrix ID — who gets invited. Unset: `POST /api/bootstrap/rooms` answers `503`. |
-| `GATEWAY_SERVICE_TOKEN` | *unset* | The token the consent snapshot is read with. Unset: `GET /api/consent/snapshot` answers `503`. Shorter than 32 characters: the Gateway refuses to start. |
+| `GATEWAY_SERVICE_TOKEN` | *unset* | The token the consent snapshot **and the runtime settings** are read with — the Sensor's and the Hermes runtime's credential, and the only two endpoints it opens. Unset: `GET /api/consent/snapshot` and `GET /api/settings/runtime` answer `503`. Shorter than 32 characters: the Gateway refuses to start. |
+| `GATEWAY_LLM_API_KEY_FILE` | *unset* | A path **on this host** holding the LLM endpoint's credential and nothing else, mounted read-only into the container. It **wins** over whatever the Companion set (ADR 0015), so a production stack can lock the credential down while the model name still comes from the browser. Read once at startup, as the runtime reads its own, so a rotated file takes effect at the next restart. Empty or unreadable: the Gateway refuses to start, rather than quietly using the browser's value. |
 | `GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES` | `100000` | The largest snapshot served. Over it, an error — never a truncation. |
 | `GATEWAY_APPROVAL_LOOKUP_WINDOW` | `20000` | How many stream positions back an approval searches for the suggestion it names, and for the message that suggestion answers. The bound is visible in the answer: a suggestion the search did not reach is `410 suggestion_out_of_reach`, never `404 suggestion_not_found`. Widen it on a bus carrying far more than one person's conversations; the cost is a longer read on the approval path alone. |
 | `GATEWAY_INBOUND_CONSUMER` | `companion-gateway-pending-contacts` | The durable JetStream consumer the pending-contact projection reads through. One Gateway per deployment owns it; rename it only for a second Gateway on the same bus, which would otherwise split the stream with the first. |
@@ -402,9 +522,10 @@ cargo test --test bridges     # the bridge login facade against a stub bridge
 cargo test --test bridge_status  # the status webhook, the mapping table and the reconciliation
 cargo test --test pending     # the pending-contact projection against a real bus
 cargo test --test approvals   # approving a suggestion, and every way it is refused
+cargo test --test settings    # the model configuration, the language, and the probe's four answers
 cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/pending.rs` publishes contract-valid inbound events onto a real JetStream and asserts the five properties of the projection — that a Gateway started against a stream with history builds its list from it, that a decision taken through the write API moves the contact out of the list, that a restart resumes at its ack floor instead of replaying, that display names come from the bus and are written nowhere, and that the store's own bytes hold no body and no network identifier; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus — which is also the one place a **real Sensor** publishes into a bus a real Gateway consumes, so that is where "messages published by a Sensor become contacts waiting for a decision" is asserted. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/pending.rs` publishes contract-valid inbound events onto a real JetStream and asserts the five properties of the projection — that a Gateway started against a stream with history builds its list from it, that a decision taken through the write API moves the contact out of the list, that a restart resumes at its ack floor instead of replaying, that display names come from the bus and are written nowhere, and that the store's own bytes hold no body and no network identifier; `tests/settings.rs` drives the model configuration end to end against the real binary — the reference deployment's combination (the model from the browser, the key from a file) first, the write-only rule asserted by searching every answer *and* every log line for both credentials, and the probe's four answers against a stub that works, one that refuses, one that answers something that is not a completion, and an address nothing listens on; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus — which is also the one place a **real Sensor** publishes into a bus a real Gateway consumes, so that is where "messages published by a Sensor become contacts waiting for a decision" is asserted. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.

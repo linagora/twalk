@@ -54,6 +54,7 @@ use harness::{
     STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID, UNREACHABLE_STATUS_BRIDGE_ID,
 };
 use harness::{sha256_hex, unreachable_nats_url, validate_against_contract, Bus};
+use harness::{StubEndpoint, StubLlm};
 use reqwest::Method;
 use serde_json::{json, Value};
 use twalk_companion_gateway::bridge_status::is_reserved_path;
@@ -131,6 +132,46 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
     (
         "get",
         "/api/consent/effective",
+        "500",
+        "store_unavailable, as above",
+    ),
+    // The settings store's own failures (#98). Same missing seam: the
+    // Gateway's SQLite file would have to fail under a running process.
+    // `settings::tests` and `settings_http::tests` cover the shapes.
+    (
+        "get",
+        "/api/settings/model",
+        "500",
+        "store_unavailable needs the Gateway's settings store to fail under a running process: the same fault-injection seam this suite does not have",
+    ),
+    ("put", "/api/settings/model", "500", "store_unavailable, as above"),
+    (
+        "delete",
+        "/api/settings/model",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
+        "post",
+        "/api/settings/model/probe",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
+        "get",
+        "/api/settings/language",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
+        "put",
+        "/api/settings/language",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
+        "get",
+        "/api/settings/runtime",
         "500",
         "store_unavailable, as above",
     ),
@@ -1335,6 +1376,31 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/bridges/{bridge_id}/logins/{login_id}",
             "/api/bridges/mautrix-whatsapp/logins/a-login",
         ),
+        (Method::GET, "/api/settings/model", "/api/settings/model"),
+        (Method::PUT, "/api/settings/model", "/api/settings/model"),
+        (Method::DELETE, "/api/settings/model", "/api/settings/model"),
+        (
+            Method::POST,
+            "/api/settings/model/probe",
+            "/api/settings/model/probe",
+        ),
+        (
+            Method::GET,
+            "/api/settings/language",
+            "/api/settings/language",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/language",
+            "/api/settings/language",
+        ),
+        // As the snapshot above: a different reason — no service token
+        // rather than no device token — and deliberately the same answer.
+        (
+            Method::GET,
+            "/api/settings/runtime",
+            "/api/settings/runtime",
+        ),
     ] {
         call.check(
             method,
@@ -1729,6 +1795,205 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         None,
     )
     .await?;
+
+    // --- the model and the language (#98), on the same Gateway: the
+    // configuration an operator names, and the four different answers a
+    // probe of it can give. A device of its own, because the driving one
+    // above was rotated and then signed out.
+    let (settings_device, _) = sign_in_cookies(&http, &base, &owner, "the settings device").await?;
+    let settings_cookie = [("twalk_device", settings_device.as_str())];
+    // Nothing named yet: `200` with `configured: false`, because "no
+    // endpoint configured at all" is a state a settings screen draws and not
+    // an error it branches on.
+    let unconfigured_model = call
+        .check(
+            Method::GET,
+            &base,
+            "/api/settings/model",
+            "/api/settings/model",
+            &settings_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        unconfigured_model.body["configured"],
+        json!(false),
+        "a deployment whose operator has named no model says so"
+    );
+    // And the probe's fourth answer: there is nothing to probe.
+    call.check(
+        Method::POST,
+        &base,
+        "/api/settings/model/probe",
+        "/api/settings/model/probe",
+        &settings_cookie,
+        None,
+        409,
+        Some("model_not_configured"),
+    )
+    .await?;
+
+    // A real OpenAI-compatible endpoint: the reference deployment's shape,
+    // a proxy in front and a model called `qwen`.
+    let llm = StubLlm::start().await?;
+    let named = call
+        .check(
+            Method::PUT,
+            &base,
+            "/api/settings/model",
+            "/api/settings/model",
+            &settings_cookie,
+            Some(json!({
+                "base_url": llm.base_url(),
+                "model": "qwen",
+                "credential": "sk-the-conformance-key",
+            })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(named.body["credential"]["source"], json!("companion"));
+    assert!(
+        !named.body.to_string().contains("sk-the-conformance-key"),
+        "the credential is write-only: no read of this API returns it"
+    );
+    call.check(
+        Method::PUT,
+        &base,
+        "/api/settings/model",
+        "/api/settings/model",
+        &settings_cookie,
+        Some(json!({ "base_url": "not-a-url", "model": "qwen" })),
+        400,
+        Some("invalid_base_url"),
+    )
+    .await?;
+    let probed = call
+        .check(
+            Method::POST,
+            &base,
+            "/api/settings/model/probe",
+            "/api/settings/model/probe",
+            &settings_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(probed.body["outcome"], json!("ok"));
+
+    // The three ways a configured endpoint fails, each its own code.
+    let dead_endpoint = harness::unreachable_http_url()?;
+    for (base_url, expected) in [
+        (format!("{dead_endpoint}/v1"), "endpoint_unreachable"),
+        (
+            StubEndpoint::answering(401, "Unauthorized", json!({ "error": "no" }))
+                .await?
+                .base_url(),
+            "endpoint_refused",
+        ),
+        (
+            StubEndpoint::answering(200, "OK", json!({ "service": "not an llm" }))
+                .await?
+                .base_url(),
+            "endpoint_not_compatible",
+        ),
+    ] {
+        call.check(
+            Method::PUT,
+            &base,
+            "/api/settings/model",
+            "/api/settings/model",
+            &settings_cookie,
+            Some(json!({ "base_url": base_url, "model": "qwen" })),
+            200,
+            None,
+        )
+        .await?;
+        call.check(
+            Method::POST,
+            &base,
+            "/api/settings/model/probe",
+            "/api/settings/model/probe",
+            &settings_cookie,
+            None,
+            502,
+            Some(expected),
+        )
+        .await?;
+    }
+    call.check(
+        Method::DELETE,
+        &base,
+        "/api/settings/model",
+        "/api/settings/model",
+        &settings_cookie,
+        None,
+        204,
+        None,
+    )
+    .await?;
+
+    // The language, and the runtime's read of both.
+    let language = call
+        .check(
+            Method::PUT,
+            &base,
+            "/api/settings/language",
+            "/api/settings/language",
+            &settings_cookie,
+            Some(json!({ "language": "fr" })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(language.body["language"], json!("fr"));
+    call.check(
+        Method::PUT,
+        &base,
+        "/api/settings/language",
+        "/api/settings/language",
+        &settings_cookie,
+        Some(json!({ "language": "fr-FR" })),
+        400,
+        Some("unsupported_language"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &base,
+        "/api/settings/language",
+        "/api/settings/language",
+        &settings_cookie,
+        None,
+        200,
+        None,
+    )
+    .await?;
+    let runtime = call
+        .check_with_bearer(
+            Method::GET,
+            &base,
+            "/api/settings/runtime",
+            "/api/settings/runtime",
+            &[],
+            Some(SERVICE_TOKEN),
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        runtime.body["llm"],
+        Value::Null,
+        "the model was deleted above, and the runtime is told that rather than left to \
+         guess between a Gateway it cannot reach and one that named nothing"
+    );
+    assert_eq!(runtime.body["language"], json!("fr"));
+    drop(llm);
+
     gateway.stop().await;
 
     // --- a Gateway an operator has not finished configuring: no owner, and
@@ -1802,6 +2067,33 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         // has nothing to describe, and answering "no account yet" would send
         // a returning user to the account form (#112).
         (Method::GET, "/api/deployment", "/api/deployment"),
+        // The settings (#98) are configured with sign-in — same state
+        // directory, same owner — so a Gateway with no owner keeps none and
+        // the guard closes them with everything else, the runtime's
+        // service-token read included.
+        (Method::GET, "/api/settings/model", "/api/settings/model"),
+        (Method::PUT, "/api/settings/model", "/api/settings/model"),
+        (Method::DELETE, "/api/settings/model", "/api/settings/model"),
+        (
+            Method::POST,
+            "/api/settings/model/probe",
+            "/api/settings/model/probe",
+        ),
+        (
+            Method::GET,
+            "/api/settings/language",
+            "/api/settings/language",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/language",
+            "/api/settings/language",
+        ),
+        (
+            Method::GET,
+            "/api/settings/runtime",
+            "/api/settings/runtime",
+        ),
     ] {
         call.check(
             method,

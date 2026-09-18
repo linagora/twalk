@@ -777,3 +777,64 @@ pub fn assert_valid_traceparent(value: &str) {
         );
     }
 }
+
+/// An HTTP endpoint that is **not** an OpenAI-compatible one, answering
+/// whatever a test tells it to (ticket #98).
+///
+/// The shared harness's `StubLlm` is the endpoint that works; this is every
+/// other kind an operator actually points Twalk at, and it exists because
+/// `POST /api/settings/model/probe`'s whole purpose is telling them apart:
+/// an endpoint that refuses the request (a wrong credential, a model it does
+/// not serve) and an endpoint that answers a perfectly good `200` for
+/// something that is not a completion (the wrong port) are two different
+/// problems with two different fixes. Canned rather than derived from a real
+/// service, so the test asserts the Gateway's classification and not
+/// somebody else's error handling.
+pub struct StubEndpoint {
+    addr: std::net::SocketAddr,
+    accept_task: tokio::task::JoinHandle<()>,
+}
+
+impl StubEndpoint {
+    /// Answers every request with this status and this JSON body.
+    pub async fn answering(status: u16, reason: &str, body: serde_json::Value) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind the stub endpoint")?;
+        let addr = listener.local_addr()?;
+        let head = format!("{status} {reason}");
+        let body = serde_json::to_vec(&body)?;
+        let accept_task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let head = head.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    // Read whatever the caller sends until it stops or the
+                    // head is complete; the answer does not depend on it.
+                    let mut buffer = [0_u8; 4096];
+                    let _ = stream.read(&mut buffer).await;
+                    let response = format!(
+                        "HTTP/1.1 {head}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        Ok(Self { addr, accept_task })
+    }
+
+    /// The OpenAI-compatible base URL an operator would configure.
+    pub fn base_url(&self) -> String {
+        format!("http://{}/v1", self.addr)
+    }
+}
+
+impl Drop for StubEndpoint {
+    fn drop(&mut self) {
+        self.accept_task.abort();
+    }
+}
