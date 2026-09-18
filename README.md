@@ -80,13 +80,14 @@ Nine event types are defined in the v1 contract:
 | `fr.linagora.twalk.inbound.reaction.added.v1`            | Sensor            | A reaction was added to a message.                                     |
 | `fr.linagora.twalk.inbound.presence.updated.v1`          | Sensor            | A contact came online or offline.                                      |
 | `fr.linagora.twalk.outbound.message.sent.v1`             | Sensor            | The user sent a message themselves, from their own phone.              |
+| `fr.linagora.twalk.outbound.reaction.added.v1`           | Sensor            | The user added a reaction themselves, from their own phone.            |
 | `fr.linagora.twalk.persona.thinking.emitted.v1`          | Hermes            | A persona has started processing an event.                             |
 | `fr.linagora.twalk.persona.suggest.produced.v1`          | Hermes            | A persona produced a suggested reply for oversight.                    |
 | `fr.linagora.twalk.persona.reply.approved.v1`            | Hermes            | A suggestion was approved and should be sent.                          |
 | `fr.linagora.twalk.consent.state.changed.v1`             | Companion Gateway | The user modified the consent state of a contact, a network or a persona. |
 | `fr.linagora.twalk.bridge.status.changed.v1`             | Companion Gateway | A bridge changed state (connected, disconnected, session expired).     |
 
-Three CloudEvents extensions are used consistently: `network` (source channel), `consent` (data-processing consent state), `traceparent` (W3C distributed tracing). `consent` is a contact's decision, so the one type that is about the user themselves — `outbound.message.sent` — carries none at all, and the schema refuses one ([ADR 0018](docs/architecture/adr/0018-the-users-own-messages-are-their-own-event-type.md)).
+Three CloudEvents extensions are used consistently: `network` (source channel), `consent` (data-processing consent state), `traceparent` (W3C distributed tracing). `consent` is a contact's decision, so the types that are about the user themselves — the `outbound.*` family — carry none at all, and their schemas refuse one ([ADR 0018](docs/architecture/adr/0018-the-users-own-messages-are-their-own-event-type.md), [ADR 0021](docs/architecture/adr/0021-the-owner-is-never-a-contact-on-any-event.md)). The user's own presence is not published at all: it tells nobody anything they do not already know.
 
 All schemas live in [`contracts/cloudevents/v1/`](contracts/cloudevents/v1/) and are the source of truth for every component.
 
@@ -148,7 +149,7 @@ The v0.1 SMS path is explicitly a proof of concept: it uses [`mautrix-gmessages`
 
 The v0.2 milestone (target: Q1 2027) adds **Telegram and Discord onboarding**, and **replaces the mautrix-gmessages SMS path with the sovereign first-party [Twake SMS Companion](docs/architecture/adr/0004-twake-sms-companion-first-party-app.md) Android app published on F-Droid**. mautrix-gmessages remains a supported alternative for operators who prefer it, but is no longer the reference path. v0.2 also delivers the four other reference personas (`watch`, `archive`, `writing`, plus a triage persona), persona SDK in Python and TypeScript, and Kubernetes overlays. The Companion covers all six channels, per-contact consent decisions, and pairing with Messagr via QR code.
 
-The v1.0 milestone (target: Q2 2027) freezes the CloudEvents v1 contract (9 types), publishes the JSON Schemas at a stable URL, and offers a hosted validator for third-party persona authors. The Companion adds consent policies with time windows, audit log export, and guided bridge recovery flows.
+The v1.0 milestone (target: Q2 2027) freezes the CloudEvents v1 contract (10 types), publishes the JSON Schemas at a stable URL, and offers a hosted validator for third-party persona authors. The Companion adds consent policies with time windows, audit log export, and guided bridge recovery flows.
 
 Detailed roadmap: [`docs/architecture/roadmap.md`](docs/architecture/roadmap.md).
 

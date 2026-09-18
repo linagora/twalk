@@ -57,7 +57,7 @@ The name is a term of art and it is **not the contact's own consent**: the conta
 The consent state of every known subject at one point in the event stream, served by the Companion Gateway and read by a consumer whose cache is cold (ADR 0010). It names the stream position it reflects, and states revocations explicitly: an absent subject means no decision was ever recorded, never a revoked one.
 
 **Event families**:
-The contract's two groups of event types. Message-flow events (`inbound.*`, `outbound.*`, `persona.*`) always carry the `network` extension, and carry `consent` whenever the event is about a contact; operational events (`consent.state.changed`, `bridge.status.changed`) declare both optional. The one message-flow event that is not about a contact is `outbound.message.sent`, the user's own message, and it carries no `consent` extension at all — the schema refuses one, because the extension is a contact's decision and the user is not a contact (ADR 0018).
+The contract's two groups of event types. Message-flow events (`inbound.*`, `outbound.*`, `persona.*`) always carry the `network` extension, and carry `consent` whenever the event is about a contact; operational events (`consent.state.changed`, `bridge.status.changed`) declare both optional. The message-flow events that are not about a contact are the `outbound.*` family — the user's own message and their own reaction — and they carry no `consent` extension at all: the schema refuses one, because the extension is a contact's decision and the user is not a contact (ADR 0018, ADR 0021).
 
 ### Companion
 
@@ -75,11 +75,11 @@ The guided path the Companion walks a new user through: homeserver, account, rec
 The 48-character secret that unlocks the user's own encrypted history, generated in their browser and shown once (ADR 0014). Twalk never holds it. The Sensor's own key backup uses a separate key of its own, which the operator configures: the two are never the same secret.
 
 **Owner**:
-The single human a deployment serves, named as a Matrix ID in the Companion Gateway's configuration (`GATEWAY_OWNER`). Any number of devices, exactly one owner: multi-user deployments are out of scope (ADR 0011). The owner is never a contact and never has a consent state: their own messages are published as `outbound.message.sent` with their Matrix ID as the subject (ADR 0018).
+The single human a deployment serves, named as a Matrix ID in the Companion Gateway's configuration (`GATEWAY_OWNER`). Any number of devices, exactly one owner: multi-user deployments are out of scope (ADR 0011). The owner is never a contact and never has a consent state, on any event: their own messages and reactions are published as `outbound.message.sent` and `outbound.reaction.added` with their Matrix ID as the subject and no `consent` extension, and their own presence is not published at all (ADR 0018, ADR 0021).
 _Avoid_: "admin", or "the user's account" when the owner's identity is what is meant
 
 **Owner identity**:
-A Matrix ID the owner's own messages are observed to arrive under. Normally a *network ghost* the bridge materialised for the owner's own account (`@whatsapp_33612345678`, `@whatsapp_lid-115332874281144`, `@signal_<uuid>`) — several per network, indistinguishable in shape from a contact's ghost, and not derivable from a bridge login id. The set is confirmed by the deployment and handed to the Sensor; an identity that is not confirmed stays a contact, because unknown is not the owner.
+A Matrix ID the owner's own traffic — messages, reactions, presence — is observed to arrive under. Normally a *network ghost* the bridge materialised for the owner's own account (`@whatsapp_33612345678`, `@whatsapp_lid-115332874281144`, `@signal_<uuid>`) — several per network, indistinguishable in shape from a contact's ghost, and not derivable from a bridge login id. The set is confirmed by the deployment and handed to the Sensor; an identity that is not confirmed stays a contact, because unknown is not the owner.
 _Avoid_: calling one "the owner's Matrix ID", which is the account and never a ghost
 
 **Device token**:

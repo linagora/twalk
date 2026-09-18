@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/outbound.reaction.added.schema.json",
+  "title": "fr.linagora.twalk.outbound.reaction.added.v1",
+  "description": "A reaction the user added themselves, from their own phone, observed as an m.reaction event in the portal room that mirrors the conversation in both directions. Produced by the Sensor when the reactor is one of the operator's own identities — their Matrix account, or one of the network ghosts the deployment has confirmed as theirs. The subject is the operator's Matrix ID, whichever identity the reaction arrived under, so a consumer sees one operator rather than one per network or per ghost. This type carries NO consent extension at all: the extension is a contact's decision, and there is no contact in this event — the user is not a contact, has no consent row, and is not part of the consent model (ADR 0018, ADR 0021). A persona is not triggered by this type; the Python SDK's trigger-type allowlist admits inbound.message.received and nothing else. Consumers subscribe to it to know that a message has already been acknowledged; a consumer that never subscribes to it cannot be surprised by it, which is why this is a type of its own rather than a conditional shape of inbound.reaction.added.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(matrix_event_id + ':' + matrix_room_id) of the m.reaction event, the same natural key as inbound.reaction.added. Replaying the same Matrix event always produces the same CloudEvents id, so consumers can deduplicate safely across bus resynchronizations."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
+      "description": "URI identifying the Matrix room the reaction was added in. Format: matrix://<homeserver>/<room_id>. This is what names the conversation the user acknowledged: the event carries no contact, so the room is the only thing that says who was being reacted to.",
+      "examples": [
+        "matrix://matrix.example.com/!abcXYZ123:example.com"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.outbound.reaction.added.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the Sensor produced the event, not the original network timestamp. The original network timestamp is preserved in data.network_timestamp when available."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+      "description": "Matrix user ID of the operator — the deployment's one owner (ADR 0011), as the Companion Gateway knows them — and NEVER the network ghost the reaction arrived under. The operator has several ghosts per network (mautrix materializes one per network identifier: WhatsApp answers both @whatsapp_<phone> and @whatsapp_lid-<lid>), they are indistinguishable in shape from a contact's ghost, and a new one can start being used mid-conversation; publishing the ghost would make the operator look like several different subjects. Which ghosts are the operator's is a fact the deployment confirms and hands to the Sensor, never one derived by string-building from a bridge login id.",
+      "examples": [
+        "@michel:example.com"
+      ]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/outbound.reaction.added.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header. Enables distributed tracing across Sensor, NATS, Hermes and downstream services without mandating a specific tracing backend.",
+      "examples": [
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+      ]
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "description": "Twalk extension. Identifies the network the user reacted on, as they experience it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic, sent from the user's own Matrix account (see ADR 0009). Enables server-side filtering on NATS without deserializing the data payload."
+    },
+    "data": {
+      "type": "object",
+      "required": ["reaction", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "reaction": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "The reaction as a Unicode emoji or a network-specific key when the network has no emoji equivalent. Always present: this event has no reduced shape, because reduction (ADR 0012) answers a revoked contact's decision and there is no contact here."
+        },
+        "target": {
+          "type": "object",
+          "required": ["matrix_event_id"],
+          "additionalProperties": false,
+          "properties": {
+            "matrix_event_id": {
+              "type": "string",
+              "pattern": "^\\$[A-Za-z0-9_-]+$",
+              "description": "The Matrix event ID of the message the reaction applies to."
+            },
+            "excerpt": {
+              "type": "string",
+              "maxLength": 512,
+              "description": "A short excerpt of the target message, so consumers do not need to look it up to reason about the reaction. Optional, and deliberately so: the targeted message is somebody else's content travelling inside the user's event, so it is published only when the user's decision about its author is 'granted' (issue #110), and reacting to a contact is not a way around the user's own decision about them. A withheld excerpt is simply absent — this type has no consent extension to label it with, so there is no way to say 'withheld' in the envelope and nothing may pretend otherwise."
+            }
+          },
+          "description": "Structured reference to the message the reaction applies to."
+        },
+        "network_timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC 3339 timestamp of the reaction as reported by the source network, when the bridge provides it. Distinct from the top-level 'time' attribute, which is the Sensor's own timestamp."
+        }
+      },
+      "description": "What the user reacted with. There is deliberately no 'contact' member: the user is not a contact, and the event names no second party — a reaction on a note the user wrote to themselves (Signal's Note to Self) has none at all, and a group conversation has many. The conversation is identified by 'source'."
+    }
+  }
+}

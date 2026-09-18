@@ -18,7 +18,10 @@
 //! message the **user** sent (`outbound.message.sent`, ADR 0018) is on the
 //! bus and must wake no persona — answering the operator, or in Signal's
 //! Note to Self answering nobody at all — and the consent gate cannot stop
-//! it, because that type carries no consent extension to read.
+//! it, because that type carries no consent extension to read. Since ADR 0021
+//! the same holds for the user's own reaction, `outbound.reaction.added`, and
+//! it needed no change to the gate: an allowlist excludes a new type by
+//! default, which is the property asserted alongside the absences.
 
 mod harness;
 
@@ -232,7 +235,7 @@ fn own_message(marker: &str, body: &str) -> Result<Value> {
 }
 
 #[tokio::test]
-async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
+async fn the_users_own_traffic_never_triggers_a_persona() -> Result<()> {
     let run = PersonaRun::start("own-message", "this reply must never be drafted").await?;
 
     // 1. On its own subject, which is where the Sensor publishes it. The
@@ -269,6 +272,21 @@ async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
     );
     run.publish_inbound(&consent_wearing).await?;
 
+    // 4. The user's own **reaction** — the `outbound.*` family's second
+    //    member (ADR 0021) — misrouted the same way. It cost the gate no
+    //    edit to refuse: the allowlist admits `inbound.message.received` and
+    //    nothing else, so a type the contract adds later is excluded before
+    //    anybody remembers it exists. That is the property being asserted
+    //    here, and it is the one a rule excluding `outbound.*` would lose.
+    let own_reaction_marker = format!("own-reaction-{}", run.prefix);
+    let mut own_reaction = contract_fixture("outbound.reaction.added")?;
+    let own_reaction_id = sha256_hex(&own_reaction_marker);
+    own_reaction["id"] = json!(own_reaction_id);
+    own_reaction["traceparent"] = json!(traceparent_for(&own_reaction_id));
+    own_reaction["data"]["target"]["excerpt"] = json!(own_reaction_marker.clone());
+    validate_against_contract(&own_reaction, "outbound.reaction.added")?;
+    run.publish_inbound(&own_reaction).await?;
+
     // The fence: a granted inbound message, published last. Its suggestion
     // proves the persona has been through the three above, which is what
     // turns an absence into an assertion instead of a wait.
@@ -282,6 +300,7 @@ async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
         ("on its own subject", &on_its_subject),
         ("misrouted onto the inbound subject", &misrouted),
         ("misrouted wearing a granted consent", &consent_wearing),
+        ("the user's own reaction, misrouted", &own_reaction),
     ] {
         let trigger_id = event_id(event);
         for event_type in [THINKING_TYPE, SUGGEST_TYPE] {
@@ -299,7 +318,7 @@ async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
                 .collect();
             assert!(
                 about.is_empty(),
-                "the user's own message ({label}) must produce no {event_type}, got {about:?}"
+                "the user's own traffic ({label}) must produce no {event_type}, got {about:?}"
             );
         }
     }
@@ -311,7 +330,7 @@ async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
     assert_eq!(
         requests.len(),
         1,
-        "four events, one of them a persona's business: the model must have been asked \
+        "five events, one of them a persona's business: the model must have been asked \
          exactly once, got {} requests",
         requests.len()
     );
@@ -319,7 +338,7 @@ async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
         requests[0].body.to_string().contains(&fence_marker),
         "the one completion request must be the inbound message's"
     );
-    for marker in ["own-subject-", "misrouted-", "wearing-"] {
+    for marker in ["own-subject-", "misrouted-", "wearing-", "own-reaction-"] {
         assert!(
             !requests[0].body.to_string().contains(marker),
             "nothing the user wrote themselves reached the model: {marker}"

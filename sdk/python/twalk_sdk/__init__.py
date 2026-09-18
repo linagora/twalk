@@ -50,6 +50,7 @@ from .envelope import (
 from .trigger import (
     MESSAGE_RECEIVED_TYPE,
     OUTBOUND_MESSAGE_SENT_TYPE,
+    OUTBOUND_REACTION_ADDED_TYPE,
     PERSONA_TRIGGER_TYPES,
     InboundMessage,
     Trigger,
@@ -70,6 +71,7 @@ __all__ = [
     "LlmError",
     "MESSAGE_RECEIVED_TYPE",
     "OUTBOUND_MESSAGE_SENT_TYPE",
+    "OUTBOUND_REACTION_ADDED_TYPE",
     "PERSONA_TRIGGER_TYPES",
     "Persona",
     "SUGGEST_TYPE",

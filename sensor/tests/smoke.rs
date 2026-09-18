@@ -12,8 +12,8 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    contract_fixture, contract_fixture_types, contract_variant_fixture, contract_variant_fixtures,
-    ensure_stack, validate_against_contract, Bot, Bus,
+    contract_fixture, contract_fixture_types, contract_schema_types, contract_variant_fixture,
+    contract_variant_fixtures, ensure_stack, validate_against_contract, Bot, Bus,
 };
 use serde_json::{json, Value};
 
@@ -174,8 +174,16 @@ async fn every_contract_fixture_validates_against_its_schema() -> Result<()> {
     let types = contract_fixture_types()?;
     assert_eq!(
         types.len(),
-        9,
-        "the v1 contract defines exactly 9 fixture types; found {types:?}"
+        10,
+        "the v1 contract defines exactly 10 fixture types; found {types:?}"
+    );
+    // And every schema has one. The count above is a tripwire for a fixture
+    // added or lost; this is the tripwire for a *schema* added without the
+    // worked example a third-party producer copies from.
+    assert_eq!(
+        contract_schema_types()?,
+        types,
+        "every contract schema must have a fixture, and every fixture a schema"
     );
     for type_name in types {
         let fixture = contract_fixture(&type_name)?;

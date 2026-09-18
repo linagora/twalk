@@ -8,6 +8,13 @@ can know a conversation has already been answered, and it carries no consent
 extension at all, because the extension is a contact's decision and there is
 no contact in it. A gate that reads consent has nothing to read.
 
+Since ADR 0021 `outbound.*` is a family rather than a single type — the
+user's own reaction is `outbound.reaction.added` — and the gate needed no
+edit to exclude it, because an allowlist excludes by default. That is the
+argument against turning it into a rule that excludes `outbound.*`: a rule
+that names what is refused is a denylist, and a denylist admits whatever
+nobody remembered to name.
+
 Asserted at the seam too (`hermes/tests/assistant.rs`, where the real persona
 container is given the user's own message and produces no event and no LLM
 call). These unit tests pin the decision itself, case by case.
@@ -17,10 +24,11 @@ from __future__ import annotations
 
 import unittest
 
-from fixtures import fixture, variant_fixture
+from fixtures import fixture, fixture_types, variant_fixture
 from twalk_sdk import (
     MESSAGE_RECEIVED_TYPE,
     OUTBOUND_MESSAGE_SENT_TYPE,
+    OUTBOUND_REACTION_ADDED_TYPE,
     PERSONA_TRIGGER_TYPES,
     is_granted,
     triggers_a_persona,
@@ -61,20 +69,33 @@ class TriggerGateTest(unittest.TestCase):
             "why ADR 0018 made it a type of its own",
         )
 
-    def test_a_granted_reaction_does_not_trigger_a_persona(self) -> None:
+    def test_no_other_contract_type_triggers_a_persona(self) -> None:
         # An allowlist, not a denylist of the user's own messages: no other
         # contract type wakes a persona either, whatever its consent says.
-        for type_name in (
-            "inbound.reaction.added",
-            "inbound.presence.updated",
-            "persona.suggest.produced",
-            "persona.thinking.emitted",
-            "persona.reply.approved",
-            "consent.state.changed",
-            "bridge.status.changed",
-        ):
+        #
+        # Enumerated from the contract directory rather than listed here, so
+        # that a type added to `contracts/cloudevents/v1/fixtures/` is
+        # covered the day it lands. A hand-written list is a list that goes
+        # quietly stale, which is the failure this whole gate exists to stop
+        # (issue #147).
+        others = [name for name in fixture_types() if name != "inbound.message.received"]
+        self.assertGreater(len(others), 5, "the contract enumeration found nothing")
+        for type_name in others:
             with self.subTest(type_name=type_name):
                 self.assertFalse(triggers_a_persona(fixture(type_name)))
+
+    def test_the_users_own_reaction_does_not_trigger_a_persona(self) -> None:
+        # The second member of the `outbound.*` family (ADR 0021), and it
+        # cost the gate no edit: an allowlist excludes a new type by default.
+        # Replacing the allowlist with a rule that excludes `outbound.*`
+        # would be a denylist, which admits whatever nobody remembered.
+        event = fixture("outbound.reaction.added")
+        self.assertEqual(event["type"], OUTBOUND_REACTION_ADDED_TYPE)
+        self.assertNotIn(
+            "consent", event, "ADR 0021: this type carries no consent extension at all"
+        )
+        self.assertFalse(triggers_a_persona(event))
+        self.assertFalse(is_granted(event), "and the consent gate could not have judged it")
 
     def test_a_type_the_contract_adds_later_does_not_trigger_a_persona(self) -> None:
         # The forward-compatible default is "no". A tenth type must not start

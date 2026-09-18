@@ -19,6 +19,10 @@ pub const OUTBOUND_MESSAGE_SENT_TYPE: &str = "fr.linagora.twalk.outbound.message
 pub const OUTBOUND_MESSAGE_SENT_DATASCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/outbound.message.sent.schema.json";
 
+pub const OUTBOUND_REACTION_ADDED_TYPE: &str = "fr.linagora.twalk.outbound.reaction.added.v1";
+pub const OUTBOUND_REACTION_ADDED_DATASCHEMA: &str =
+    "https://schemas.twalk.dev/cloudevents/v1/outbound.reaction.added.schema.json";
+
 pub const PRESENCE_UPDATED_TYPE: &str = "fr.linagora.twalk.inbound.presence.updated.v1";
 pub const PRESENCE_UPDATED_DATASCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/inbound.presence.updated.schema.json";
@@ -701,6 +705,88 @@ pub fn build_reaction_added(input: &InboundReaction) -> Value {
     })
 }
 
+/// Everything needed to build an `outbound.reaction.added.v1` envelope — a
+/// reaction the user added themselves, already resolved at the seam.
+///
+/// Notice what is not here, next to [`InboundReaction`]: no `consent`, no
+/// `display_name`, no `network_identifier`. The user is not a contact
+/// (ADR 0018), so there is no decision to label the event with, no contact
+/// object to fill and no contact PII to gate — which is the whole point,
+/// because the field that went missing carried the operator's **own phone
+/// number** on a phone-based network, published as a contact's attribute
+/// under a label saying a third party had agreed to it (ADR 0021). The
+/// reactor on the wire — the network ghost the reaction arrived under — is
+/// not carried either: the subject is the operator's own Matrix ID, so one
+/// operator appears on the bus rather than one per network and one per ghost.
+pub struct OutboundReaction {
+    /// Event id of the `m.reaction` event itself (the natural key).
+    pub matrix_event_id: String,
+    pub matrix_room_id: String,
+    /// Server name of the Sensor's homeserver (the `source` authority).
+    pub server_name: String,
+    /// The operator's Matrix ID (the CloudEvents `subject`).
+    pub owner_matrix_id: String,
+    /// The reaction key (a Unicode emoji or a network-specific key).
+    pub reaction: String,
+    /// Event id of the message the reaction applies to.
+    pub target_event_id: String,
+    /// The targeted message, when the Sensor could read it — its excerpt and
+    /// the author whose consent governs it.
+    pub target_excerpt: Option<QuotedExcerpt>,
+    pub network: Network,
+    /// RFC 3339 timestamp of when the Sensor produced the event.
+    pub produced_at: String,
+    /// RFC 3339 timestamp reported by the source network, when the bridge
+    /// provides one.
+    pub network_timestamp: Option<String>,
+}
+
+/// Builds the `outbound.reaction.added.v1` envelope: the user's own reaction,
+/// with their Matrix ID as the subject and **no `consent` extension at all**
+/// (ADR 0021, symmetrical with ADR 0018's `outbound.message.sent`).
+///
+/// There is no reduced shape here, because reduction answers a revoked
+/// contact's decision (ADR 0012) and this event has no contact. The one
+/// thing that can still be withheld is the excerpt of the targeted message:
+/// that text belongs to whoever wrote it, and the user's decision about
+/// *them* governs it (issue #110) — reacting to a contact is not a way
+/// around the user's own decision about them. It is simply absent when it
+/// may not be published, since the type has no consent label to say
+/// "withheld" with.
+pub fn build_outbound_reaction_added(input: &OutboundReaction) -> Value {
+    let mut target = json!({ "matrix_event_id": input.target_event_id });
+    if let Some(excerpt) = input
+        .target_excerpt
+        .as_ref()
+        .and_then(QuotedExcerpt::publishable_unlabelled)
+    {
+        target["excerpt"] = json!(excerpt);
+    }
+    let mut data = json!({
+        "reaction": cap_chars(&input.reaction, 64),
+        "target": target,
+    });
+    if let Some(network_timestamp) = &input.network_timestamp {
+        data["network_timestamp"] = json!(network_timestamp);
+    }
+    // The same natural key as the inbound reaction it would otherwise have
+    // been published as: one Matrix event still has one deterministic id.
+    let id = cloud_event_id(&input.matrix_event_id, &input.matrix_room_id);
+    json!({
+        "specversion": "1.0",
+        "id": id,
+        "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
+        "type": OUTBOUND_REACTION_ADDED_TYPE,
+        "time": input.produced_at,
+        "subject": input.owner_matrix_id,
+        "datacontenttype": "application/json",
+        "dataschema": OUTBOUND_REACTION_ADDED_DATASCHEMA,
+        "traceparent": originate_traceparent(&id),
+        "network": input.network.as_str(),
+        "data": data,
+    })
+}
+
 /// A contact's connectivity on a network, normalized across networks (the
 /// contract's `data.presence` enum).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -954,6 +1040,81 @@ mod tests {
             );
             assert_eq!(
                 event["data"]["reply_to"]
+                    .get("excerpt")
+                    .and_then(Value::as_str),
+                expected,
+                "quoted author {author:?}"
+            );
+        }
+    }
+
+    fn sample_outbound_reaction() -> OutboundReaction {
+        OutboundReaction {
+            matrix_event_id: "$AbCdEfGh1234".to_owned(),
+            matrix_room_id: "!abcXYZ123:example.com".to_owned(),
+            server_name: "example.com".to_owned(),
+            owner_matrix_id: "@michel:example.com".to_owned(),
+            reaction: "👍".to_owned(),
+            target_event_id: "$Target".to_owned(),
+            target_excerpt: None,
+            network: Network::Whatsapp,
+            produced_at: "2026-09-17T10:00:00Z".to_owned(),
+            network_timestamp: None,
+        }
+    }
+
+    #[test]
+    fn the_users_own_reaction_carries_no_consent_and_no_contact() {
+        // ADR 0021, as the same two absences as ADR 0018's message. What
+        // the `contact` object used to carry here is the point: the
+        // operator's display name, and — under a network-wide grant, which
+        // is the ordinary way a user decides — the phone number their own
+        // ghost localpart is minted from.
+        let event = build_outbound_reaction_added(&sample_outbound_reaction());
+        assert_eq!(event["type"], OUTBOUND_REACTION_ADDED_TYPE);
+        assert_eq!(
+            event["subject"], "@michel:example.com",
+            "the operator's Matrix ID, not the ghost the reaction arrived under"
+        );
+        assert!(event.get("consent").is_none(), "{event}");
+        assert!(event["data"].get("contact").is_none(), "{event}");
+        assert_eq!(event["data"]["reaction"], "👍");
+        assert_eq!(event["data"]["target"]["matrix_event_id"], "$Target");
+        // The natural key is unchanged: one Matrix event, one id, whichever
+        // door it goes out of — the same vector as the inbound reaction's.
+        assert_eq!(
+            event["id"],
+            "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0"
+        );
+    }
+
+    #[test]
+    fn a_reacted_to_contact_is_quoted_only_when_granted() {
+        // Reacting to a contact is not a way around the user's own decision
+        // about them (issue #110). With no consent extension to say
+        // "withheld" with, the excerpt simply goes.
+        for (author, expected) in [
+            (
+                QuotedAuthor::Contact(Consent::Granted),
+                Some("on décale à 20h ?"),
+            ),
+            (QuotedAuthor::Contact(Consent::Pending), None),
+            (QuotedAuthor::Contact(Consent::Revoked), None),
+            (QuotedAuthor::Unknown, None),
+            (QuotedAuthor::Owner, Some("on décale à 20h ?")),
+        ] {
+            let mut input = sample_outbound_reaction();
+            input.target_excerpt = Some(QuotedExcerpt {
+                text: "on décale à 20h ?".to_owned(),
+                author,
+            });
+            let event = build_outbound_reaction_added(&input);
+            assert_eq!(
+                event["data"]["target"]["matrix_event_id"], "$Target",
+                "the target is kept whatever the author's state: {author:?}"
+            );
+            assert_eq!(
+                event["data"]["target"]
                     .get("excerpt")
                     .and_then(Value::as_str),
                 expected,
