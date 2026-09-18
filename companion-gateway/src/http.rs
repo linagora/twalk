@@ -36,6 +36,8 @@ use crate::bridge_status::Statuses;
 use crate::bridge_status_http;
 use crate::consent_http;
 use crate::consent_snapshot::{self, Snapshots};
+use crate::contacts::Contacts;
+use crate::contacts_http;
 use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
 use crate::session::Sessions;
@@ -80,6 +82,14 @@ pub struct Gateway {
     /// answers `503 bridge_status_not_configured`, rather than accepting a
     /// push it would throw away.
     statuses: Option<Arc<Statuses>>,
+    /// The pending-contact projection ([`crate::contacts`], ticket #54): the
+    /// list of who has written and is still waiting for a decision. `None`
+    /// on the same terms as [`Self::consent`] — it needs the same bus and
+    /// the same store — and the contact endpoints then answer `503
+    /// contacts_not_configured` rather than an empty list, because "nobody
+    /// has written to you" and "this Gateway is not watching" are very
+    /// different claims.
+    contacts: Option<Arc<Contacts>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -99,6 +109,7 @@ impl Gateway {
             ),
             snapshots: None,
             statuses: None,
+            contacts: None,
             now_unix_seconds,
         }
     }
@@ -174,6 +185,19 @@ impl Gateway {
         self.statuses.clone()
     }
 
+    /// Adds the pending-contact projection (ticket #54), the same way. It is
+    /// configured together with consent — same store, same bus — but kept as
+    /// its own half so that the endpoints of each say which of them a
+    /// deployment is missing.
+    pub fn with_contacts(mut self, contacts: Option<Arc<Contacts>>) -> Self {
+        self.contacts = contacts;
+        self
+    }
+
+    pub fn contacts(&self) -> Option<Arc<Contacts>> {
+        self.contacts.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -228,6 +252,9 @@ pub fn router(gateway: Gateway) -> Router {
         // still inside the guard's table — as `Requirement::BridgeToken`, so
         // the policy has no hole in it.
         .merge(bridge_status_http::routes())
+        // The pending contacts (ticket #54): the same merge, the same
+        // guard. The owner's own read of who is waiting for a decision.
+        .merge(contacts_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))

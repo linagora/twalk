@@ -18,7 +18,11 @@
 //! registration relay creating this deployment's one account on a homeserver
 //! whose own registration is closed, and the Sensor joining a room the Gateway
 //! invited it to and publishing that room's traffic to the bus as
-//! `network=matrix`. It brings the `sensor` service up beside the Gateway,
+//! `network=matrix`. It is also where ticket #54's own end of the chain is
+//! asserted, because this is the only place a **real Sensor** publishes into
+//! a bus a real Gateway consumes: a correspondent who writes in that room
+//! appears in the Gateway's pending list, and leaves it when the user
+//! decides. It brings the `sensor` service up beside the Gateway,
 //! which is also where "the Sensor's startup does not depend on the Gateway"
 //! is asserted — from compose's own resolved configuration.
 //!
@@ -59,6 +63,10 @@ const OWNER_LOCALPART: &str = "owner";
 /// Throwaway constants for the local, ephemeral deploy-test stack.
 const OWNER_PASSWORD: &str = "deploy-test-only-password-owner";
 const REGISTRATION_SHARED_SECRET: &str = "deploy-test-only-registration-shared-secret";
+/// A throwaway password for the per-run correspondent account #54's half of
+/// the bootstrap test provisions.
+const CORRESPONDENT_PASSWORD: &str = "deploy-test-only-password-correspondent";
+
 /// The service token the deployed Gateway serves its consent snapshot to
 /// (ticket #50) — long enough for the Gateway's own minimum, and throwaway
 /// like the rest of this stack's credentials.
@@ -741,6 +749,124 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     assert_eq!(event["subject"].as_str(), Some(owner_user_id().as_str()));
     assert_eq!(event["data"]["body"].as_str(), Some(body.as_str()));
 
+    // --- ticket #54, at the only seam where the whole chain is real: a
+    // correspondent writes in that room, the Sensor publishes it, and the
+    // Gateway's projection turns it into a decision waiting to be taken.
+    //
+    // A fresh account per run, because the Gateway's journal lives on a
+    // volume that survives between runs: a correspondent this deployment has
+    // already been asked about would not be waiting for anything.
+    let correspondent = fresh_correspondent();
+    provision_account(&env_file, &correspondent, CORRESPONDENT_PASSWORD).await?;
+    let correspondent_id = format!("@{correspondent}:{SERVER_NAME}");
+    let correspondent_token = login_as(&client, &correspondent, CORRESPONDENT_PASSWORD).await?;
+    invite(&client, &owner_token, &room_id, &correspondent_id).await?;
+    join(&client, &correspondent_token, &room_id).await?;
+    send_message(
+        &client,
+        &correspondent_token,
+        &room_id,
+        "bonjour, c'est moi qui écris",
+    )
+    .await?;
+
+    // The Sensor publishes it, with the correspondent as its subject — the
+    // event the projection reads three attributes of.
+    let written = poll_deploy(
+        || async {
+            bus.fetch_room_messages_on(SERVER_NAME, STREAM, MESSAGE_SUBJECT, &room_id)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|stored| stored.payload["subject"] == serde_json::json!(correspondent_id))
+        },
+        "the correspondent's message to reach the bus",
+    )
+    .await?;
+    validate_against_contract(&written.payload, "inbound.message.received")?;
+
+    // And the deployed Gateway puts them in the list of decisions waiting.
+    let pending = |contact: String| {
+        let client = client.clone();
+        let base = base.clone();
+        let device_token = device_token.clone();
+        async move {
+            let listed: serde_json::Value = client
+                .get(format!("{base}/api/contacts/pending"))
+                .header("cookie", format!("twalk_device={device_token}"))
+                .send()
+                .await
+                .ok()?
+                .json()
+                .await
+                .ok()?;
+            let entries = listed["contacts"].as_array()?.clone();
+            Some((
+                entries
+                    .iter()
+                    .find(|entry| entry["contact"] == serde_json::json!(contact))
+                    .cloned(),
+                entries,
+            ))
+        }
+    };
+    let (entry, entries) = poll_deploy(
+        || async {
+            let (entry, entries) = pending(correspondent_id.clone()).await?;
+            entry.map(|entry| (entry, entries))
+        },
+        "the deployed Gateway to list the correspondent as waiting for a decision",
+    )
+    .await?;
+    assert_eq!(
+        entry["network"].as_str(),
+        Some("matrix"),
+        "a room with no bridge marker is native Matrix traffic, here too: {entry}"
+    );
+    let mut members: Vec<&String> = entry
+        .as_object()
+        .context("a pending contact is an object")?
+        .keys()
+        .collect();
+    members.sort();
+    assert_eq!(
+        members,
+        vec!["contact", "first_seen", "last_seen", "network"],
+        "the deployed Gateway hands out an ID, a network and two instants — no body,          no display name, no network identifier: {entry}"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry["contact"] == serde_json::json!(owner_user_id())),
+        "the owner's own messages travel through the same room and must not become          decisions the owner has to take about themselves: {entries:?}"
+    );
+
+    // The user decides, through the write API, and the correspondent stops
+    // waiting.
+    let decided = client
+        .post(format!("{base}/api/consent/decisions"))
+        .header("cookie", format!("twalk_device={device_token}"))
+        .json(&serde_json::json!({
+            "subject": { "type": "contact", "id": correspondent_id },
+            "new_state": "granted",
+            "scope": { "networks": ["matrix"] }
+        }))
+        .send()
+        .await?;
+    assert_eq!(
+        decided.status(),
+        reqwest::StatusCode::CREATED,
+        "the decision must be recorded: {}",
+        decided.text().await.unwrap_or_default()
+    );
+    let (still_waiting, _) = pending(correspondent_id.clone())
+        .await
+        .context("the pending list must answer after a decision")?;
+    assert!(
+        still_waiting.is_none(),
+        "a contact the user decided about is not waiting for a decision: {still_waiting:?}"
+    );
+
     // The deployed Gateway logged the bootstrap and none of its credentials.
     // (The store is asserted at the process boundary, in tests/bootstrap.rs,
     // where the test can read the file the Gateway writes.)
@@ -758,6 +884,12 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
             REGISTRATION_SHARED_SECRET,
         ),
         ("the issued device token", device_token.as_str()),
+        // And #54's own invariant, at the deployment seam: the projection
+        // reads three attributes of an inbound event and never its body.
+        (
+            "the correspondent's message",
+            "bonjour, c'est moi qui écris",
+        ),
     ] {
         assert!(
             !logs.contains(secret),
@@ -769,6 +901,113 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
         teardown(&env_file).await?;
     }
     Ok(())
+}
+
+/// A correspondent localpart no previous run has used. The Gateway's decision
+/// journal lives on a volume that survives between runs, so a correspondent
+/// this deployment has already been asked about would not be waiting for a
+/// decision — and the test would pass for the wrong reason.
+fn fresh_correspondent() -> String {
+    format!(
+        "g54_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos()
+    )
+}
+
+/// Provisions one account on the deployment's Synapse the way `provision.sh`
+/// does — `register_new_matrix_user` with the registration shared secret the
+/// homeserver's own configuration carries. Not through the Gateway's
+/// registration relay, which creates the owner's account and refuses every
+/// other: a second human on this homeserver is the operator's business.
+async fn provision_account(env_file: &Path, localpart: &str, password: &str) -> Result<()> {
+    compose_change(
+        env_file,
+        &[
+            "exec",
+            "-T",
+            "synapse",
+            "register_new_matrix_user",
+            "-u",
+            localpart,
+            "-p",
+            password,
+            "--no-admin",
+            "-c",
+            "/data/homeserver.yaml",
+            "http://localhost:8008",
+        ],
+        "register a correspondent",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Invites a user into a room, as the room's creator.
+async fn invite(
+    client: &reqwest::Client,
+    owner_token: &str,
+    room_id: &str,
+    user_id: &str,
+) -> Result<()> {
+    let response = client
+        .post(format!(
+            "{}/_matrix/client/v3/rooms/{room_id}/invite",
+            homeserver_url()
+        ))
+        .bearer_auth(owner_token)
+        .json(&serde_json::json!({ "user_id": user_id }))
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "the homeserver refused the invitation: {}",
+        response.text().await.unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// Accepts an invitation.
+async fn join(client: &reqwest::Client, token: &str, room_id: &str) -> Result<()> {
+    let response = client
+        .post(format!(
+            "{}/_matrix/client/v3/rooms/{room_id}/join",
+            homeserver_url()
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "the homeserver refused the join: {}",
+        response.text().await.unwrap_or_default()
+    );
+    Ok(())
+}
+
+/// Logs any provisioned account in with its password.
+async fn login_as(client: &reqwest::Client, localpart: &str, password: &str) -> Result<String> {
+    let body: serde_json::Value = serde_json::from_str(
+        &client
+            .post(format!("{}/_matrix/client/v3/login", homeserver_url()))
+            .json(&serde_json::json!({
+                "type": "m.login.password",
+                "identifier": { "type": "m.id.user", "user": localpart },
+                "password": password,
+            }))
+            .send()
+            .await?
+            .text()
+            .await?,
+    )?;
+    body["access_token"]
+        .as_str()
+        .map(str::to_owned)
+        .context("the login answered no access token")
 }
 
 /// Logs the owner in with a password: only for a warm stack whose account a

@@ -322,7 +322,42 @@ pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
         // no bus answers `consent_not_configured` rather than pretending
         // the snapshot is the thing that is missing.
         ("GATEWAY_SERVICE_TOKEN".to_owned(), SERVICE_TOKEN.to_owned()),
+        // The pending-contact projection's durable consumer (ticket #54).
+        // A deployment has one Gateway and uses the default name; the test
+        // stack has one bus shared by every suite and every run, so each
+        // test's Gateway gets its own — two Gateways on one durable name
+        // would split the inbound stream between them, and each would see
+        // half the contacts.
+        //
+        // Derived from the static directory, which is unique per test: a
+        // Gateway restarted on the same directory keeps the same consumer
+        // and therefore the same ack floor, which is exactly the property
+        // `tests/pending.rs` restarts one to assert.
+        (
+            "GATEWAY_INBOUND_CONSUMER".to_owned(),
+            inbound_consumer_name(static_dir),
+        ),
     ]
+}
+
+/// A durable consumer name for a test's Gateway, from its static directory.
+/// NATS refuses `.`, `*`, `>`, `/`, `\` and whitespace in a durable name, so
+/// everything but letters, digits and `-` becomes `-`.
+pub fn inbound_consumer_name(static_dir: &Path) -> String {
+    let slug: String = static_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("g54-{slug}")
 }
 
 /// [`gateway_env`] with sign-in unconfigured: what an operator gets who has

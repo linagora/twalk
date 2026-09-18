@@ -27,7 +27,14 @@
 //! `as_token`, a `whoami` reconciliation at startup, the mapping from
 //! mautrix's state vocabulary to the contract's, and the transitions
 //! published as `bridge.status.changed.v1` through #49's outbox, so the
-//! Gateway is the single producer of that event.
+//! Gateway is the single producer of that event; ticket #54 made the Gateway
+//! a consumer as well as a producer — the pending-contact projection
+//! ([`contacts`], [`contacts_http`]), a durable consumer on
+//! `inbound.message.received` that keeps **only** a contact's Matrix ID, the
+//! network it wrote on and its first and last sighting, so the Companion can
+//! say how many decisions are waiting. That store's restraint is the
+//! feature: no body, no display name, no `network_identifier`, enforced by
+//! the shape of the types rather than by care.
 //!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
@@ -49,6 +56,8 @@ pub mod config;
 pub mod consent;
 pub mod consent_http;
 pub mod consent_snapshot;
+pub mod contacts;
+pub mod contacts_http;
 pub mod http;
 pub mod matrix_openid;
 pub mod metrics;

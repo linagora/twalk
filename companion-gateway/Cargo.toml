@@ -34,11 +34,21 @@ serde_json = "1"
 # libsqlite3.
 rusqlite = { version = "0.40", features = ["bundled"] }
 # The bus, as the Sensor speaks it: the consent outbox publishes committed
-# decisions on NATS JetStream with `Nats-Msg-Id` set to the event id.
+# decisions on NATS JetStream with `Nats-Msg-Id` set to the event id, and the
+# pending-contact projection (#54) consumes `inbound.message.received` from a
+# durable consumer on the same stream.
 async-nats = "0.50"
+# Draining a JetStream batch is a `Stream`, so the projection needs
+# `StreamExt`. Already in the graph through async-nats; named here because
+# this crate uses it directly.
+futures = "0.3"
 # RFC 3339 timestamps, formatted the way the Sensor formats its own
 # (sensor/src/main.rs::rfc3339) — the contract's `time` and `occurred_at`.
-time = { version = "0.3", features = ["formatting"] }
+# `parsing` because the pending-contact projection (#54) takes its first- and
+# last-seen instants from the event's own `time` and stores them in the one
+# canonical spelling, so that "earliest" and "latest" are string comparisons
+# the database can make.
+time = { version = "0.3", features = ["formatting", "parsing"] }
 # Device and refresh tokens are 256 bits straight from the OS CSPRNG.
 getrandom = "0.3"
 tower = { version = "0.5", features = ["util"] }

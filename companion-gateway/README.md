@@ -2,7 +2,7 @@
 
 The Companion backend (Rust): bridge provisioning facade, persona orchestrator, and consent broker. It is the single writer of consent state (see `docs/architecture/adr/0006-consent-state-owned-by-companion-gateway.md`).
 
-What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation — the consent store (ticket #49): an append-only decision journal in SQLite, the current state as its projection, and a transactional outbox that publishes each committed decision exactly once as a `consent.state.changed.v1` — bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses — the consent snapshot (ticket #50): the whole current state with the bus sequence it reflects, served to a consumer whose cache is cold — and the bridge login facade (ticket #55): each configured bridge's provisioning API driven by the Gateway, which holds the blocking step of a QR login itself. What is left of specs #46 and #47 lands on top of them.
+What exists today is the service skeleton (ticket #48) — the origin that serves the Companion, a health endpoint, metrics, structured logs and a graceful shutdown — the user's session (ticket #52): sign-in with a Matrix OpenID token, the owner check, and per-device tokens with revocation — the consent store (ticket #49): an append-only decision journal in SQLite, the current state as its projection, and a transactional outbox that publishes each committed decision exactly once as a `consent.state.changed.v1` — bootstrap (ticket #53): the registration relay that creates this deployment's one account, and the Sensor's invitation into the rooms the user chooses — the consent snapshot (ticket #50): the whole current state with the bus sequence it reflects, served to a consumer whose cache is cold — the bridge login facade (ticket #55): each configured bridge's provisioning API driven by the Gateway, which holds the blocking step of a QR login itself — and the pending-contact projection (ticket #54), which makes the Gateway a consumer of the bus as well as its producer: a durable consumer on `inbound.message.received` that keeps a contact's Matrix ID, its network and its first and last sighting, and nothing else. What is left of specs #46 and #47 lands on top of them.
 
 ## The origin
 
@@ -23,6 +23,8 @@ One HTTP origin serves everything, so there is no CORS and the device token can 
 | `/api/consent/state` | `GET` returns the current state, one entry per (subject, network), as recorded. |
 | `/api/consent/effective` | `GET` returns the state that applies to one contact on one network, with the precedence resolved. |
 | `/api/consent/snapshot` | `GET` returns the whole state with the JetStream sequence it reflects, for a consumer starting cold (below). The one route that takes a **service token** and refuses a device token. |
+| `/api/contacts/pending` | `GET` returns the contacts that have written and that no decision covers, with a count per network (below). |
+| `/api/contacts/display-names` | `GET` returns what those contacts are called, read from the bus and stored nowhere. |
 | `/api/…` (anything else) | A JSON error, never HTML: a client parsing a response must not be handed a page. Unauthenticated, that is a `401` — the guard answers before routing, so an unknown path tells a caller with no device token nothing about the API's shape. |
 | anything else | The Companion's build in `GATEWAY_STATIC_DIR`, resolved the way SvelteKit's static adapter lays it out (see below). |
 
@@ -212,6 +214,71 @@ There is no pagination: a cursor would be a second ordering to get wrong, and a 
 
 The caller is a service, not one of the owner's browsers: the Sensor has no Matrix OpenID token to sign in with and no cookie to send, so this route takes `GATEWAY_SERVICE_TOKEN` as an `Authorization: Bearer` credential. The two credentials are disjoint — a device token opens every other endpoint and not this one; the service token opens this one and nothing else — and the Gateway compares the token as a SHA-256 digest, so a refusal leaks neither its length nor how far a guess got. It grants a read of the whole social graph the user ever decided about, which is why it is generated (`openssl rand -hex 32`) and why the Gateway refuses to start with one under 32 characters.
 
+## The pending contacts (ticket #54)
+
+Screen 5 says "3 consent decisions waiting". To count them the Gateway has to know who has
+written, so it consumes the bus as well as producing on it — and this is where the design is
+most exposed, because a careless version of it is a log of who writes to the user.
+
+```
+GET /api/contacts/pending
+
+{ "total": 3,
+  "networks": [ { "network": "signal", "count": 1 }, { "network": "whatsapp", "count": 2 } ],
+  "contacts": [ { "contact": "@whatsapp_33612345678:example.com", "network": "whatsapp",
+                  "first_seen": "2026-09-17T10:00:00.000Z",
+                  "last_seen":  "2026-09-17T18:30:00.000Z" } ] }
+```
+
+**Four values, and there will never be a fifth.** No message body, no display name, no
+`network_identifier` — the Sensor withholds the identifier until consent is granted, and the
+Gateway does not undo that by keeping a copy. That restraint is the feature, so it is enforced
+rather than remembered: the projection deserialises each event into a struct with three fields
+and **no `data` member**, so the body never becomes a value in the process at all; the store is a
+four-column table whose columns a unit test pins; and `tests/pending.rs` publishes an event
+carrying a body, a display name and an identifier, then reads the bytes of the whole state
+directory and the captured logs for each of them.
+
+The uncomfortable part, said here rather than only in a document: a bridged ghost user's Matrix
+ID conventionally embeds the network identifier (`@whatsapp_33612345678:example.com`), so this
+store keeps phone numbers although it has no column for one. It is stored because a consent
+decision has to name its subject and that ID *is* the subject — see
+`docs/architecture/security-model.md`, residual risk 5.
+
+**Waiting** is the same question `/api/consent/effective` answers with `decided_by: null`:
+neither the contact's own decision nor its network's default exists. Granting or revoking a whole
+network therefore empties the list of every contact on it at once, and a contact the owner
+deliberately left `pending` is not in it — they answered, and the answer was "not yet". The owner
+is never in it either: their own messages travel through the same rooms, and nobody is their own
+correspondent, so those sightings are not filtered out on read — they are never stored.
+
+`total` and `networks` always count the whole list, whatever `?network=` narrows `contacts` to: a
+badge and the list beside it must never disagree. There is no pagination and no cap, as for
+`/api/consent/state`.
+
+**The consumer.** Durable, created with full delivery, so a Gateway installed after weeks of
+Sensor traffic builds its first list from the stream's history rather than showing an empty
+inbox; every run after that resumes at its own ack floor, which is the bus's business — the
+Gateway keeps no cursor of its own. Each sighting is committed and then acked, so a crash between
+the two redelivers a row the store already has, and the upsert absorbs it (`first_seen` only ever
+moves earlier, `last_seen` only ever later).
+
+**Display names** are the one thing read on demand:
+
+```
+GET /api/contacts/display-names?contact=@whatsapp_33612345678:example.com
+
+{ "contacts": [ { "contact": "@whatsapp_33612345678:example.com",
+                  "display_name": "Aïcha Benali" } ] }
+```
+
+A separate call because a record of who writes to the user *and what they are called* is a
+directory, and this is not one. The Gateway walks the tail of the inbound stream, keeps the most
+recent name it finds for each contact asked about, and drops everything else — nothing is
+written, cached or logged. A contact whose last message has fallen outside that window comes back
+with `display_name: null`, which is an answer and not a failure: the Companion shows the Matrix
+ID, which is what the decision will name anyway.
+
 ## Configuration
 
 Environment variables only, like the Sensor. They are documented for an operator in `deploy/docker-compose/.env.example`.
@@ -233,6 +300,7 @@ Environment variables only, like the Sensor. They are documented for an operator
 | `GATEWAY_SENSOR_USER_ID` | *unset* | The Sensor's Matrix ID — who gets invited. Unset: `POST /api/bootstrap/rooms` answers `503`. |
 | `GATEWAY_SERVICE_TOKEN` | *unset* | The token the consent snapshot is read with. Unset: `GET /api/consent/snapshot` answers `503`. Shorter than 32 characters: the Gateway refuses to start. |
 | `GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES` | `100000` | The largest snapshot served. Over it, an error — never a truncation. |
+| `GATEWAY_INBOUND_CONSUMER` | `companion-gateway-pending-contacts` | The durable JetStream consumer the pending-contact projection reads through. One Gateway per deployment owns it; rename it only for a second Gateway on the same bus, which would otherwise split the stream with the first. |
 | `GATEWAY_BRIDGES` | *unset* | The bridge instances this deployment can log in to, by `bridge_id`, comma-separated and in the order the Companion offers them (`mautrix-whatsapp,mautrix-signal`). Unset: `GET /api/bridges` answers an empty list. |
 | `GATEWAY_BRIDGE_<ID>_URL` | *required per bridge* | That bridge's appservice listener, where its provisioning API is — e.g. `http://bridge-whatsapp:29318`. `<ID>` is the `bridge_id` upper-cased with every non-alphanumeric character as `_`. |
 | `GATEWAY_BRIDGE_<ID>_PROVISIONING_SECRET` | *required per bridge* | The same value as that bridge's `provisioning.shared_secret`. It drives logins and logouts on the user's account. |
@@ -256,9 +324,10 @@ cargo test --test bootstrap   # the registration relay and the Sensor's invitati
 cargo test --test consent_snapshot  # the snapshot, and the hand-off to the bus
 cargo test --test bridges     # the bridge login facade against a stub bridge
 cargo test --test bridge_status  # the status webhook, the mapping table and the reconciliation
+cargo test --test pending     # the pending-contact projection against a real bus
 cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/pending.rs` publishes contract-valid inbound events onto a real JetStream and asserts the five properties of the projection — that a Gateway started against a stream with history builds its list from it, that a decision taken through the write API moves the contact out of the list, that a restart resumes at its ack floor instead of replaying, that display names come from the bus and are written nowhere, and that the store's own bytes hold no body and no network identifier; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus — which is also the one place a **real Sensor** publishes into a bus a real Gateway consumes, so that is where "messages published by a Sensor become contacts waiting for a decision" is asserted. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.
