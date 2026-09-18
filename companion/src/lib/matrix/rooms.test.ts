@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { roomLabel, roomsFromSync, type RoomSummary } from './rooms';
+import { matchesQuery, resolveDisplayNames, roomLabel, roomsFromSync, type RoomSummary } from './rooms';
 
 function sync(rooms: Record<string, unknown>) {
 	return { next_batch: 's1', rooms: { join: rooms } };
@@ -145,5 +145,116 @@ describe('labelling a room', () => {
 		expect(roomLabel(room())).toEqual({ text: '!room:example.com', source: 'room-id' });
 		// Whitespace is not a name either.
 		expect(roomLabel(room({ name: '   ' })).source).toBe('room-id');
+	});
+});
+
+describe('naming a room without a name', () => {
+	// On a real work account most rooms are direct messages, so most of the
+	// list was Matrix IDs and a user looking for a colleague was shown a
+	// localpart (#137).
+	const dm = (heroes: string[]): RoomSummary => ({
+		roomId: '!abc:linagora.com',
+		name: null,
+		alias: null,
+		encrypted: true,
+		heroes,
+		joinedMembers: heroes.length + 1
+	});
+
+	it('uses the display names the homeserver gave', () => {
+		const directory = new Map([['@jplorre:linagora.com', 'Jean-Pierre LORRÉ']]);
+		expect(roomLabel(dm(['@jplorre:linagora.com']), directory)).toEqual({
+			text: 'Jean-Pierre LORRÉ',
+			source: 'heroes'
+		});
+	});
+
+	it('keeps the id of a hero it could not name, beside the ones it could', () => {
+		// Half-named is still true. Dropping the unnamed would misdescribe who
+		// is in the room, which is worse than an unfriendly label.
+		const directory = new Map([['@jplorre:linagora.com', 'Jean-Pierre LORRÉ']]);
+		expect(roomLabel(dm(['@jplorre:linagora.com', '@julie:linagora.com']), directory).text).toBe(
+			'Jean-Pierre LORRÉ, @julie:linagora.com'
+		);
+	});
+
+	it('degrades to exactly what it did before, with no directory at all', () => {
+		expect(roomLabel(dm(['@jplorre:linagora.com'])).text).toBe('@jplorre:linagora.com');
+	});
+});
+
+describe('matchesQuery', () => {
+	const room: RoomSummary = {
+		roomId: '!zYPBIKiQbCfLavhgUA:linagora.com',
+		name: null,
+		alias: null,
+		encrypted: true,
+		heroes: ['@jplorre:linagora.com'],
+		joinedMembers: 2
+	};
+	const directory = new Map([['@jplorre:linagora.com', 'Jean-Pierre LORRÉ']]);
+
+	it('matches an empty query, so a blank field hides nothing', () => {
+		expect(matchesQuery(room, '', directory)).toBe(true);
+		expect(matchesQuery(room, '   ', directory)).toBe(true);
+	});
+
+	it('finds a person by the name the user is reading', () => {
+		expect(matchesQuery(room, 'Jean-Pierre', directory)).toBe(true);
+	});
+
+	it('ignores case and accents, because a name is typed the way it sounds', () => {
+		expect(matchesQuery(room, 'lorre', directory)).toBe(true);
+		expect(matchesQuery(room, 'LORRÉ', directory)).toBe(true);
+	});
+
+	it('also finds what a user might type from memory instead of the label', () => {
+		expect(matchesQuery(room, 'jplorre', directory)).toBe(true);
+		expect(matchesQuery(room, 'zYPBIKi', directory)).toBe(true);
+	});
+
+	it('does not match something absent', () => {
+		expect(matchesQuery(room, 'julie', directory)).toBe(false);
+	});
+});
+
+describe('resolveDisplayNames', () => {
+	const answering = (names: Record<string, unknown>): typeof fetch =>
+		(async (url: string) => {
+			const id = decodeURIComponent(String(url).split('/profile/')[1].split('/')[0]);
+			if (!(id in names)) {
+				return new Response('{}', { status: 404 });
+			}
+			return new Response(JSON.stringify({ displayname: names[id] }), { status: 200 });
+		}) as unknown as typeof fetch;
+
+	it('asks once per distinct user and returns what it was told', async () => {
+		let calls = 0;
+		const counting = (async (url: string) => {
+			calls += 1;
+			return answering({ '@a:x': 'Ada' })(url as never);
+		}) as unknown as typeof fetch;
+		const found = await resolveDisplayNames('https://x', 'token', ['@a:x', '@a:x'], {
+			fetchImpl: counting
+		});
+		expect(found.get('@a:x')).toBe('Ada');
+		expect(calls, 'the same user is not asked about twice').toBe(1);
+	});
+
+	it('leaves out a user the homeserver will not name', async () => {
+		const found = await resolveDisplayNames('https://x', 'token', ['@a:x', '@b:x'], {
+			fetchImpl: answering({ '@a:x': 'Ada', '@b:x': '   ' })
+		});
+		// An empty name is not a name: the id stands in, as it always did.
+		expect([...found.keys()]).toEqual(['@a:x']);
+	});
+
+	it('survives a homeserver that refuses outright', async () => {
+		const throwing = (async () => {
+			throw new TypeError('Failed to fetch');
+		}) as unknown as typeof fetch;
+		await expect(
+			resolveDisplayNames('https://x', 'token', ['@a:x'], { fetchImpl: throwing })
+		).resolves.toEqual(new Map());
 	});
 });

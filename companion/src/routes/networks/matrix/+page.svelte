@@ -44,7 +44,13 @@
 		ssoRedirectUrl,
 		type LoginFlows
 	} from '$lib/matrix/login';
-	import { listRooms, roomLabel, type RoomSummary } from '$lib/matrix/rooms';
+	import {
+		listRooms,
+		matchesQuery,
+		resolveDisplayNames,
+		roomLabel,
+		type RoomSummary
+	} from '$lib/matrix/rooms';
 	import { domain, restoreDomain } from '$lib/onboarding/domain';
 	import { homeserver, matrixSession, restoreHomeserver } from '$lib/onboarding/progress';
 
@@ -63,7 +69,21 @@
 	let outcomes = $state<{ room_id: string; status: string; reason?: string }[]>([]);
 	let sensor = $state<string | null>(null);
 
+	/** Display names the homeserver gave for the heroes of nameless rooms. */
+	let directory = $state<Map<string, string>>(new Map());
+	let query = $state('');
+
 	const anySelected = $derived(selected.size > 0);
+	const shown = $derived(rooms.filter((room) => matchesQuery(room, query, directory)));
+	/**
+	 * Whether every room the filter is showing is already chosen.
+	 *
+	 * The bulk control acts on **what is on screen**, never on the whole
+	 * account. On a work account this list is colleagues' private
+	 * conversations, and a control that selects all of them in one click is
+	 * how sixty people end up observed without anyone deciding to (#122).
+	 */
+	const allShownChosen = $derived(shown.length > 0 && shown.every((room) => selected.has(room.roomId)));
 
 	onMount(async () => {
 		restoreDomain();
@@ -145,6 +165,14 @@
 		busy = true;
 		try {
 			rooms = await listRooms(next.baseUrl, next.accessToken);
+			// Names for the rooms that have none, asked of the homeserver
+			// afterwards: the list is usable without them and never waits.
+			const heroes = rooms.filter((room) => room.name === null && room.alias === null).flatMap((room) => room.heroes);
+			if (heroes.length > 0) {
+				void resolveDisplayNames(next.baseUrl, next.accessToken, heroes).then((found) => {
+					directory = found;
+				});
+			}
 		} catch (error) {
 			problem = messageFor(error);
 		} finally {
@@ -200,6 +228,21 @@
 			`${window.location.origin}/networks/matrix`,
 			idpId
 		);
+	}
+
+	/** Chooses, or unchooses, every room the filter is currently showing. */
+	function toggleShown() {
+		const next = new Set(selected);
+		if (allShownChosen) {
+			for (const room of shown) {
+				next.delete(room.roomId);
+			}
+		} else {
+			for (const room of shown) {
+				next.add(room.roomId);
+			}
+		}
+		selected = next;
 	}
 
 	function toggle(roomId: string) {
@@ -372,9 +415,48 @@
 		{:else if rooms.length === 0}
 			<p class="card card--warning" data-testid="matrix-no-rooms">{$t('matrix.rooms.none')}</p>
 		{:else}
+			<div class="field">
+				<label class="label" for="room-search">{$t('matrix.rooms.searchLabel')}</label>
+				<input
+					id="room-search"
+					class="input"
+					type="search"
+					autocomplete="off"
+					spellcheck="false"
+					placeholder={$t('matrix.rooms.searchPlaceholder')}
+					data-testid="matrix-room-search"
+					bind:value={query}
+					disabled={stage === 'inviting'}
+				/>
+			</div>
+
+			<p class="small muted" data-testid="matrix-rooms-count">
+				{$t('matrix.rooms.showing', { shown: shown.length, total: rooms.length })}
+			</p>
+
+			{#if shown.length > 0}
+				<!--
+					Named by what it will do, and counted, so "select" can never
+					be read as "select everything I have".
+				-->
+				<p>
+					<button
+						class="button"
+						type="button"
+						data-testid="matrix-rooms-toggle-shown"
+						disabled={stage === 'inviting'}
+						onclick={toggleShown}
+					>
+						{allShownChosen
+							? $t('matrix.rooms.deselectShown', { count: shown.length })
+							: $t('matrix.rooms.selectShown', { count: shown.length })}
+					</button>
+				</p>
+			{/if}
+
 			<ul class="rooms" data-testid="matrix-rooms">
-				{#each rooms as room (room.roomId)}
-					{@const label = roomLabel(room)}
+				{#each shown as room (room.roomId)}
+					{@const label = roomLabel(room, directory)}
 					<li>
 						<label class="room">
 							<input
