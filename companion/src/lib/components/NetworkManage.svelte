@@ -32,6 +32,7 @@
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
+	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
@@ -256,9 +257,9 @@
 			{$t(stateCopy(connection.state))}
 		</p>
 
-		{#if trouble !== null}
-			<p class="card card--warning small" role="alert" data-testid="manage-trouble">{trouble}</p>
-		{/if}
+		<!-- Above the disconnect and re-link controls, which are what it
+		     answers, and it follows them when the confirmation opens (#139). -->
+		<ActionProblem message={trouble} testId="manage-trouble" variant="card-small" />
 
 		{#if confirming}
 			<!-- The confirmation says what stops, and — just as important — what

@@ -294,3 +294,72 @@ test('a refused sign-in says which of the homeserver’s refusals it was', async
 	const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }));
 	expect(stored).not.toContain('not-the-password');
 });
+
+test('a refused invitation is readable from where the button was pressed', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// A hundred rooms, which is what a work account looks like and what this
+	// screen was unusable with (#139). The list is stubbed at the homeserver's
+	// own `/sync` rather than created for real: what is under test is where the
+	// refusal renders, and a hundred `createRoom` calls would prove nothing
+	// about that while taking a minute.
+	// Matched by path rather than by a glob: the request carries a JSON filter
+	// in its query string, and a pattern that has to survive that is a pattern
+	// that silently stops matching.
+	await page.route(
+		(url) => url.pathname === '/_matrix/client/v3/sync',
+		async (route) => {
+			const join: Record<string, unknown> = {};
+			for (let index = 0; index < 100; index += 1) {
+				const number = String(index).padStart(3, '0');
+				join[`!room${number}:test.twalk`] = {
+					state: {
+						events: [{ type: 'm.room.name', content: { name: `Room ${number}` } }]
+					},
+					timeline: { events: [] },
+					summary: {}
+				};
+			}
+			await route.fulfill({ json: { rooms: { join } } });
+		}
+	);
+
+	// And a refusal to answer the click with. The Gateway's own 401 is what
+	// the owner met; stubbing it here keeps the assertion about the screen.
+	await page.route('**/api/bootstrap/rooms', async (route) => {
+		await route.fulfill({ status: 401, json: { error: 'matrix_token_rejected' } });
+	});
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill(stack!.synapseUrl);
+	await page.getByTestId('matrix-homeserver').blur();
+	await page.getByTestId('matrix-username').fill('bot_alpha');
+	await page.getByTestId('matrix-password').fill(PASSWORD);
+	await page.getByTestId('matrix-signin').click();
+
+	await expect(page.getByTestId('matrix-rooms')).toBeVisible();
+	await expect(page.getByTestId('matrix-rooms-count')).toContainText('100');
+
+	// Act at the bottom, as the owner did: tick a room and press the button,
+	// which Playwright scrolls to exactly as a finger would.
+	await page.getByTestId('room-!room000:test.twalk').check();
+	const button = page.getByTestId('invite-sensor');
+	await button.click();
+
+	// The answer is where the action was. `toBeInViewport` is the assertion
+	// that could have caught this: the old message was visible to a selector
+	// and three thousand pixels above the button to a person.
+	const answer = page.getByTestId('matrix-invite-problem');
+	await expect(answer).toBeVisible();
+	await expect(answer).toBeInViewport();
+	await expect(button).toBeInViewport();
+	await expect(answer).toHaveAttribute('role', 'alert');
+	await expect(answer).toContainText(/homeserver|serveur/i);
+
+	// And it did not also render at the top, where nobody was looking.
+	await expect(page.getByTestId('matrix-problem')).toHaveCount(0);
+});

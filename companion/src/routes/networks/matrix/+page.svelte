@@ -26,10 +26,21 @@
 	those need member state this listing deliberately does not fetch. Such a
 	room is shown by what is actually known about it and labelled as such,
 	rather than rendered blank (`$lib/matrix/rooms.ts`).
+
+	# Two refusals, two places
+
+	This screen has two actions with a page between them, so it has two message
+	surfaces and they are not interchangeable (#139). `problem` answers signing
+	in and listing, and renders by the sign-in controls at the top. `invite`
+	answers the invitation, and renders **against the invite button** — which on
+	an account with a hundred rooms is three thousand pixels further down. The
+	owner who reported "nothing happens" had been told, at the top of a page
+	they were at the bottom of.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 
+	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import { gateway } from '$lib/api/client';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
@@ -62,7 +73,10 @@
 	let username = $state('');
 	let password = $state('');
 	let busy = $state(false);
+	/** Signing in and listing: answered by the controls at the top. */
 	let problem = $state<string | null>(null);
+	/** The invitation: answered at the invite button, wherever that is (#139). */
+	let inviteProblem = $state<string | null>(null);
 	let session = $state<MatrixSession | null>(null);
 	let rooms = $state<RoomSummary[]>([]);
 	let selected = $state<Set<string>>(new Set());
@@ -260,7 +274,7 @@
 			return;
 		}
 		stage = 'inviting';
-		problem = null;
+		inviteProblem = null;
 		const answer = await gateway.POST('/api/bootstrap/rooms', {
 			body: {
 				matrix_access_token: session.accessToken,
@@ -276,7 +290,7 @@
 			// (#138). Saying "the invitation failed" for either was true and
 			// useless.
 			const code = (answer.error as { error?: string } | undefined)?.error;
-			problem =
+			inviteProblem =
 				code === 'matrix_token_rejected'
 					? $t('matrix.error.tokenRejected')
 					: $t('matrix.error.invite');
@@ -316,9 +330,11 @@
 		<p class="subtitle">{$t('matrix.caption')}</p>
 	</header>
 
-	{#if problem !== null}
-		<p class="card card--warning" role="alert" data-testid="matrix-problem">{problem}</p>
-	{/if}
+	<!-- The sign-in surface. It sits at the top because the controls it answers
+	     do: the homeserver field, the identity providers and the password form
+	     are all within a screen of here. The invitation's refusal is not here —
+	     it is at the invite button, a hundred rooms down (#139). -->
+	<ActionProblem message={problem} testId="matrix-problem" />
 
 	{#if stage === 'signing-in'}
 		<div class="field">
@@ -501,6 +517,11 @@
 					</li>
 				{/each}
 			</ul>
+
+			<!-- The invitation's answer, immediately above the control that asks
+			     for it, so that a user who pressed the button at the bottom of a
+			     hundred rooms reads the refusal without hunting for it (#139). -->
+			<ActionProblem message={inviteProblem} testId="matrix-invite-problem" />
 
 			<button
 				class="button button--primary"

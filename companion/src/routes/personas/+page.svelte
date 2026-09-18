@@ -32,6 +32,7 @@
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
+	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
@@ -286,9 +287,9 @@
 			<p class="small">{$t('persona.pause.meaning')}</p>
 		</div>
 
-		{#if failureText !== null}
-			<p class="error-text" role="alert" data-testid="activation-error">{failureText}</p>
-		{/if}
+		<!-- Against the button, and it stays against the button: the cards above
+		     it grow with the deployment's networks (#139). -->
+		<ActionProblem message={failureText} testId="activation-error" variant="text" />
 
 		<button
 			class="button button--primary"

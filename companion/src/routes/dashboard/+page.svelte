@@ -40,6 +40,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 
+	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { boot } from '$lib/boot';
 	import { locale, t } from '$lib/i18n';
@@ -338,11 +339,13 @@
 				</li>
 			{/each}
 		</ul>
-		{#if personaError !== null}
-			<p class="error-text" role="alert" data-testid="persona-error">
-				{$t('dashboard.persona.failed', { error: personaError })}
-			</p>
-		{/if}
+		<!-- The toggle that was refused may be any row of the list above, so the
+		     message moves to the reader when the reader is elsewhere (#139). -->
+		<ActionProblem
+			message={personaError === null ? null : $t('dashboard.persona.failed', { error: personaError })}
+			testId="persona-error"
+			variant="text"
+		/>
 		<p class="small muted" data-testid="pause-meaning">{$t('dashboard.persona.pausedMeaning')}</p>
 		<p class="small muted" data-testid="no-runtime">{$t('dashboard.persona.noRuntime')}</p>
 	</section>
@@ -432,11 +435,13 @@
 				{/each}
 			</ul>
 		{/if}
-		{#if deviceError !== null}
-			<p class="error-text" role="alert" data-testid="device-error">
-				{$t('dashboard.devices.failed', { error: deviceError })}
-			</p>
-		{/if}
+		<!-- A deployment the owner has used for a while has a long device list,
+		     and the revoke button that was refused can be at the top of it. -->
+		<ActionProblem
+			message={deviceError === null ? null : $t('dashboard.devices.failed', { error: deviceError })}
+			testId="device-error"
+			variant="text"
+		/>
 	</section>
 
 	<section class="card" data-testid="messagr">
