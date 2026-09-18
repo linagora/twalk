@@ -303,6 +303,9 @@ pub struct CompletedLogin {
 #[derive(Debug, Clone)]
 pub struct StepView {
     pub step_id: String,
+    /// The transaction id the bridge issued with this step, echoed on the
+    /// call that advances it (#106).
+    pub txn_id: Option<String>,
     pub step_type: StepType,
     /// The bridge's own instructions for the user, when it gives any.
     pub instructions: Option<String>,
@@ -1038,6 +1041,7 @@ fn apply(clients: &Clients, bridge: &Arc<Bridge>, active: &Arc<ActiveLogin>, ste
             let valid_for = step_validity(step_type, &step.payload, now, deadline);
             let view_step = StepView {
                 step_id: step.step_id.clone(),
+                txn_id: step.txn_id.clone(),
                 step_type,
                 instructions: step.instructions.clone(),
                 payload: step.payload.clone(),
@@ -1064,7 +1068,13 @@ fn apply(clients: &Clients, bridge: &Arc<Bridge>, active: &Arc<ActiveLogin>, ste
                 "a bridge login advanced to a new step"
             );
             if step_type.blocks() {
-                hold(clients, bridge.clone(), active.clone(), step.step_id);
+                hold(
+                    clients,
+                    bridge.clone(),
+                    active.clone(),
+                    step.step_id,
+                    step.txn_id,
+                );
             }
         }
     }
@@ -1074,17 +1084,27 @@ fn apply(clients: &Clients, bridge: &Arc<Bridge>, active: &Arc<ActiveLogin>, ste
 /// has to. Each answer is another step — a refreshed QR, the next step,
 /// the completion — and each one goes through [`Self::apply`], which
 /// spawns the next hold if the new step blocks too.
-fn hold(clients: &Clients, bridge: Arc<Bridge>, active: Arc<ActiveLogin>, step_id: String) {
+fn hold(
+    clients: &Clients,
+    bridge: Arc<Bridge>,
+    active: Arc<ActiveLogin>,
+    step_id: String,
+    bridge_txn_id: Option<String>,
+) {
     let clients = clients.clone();
     tokio::spawn(async move {
         let process_id = active.read().process_id.clone();
-        // `txn_id` makes a retry idempotent at the bridge; one per held
-        // request, derived from the step and the generation, so a retry
-        // of *this* request is the same transaction.
-        let txn_id = format!(
-            "twalk-{process_id}-{step_id}-{}",
-            active.generation.load(Ordering::SeqCst)
-        );
+        // `txn_id` makes a retry idempotent at the bridge. It must be the
+        // one the bridge issued **with this step**: mautrix validates it and
+        // answers `500 M_BAD_STATE: Transaction ID does not match` for
+        // anything else (#106). The derived value is a fallback for a bridge
+        // that issues none, and it keeps the same retry property.
+        let txn_id = bridge_txn_id.unwrap_or_else(|| {
+            format!(
+                "twalk-{process_id}-{step_id}-{}",
+                active.generation.load(Ordering::SeqCst)
+            )
+        });
         let answer = call_bridge(
             &bridge.config,
             &clients.blocking_http,
@@ -1311,6 +1331,11 @@ async fn mautrix_error(response: reqwest::Response) -> (String, String) {
 #[derive(Debug, Clone)]
 pub struct ParsedStep {
     pub process_id: Option<String>,
+    /// The transaction id **the bridge issued for this step**. mautrix
+    /// validates it on the next call and answers `500 M_BAD_STATE:
+    /// Transaction ID does not match` for anything else, so it is echoed
+    /// rather than invented (#106).
+    pub txn_id: Option<String>,
     pub step_id: String,
     pub step_type: StepType,
     pub instructions: Option<String>,
@@ -1334,6 +1359,10 @@ pub fn parse_step(answer: &Value) -> Result<ParsedStep, String> {
         .unwrap_or(Value::Null);
     let complete = answer.get("complete").cloned().unwrap_or(Value::Null);
     Ok(ParsedStep {
+        txn_id: answer
+            .get("txn_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         // mautrix calls the process id `login_id` at the top level of a
         // start or step answer — the same word its `?login_id=` query
         // parameter uses for an *existing* login, which is why this reads

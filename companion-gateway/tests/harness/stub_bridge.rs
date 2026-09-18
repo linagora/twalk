@@ -535,6 +535,10 @@ async fn start(
 fn qr_step(process_id: &str, data: &str) -> Value {
     json!({
         "login_id": process_id,
+        // Issued with the step and validated on the call that advances it,
+        // exactly as mautrix does — it answers `500 M_BAD_STATE:
+        // Transaction ID does not match` for anything else (#106).
+        "txn_id": format!("stub-txn-{process_id}"),
         "type": "display_and_wait",
         "step_id": QR_STEP,
         "instructions": "Scan this code from the phone",
@@ -560,6 +564,14 @@ async fn step(
         let inner = state.inner.lock().expect("the stub is not poisoned");
         if !inner.processes.contains_key(&process_id) {
             return mautrix_error(StatusCode::NOT_FOUND, "M_NOT_FOUND");
+        }
+    }
+    // The transaction id must be the one issued with the step being
+    // advanced. A caller that invents one gets mautrix's own answer (#106):
+    // this is what a real WhatsApp login failed on while the tests passed.
+    if let Some(txn_id) = query.get("txn_id") {
+        if txn_id != &format!("stub-txn-{process_id}") {
+            return mautrix_error(StatusCode::INTERNAL_SERVER_ERROR, "M_BAD_STATE");
         }
     }
     if step_type == "cancel" {
