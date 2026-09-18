@@ -48,6 +48,8 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `src/lib/capabilities/` | The capability gate: `report.ts` decides (pure), `probe.ts` measures (browser-only). |
 | `src/lib/networks/` | Screen 3 and the network flows: the card catalogue, the polled login read as a screen state (`login-view.ts`, pure), the polling itself (`login-session.ts`), each QR screen's words (`copy.ts`) and the SMS path's cookie parsing (`cookies.ts`). |
 | `src/lib/matrix/` | The user's own homeserver: discovery, sign-in (`login.ts`) and the room listing screen 3d selects from (`rooms.ts`). |
+| `src/lib/personas/` | Screen 4: the `assistant` card and its two locked abilities (`catalogue.ts`), the perimeter an activation is scoped to (`scope.ts`, pure) and the consent decision it writes (`activation.ts`). |
+| `src/lib/dashboard/` | Screen 5's judgements (`model.ts`, pure: the rows, the health roll-up, the feed and what may not be in it), the four reads it needs (`load.ts`) and its relative times (`format.ts`). |
 | `src/lib/qr/` | The QR encoder. The only module that imports an encoding library. |
 | `src/lib/version/` | The version handshake against the Gateway's `/health`, and the reload it forces. |
 | `src/lib/i18n/` | French and English, ICU patterns, `<locale>.json` per the wireframes. |
@@ -57,6 +59,7 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `tests/serve-like-gateway.mjs` | The Gateway's own path resolution, in Node, for Playwright. |
 | `tests/real-stack.mjs` | Brings up the compose stack and the Gateway binaries the stack-backed journeys run against. |
 | `tests/stub-bridge.mjs` | bridgev2's provisioning contract, stubbed — including its blocking step. |
+| `tests/e2e/dashboard/bus.ts` | Forty lines of the NATS wire protocol, so a journey can assert that a consent decision reached the bus and not only the screen. |
 
 ## The decisions worth knowing before you change something
 
@@ -200,6 +203,61 @@ dependency nobody promised to keep. Declaring it here is what stops the crypto
 work of ticket #67 from breaking on a dependency bump. Nothing in this app
 imports it directly yet.
 
+### Activating a persona is a consent decision, and the screen offers nothing else
+
+ADR 0013: there is no persona control API, and there will not be one. Activation
+is `POST /api/consent/decisions` with a `persona` subject, scoped to the
+networks that persona may read; pausing is the same call with `revoked`. So
+screen 4 may only offer what is expressible as that one decision — which is why
+its two ability rows are drawn on and locked rather than switchable: a decision
+carries a subject, a state and a scope, and nothing else, so a third switch
+would record nothing. The design review (#74) struck the wireframe's auto-send
+toggle and its active-hours control for the same reason from the other
+direction: a control in a privacy screen that the runtime does not enforce is a
+protection the user is told about and does not have.
+
+The scope is fixed at the moment the user presses the button, from the bridges
+whose login is `complete`. It never widens: a network connected next week is in
+no decision the user took, and the persona stays inactive on it. Matrix is the
+one network the Companion cannot prove is connected — the Gateway forgets the
+access token that invited the Sensor as soon as the call returns (ADR 0011), and
+there is no `GET /api/bootstrap/rooms` — so its row is offered unticked with the
+reason on the screen rather than guessed at.
+
+### The dashboard's feed is operational only, and that is enforced in the model
+
+The wireframe's screen 5 fed "the last 10 events on the bus (received
+messages…)" with who sent them. The design review replaced it with operational
+events — bridge state, consent decisions, persona activity — plus a message
+**count**. A home screen is unlocked in public; the list of who writes to you is
+not something a product whose argument is sovereignty renders there.
+
+The rule lives in `src/lib/dashboard/model.ts`, not in the markup, because a
+consent decision *does* carry the contact's Matrix ID and that is the one place
+this screen could leak it. `activityFeed` renders such a decision as "a
+contact's consent on WhatsApp became granted" and puts no id in the row's
+values; `model.test.ts` asserts it, and the Playwright journey greps the whole
+rendered page for a Matrix ID.
+
+### The dashboard says what it cannot know
+
+Three facts the wireframe assumes have no source in the deployment as it stands,
+and the screen states their absence rather than drawing a plausible value: live
+bridge state and the time of the last message (`GET /api/bridges` reports the
+last login *process*, not a heartbeat; #56 landed the producer — bridges push
+their state, the Gateway publishes `bridge.status.changed.v1` — and no read on
+this origin serves it to a browser), a message count (nothing between the bus and the
+Companion counts), and persona output (Hermes is not implemented — only its test
+harness landed, so an activated assistant produces nothing today). The
+pending-decisions chip counts contacts whose *recorded* consent is `pending`;
+#54's projection over the inbound stream is the fuller source, and until it
+lands the chip is drawn only when it has something to say.
+
+There is also no `GET /api/events/stream`. The wireframe subscribes to a merged
+SSE stream; the Gateway describes no such endpoint, so the screen polls and
+offers an explicit refresh. That stream now has something live to carry, and is
+still the missing half.
+
 ## Testing
 
 **Playwright is authoritative** (spec #65). It runs `channel: 'chromium'` — the
@@ -335,8 +393,8 @@ before the request goes out and is written to no browser store.
 
 ## What is not here yet
 
-Screens 4 and 5 of the wireframes: persona activation and the dashboard. Screen
-1's secondary "pair with my other device" link waits on the device-pairing flow
-and is not wired. MSC4108 sign-in by QR from another Matrix client is named on
-screen 3d rather than offered: it carries encryption secrets across and needs
-the crypto stack these screens do not load.
+Screen 1's secondary "pair with my other device" link waits on the
+device-pairing flow and is not wired. MSC4108 sign-in by QR from another Matrix
+client is named on screen 3d rather than offered: it carries encryption secrets
+across and needs the crypto stack these screens do not load. Messagr pairing is
+shown on the dashboard as unavailable in v0.1, which it is.

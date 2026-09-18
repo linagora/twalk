@@ -193,6 +193,12 @@ export async function startBridgeStack() {
 			GATEWAY_HOMESERVER_FEDERATION_URL: synapseUrl,
 			GATEWAY_REGISTRATION_SHARED_SECRET: REGISTRATION_SECRET,
 			GATEWAY_SENSOR_USER_ID: `@sensor:${SERVER_NAME}`,
+			// The consent endpoints answer `503 consent_not_configured`
+			// without a bus, and ticket #69 writes a consent decision on the
+			// `assistant` persona — which its journey then reads back off
+			// NATS, because "the UI said so" is not evidence that the
+			// decision left the Gateway (ADR 0013).
+			GATEWAY_NATS_URL: `nats://127.0.0.1:${NATS_PORT}`,
 			GATEWAY_BRIDGES: BRIDGES.map((bridge) => bridge.bridgeId).join(','),
 			...bridgeEnvironment,
 			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'
