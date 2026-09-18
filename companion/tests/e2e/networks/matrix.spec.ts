@@ -134,6 +134,55 @@ test('asking again about a room the Sensor is already in is not an error', async
 	}
 });
 
+test('an SSO-only homeserver gets its provider’s own button and no password form', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// The owner's own deployment answers exactly this: three flows, no
+	// password. Only the flow listing is stubbed — the rest of the screen is
+	// the real one, and a homeserver with an identity provider is not
+	// something the test stack can be made into.
+	await page.route(`${stack!.synapseUrl}/_matrix/client/v3/login`, async (route) => {
+		if (route.request().method() !== 'GET') {
+			await route.continue();
+			return;
+		}
+		await route.fulfill({
+			json: {
+				flows: [
+					{
+						type: 'm.login.sso',
+						identity_providers: [{ id: 'oidc-twake', name: 'Connect with Twake' }]
+					},
+					{ type: 'm.login.token' },
+					{ type: 'm.login.application_service' }
+				]
+			}
+		});
+	});
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill(stack!.synapseUrl);
+	await page.getByTestId('matrix-homeserver').blur();
+
+	// The provider's own name, and its id in the redirect so the homeserver's
+	// chooser page is skipped.
+	const button = page.getByTestId('matrix-sso-oidc-twake');
+	await expect(button).toBeVisible();
+	await expect(button).toHaveText(/Connect with Twake/);
+
+	// No password form, no generic SSO button, and nothing that reads as
+	// broken for their absence.
+	await expect(page.getByTestId('matrix-username')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-password')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-sso')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-no-flow')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-problem')).toHaveCount(0);
+});
+
 test('a refused sign-in says which of the homeserver’s refusals it was', async ({
 	context,
 	page,

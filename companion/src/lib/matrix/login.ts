@@ -25,10 +25,25 @@
 
 import type { MatrixSession } from '$lib/crypto/bootstrap';
 
+/**
+ * One identity provider a homeserver's SSO flow advertises.
+ *
+ * Worth having rather than a generic "Sign in with SSO": a user recognises
+ * *their* identity provider by its own name, and the spec's redirect takes the
+ * provider's id when one is known, which skips the homeserver's own chooser
+ * page for a deployment that has exactly one.
+ */
+export interface IdentityProvider {
+	readonly id: string;
+	readonly name: string;
+}
+
 /** What a homeserver says it accepts. */
 export interface LoginFlows {
 	readonly password: boolean;
 	readonly sso: boolean;
+	/** The providers the SSO flow advertises; empty when it advertises none. */
+	readonly identityProviders: readonly IdentityProvider[];
 	/** Every flow type the homeserver listed, for the screen to be honest about. */
 	readonly types: readonly string[];
 }
@@ -71,8 +86,38 @@ export function readFlows(document: unknown): LoginFlows {
 	return {
 		password: types.includes('m.login.password'),
 		sso: types.includes('m.login.sso'),
+		identityProviders: providersOf(flows),
 		types
 	};
+}
+
+/** `identity_providers` of the `m.login.sso` flow, when it lists any. */
+function providersOf(flows: readonly unknown[]): IdentityProvider[] {
+	for (const flow of flows) {
+		if (flow === null || typeof flow !== 'object') {
+			continue;
+		}
+		const record = flow as Record<string, unknown>;
+		if (record['type'] !== 'm.login.sso') {
+			continue;
+		}
+		const listed = record['identity_providers'];
+		if (!Array.isArray(listed)) {
+			continue;
+		}
+		return listed.flatMap((entry): IdentityProvider[] => {
+			if (entry === null || typeof entry !== 'object') {
+				return [];
+			}
+			const provider = entry as Record<string, unknown>;
+			const id = provider['id'];
+			if (typeof id !== 'string' || id === '') {
+				return [];
+			}
+			return [{ id, name: typeof provider['name'] === 'string' && provider['name'] !== '' ? provider['name'] : id }];
+		});
+	}
+	return [];
 }
 
 export async function loginFlows(baseUrl: string, fetchImpl?: typeof fetch): Promise<LoginFlows> {
@@ -95,9 +140,14 @@ export async function loginFlows(baseUrl: string, fetchImpl?: typeof fetch): Pro
  * `redirectUrl` is this screen's own address, which the homeserver appends a
  * `loginToken` to. It is sent without a query of its own so that the
  * homeserver's append is unambiguous.
+ *
+ * `idpId`, when the homeserver advertised one, addresses that provider
+ * directly (`/redirect/{idpId}`) instead of the homeserver's own chooser page
+ * — one screen fewer for a deployment with a single provider.
  */
-export function ssoRedirectUrl(baseUrl: string, redirectUrl: string): string {
-	return `${baseUrl}/_matrix/client/v3/login/sso/redirect?redirectUrl=${encodeURIComponent(redirectUrl)}`;
+export function ssoRedirectUrl(baseUrl: string, redirectUrl: string, idpId?: string): string {
+	const provider = idpId === undefined || idpId === '' ? '' : `/${encodeURIComponent(idpId)}`;
+	return `${baseUrl}/_matrix/client/v3/login/sso/redirect${provider}?redirectUrl=${encodeURIComponent(redirectUrl)}`;
 }
 
 /** The `loginToken` the homeserver sent the browser back with, if any. */

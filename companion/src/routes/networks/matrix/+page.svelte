@@ -151,8 +151,12 @@
 		}
 	}
 
-	function startSso() {
-		window.location.href = ssoRedirectUrl(baseUrl, `${window.location.origin}/networks/matrix`);
+	function startSso(idpId?: string) {
+		window.location.href = ssoRedirectUrl(
+			baseUrl,
+			`${window.location.origin}/networks/matrix`,
+			idpId
+		);
 	}
 
 	function toggle(roomId: string) {
@@ -238,10 +242,29 @@
 		</div>
 
 		{#if flows !== null && flows.sso}
-			<button class="button button--primary" type="button" onclick={startSso} data-testid="matrix-sso">
-				<Icon name="account" size="dense" />
-				{$t('matrix.sso')}
-			</button>
+			<!-- One button per advertised identity provider, labelled with the
+			     provider's own name: a user recognises "Connect with Twake",
+			     not a generic "single sign-on". A homeserver that advertises
+			     none gets one button and its own chooser page. -->
+			<div class="actions">
+				{#each flows.identityProviders as provider (provider.id)}
+					<button
+						class="button button--primary"
+						type="button"
+						onclick={() => startSso(provider.id)}
+						data-testid={`matrix-sso-${provider.id}`}
+					>
+						<Icon name="account" size="dense" />
+						{provider.name}
+					</button>
+				{/each}
+				{#if flows.identityProviders.length === 0}
+					<button class="button button--primary" type="button" onclick={() => startSso()} data-testid="matrix-sso">
+						<Icon name="account" size="dense" />
+						{$t('matrix.sso')}
+					</button>
+				{/if}
+			</div>
 		{/if}
 
 		{#if flows !== null && flows.password}
