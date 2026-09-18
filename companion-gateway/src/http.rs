@@ -45,6 +45,8 @@ use crate::outbox::Outbox;
 use crate::session::Sessions;
 use crate::session_http;
 use crate::static_files::{Resolution, Resolver};
+use crate::suggestions::Suggestions;
+use crate::suggestions_http;
 use crate::trace;
 
 /// Everything the handlers share. Cheap to clone: one `Arc` each.
@@ -100,6 +102,15 @@ pub struct Gateway {
     /// send" and "that suggestion cannot be approved" are very different
     /// claims and only one of them is about the suggestion.
     approvals: Option<Arc<Approvals>>,
+    /// The suggestion projection ([`crate::suggestions`], ticket #97): the
+    /// read side of the same act — what a persona proposed, for which
+    /// message, and where it stands. `None` on the same terms as
+    /// [`Self::approvals`], because a suggestion lives on the bus and a
+    /// Gateway with no bus has nowhere to read one from; the suggestion
+    /// endpoints then answer `503 suggestions_not_configured` rather than an
+    /// empty list, because "nobody has suggested anything" and "this Gateway
+    /// is not watching" are very different claims.
+    suggestions: Option<Arc<Suggestions>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -121,6 +132,7 @@ impl Gateway {
             statuses: None,
             contacts: None,
             approvals: None,
+            suggestions: None,
             now_unix_seconds,
         }
     }
@@ -221,6 +233,18 @@ impl Gateway {
         self.approvals.clone()
     }
 
+    /// Adds the suggestion projection (ticket #97), the same way. Configured
+    /// with the approval half — same bus, same store, same window — and kept
+    /// as its own half so that a deployment missing one is told which.
+    pub fn with_suggestions(mut self, suggestions: Option<Arc<Suggestions>>) -> Self {
+        self.suggestions = suggestions;
+        self
+    }
+
+    pub fn suggestions(&self) -> Option<Arc<Suggestions>> {
+        self.suggestions.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -283,6 +307,11 @@ pub fn router(gateway: Gateway) -> Router {
         // one suggestion at a time, and refused when the sender's consent is
         // no longer granted at that moment.
         .merge(approval_http::routes())
+        // Reading suggestions (ticket #97): the same merge, the same guard.
+        // The read side of the act above — a projection of the bus, written
+        // nowhere, carrying the persona's own words and none of the message
+        // they answer.
+        .merge(suggestions_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))

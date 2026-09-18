@@ -21,6 +21,7 @@ use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
 use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::static_files::Resolver;
 use twalk_companion_gateway::store::Store;
+use twalk_companion_gateway::suggestions::Suggestions;
 
 /// How long in-flight requests get to finish after SIGTERM before the
 /// process exits anyway. Static files and a JSON document: a request that
@@ -138,7 +139,7 @@ async fn main() -> Result<()> {
     // and one bus: the outbox that publishes decisions (#49) and the
     // projection that consumes the inbound stream to know who is waiting for
     // one (#54).
-    let (consent, contacts, approvals) = match &config.consent {
+    let (consent, contacts, approvals, suggestions) = match &config.consent {
         Some(consent) => {
             let (store, outbox) = open_consent(consent, &metrics)?;
             tokio::spawn(publish_until_shutdown(
@@ -165,7 +166,7 @@ async fn main() -> Result<()> {
                  reply, refused if the sender's consent is no longer granted at that moment"
             );
             let projection = Arc::new(Contacts::new(
-                store,
+                store.clone(),
                 metrics.clone(),
                 consent.owner.clone(),
                 consent.nats_url.clone(),
@@ -179,7 +180,26 @@ async fn main() -> Result<()> {
                  network identifier"
             );
             tokio::spawn(project_until_shutdown(projection.clone()));
-            (Some(outbox), Some(projection), Some(approvals))
+            // Reading suggestions (ticket #97): the read side of the same
+            // act, on the same bus and the same window. Its own half, and
+            // its own bus connection, because a screen that cannot draw and
+            // a reply that did not go out must not queue behind each other.
+            let suggestions = Arc::new(Suggestions::new(
+                store,
+                consent.nats_url.clone(),
+                config.approval_lookup_window,
+                std::time::SystemTime::now,
+            ));
+            info!(
+                lookup_window = config.approval_lookup_window,
+                "suggestion reads are on: GET /api/suggestions projects the bus — nothing is                  stored, and the answer says how far back it looked"
+            );
+            (
+                Some(outbox),
+                Some(projection),
+                Some(approvals),
+                Some(suggestions),
+            )
         }
         None => {
             if config.sign_in.is_some() {
@@ -191,7 +211,7 @@ async fn main() -> Result<()> {
                      is read from the bus and the reply is published on it"
                 );
             }
-            (None, None, None)
+            (None, None, None, None)
         }
     };
 
@@ -324,7 +344,8 @@ async fn main() -> Result<()> {
             .with_snapshots(snapshots)
             .with_statuses(statuses.clone())
             .with_contacts(contacts)
-            .with_approvals(approvals),
+            .with_approvals(approvals)
+            .with_suggestions(suggestions),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming

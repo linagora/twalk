@@ -123,6 +123,19 @@ tags:
       correspondents, and what it refuses to hold is the only thing between
       it and a surveillance log
       (`docs/architecture/security-model.md`, residual risk 5).
+  - name: suggestions
+    description: |
+      Reading what personas have proposed: the listing #100's approval
+      screen draws from, and one suggestion by id.
+
+      It is a **projection of the bus and not a second store**. The
+      suggestion lives in the stream, the Gateway keeps no copy, and the
+      read is therefore bounded — with the bound reported in the answer
+      rather than assumed. And it carries nothing of the message being
+      answered beyond its id and its type: an excerpt belongs to the author
+      of the quoted message rather than to whoever sent the event carrying
+      it (ticket #110, ADR 0012), so this projection never opens an inbound
+      event at all.
   - name: approvals
     description: |
       The act that turns a suggestion into an outbound reply, and the record
@@ -1218,6 +1231,224 @@ paths:
         "503":
           $ref: "#/components/responses/ContactsNotConfigured"
 
+  /api/suggestions:
+    get:
+      operationId: getSuggestions
+      tags: [suggestions]
+      summary: The suggestions personas have proposed, newest first.
+      description: |
+        What #100's approval screen draws: what each persona proposed, for
+        which message, when, whether it has expired and whether it was
+        already approved.
+
+        **This is a projection of the bus, not a second store.** The
+        suggestion lives in the stream; the Gateway keeps no copy of it, so
+        there is nothing here that a replay could disagree with. The cost is
+        that the read is bounded — the same window an approval's lookup uses
+        (`GATEWAY_APPROVAL_LOOKUP_WINDOW`) — and the bound is in the answer
+        rather than in the release notes: `window.reached_start_of_stream`
+        is `false` when older suggestions may exist and were not read.
+
+        **It carries nothing of the message being answered.** A suggestion
+        quotes a contact's message, and an excerpt belongs to the author of
+        the quoted message rather than to whoever sent the event carrying it
+        (ticket #110, ADR 0012) — so a listing that resolved the trigger and
+        showed its text would re-publish a revoked contact's words through a
+        new door. The trigger appears here as its CloudEvents id and type,
+        which is identity and not content. The persona's own proposed text
+        *is* carried: it is the thing being approved.
+
+        Whether a suggestion can actually be approved also depends on the
+        sender's consent **at that moment**, which is not a property of the
+        suggestion and is not reported here. `POST /api/approvals` is the
+        only thing that can answer it, and it answers it as a refusal that
+        names the contact.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: |
+            How many suggestions to answer with, newest first. A screen draws
+            a page; reading further back is the deployment's window, not this
+            parameter.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: |
+            The suggestions in the read window, and what the read covered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestionListing"
+        "400":
+          description: |
+            `malformed_request` - `limit` is not a whole number between 1 and
+            200.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [malformed_request]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "500":
+          description: |
+            `store_unavailable` - the Gateway's own store could not be read,
+            so whether a suggestion was already approved is unknown rather
+            than no. Nothing is answered half-known.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [store_unavailable]
+        "502":
+          description: |
+            `bus_unreachable` - the suggestions are on the bus and the bus
+            did not answer. A `502` and not a `503`: this deployment does
+            read suggestions, and what failed is the thing behind it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [bus_unreachable]
+        "503":
+          $ref: "#/components/responses/SuggestionsNotConfigured"
+
+  /api/suggestions/{suggestion_event_id}:
+    get:
+      operationId: getSuggestion
+      tags: [suggestions]
+      summary: One suggestion, by the id of the event that proposed it.
+      description: |
+        For a screen that was handed an id — a deep link, a reload, the
+        answer to an approval that was refused.
+
+        This is where three situations are three answers, which is the whole
+        reason the route exists beside the listing:
+
+        - `200` with `standing: "expired"` - it is there, and it is no
+          longer approvable (ticket #22's policy).
+        - `200` with `standing: "approved"` - it was approved, and the
+          `approval` member says where the reply landed.
+        - `404 suggestion_not_found` - the whole retained stream was read and
+          no suggestion has this id.
+        - `410 suggestion_out_of_reach` - the bounded read gave up first, so
+          it may exist further back than this Gateway looks.
+
+        Collapsing any two of those into one signal is the defect this
+        project has spent eight incidents on. They are the same codes and the
+        same statuses `POST /api/approvals` answers with, because they are
+        the same facts about the same bounded read.
+      parameters:
+        - $ref: "#/components/parameters/suggestionEventId"
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The suggestion, and where it stands.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Suggestion"
+        "400":
+          description: |
+            `malformed_request` - the path names something that is not a
+            contract event id (64 lowercase hex characters).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [malformed_request]
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          description: |
+            `suggestion_not_found` - the whole retained stream was read and
+            no suggestion has this id. Not the same answer as the one below.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [suggestion_not_found]
+        "409":
+          description: |
+            `suggestion_unreadable` - the suggestion is on the bus and this
+            build cannot read it: a network, a consent state or a content
+            type it does not know. "I found it and do not understand it" is
+            not "it is not there", so it is neither a `404` nor a silence. In
+            a listing the same suggestion is counted under `unreadable`
+            instead, because one bad message must not blank a screen.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [suggestion_unreadable]
+        "410":
+          description: |
+            `suggestion_out_of_reach` - the read is bounded
+            (`GATEWAY_APPROVAL_LOOKUP_WINDOW`) and the bound was reached
+            before the stream's first retained message. The suggestion may
+            exist, further back than the Gateway looks; `detail` names the
+            variable that widens the search.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [suggestion_out_of_reach]
+        "500":
+          description: |
+            `store_unavailable` - the Gateway's own store could not be read,
+            so whether this suggestion was already approved is unknown.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [store_unavailable]
+        "502":
+          description: |
+            `bus_unreachable` - the suggestion is on the bus and the bus did
+            not answer.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [bus_unreachable]
+        "503":
+          $ref: "#/components/responses/SuggestionsNotConfigured"
+
   /api/approvals:
     post:
       operationId: approveSuggestion
@@ -2208,8 +2439,10 @@ components:
       in: path
       required: true
       description: |
-        The CloudEvents id of the `persona.suggest.produced` event that was
-        approved: 64 lowercase hex characters, the contract's own id shape.
+        The CloudEvents id of a `persona.suggest.produced` event: 64
+        lowercase hex characters, the contract's own id shape. The same
+        parameter names the suggestion being read (`GET /api/suggestions/{id}`)
+        and the one whose approval is being asked about.
       schema:
         type: string
         pattern: "^[a-f0-9]{64}$"
@@ -2379,6 +2612,20 @@ components:
               - properties:
                   error:
                     enum: [approvals_not_configured]
+    SuggestionsNotConfigured:
+      description: |
+        This deployment reads no suggestions: `GATEWAY_NATS_URL` is unset, so
+        there is no bus to project. An empty list would claim that no persona
+        has proposed anything, which is a very different statement from "this
+        Gateway is not watching"; `detail` names the variable.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/Error"
+              - properties:
+                  error:
+                    enum: [suggestions_not_configured]
     ConsentStoreUnavailable:
       description: |
         The consent journal (SQLite, the record of truth for consent)
@@ -2547,6 +2794,213 @@ components:
           type: [string, "null"]
           description: |
             When the bus acknowledged it. `null` on the same terms.
+
+    SuggestionTrigger:
+      type: object
+      description: |
+        The message a suggestion answers, **by identity alone**.
+
+        There is no member here for its text, its sender, its room or an
+        excerpt of what it was itself quoting, and there will not be one. An
+        excerpt belongs to the author of the quoted message rather than to
+        whoever sent the event carrying it, and a listing that re-published a
+        revoked contact's words would be ticket #110's defect one layer up
+        (ADR 0012). The enforcement is not this schema: the Gateway's
+        projection never opens an inbound event at all.
+      required: [event_id, event_type]
+      additionalProperties: false
+      properties:
+        event_id:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: The CloudEvents id of the event the suggestion replies to.
+        event_type:
+          type: string
+          description: |
+            Its CloudEvents type, e.g.
+            `fr.linagora.twalk.inbound.message.received.v1`.
+
+    Suggestion:
+      type: object
+      description: |
+        One suggestion as it stands on the bus right now. The same shape from
+        `GET /api/suggestions` and from `GET /api/suggestions/{id}`, so a
+        client renders one thing.
+      required:
+        [
+          event_id,
+          source,
+          persona_id,
+          network,
+          consent,
+          produced_at,
+          expires_at,
+          attempt,
+          standing,
+          trigger,
+          suggestion,
+          stream_sequence,
+          approval,
+        ]
+      additionalProperties: false
+      properties:
+        event_id:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: |
+            The CloudEvents id of the `persona.suggest.produced.v1`. This is
+            what `POST /api/approvals` takes as `suggestion_event_id`.
+        source:
+          type: string
+          description: |
+            `hermes://<domain>/personas/<persona id>` — the persona that
+            proposed it, and the `source` the approved reply will carry
+            (ADR 0022).
+        persona_id:
+          type: string
+          description: The persona that proposed it.
+        network:
+          type: string
+          enum: [whatsapp, telegram, signal, discord, sms, matrix]
+          description: The network the message it answers arrived on.
+        consent:
+          type: string
+          enum: [granted, pending, revoked]
+          description: |
+            The consent label the trigger carried **when the Sensor observed
+            it**. An audit fact about the past, and never the current state:
+            consent can have been revoked since, which is exactly why
+            `POST /api/approvals` re-reads it rather than trusting this.
+        produced_at:
+          type: string
+          format: date-time
+          description: When the persona produced the suggestion.
+        expires_at:
+          type: [string, "null"]
+          description: |
+            When it goes stale (ticket #22). `null` when the persona set
+            none, which the contract allows and the first-party SDK never
+            does — a suggestion with no expiry can be approved at any later
+            date.
+        attempt:
+          type: [integer, "null"]
+          description: |
+            Which suggestion this is for that trigger, starting at 1. Several
+            may exist for one message; each attempt has its own id.
+        standing:
+          type: string
+          enum: [approvable, expired, approved]
+          description: |
+            Where this suggestion stands, as far as approving it goes.
+
+            - `approvable` - nothing about the suggestion itself stops it.
+            - `expired` - its `expires_at` has passed. Still readable, no
+              longer approvable.
+            - `approved` - this Gateway recorded an approval of it, and
+              `approval` says where the reply landed.
+
+            A suggestion that does not exist is not a fourth value here: it
+            is `404` from `GET /api/suggestions/{id}` and an absence from the
+            listing, so a screen cannot confuse "gone stale" with "never
+            was". Nor is the sender's consent folded in: that is a different
+            fact about a different subject, read at the moment of approval.
+        trigger:
+          $ref: "#/components/schemas/SuggestionTrigger"
+        suggestion:
+          type: object
+          description: |
+            What the persona proposed — the text the screen draws and the
+            user approves, edits or refuses. It is the persona's own words,
+            which is why it is here when the quoted message's are not.
+          required: [body, format]
+          additionalProperties: false
+          properties:
+            body:
+              type: string
+              description: The suggested reply in its canonical text form.
+            format:
+              type: string
+              enum: [text/plain, text/markdown, text/html]
+              description: Content type of the body.
+        stream_sequence:
+          type: integer
+          description: Where on the bus this suggestion was found.
+        approval:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/Approval"
+          description: |
+            The approval this Gateway recorded, or `null` when there is none.
+            Its own `publication` member says whether the reply reached the
+            bus, which is the answer to "did it actually go out?" — the same
+            document `GET /api/approvals/{id}` answers with.
+
+    SuggestionReadWindow:
+      type: object
+      description: |
+        The stretch of the stream an answer was computed from.
+
+        The bus has no index from a CloudEvents id to a stream position, so
+        finding suggestions means reading the stream, so the read is bounded.
+        A bound nobody can see is a bound that lies, which is why it is here
+        and not only in the configuration.
+      required:
+        [from_sequence, to_sequence, sequences, reached_start_of_stream]
+      additionalProperties: false
+      properties:
+        from_sequence:
+          type: integer
+          description: |
+            The first stream position read. `0` when the stream is empty.
+        to_sequence:
+          type: integer
+          description: |
+            The last, which is the stream's head at the moment of the read.
+            `0` when the stream is empty.
+        sequences:
+          type: integer
+          description: |
+            The configured width of the read
+            (`GATEWAY_APPROVAL_LOOKUP_WINDOW`), shared with the approval
+            lookup because it is the same bus and the same question.
+        reached_start_of_stream:
+          type: boolean
+          description: |
+            `true` when the read began at the stream's first retained
+            message, so nothing older exists to have been missed. `false`
+            means there may be older suggestions this Gateway did not read —
+            a fact about this answer, not about the bus.
+
+    SuggestionListing:
+      type: object
+      description: |
+        The suggestions in the read window, newest first, and what the read
+        covered.
+      required: [suggestions, window, truncated, unreadable]
+      additionalProperties: false
+      properties:
+        suggestions:
+          type: array
+          description: Newest first.
+          items:
+            $ref: "#/components/schemas/Suggestion"
+        window:
+          $ref: "#/components/schemas/SuggestionReadWindow"
+        truncated:
+          type: boolean
+          description: |
+            `true` when `limit` cut the list: more suggestions were found
+            inside the window than were answered with. Distinct from
+            `window.reached_start_of_stream`, which is about the bus rather
+            than about the request.
+        unreadable:
+          type: integer
+          description: |
+            Suggestions found in the window that this build could not read —
+            an unknown network, an unknown consent state, a content type the
+            contract does not name. Counted rather than dropped in silence,
+            so a screen missing a row has somewhere to look. A single read of
+            one of these answers `409 suggestion_unreadable` instead.
 
     CreateAccountRequest:
       type: object
