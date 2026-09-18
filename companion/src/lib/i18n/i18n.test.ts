@@ -61,7 +61,9 @@ describe('the catalogues', () => {
 			seconds: 20,
 			rooms: 3,
 			sensor: '@sensor:example.com',
-			user: '@you:example.com'
+			user: '@you:example.com',
+			names: '__Secure-1PSID, __Secure-1PSIDTS',
+			emoji: '🐢'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();

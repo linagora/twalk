@@ -42,6 +42,7 @@ const COOKIES_FLOW = 'cookies';
 const PHONE_FLOW = 'phone';
 const QR_STEP = 'fi.mau.stub.login.qr';
 const COOKIES_STEP = 'fi.mau.stub.login.cookies';
+const EMOJI_STEP = 'fi.mau.stub.login.emoji';
 const PHONE_STEP = 'fi.mau.stub.login.phone';
 
 function freshBridge() {
@@ -319,6 +320,19 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 			});
 			if (stepType === 'display_and_wait') {
 				await heldStep(bridge, processId, response);
+				return;
+			}
+			// The SMS preview path: cookies are answered with the emoji pairing
+			// step, which is the same blocking step with a different payload
+			// type, and mautrix-gmessages really does answer that way.
+			if (stepType === 'cookies') {
+				json(response, 200, {
+					login_process_id: processId,
+					type: 'display_and_wait',
+					step_id: EMOJI_STEP,
+					instructions: 'Check that this emoji matches the one on your phone',
+					display_and_wait: { type: 'emoji', data: '🐢', can_cancel: true }
+				});
 				return;
 			}
 			json(response, 200, completion(bridge, processId, `stub-login-${processId}`));
