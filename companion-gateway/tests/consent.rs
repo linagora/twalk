@@ -568,6 +568,94 @@ async fn a_crash_between_commit_and_publish_publishes_exactly_once_on_restart() 
 }
 
 #[tokio::test]
+async fn activating_a_persona_is_a_decision_on_this_same_write_path() -> Result<()> {
+    // ADR 0013: activating or pausing a persona *is* a consent decision, on
+    // the same journal and the same bus subject, with `scope.networks` naming
+    // the networks that persona may read. The Companion's screen 4 writes
+    // exactly this (#69), and Hermes learns that a persona is active by
+    // reading the event off the bus (#60) — there is no control API to add.
+    let fixture = Fixture::start("persona").await?;
+    // Unique to the run, like every other subject here: one bus is shared by
+    // every suite.
+    let persona = format!(
+        "assistant-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos()
+    );
+
+    let activated = fixture
+        .decide_ok(json!({
+            "subject": { "type": "persona", "id": persona },
+            "new_state": "granted",
+            "scope": { "networks": ["whatsapp", "signal"] }
+        }))
+        .await?;
+    assert_eq!(activated["old_state"].as_str(), Some("unset"), "{activated}");
+    // Sorted, because the scope is part of the event's deterministic id.
+    assert_eq!(activated["scope"]["networks"], json!(["signal", "whatsapp"]));
+    let granted_id = event_id(&activated)?;
+
+    let event = &fixture.wait_for_published(&[&granted_id]).await?[0].payload;
+    validate_against_contract(event, "consent.state.changed")?;
+    assert_eq!(
+        event["data"]["subject"],
+        json!({"type": "persona", "id": persona})
+    );
+    assert_eq!(event["data"]["new_state"].as_str(), Some("granted"));
+    assert_eq!(event["data"]["scope"]["networks"], json!(["signal", "whatsapp"]));
+
+    // The owner's own read shows it, which is how the dashboard knows which
+    // personas are active and on which networks.
+    let (status, state) = fixture.get("/api/consent/state").await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{state}");
+    let entries: Vec<&Value> = state["entries"]
+        .as_array()
+        .context("the state names its entries")?
+        .iter()
+        .filter(|entry| entry["subject"]["id"].as_str() == Some(persona.as_str()))
+        .collect();
+    assert_eq!(entries.len(), 2, "one entry per network: {state}");
+    assert!(entries.iter().all(|entry| entry["state"] == "granted"));
+
+    // And the consumer snapshot leaves it out: a persona is not consent state
+    // a Sensor labels senders by (ticket #50).
+    let snapshot = reqwest::Client::new()
+        .get(format!("{}/api/consent/snapshot", fixture.base))
+        .header("authorization", format!("Bearer {}", harness::SERVICE_TOKEN))
+        .send()
+        .await
+        .context("the snapshot did not answer")?
+        .json::<Value>()
+        .await?;
+    assert!(
+        !snapshot["entries"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|entry| entry["subject"]["type"] == "persona"),
+        "no persona reaches the snapshot: {snapshot}"
+    );
+
+    // Pausing it is the same call with `revoked`. It is starved, not stopped:
+    // nothing here manages a process, and nothing can.
+    let paused = fixture
+        .decide_ok(json!({
+            "subject": { "type": "persona", "id": persona },
+            "new_state": "revoked",
+            "scope": { "networks": ["whatsapp", "signal"] }
+        }))
+        .await?;
+    assert_eq!(paused["old_state"].as_str(), Some("granted"), "{paused}");
+    let paused_event = &fixture.wait_for_published(&[&event_id(&paused)?]).await?[0].payload;
+    assert_eq!(paused_event["data"]["new_state"].as_str(), Some("revoked"));
+
+    fixture.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_write_api_refuses_a_caller_without_a_device_token() -> Result<()> {
     let fixture = Fixture::start("unauthenticated").await?;
     let subject = contact("unauthenticated");
@@ -627,13 +715,13 @@ async fn the_write_api_refuses_what_the_contract_does_not_allow() -> Result<()> 
 
     for (what, body, expected) in [
         (
-            "a persona subject, which is #60's to record",
+            "a subject type the contract does not have",
             json!({
-                "subject": { "type": "persona", "id": "assistant" },
+                "subject": { "type": "device", "id": "assistant" },
                 "new_state": "granted",
                 "scope": { "networks": ["whatsapp"] }
             }),
-            "unsupported_subject_type",
+            "unknown_value",
         ),
         (
             "a network subject whose scope is not its own network",
