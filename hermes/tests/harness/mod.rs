@@ -66,6 +66,13 @@ pub const LLM_API_KEY: &str = "test-only-llm-key";
 /// halves in the request the stub actually received.
 pub const LLM_PARAMS: &str = r#"{"top_p": 0.9, "temperature": null}"#;
 
+/// The suggestion policy's default window, in seconds: how long a
+/// suggestion stays approvable when the operator has named no window of
+/// their own (`sdk/python/twalk_sdk/policy.py`). Restated here rather than
+/// read from the SDK, because a test that took the persona's own constant
+/// would agree with it whatever it became.
+pub const DEFAULT_SUGGESTION_TTL_SECONDS: i64 = 3600;
+
 pub const INBOUND_TYPE: &str = "fr.linagora.twalk.inbound.message.received.v1";
 pub const OUTBOUND_TYPE: &str = "fr.linagora.twalk.outbound.message.sent.v1";
 pub const THINKING_TYPE: &str = "fr.linagora.twalk.persona.thinking.emitted.v1";
@@ -192,7 +199,30 @@ impl PersonaRun {
     /// Brings up the persona: an isolated stream and subject prefix, a stub
     /// LLM answering `canned_reply`, and the container, waited for until it
     /// reports itself ready.
+    ///
+    /// The suggestion window is left unset, so the persona runs on the
+    /// policy's own default — which is what a deployment that configured
+    /// nothing gets.
     pub async fn start(test_name: &str, canned_reply: &str) -> Result<Self> {
+        Self::start_with(test_name, canned_reply, None).await
+    }
+
+    /// [`start`](Self::start) with the operator's suggestion window named
+    /// explicitly, in seconds: the expiry is configuration, so a test has
+    /// to be able to set it rather than only observe the default.
+    pub async fn start_with_suggestion_ttl(
+        test_name: &str,
+        canned_reply: &str,
+        ttl_seconds: i64,
+    ) -> Result<Self> {
+        Self::start_with(test_name, canned_reply, Some(ttl_seconds)).await
+    }
+
+    async fn start_with(
+        test_name: &str,
+        canned_reply: &str,
+        ttl_seconds: Option<i64>,
+    ) -> Result<Self> {
         ensure_stack().await?;
         ensure_image().await?;
 
@@ -218,6 +248,12 @@ impl PersonaRun {
                 ("TWALK_TEST_PERSONA_MODEL", MODEL.to_owned()),
                 ("TWALK_TEST_PERSONA_LLM_KEY", LLM_API_KEY.to_owned()),
                 ("TWALK_TEST_PERSONA_LLM_PARAMS", LLM_PARAMS.to_owned()),
+                (
+                    "TWALK_TEST_PERSONA_SUGGESTION_TTL",
+                    // Empty is how compose passes on "the operator named no
+                    // window", which is the case the default has to cover.
+                    ttl_seconds.map(|ttl| ttl.to_string()).unwrap_or_default(),
+                ),
             ],
         );
         let run = PersonaRun {
@@ -287,6 +323,19 @@ impl PersonaRun {
         self.bus
             .publish_event(&self.subject(INBOUND_TYPE), event)
             .await
+    }
+
+    /// Publishes an inbound event **again**, without the `Nats-Msg-Id` the
+    /// Sensor sets on a first publish.
+    ///
+    /// That header is what makes the bus collapse a producer's replay, so
+    /// leaving it off is the only way a test can put the *consumer's* own
+    /// at-least-once path under the persona's process boundary: the stream
+    /// stores the same CloudEvent twice and the persona is delivered it
+    /// twice, exactly as it would be after a crash between processing and
+    /// acking.
+    pub async fn redeliver_inbound(&self, event: &Value) -> Result<()> {
+        self.bus.publish(&self.subject(INBOUND_TYPE), event).await
     }
 
     /// Publishes an event onto the subject its **own type** maps to, the way

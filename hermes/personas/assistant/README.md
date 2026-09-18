@@ -11,6 +11,8 @@ What is the persona's own judgement, and therefore lives here:
 - when to stay quiet: v0.1 answers text, so a message with no text is skipped without a suggestion (the `thinking` event still says the persona started, so the activity is visible);
 - the sampling: a low temperature, because the same message should get the same draft on a retry.
 
+What is *not* the persona's own judgement, and therefore lives in the SDK: how long a suggestion stays approvable. That window is the operator's (`TWALK_SUGGESTION_TTL_SECONDS`, an hour by default) and it runs from when the suggestion was produced, not from the message it answers — a persona reads the messages that arrived before it was activated (ADR 0013), so a window keyed off the trigger would hand a new user a screen of expired drafts. The attempt counter is the SDK's for the same reason: a trigger the bus redelivers is the same suggestion, keyed the same way, and never a second draft of one message.
+
 ## Running it
 
 It ships as a container image — the SDK and its dependencies install inside, since the host has no pip (PEP 668) and a persona is a separate process anyway:
