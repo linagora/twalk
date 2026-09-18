@@ -12,6 +12,13 @@
 	    says the list is unknown and leaves the cards tappable, because the
 	    screen behind them handles a missing bridge on its own.
 
+	And it says *which* kind of "could not answer" it was (#111). This screen
+	is where the conflation was caught live: `GET /api/bridges` answered `401`
+	in zero milliseconds — the session had expired — and the card told the
+	owner their Twalk server could not be reached. It was reached. It refused.
+	The two are fixed in entirely different places, so `$lib/api/trouble.ts`
+	tells them apart and the copy follows.
+
 	`GET /api/bridges` reads configuration and the Gateway's own memory: it
 	contacts no bridge, so this screen draws while every bridge is down.
 -->
@@ -19,20 +26,24 @@
 	import { onMount } from 'svelte';
 
 	import { gateway } from '$lib/api/client';
+	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import { gridFor, looksLikeIos, type BridgeRow, type CardState } from '$lib/networks/catalogue';
 
 	let bridges = $state<BridgeRow[]>([]);
 	let bridgesKnown = $state(false);
+	/** Why the list is unknown, when it is. */
+	let bridgesTrouble = $state<ApiTrouble | null>(null);
 	let loaded = $state(false);
 	let ios = $state(false);
 
 	onMount(async () => {
 		ios = looksLikeIos(navigator.userAgent, navigator.maxTouchPoints, navigator.platform);
-		const listed = await gateway.GET('/api/bridges');
-		bridgesKnown = listed.error === undefined;
-		bridges = listed.data?.bridges ?? [];
+		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		bridgesKnown = listed !== null && listed.error === undefined;
+		bridgesTrouble = bridgesKnown ? null : troubleOf(listed);
+		bridges = listed?.data?.bridges ?? [];
 		loaded = true;
 	});
 
@@ -67,8 +78,20 @@
 	</header>
 
 	{#if loaded && !bridgesKnown}
-		<p class="card card--warning small" role="status" data-testid="bridges-unknown">
-			{$t('networks.unreachable')}
+		<p
+			class="card card--warning small"
+			role="status"
+			data-testid="bridges-unknown"
+			data-trouble={bridgesTrouble}
+		>
+			{#if bridgesTrouble === 'session-refused'}
+				{$t('api.trouble.sessionRefused')}
+			{:else if bridgesTrouble === 'refused'}
+				{$t('api.trouble.refused')}
+			{:else}
+				{$t('api.trouble.unreachable')}
+			{/if}
+			{$t('networks.unknownList')}
 		</p>
 	{/if}
 

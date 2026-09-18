@@ -20,13 +20,24 @@
 
 	import CapabilityGate from '$lib/components/CapabilityGate.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
+	import SessionExpired from '$lib/components/SessionExpired.svelte';
 	import TabElsewhere from '$lib/components/TabElsewhere.svelte';
 	import VersionBanner from '$lib/components/VersionBanner.svelte';
 	import { boot, startBoot } from '$lib/boot';
 	import { locale, t } from '$lib/i18n';
+	import { session } from '$lib/session/state';
 	import type { TabRole } from '$lib/tabs/lock';
 
 	let { children } = $props();
+
+	/**
+	 * The session-expired dialog lives here, over every screen, because #111
+	 * asks for the `401` to be handled **once**: `$lib/api/client.ts` repairs
+	 * what a refresh can repair, and what it cannot becomes this. No screen
+	 * implements it, and the screen underneath is never unmounted — the way out
+	 * is `/signin?next=<this path>`, which brings the user back here.
+	 */
+	const sessionState = $derived($session);
 
 	/**
 	 * Which tab this is (ADR 0014). `electing` until the Web Lock answers,
@@ -111,6 +122,10 @@
 		{@render children()}
 	{/if}
 </main>
+
+{#if sessionState.kind === 'expired'}
+	<SessionExpired status={sessionState} />
+{/if}
 
 <style>
 	.skip {

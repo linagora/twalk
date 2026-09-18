@@ -29,7 +29,7 @@
 // stack is shared with the Rust suites.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -71,6 +71,8 @@ const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`;
 export const STACK_FILE = join(here, '.real-stack.json');
 /** The same, for the bridge journeys' own Gateway (ticket #68). */
 export const BRIDGE_STACK_FILE = join(here, '.bridge-stack.json');
+/** And for the session journeys' own Gateway (ticket #111). */
+export const SESSION_STACK_FILE = join(here, '.session-stack.json');
 
 /**
  * Brings the stack up and returns what the tests need to know. Idempotent
@@ -177,7 +179,7 @@ export async function startBridgeStack() {
 		await composeUp();
 	}
 	await waitFor(`${synapseUrl}/health`, 'Synapse', 300_000);
-	provisionBots();
+	await withLock('provision-bots', () => provisionBots());
 
 	const { startStubBridge, STUB_PROVISIONING_SECRET } = await import('./stub-bridge.mjs');
 	const stub = await startStubBridge(
@@ -268,6 +270,136 @@ export async function startBridgeStack() {
 }
 
 /**
+ * A third Gateway, for the **session** journeys of ticket #111: the refresh,
+ * the central `401` repair, and the session-expired state.
+ *
+ * ## Why a Gateway of its own, and why its token lives five seconds
+ *
+ * The defect is a credential expiring under a working screen. Waiting fifteen
+ * minutes for that in a browser test is not an option, and the ticket says so:
+ * expire the token **at the Gateway** instead. `GATEWAY_DEVICE_TOKEN_TTL` is
+ * the operator's knob for exactly that, and five seconds is a fifteen-minute
+ * afternoon in miniature — the same code path, the same rotation, the same
+ * `expires_in`.
+ *
+ * It cannot be the bridge journeys' Gateway because that TTL is deployment-wide:
+ * every other spec on that origin would spend its life mid-expiry, and #68's
+ * assertions would start measuring this ticket's behaviour instead of their own.
+ * The refresh token keeps its default thirty days, so *device token dead,
+ * refresh token alive* — the case the whole mechanism exists for — is simply
+ * what this Gateway is, five seconds after any sign-in.
+ *
+ * The owner is `bot_alpha`, as the bridge stack's is: signing in needs an
+ * account that already exists. The bridges are stubbed the same way, so that a
+ * connected network can be connected here and still read as connected after a
+ * session has died and been signed in again.
+ */
+export async function startSessionStack() {
+	const synapseUrl = `http://127.0.0.1:${SYNAPSE_PORT}`;
+
+	if (!(await answers(`${synapseUrl}/health`))) {
+		await composeUp();
+	}
+	await waitFor(`${synapseUrl}/health`, 'Synapse', 300_000);
+	await withLock('provision-bots', () => provisionBots());
+
+	const { startStubBridge, STUB_PROVISIONING_SECRET } = await import('./stub-bridge.mjs');
+	const stub = await startStubBridge(
+		BRIDGES.map((bridge) => bridge.bridgeId),
+		{
+			signIn: async (deviceName) => signInOwner(synapseUrl, gatewayOrigin, deviceName),
+			matrixUser: async (localpart) => {
+				const user = await matrixLogin(synapseUrl, localpart ?? OWNER_LOCALPART);
+				return {
+					user_id: user.user_id,
+					access_token: user.access_token,
+					homeserver: synapseUrl,
+					sensor: `@sensor:${SERVER_NAME}`
+				};
+			}
+		}
+	);
+
+	const bridgeEnvironment = {};
+	for (const { bridgeId, network } of BRIDGES) {
+		const slug = bridgeId.toUpperCase().replace(/[^A-Z0-9]/gu, '_');
+		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_URL`] = stub.bridgeUrl(bridgeId);
+		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_PROVISIONING_SECRET`] = STUB_PROVISIONING_SECRET;
+		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_NETWORK`] = network;
+	}
+
+	const stateDir = await mkdtemp(join(tmpdir(), 'twalk-companion-session-'));
+	const gatewayPort = await freePort();
+	const gateway = spawn(buildGateway(), [], {
+		env: {
+			...process.env,
+			GATEWAY_LISTEN: `127.0.0.1:${gatewayPort}`,
+			GATEWAY_STATIC_DIR: join(here, '..', 'build'),
+			GATEWAY_STATE_DIR: stateDir,
+			GATEWAY_OWNER: `@${OWNER_LOCALPART}:${SERVER_NAME}`,
+			GATEWAY_HOMESERVER_URL: synapseUrl,
+			GATEWAY_HOMESERVER_FEDERATION_URL: synapseUrl,
+			GATEWAY_REGISTRATION_SHARED_SECRET: REGISTRATION_SECRET,
+			GATEWAY_SENSOR_USER_ID: `@sensor:${SERVER_NAME}`,
+			GATEWAY_NATS_URL: `nats://127.0.0.1:${NATS_PORT}`,
+			GATEWAY_INBOUND_CONSUMER: inboundConsumer('session'),
+			GATEWAY_BRIDGES: BRIDGES.map((bridge) => bridge.bridgeId).join(','),
+			...bridgeEnvironment,
+			// The whole point of this origin. The default is 900, it is correct,
+			// and #111 is explicit that raising it to hide the bug is the one
+			// thing not to do — so here it is lowered instead, to make the same
+			// expiry arrive in a test's lifetime.
+			GATEWAY_DEVICE_TOKEN_TTL: String(SESSION_DEVICE_TOKEN_TTL_SECONDS),
+			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'
+		},
+		stdio: ['ignore', 'inherit', 'inherit']
+	});
+	gateway.on('exit', (code) => {
+		if (code !== 0 && code !== null) {
+			console.error(`the Companion Gateway (session) exited with ${code}`);
+		}
+	});
+
+	const gatewayOrigin = `http://127.0.0.1:${gatewayPort}`;
+	await waitFor(`${gatewayOrigin}/health`, 'the Companion Gateway', 30_000);
+
+	const info = {
+		owner: OWNER_LOCALPART,
+		ownerId: `@${OWNER_LOCALPART}:${SERVER_NAME}`,
+		serverName: SERVER_NAME,
+		domain: `127.0.0.1:${SYNAPSE_PORT}`,
+		synapseUrl,
+		gatewayOrigin,
+		stubOrigin: stub.origin,
+		bridges: BRIDGES,
+		natsPort: NATS_PORT,
+		deviceTokenTtlSeconds: SESSION_DEVICE_TOKEN_TTL_SECONDS
+	};
+	await writeFile(SESSION_STACK_FILE, `${JSON.stringify(info, null, '\t')}\n`);
+
+	process.on('exit', () => gateway.kill('SIGTERM'));
+
+	return {
+		...info,
+		stop: async () => {
+			gateway.kill('SIGTERM');
+			await stub.close();
+			await rm(stateDir, { recursive: true, force: true }).catch(() => {});
+		}
+	};
+}
+
+/**
+ * How long a device token lives on the session origin.
+ *
+ * Five seconds: short enough that a test waits for an expiry rather than a
+ * coffee, and long enough that a page load, its boot refresh and its first
+ * screen's reads are not racing the clock. Two seconds was tried and is not:
+ * a browser can spend that much of it fetching the app.
+ */
+const SESSION_DEVICE_TOKEN_TTL_SECONDS = 5;
+
+/**
  * The bridges the networks suite configures, and the network each one serves.
  * Three, because screen 3's picker is a join of the catalogue with this list
  * and a screen that only ever saw one bridge would not prove it.
@@ -280,6 +412,41 @@ const BRIDGES = [
 
 /** The shared stack's owner bot for the bridge journeys, and its password scheme. */
 const OWNER_LOCALPART = 'bot_alpha';
+
+/**
+ * Runs `work` with nobody else in this checkout running it.
+ *
+ * Playwright starts every `webServer` at once, and since #111 there are three
+ * of them, each orchestrating a Gateway on the one shared test stack. Bringing
+ * the bots up is the step that does not tolerate company: two registrations of
+ * the same localpart racing is a flake nobody would enjoy debugging. A
+ * directory is the lock because creating one is atomic on every filesystem that
+ * matters.
+ */
+async function withLock(name, work) {
+	const path = join(tmpdir(), `twalk-companion-${name}.lock`);
+	const deadline = Date.now() + 300_000;
+	for (;;) {
+		try {
+			await mkdir(path);
+			break;
+		} catch (error) {
+			if (error.code !== 'EEXIST') {
+				throw error;
+			}
+			if (Date.now() > deadline) {
+				// A lock this old belongs to a run that died. Take it.
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+	}
+	try {
+		return await work();
+	} finally {
+		await rm(path, { recursive: true, force: true }).catch(() => {});
+	}
+}
 
 /** Idempotent: an account that exists is skipped. */
 function provisionBots() {
@@ -341,14 +508,20 @@ async function signInOwner(synapseUrl, gatewayOrigin, deviceName) {
 		body: JSON.stringify({ matrix_openid_token: await token.json(), device_name: deviceName })
 	});
 	const session = await answer.json();
-	const cookie = answer.headers
-		.getSetCookie()
-		.map((value) => value.split(';')[0])
-		.find((pair) => pair.startsWith('twalk_device='));
+	const pairs = answer.headers.getSetCookie().map((value) => value.split(';')[0]);
+	const cookie = pairs.find((pair) => pair.startsWith('twalk_device='));
 	if (cookie === undefined) {
 		throw new Error(`the sign-in set no device cookie: ${answer.status}`);
 	}
-	return { device_token: cookie.slice('twalk_device='.length), session };
+	// The refresh token too, for the session journeys of ticket #111: a browser
+	// holding only the device cookie can never refresh, so a test that set only
+	// that one would be asserting a session the product does not issue.
+	const refresh = pairs.find((pair) => pair.startsWith('twalk_refresh='));
+	return {
+		device_token: cookie.slice('twalk_device='.length),
+		refresh_token: refresh === undefined ? null : refresh.slice('twalk_refresh='.length),
+		session
+	};
 }
 
 async function composeUp() {

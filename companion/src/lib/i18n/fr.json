@@ -216,10 +216,12 @@
 	"networks.skip": "Passer pour l'instant, j'ajouterai mes réseaux plus tard",
 	"networks.footer": "Vous pouvez ajouter ou retirer un réseau à tout moment depuis le tableau de bord.",
 	"networks.loading": "Lecture des réseaux que cette installation peut connecter…",
-	"networks.unreachable": "Votre serveur Twalk n'a pas pu être joint : les réseaux qu'il peut connecter restent inconnus. Les cartes ci-dessous sont celles que Twalk prend en charge.",
+	"networks.unknownList": "Les réseaux qu’il peut connecter sont donc inconnus ; les cartes ci-dessous sont celles que Twalk prend en charge.",
 	"networks.card.iosBlocked": "Nécessite un téléphone Android. iOS ne peut pas alimenter cet aperçu : Google Messages Web lit les SMS depuis un appareil Android.",
 	"networks.card.notConfigured": "Aucune passerelle pour ce réseau n'est configurée sur votre serveur Twalk.",
 	"networks.back": "Retour aux réseaux",
+
+	"networks.bridgesUnreadable.title": "Cet écran n’a pas pu démarrer",
 
 	"networks.noBridge.title": "Ce réseau n'est pas configuré",
 	"networks.noBridge.body": "Votre serveur Twalk n'a pas de passerelle pour {network}. Activez le profil « bridges » de votre installation, puis revenez sur cet écran.",
@@ -395,6 +397,7 @@
 	"persona.scope.matrixHint": "Votre déploiement Twalk ne garde aucune trace des salons dans lesquels vous avez invité le Sensor : le jeton d’accès qui l’a fait a été oublié dès l’invitation envoyée. Cochez cette case si vous avez connecté votre compte Matrix existant.",
 	"persona.scope.none": "Aucun réseau n’est encore connecté. Connectez-en un, et l’assistant aura quelque chose à lire.",
 	"persona.scope.connectFirst": "Connecter un réseau",
+	"persona.scope.unknown": "Twalk n’a pas pu lire quels réseaux ce déploiement a connectés : cet écran ne peut donc pas dire ce que l’assistant serait autorisé à lire. Réessayez plutôt que de l’activer à l’aveugle.",
 
 	"persona.consent.title": "Qui l’assistant peut lire, par défaut",
 	"persona.consent.body": "Chaque contact démarre à « en attente ». L’assistant ne lit rien de quelqu’un tant que vous n’avez pas décidé à son sujet, et aucune règle n’accorde l’accès automatiquement — cette version n’importe aucun carnet d’adresses.",
@@ -510,5 +513,15 @@
 	"done.next.cta": "Connecter un réseau",
 	"done.next.after": "Ensuite : activez votre assistant sur les réseaux que vous avez connectés, et arrivez sur votre tableau de bord.",
 	"done.dashboard": "Aller à mon tableau de bord",
-	"dashboard.chip.noInbox": "Décider à leur sujet un par un n’existe pas dans cette version. Accorder ou révoquer un réseau entier décide pour tous ceux qui y écrivent, d’un coup."
+	"dashboard.chip.noInbox": "Décider à leur sujet un par un n’existe pas dans cette version. Accorder ou révoquer un réseau entier décide pour tous ceux qui y écrivent, d’un coup.",
+
+	"session.expired.title": "Votre session a expiré",
+	"session.expired.body": "Twalk connecte chaque navigateur pour une durée courte à la fois, et celle-ci est écoulée. Reconnectez-vous pour continuer.",
+	"session.expired.bodyFor": "Twalk connecte chaque navigateur pour une durée courte à la fois, et celle-ci est écoulée. Reconnectez-vous en tant que {owner} pour continuer.",
+	"session.expired.stay": "Votre serveur Twalk n’a rien d’anormal et rien n’a été perdu. Vous reviendrez directement sur cet écran, et les réseaux que vous avez connectés le sont toujours.",
+	"session.expired.signIn": "Se reconnecter",
+
+	"api.trouble.unreachable": "Votre serveur Twalk n’a pas pu être joint : rien n’a répondu du tout. Vérifiez qu’il fonctionne, et vérifiez votre connexion.",
+	"api.trouble.sessionRefused": "Votre serveur Twalk a répondu, et il a refusé cette session. Reconnectez-vous pour continuer — rien d’autre ne va mal.",
+	"api.trouble.refused": "Votre serveur Twalk a répondu, mais il n’a pas pu faire cela. Réessayez, et ouvrez le diagnostic si cela persiste."
 }

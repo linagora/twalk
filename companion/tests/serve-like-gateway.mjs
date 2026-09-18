@@ -72,6 +72,13 @@ const REAL_STACK = process.env.TWALK_TEST_REAL_STACK === '1';
  * `playwright.config.ts`.
  */
 const BRIDGE_STACK = process.env.TWALK_TEST_BRIDGE_STACK === '1';
+/**
+ * `TWALK_TEST_SESSION_STACK=1` asks for the session journeys' Gateway instead
+ * (ticket #111): the same owner and the same stub bridges as the bridge stack,
+ * on a deployment whose device token lives five seconds, so a browser test can
+ * watch a credential expire under a working screen.
+ */
+const SESSION_STACK = process.env.TWALK_TEST_SESSION_STACK === '1';
 let gatewayOrigin = process.env.TWALK_TEST_GATEWAY_PROXY ?? null;
 let stubOrigin = process.env.TWALK_TEST_STUB_PROXY ?? null;
 
@@ -367,9 +374,13 @@ const server = createServer((request, response) => {
 // The real stack, when asked for, comes up *before* the origin answers
 // anything: Playwright waits on `/health`, so a server that is listening is a
 // server whose Gateway and Synapse are ready.
-if ((REAL_STACK || BRIDGE_STACK) && gatewayOrigin === null) {
-	const { startBridgeStack, startRealStack } = await import('./real-stack.mjs');
-	const stack = BRIDGE_STACK ? await startBridgeStack() : await startRealStack();
+if ((REAL_STACK || BRIDGE_STACK || SESSION_STACK) && gatewayOrigin === null) {
+	const { startBridgeStack, startRealStack, startSessionStack } = await import('./real-stack.mjs');
+	const stack = SESSION_STACK
+		? await startSessionStack()
+		: BRIDGE_STACK
+			? await startBridgeStack()
+			: await startRealStack();
 	gatewayOrigin = stack.gatewayOrigin;
 	stubOrigin = stack.stubOrigin ?? null;
 	console.log(`the real Gateway answers /api at ${gatewayOrigin}`);

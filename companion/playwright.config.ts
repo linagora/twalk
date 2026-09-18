@@ -32,6 +32,16 @@ const port = Number(process.env.TWALK_TEST_PORT ?? 4319);
 const bridgePort = Number(process.env.TWALK_TEST_BRIDGE_PORT ?? port + 1);
 
 /**
+ * The third origin, for the session journeys of ticket #111.
+ *
+ * A third Gateway because the thing under test is the *deployment's* device
+ * token lifetime: this one issues tokens that live five seconds, so a browser
+ * can be watched losing a session and getting it back. Putting that TTL on the
+ * bridge origin would have every other spec expiring mid-assertion.
+ */
+const sessionPort = Number(process.env.TWALK_TEST_SESSION_PORT ?? port + 2);
+
+/**
  * `TWALK_TEST_REAL_STACK=1` puts a real Companion Gateway and a real Synapse
  * behind the test server (`tests/real-stack.mjs`), which is what the bootstrap
  * journey of ticket #67 needs: cross-signing, secret storage and a key backup
@@ -56,7 +66,7 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
-			testIgnore: ['networks/**', 'dashboard/**'],
+			testIgnore: ['networks/**', 'dashboard/**', 'session/**'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',
@@ -105,12 +115,31 @@ export default defineConfig({
 				viewport: { width: 390, height: 844 },
 				baseURL: `http://127.0.0.1:${bridgePort}`
 			}
+		},
+		{
+			// The session journeys (#111), on their own short-lived-token origin.
+			//
+			// One worker and not parallel, for the same reason as `dashboard`:
+			// one Gateway, one device list, one login per bridge. These tests
+			// revoke devices and complete logins, which is state the next one
+			// would otherwise inherit.
+			name: 'session',
+			testMatch: 'session/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${sessionPort}`
+			}
 		}
 	],
 
-	// One server, run twice when a real stack is wanted: once in front of the
-	// bootstrap Gateway, once in front of the bridge Gateway. Without the
-	// stack there is one static origin and every spec that needs more skips.
+	// One server, run three times when a real stack is wanted: once in front of
+	// the bootstrap Gateway, once in front of the bridge Gateway, once in front
+	// of the session Gateway. Without the stack there is one static origin and
+	// every spec that needs more skips.
 	webServer: realStack
 		? [
 				{
@@ -132,6 +161,18 @@ export default defineConfig({
 					env: {
 						TWALK_TEST_PORT: String(bridgePort),
 						TWALK_TEST_BRIDGE_STACK: '1'
+					},
+					reuseExistingServer: false,
+					timeout: 900_000,
+					stdout: 'pipe',
+					stderr: 'pipe'
+				},
+				{
+					command: 'node tests/serve-like-gateway.mjs',
+					url: `http://127.0.0.1:${sessionPort}/health`,
+					env: {
+						TWALK_TEST_PORT: String(sessionPort),
+						TWALK_TEST_SESSION_STACK: '1'
 					},
 					reuseExistingServer: false,
 					timeout: 900_000,

@@ -159,6 +159,59 @@ memory and fails when the two differ. It runs first in `npm test`.
 is checked against the description and a path or a response member nobody
 described is a compile error.
 
+### The session refreshes itself, and a `401` is repaired once
+
+The device token lives fifteen minutes (`GATEWAY_DEVICE_TOKEN_TTL`, ADR 0011).
+That is correct and is not to be raised: it is the credential that travels on
+every request. What was missing until ticket #111 is the other half of the
+mechanism — the Companion never called `POST /api/session/refresh`, so every
+session died a quarter of an hour after sign-in, on whatever screen the user
+happened to be reading, and the refusal rendered as a spinner that never ended.
+
+Two mechanisms now, and both are needed:
+
+- **the scheduled refresh** (`src/lib/session/refresh.ts`). `expires_in` comes
+  back with every sign-in and every refresh, so the client renews with a fifth
+  of the lifetime still in hand. A user working continuously never meets a
+  failure at all. The boot sequence adopts whatever session the browser already
+  holds by refreshing once — which is also the **only** way a browser can learn
+  its token's lifetime, since the token is an `HttpOnly` cookie and the session
+  document carries no expiry.
+- **the central `401` retry** (`src/lib/api/client.ts`). A timer is a promise a
+  browser does not keep: a backgrounded tab, a laptop closed over lunch, a
+  phone that slept. Every `401` from every call is therefore answered once, in
+  the wrapper around the generated client — refresh, replay the original
+  request, and only if the refresh is refused let the failure through with the
+  session marked *expired*.
+
+One refresh at a time, always: it rotates both tokens and kills the previous
+refresh token immediately, so two racing would destroy each other's
+credential — and the dashboard fires five reads in one `Promise.all`, which
+makes five simultaneous `401`s the ordinary case.
+
+**No screen implements any of this**, and none should. What a screen sees is
+either the answer or a failure that is genuinely terminal. When neither the
+device token nor the refresh token can be saved, `SessionExpired.svelte` is
+rendered by the root layout as a dialog **over** the current screen — which is
+not unmounted — and its way out is `/signin?next=<the current path>` (ticket
+#112), so the sign-in screen brings the user back to where they were. Sending
+them to the first screen instead is how an expired session came to look like a
+broken bridge, and how the owner nearly re-paired a working WhatsApp link.
+
+### "Could not be reached" and "answered, and refused" are different sentences
+
+`$lib/api/trouble.ts` is three words long and exists because conflating those
+two cost a day. `GET /api/bridges` answered `401` in zero milliseconds — the
+session had expired — and screen 3 told the owner their Twalk server could not
+be reached. It had been reached. It had refused. The user goes and looks at
+their firewall for a problem that is a sign-in.
+
+So a failed call is read as one of three things — nothing answered
+(`unreachable`), it answered `401` and the wrapper's refresh could not save the
+session (`session-refused`), or it answered something else (`refused`) — and
+every screen that reports a failed read says which. The retry button is offered
+for the two a retry can help; the third offers signing in.
+
 ### Browser-only code stays out of module scope
 
 Prerendering imports every statically reachable module in **Node**, where
@@ -339,24 +392,30 @@ generation replaces them; nothing on these paths writes to `localStorage` or
 IndexedDB. The one exception is a boolean: whether the user has dismissed a
 screen's disclosure card, which the wireframe asks to remember per device.
 
-### Two origins under `npm run test:e2e:stack`, because there are two owners
+### Three origins under `npm run test:e2e:stack`, because one Gateway cannot be all three
 
 `tests/real-stack.mjs` brings up one compose stack and builds the Gateway once,
-then starts it **twice**:
+then starts it **three times**:
 
 - `startRealStack()` — the bootstrap journey's Gateway, whose owner's account
   does *not* exist, because creating it is what the journey does and the
   Gateway creates this deployment's one account and refuses a second;
 - `startBridgeStack()` — the networks journey's Gateway, whose owner is
   `bot_alpha` (already provisioned on the shared test stack), with the three
-  bridges of `tests/stub-bridge.mjs` configured.
+  bridges of `tests/stub-bridge.mjs` configured;
+- `startSessionStack()` — the session journeys' Gateway (#111), the same owner
+  and the same stub bridges, on a deployment whose **device token lives five
+  seconds**. The ticket asks for the expiry to be arranged at the Gateway
+  rather than waited for, and `GATEWAY_DEVICE_TOKEN_TTL` is the operator's own
+  knob for it. It cannot be the bridge origin's, because that lifetime is
+  deployment-wide and every other spec there would spend its life mid-expiry.
 
-One Gateway cannot be both, which is the whole reason for the second origin.
-Everything else is shared: one orchestrator, one `proxyToGateway` in
-`serve-like-gateway.mjs`, one `TWALK_TEST_REAL_STACK=1` gate. The bridge origin
-also exposes the stub's control surface at `/stub-control/*`, so a browser
-journey drives both sides of a login — the user's and the bridge's — without
-knowing a second port.
+One Gateway cannot be all three, which is the whole reason for the extra
+origins. Everything else is shared: one orchestrator, one `proxyToGateway` in
+`serve-like-gateway.mjs`, one `TWALK_TEST_REAL_STACK=1` gate. The bridge and
+session origins also expose the stub's control surface at `/stub-control/*`, so
+a browser journey drives both sides of a login — the user's and the bridge's —
+without knowing a second port.
 
 The bridge is stubbed for the reason spec #47 gives: a real mautrix-whatsapp
 needs a live WhatsApp account and a human with a phone. Nothing else is stubbed.

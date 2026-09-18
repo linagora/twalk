@@ -95,10 +95,12 @@
 	"networks.skip": "Skip for now, I'll add networks later",
 	"networks.footer": "You can add or remove networks at any time from the dashboard.",
 	"networks.loading": "Reading what this deployment can connect…",
-	"networks.unreachable": "Your Twalk server could not be reached, so the networks it can connect are unknown. The cards below are the ones Twalk supports.",
+	"networks.unknownList": "The networks it can connect are therefore unknown; the cards below are the ones Twalk supports.",
 	"networks.card.iosBlocked": "Needs an Android phone. iOS cannot feed this preview: Google Messages Web reads the SMS from an Android device.",
 	"networks.card.notConfigured": "No bridge for this network is configured on your Twalk server.",
 	"networks.back": "Back to networks",
+
+	"networks.bridgesUnreadable.title": "This screen could not start",
 
 	"networks.noBridge.title": "This network is not configured",
 	"networks.noBridge.body": "Your Twalk server has no bridge for {network}. Turn on the bridges profile of your deployment, then come back to this screen.",
@@ -396,6 +398,7 @@
 	"persona.scope.matrixHint": "Your Twalk deployment keeps no record of the rooms you invited the Sensor into — the access token that did it was forgotten as soon as the invitation was sent. Tick this if you connected your existing Matrix account.",
 	"persona.scope.none": "No network is connected yet. Connect one first, and the assistant will have something to read.",
 	"persona.scope.connectFirst": "Connect a network",
+	"persona.scope.unknown": "Twalk could not read which networks this deployment has connected, so this screen cannot say what the assistant would be allowed to read. Try again rather than activating it blind.",
 
 	"persona.consent.title": "Who the assistant may read, by default",
 	"persona.consent.body": "Every contact starts at pending. The assistant reads nothing from someone until you decide about them, and there is no rule that grants anyone automatically — this version imports no address book.",
@@ -511,5 +514,15 @@
 	"done.next.cta": "Connect a network",
 	"done.next.after": "After that: activate your assistant on the networks you connected, and land on your dashboard.",
 	"done.dashboard": "Go to my dashboard",
-	"dashboard.chip.noInbox": "Deciding about them one by one is not in this version. Granting or revoking a whole network decides for everyone on it at once."
+	"dashboard.chip.noInbox": "Deciding about them one by one is not in this version. Granting or revoking a whole network decides for everyone on it at once.",
+
+	"session.expired.title": "Your session has expired",
+	"session.expired.body": "Twalk signs each browser in for a short while at a time, and this one's turn is over. Sign in again to carry on.",
+	"session.expired.bodyFor": "Twalk signs each browser in for a short while at a time, and this one's turn is over. Sign in again as {owner} to carry on.",
+	"session.expired.stay": "Nothing is wrong with your Twalk server and nothing was lost. You will come straight back to this screen, and the networks you have connected are still connected.",
+	"session.expired.signIn": "Sign in again",
+
+	"api.trouble.unreachable": "Your Twalk server could not be reached: nothing answered at all. Check that it is running, and check your connection.",
+	"api.trouble.sessionRefused": "Your Twalk server answered, and would not accept this session. Sign in again to carry on — nothing else is wrong.",
+	"api.trouble.refused": "Your Twalk server answered, but could not do this. Try again, and open the diagnostics if it persists."
 }
