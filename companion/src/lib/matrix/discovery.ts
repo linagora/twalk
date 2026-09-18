@@ -16,6 +16,18 @@
 // created, that the thing at that domain is a Matrix homeserver and not a
 // parked page.
 //
+// # A server name or an address
+//
+// The value this takes is **what a user typed**, and Matrix's delegation
+// mechanism exists precisely so that what they type can be their server name —
+// `linagora.com`, the half of their own Matrix ID they can recite — rather than
+// the address of the machine behind it. The networks screen asked for a base
+// URL and got a failure for `linagora.com` while `https://matrix.linagora.com`
+// worked, which is the mechanism inverted (#124). So both spellings are
+// accepted here: a bare name is turned into an address the way screen 1 does,
+// and a value that already carries a scheme is taken as the address it is —
+// port, path and all, which `homeserverBaseUrl` alone would drop.
+//
 // `fetch` is a parameter so this module is testable without a browser; the
 // callers pass none and get the global.
 
@@ -49,7 +61,7 @@ const TIMEOUT_MS = 8000;
  */
 export async function discoverHomeserver(domain: string, fetchImpl?: Fetch): Promise<Discovery> {
 	const doFetch = fetchImpl ?? globalThis.fetch.bind(globalThis);
-	const direct = homeserverBaseUrl(domain);
+	const direct = directBaseUrl(domain);
 	const delegated = await readWellKnown(direct, doFetch);
 	const baseUrl = delegated ?? direct;
 
@@ -103,6 +115,31 @@ export async function discoverHomeserver(domain: string, fetchImpl?: Fetch): Pro
 		ok: true,
 		homeserver: { baseUrl, versions, delegated: delegated !== null }
 	};
+}
+
+/**
+ * The address to ask before delegation is consulted: what the user typed, read
+ * as an address when it is one and as a server name when it is not.
+ *
+ * A scheme is the tell. `https://matrix.example.com:8448/synapse` is somebody
+ * naming a homeserver exactly, and every part of it matters;
+ * `matrix.example.com` is a name, and `homeserverBaseUrl` knows how this
+ * project spells one (HTTPS, except on loopback, where a deployment has no
+ * certificate and needs none).
+ */
+export function directBaseUrl(value: string): string {
+	const trimmed = value.trim();
+	if (!/^https?:\/\//i.test(trimmed)) {
+		return homeserverBaseUrl(trimmed);
+	}
+	try {
+		const url = new URL(trimmed);
+		const path = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+		return `${url.origin}${path}`;
+	} catch {
+		// Not a URL after all; let the name spelling have it.
+		return homeserverBaseUrl(trimmed);
+	}
 }
 
 /**

@@ -363,3 +363,89 @@ test('a refused invitation is readable from where the button was pressed', async
 	// And it did not also render at the top, where nobody was looking.
 	await expect(page.getByTestId('matrix-problem')).toHaveCount(0);
 });
+
+test('the homeserver field starts empty, whatever onboarding resolved', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// A browser that has walked the bootstrap journey: it knows the Twalk
+	// domain and the homeserver onboarding resolved. Both are the deployment's
+	// own server, which is the one account this screen is not for — and both
+	// are what used to arrive in the field (#124).
+	await page.addInitScript(() => {
+		window.localStorage.setItem('twalk:domain', 'twalk.localhost:8009');
+		window.localStorage.setItem('twalk:homeserver', 'http://twalk.localhost:8009');
+	});
+
+	await page.goto('/networks/matrix');
+	const field = page.getByTestId('matrix-homeserver');
+	await expect(field).toBeVisible();
+	await expect(field).toHaveValue('');
+
+	// Nothing arrives that could only have come from the deployment, and no
+	// login form is offered for a homeserver nobody named.
+	await expect(page.getByTestId('screen-matrix')).not.toContainText('twalk.localhost');
+	await expect(page.getByTestId('matrix-username')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-password')).toHaveCount(0);
+	await expect(page.getByTestId('matrix-sso')).toHaveCount(0);
+
+	// The shape of what to type is on the screen rather than in the field.
+	await expect(field).toHaveAttribute('placeholder', /\./);
+});
+
+test('a server name is enough: the field follows .well-known delegation', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+
+	// `@mmaudet:linagora.com` is what a person can recite; `linagora.com`
+	// delegates to `matrix.linagora.com`, and the field used to fail on the
+	// first while working on the second (#124). The delegation is stubbed —
+	// the homeserver behind it is the real Synapse, and everything after this
+	// one document is the real journey.
+	await page.route('https://delegated.test/.well-known/matrix/client', async (route) => {
+		await route.fulfill({
+			status: 200,
+			headers: { 'access-control-allow-origin': '*', 'content-type': 'application/json' },
+			body: JSON.stringify({ 'm.homeserver': { base_url: stack!.synapseUrl } })
+		});
+	});
+
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill('delegated.test');
+	await page.getByTestId('matrix-homeserver-continue').click();
+
+	// It says where the delegation led, because the credentials are about to
+	// go somewhere the user did not type.
+	const resolved = page.getByTestId('matrix-resolved');
+	await expect(resolved).toBeVisible();
+	await expect(resolved).toHaveAttribute('data-homeserver', stack!.synapseUrl);
+
+	// And the flows are that server's: this is the real Synapse answering.
+	await page.getByTestId('matrix-username').fill('bot_alpha');
+	await page.getByTestId('matrix-password').fill(PASSWORD);
+	await page.getByTestId('matrix-signin').click();
+	await expect(page.getByTestId('screen-matrix')).toHaveAttribute('data-stage', 'rooms');
+});
+
+test('a homeserver that answers nothing is named as that, before any credential', async ({
+	context,
+	page,
+	request
+}) => {
+	await signIn(context, request, 'the Matrix device');
+	await page.goto('/networks/matrix');
+	await page.getByTestId('matrix-homeserver').fill('nothing-here.invalid');
+	await page.getByTestId('matrix-homeserver-continue').click();
+
+	const problem = page.getByTestId('matrix-problem');
+	await expect(problem).toBeVisible({ timeout: 20_000 });
+	await expect(problem).toContainText(/nothing-here.invalid/);
+	// No form for a server that is not there.
+	await expect(page.getByTestId('matrix-username')).toHaveCount(0);
+});
