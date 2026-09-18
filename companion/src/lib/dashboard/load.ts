@@ -8,6 +8,7 @@
 //   GET /api/consent/state   every recorded decision, personas included
 //   GET /api/devices   every device, revoked ones dated
 //   GET /api/contacts/pending   how many contacts are waiting for a decision
+//   GET /api/suggestions   how many replies are waiting for approval
 //
 // **The last one is read for its numbers and for nothing else.** Its answer
 // carries a `contacts` array of Matrix user IDs — the list of who has written
@@ -16,6 +17,21 @@
 // so it takes `total` and the per-network counts and drops the array here
 // (#74), at the seam, rather than carrying it into a component where a later
 // row could render it. The list belongs to the consent inbox, which is v0.2.
+//
+// **And the last one on the same terms** (#100). `GET /api/suggestions`
+// answers with every proposed reply *in full*, because the approval screen has
+// to draw them. The dashboard may not: the home screen is what gets unlocked
+// on a train, and an approval queue shows the proposed text. So the answer is
+// reduced to a count here, at the seam, by `$lib/approvals/summary.ts` — the
+// same shape as `pending.contacts` above, for the same reason, and the reason
+// the ticket's "grep the rendered dashboard for the suggestion's text and find
+// nothing" holds by construction rather than by a component's restraint.
+//
+// It is also the first read on this poll that scans the bus rather than a
+// store: the Gateway's suggestion listing is a projection of the stream and
+// keeps no copy. It is read on the same fifteen-second tick as the rest
+// because a second timer would be a second thing to reason about, and the
+// window it scans is the deployment's own.
 //
 // There is no `GET /api/events/stream`. The wireframe's screen 5 subscribes to
 // a merged Server-Sent Events stream and renders "without page refresh"; the
@@ -31,6 +47,8 @@
 
 import { gateway } from '$lib/api/client';
 import type { components } from '$lib/api/schema';
+import { dismissed } from '$lib/approvals/dismissed';
+import { summarise, type Waiting } from '$lib/approvals/summary';
 
 /**
  * How many contacts are waiting for a decision, and on which networks. The
@@ -48,6 +66,12 @@ export type Snapshot = {
 	devices: components['schemas']['Device'][] | null;
 	/** `null` when the deployment does not project the inbound stream. */
 	pending: PendingSummary | null;
+	/**
+	 * How many replies are waiting for approval, and nothing about what they
+	 * say. `null` when this deployment reads no suggestions, which is a
+	 * different statement from "none are waiting" and is rendered as neither.
+	 */
+	waiting: Waiting | null;
 	/** False when nothing answered at all. */
 	reachable: boolean;
 };
@@ -58,16 +82,18 @@ export const EMPTY: Snapshot = {
 	consent: null,
 	devices: null,
 	pending: null,
+	waiting: null,
 	reachable: true
 };
 
 export async function loadDashboard(): Promise<Snapshot> {
-	const [session, bridges, consent, devices, pending] = await Promise.all([
+	const [session, bridges, consent, devices, pending, suggestions] = await Promise.all([
 		ask(() => gateway.GET('/api/session')),
 		ask(() => gateway.GET('/api/bridges')),
 		ask(() => gateway.GET('/api/consent/state')),
 		ask(() => gateway.GET('/api/devices')),
-		ask(() => gateway.GET('/api/contacts/pending'))
+		ask(() => gateway.GET('/api/contacts/pending')),
+		ask(() => gateway.GET('/api/suggestions'))
 	]);
 	return {
 		session: session,
@@ -77,12 +103,16 @@ export async function loadDashboard(): Promise<Snapshot> {
 		// `pending.contacts` is deliberately not carried past this line. See
 		// the module note: the counts are the dashboard's, the list is not.
 		pending: pending === null ? null : { total: pending.total, networks: pending.networks },
+		// Same line, same reason: what a persona wrote does not travel past
+		// here. `summarise` returns two numbers and has nowhere to put a text.
+		waiting: suggestions === null ? null : summarise(suggestions, dismissed()),
 		reachable:
 			session !== null ||
 			bridges !== null ||
 			consent !== null ||
 			devices !== null ||
-			pending !== null
+			pending !== null ||
+			suggestions !== null
 	};
 }
 

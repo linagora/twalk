@@ -341,6 +341,90 @@ that does not exist would be worse than one that explains itself.
 `null` (the deployment projects no inbound stream, or the read failed) and `0`
 (nobody is waiting) are different facts and both draw nothing.
 
+### The approval screen cannot name the contact, and says so (#160)
+
+`/approvals` draws what a persona proposed and sends the one the user approves.
+The hard part is not the sending; it is what the screen is allowed to know.
+
+`GET /api/suggestions` (#97) carries the message a suggestion answers as a
+CloudEvents id and a type and **nothing else** — no sender, no display name, no
+excerpt. That is not an oversight but the strongest form of the protection #110
+established: the Gateway's projection has no code path that opens an inbound
+event, so there is no reduction rule to get right and no leak to test for. The
+cost lands here. The screen can say *"a reply to a message on WhatsApp"*; it
+cannot say *"a reply to Aïcha"*.
+
+This screen does not work around it. There is no second read, no cache and no
+member on a row where a contact could go, and `rows.test.ts` asserts that a row
+serialises without one. What it does instead is say so on the screen, beside the
+row it affects (`approvals.whoIsIt.*`), so that a user asked to be deliberate
+about something they cannot see knows it is a decision rather than a defect.
+
+**What building it showed**, for #160 to weigh: the reply's own text carries
+more context than expected — a persona answers in the language of the message it
+answers and usually quotes its subject, so a single suggestion reads perfectly
+well on its own. What genuinely hurts is *two suggestions at once*: two cards,
+both plausible, and nothing on either to say which conversation it belongs to.
+The failure is not "I cannot tell who this is", it is "I cannot tell these two
+apart", and it arrives the moment a deployment has more than one active
+correspondent. Of #160's four options, the one this screen would have used is a
+`contact` member on the suggestion event itself — written once, at publication
+time, where ADR 0012 already puts these decisions.
+
+### Refusing a suggestion is local, and the copy says exactly that
+
+#100 asks for three actions per row. Two of them are `POST /api/approvals`. The
+third — **refuse** — is not any API: this origin serves no route that refuses a
+suggestion, and a suggestion lives in the stream rather than in a store, so a
+refusal recorded at the Gateway would be the second store `CONTEXT.md` refuses
+to have, and a refusal published on the bus would be a new contract event type
+before the v1.0 freeze whose only consumer is this screen.
+
+So refusing hides the row **on this browser** (`$lib/approvals/dismissed.ts`),
+the persona is not told, nothing is recorded, the suggestion goes stale on its
+own — and all four of those are on the screen next to the button. The dismissal
+can be taken back, and the journey asserts that the Gateway still calls the
+suggestion `approvable` afterwards, because a local hiding that pretended to be
+more would be the screen lying about what it did.
+
+### Every refusal has a sentence, and a test reads the Gateway to prove it
+
+`POST /api/approvals` refuses with fifteen distinct codes plus the three the
+request itself can be wrong in, and the Gateway's own description says why they
+are not one code. `$lib/approvals/refusal.ts` is the table of sentences, and
+`refusal.test.ts` parses `companion-gateway/openapi.yaml` and fails when the
+approval or suggestion routes grow a code this screen has no words for — in both
+directions, so a removed code leaves no orphan string either.
+
+Two invariants the type enforces rather than the screen: every answer names a
+**remedy**, so there is no cause without a next step; and there is no value
+meaning "still working", so a refusal cannot be rendered as a spinner (#111,
+#135, #139). The one refusal that is not a failure is
+`approval_published_but_not_recorded` — the reply *went out* and the Gateway
+could not write that down — and it carries `sent: true`, because telling the user
+it failed is the lie that makes them send twice.
+
+### Lost replies, in the one form this origin can see
+
+A suggestion whose `standing` is `approved` and whose approval's `publication`
+is `unpublished` is a reply this deployment recorded and never sent. It is listed
+with its text and a *Send it again* action, which republishes under the same
+deterministic id and is deduplicated by the bus, so it cannot go out twice. Both
+values of `publication` are terminal and neither is "in flight".
+
+The other kind — a reply that reached the bus and that the Sensor could not post
+into the room — is **not visible from this origin at all**: nothing publishes an
+event for it and no route reports it. The screen does not invent a row for it.
+
+### The dashboard gets a count and a link, and not a word of the text
+
+The same reasoning as the pending chip, one screen further out: the home screen
+is what gets unlocked on a train, and an approval queue shows proposed text. So
+`GET /api/suggestions` is reduced to two numbers in `$lib/approvals/summary.ts`
+— a count and whether the count is a floor — and `$lib/dashboard/load.ts` keeps
+nothing else. `summary.test.ts` asserts the property on the value; the journey
+asserts it on the rendered page.
+
 ### The picker describes where the user is, and asks before it says
 
 Screen 3 read "Connect your first network — step 1 of 3" to an owner with
@@ -406,6 +490,18 @@ stack the Rust suites share. `TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT` and
 `TWALK_TEST_PORT` moves the origin — worth setting both when another worktree
 is running its own suite, since `reuseExistingServer` will otherwise happily
 reuse *its* server.
+
+The **approval journeys** (`tests/e2e/approvals/`) run as their own Playwright
+project on the bridge Gateway's origin, after the `dashboard` project: approving
+needs a signed-in device, a bus to publish a suggestion on and the Gateway's own
+consent journal to read, and that Gateway is the only one configured with all
+three. The suggestions are published onto the bus by the test rather than
+produced by a persona — Hermes has its own suite against its own process
+boundary — and everything downstream of the publish is real: the Gateway scans
+the stream, checks its journal, and publishes `persona.reply.approved.v1`, which
+the journey reads back off NATS. The trigger is deliberately loaded with a body,
+a display name and a network identifier, and every screen the journey visits is
+searched for all three.
 
 iOS behaviour — Safari's seven-day eviction, the installed-app exemption,
 Lockdown Mode — is verified by hand on a real device, as spec #65 requires:

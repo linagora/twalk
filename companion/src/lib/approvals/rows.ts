@@ -1,0 +1,223 @@
+// What the approval screen draws, decided here rather than in the markup.
+//
+// The screen has one job with a decision in it — *which actions is this row
+// allowed to offer* — and that decision is the ticket's hardest requirement,
+// so it lives in a module a test can reach.
+//
+// # Three situations, three answers (#100)
+//
+// The Gateway answers `standing` as one of three values and it is the whole
+// vocabulary: `approvable`, `expired`, `approved`. A suggestion that does not
+// exist is deliberately not a fourth value — it is a `404` or an absence from
+// the listing — so this file cannot confuse "gone stale" with "never was", and
+// neither can the screen.
+//
+// # "Deliberate by construction — an explicit call, never a default, never a
+// batch" (`CONTEXT.md`)
+//
+// That sentence is a specification for this screen, and it is enforced here:
+//
+//   - [`actionsFor`] returns the actions of **one** row. There is no function
+//     in this module that takes a list, and there is not going to be one:
+//     "approve all" would have to be written here first.
+//   - nothing is selected by default. A row carries actions, never a
+//     "selected" flag, so there is no state a keystroke could approve.
+//   - `approve` and `edit` are two actions, not one control with a mode.
+//     Editing opens a field; approving the edit is a second, separate press.
+//
+// # What a row cannot say, and why (#160)
+//
+// It cannot name the contact. `GET /api/suggestions` carries the trigger as an
+// id and a type and nothing else, because naming the contact means opening
+// their message and re-publishing a revoked contact's words through a new door
+// — the leak #110 closed (ADR 0012). So [`triggerKey`] resolves to *"a reply
+// to a WhatsApp message"* and never to *"a reply to Aïcha"*.
+//
+// This module does not work around that, and the way it does not is worth
+// stating: there is no import of `$lib/api/client` here, no second read, and
+// no member on `Row` for a display name. The open question is #160's and the
+// owner's; the screen says out loud that it cannot name the person, which is
+// the honest rendering of a constraint rather than a gap the user discovers.
+
+import type { components } from '$lib/api/schema';
+import type { MessageKey } from '$lib/i18n';
+
+export type Suggestion = components['schemas']['Suggestion'];
+export type Listing = components['schemas']['SuggestionListing'];
+export type Approval = components['schemas']['Approval'];
+export type Standing = Suggestion['standing'];
+
+/**
+ * One action a row may offer. Never plural, never defaulted.
+ *
+ * `retry` is not a synonym for `approve`: it is the repair for an approval the
+ * Gateway recorded and the bus never acknowledged, which republishes under the
+ * same deterministic id and is deduplicated rather than sent twice.
+ */
+export type Action = 'approve' | 'edit' | 'dismiss' | 'retry';
+
+export interface Row {
+	id: string;
+	personaId: string;
+	network: components['schemas']['Network'];
+	producedAt: string;
+	expiresAt: string | null;
+	attempt: number | null;
+	/** The persona's own words: the thing being approved, and the only text here. */
+	body: string;
+	format: string;
+	/** The message being answered, by identity alone. No sender, no excerpt. */
+	trigger: components['schemas']['SuggestionTrigger'];
+	standing: Standing;
+	approval: Approval | null;
+	/**
+	 * An approval this Gateway recorded whose reply never reached the bus.
+	 *
+	 * This is #100's "lost reply", in the one form this origin can actually
+	 * see: `publication: "unpublished"` means the row was written and the
+	 * publication did not land. Both values of `publication` are terminal and
+	 * neither is "in flight", so a screen rendering this as a spinner would be
+	 * rendering a state that cannot end.
+	 */
+	lostReply: boolean;
+	actions: Action[];
+}
+
+/**
+ * What one row may offer. One suggestion in, one row's actions out.
+ *
+ * `expired` keeps `dismiss` and loses `approve`: the ticket asks for an old
+ * suggestion to be *shown as no longer approvable, with the reason*, because
+ * nothing is persisted and making it vanish would be the screen lying about
+ * what happened to it.
+ */
+export function actionsFor(suggestion: Suggestion): Action[] {
+	switch (suggestion.standing) {
+		case 'approvable':
+			return ['approve', 'edit', 'dismiss'];
+		case 'expired':
+			return ['dismiss'];
+		case 'approved':
+			return suggestion.approval?.publication === 'unpublished' ? ['retry'] : [];
+		default:
+			// A standing this build does not know. Offering nothing is the safe
+			// answer: an approval is an explicit act, and this is not one.
+			return [];
+	}
+}
+
+export function toRow(suggestion: Suggestion): Row {
+	return {
+		id: suggestion.event_id,
+		personaId: suggestion.persona_id,
+		network: suggestion.network,
+		producedAt: suggestion.produced_at,
+		expiresAt: suggestion.expires_at,
+		attempt: suggestion.attempt,
+		body: suggestion.suggestion.body,
+		format: suggestion.suggestion.format,
+		trigger: suggestion.trigger,
+		standing: suggestion.standing,
+		approval: suggestion.approval,
+		lostReply:
+			suggestion.standing === 'approved' && suggestion.approval?.publication === 'unpublished',
+		actions: actionsFor(suggestion)
+	};
+}
+
+/**
+ * The listing, newest first, with the ones this browser has dismissed left
+ * out.
+ *
+ * A dismissal is local (`./dismissed.ts`) and it is not a state the Gateway
+ * knows: filtering here rather than at the Gateway is the honest shape,
+ * because there is no API that could be asked.
+ */
+export function toRows(listing: Listing, dismissed: ReadonlySet<string>): Row[] {
+	return listing.suggestions.filter((entry) => !dismissed.has(entry.event_id)).map(toRow);
+}
+
+/**
+ * What the screen can honestly say about the message a suggestion answers.
+ *
+ * The event type and the network, and nothing else — see the module note. An
+ * unknown type still gets a sentence rather than a blank, because a row with
+ * no explanation of what it is answering is a row the user cannot judge at
+ * all.
+ */
+export function triggerKey(eventType: string): MessageKey {
+	return eventType === 'fr.linagora.twalk.inbound.message.received.v1'
+		? 'approvals.trigger.message'
+		: 'approvals.trigger.other';
+}
+
+/**
+ * Whether a suggestion the Gateway called approvable has gone stale since the
+ * read.
+ *
+ * The Gateway decides `standing` at the moment it answers, and a screen left
+ * open outlives that answer. This does **not** change what the row offers —
+ * the Gateway is the authority on whether an approval is refused, and a client
+ * that hid the button would be a second, disagreeing authority — it adds a
+ * warning, so that pressing approve and meeting `409 suggestion_expired` is
+ * not a surprise.
+ */
+export function goneStale(row: Row, now: number): boolean {
+	if (row.standing !== 'approvable' || row.expiresAt === null) {
+		return false;
+	}
+	const at = Date.parse(row.expiresAt);
+	return Number.isFinite(at) && at <= now;
+}
+
+/** Something true about the read itself, which the screen says out loud. */
+export type Notice =
+	/** The bounded read did not reach the stream's first retained message. */
+	| { kind: 'window'; count?: undefined }
+	/** `limit` cut the list: more were found in the window than answered with. */
+	| { kind: 'truncated'; count?: undefined }
+	/** Suggestions found and not understood by this Gateway build. */
+	| { kind: 'unreadable'; count: number }
+	/** Rows this browser dismissed, so the count on screen is not the count read. */
+	| { kind: 'dismissed'; count: number };
+
+/**
+ * The facts about the read that a user has to be told.
+ *
+ * `window.reached_start_of_stream` is the one that matters most: the Gateway
+ * keeps no copy of a suggestion, so a read that stopped short is a read that
+ * may have missed older ones — *"a bound nobody can see is a bound that
+ * lies"*. Leaving it in the response and out of the screen would put the lie
+ * back.
+ */
+export function noticesFor(listing: Listing, dismissed: number): Notice[] {
+	const notices: Notice[] = [];
+	if (!listing.window.reached_start_of_stream) {
+		notices.push({ kind: 'window' });
+	}
+	if (listing.truncated) {
+		notices.push({ kind: 'truncated' });
+	}
+	if (listing.unreadable > 0) {
+		notices.push({ kind: 'unreadable', count: listing.unreadable });
+	}
+	if (dismissed > 0) {
+		notices.push({ kind: 'dismissed', count: dismissed });
+	}
+	return notices;
+}
+
+/**
+ * How many rows in a listing are waiting for the user — what the dashboard's
+ * chip counts.
+ *
+ * A lost reply counts too: it is a thing the user has to act on, and the
+ * dashboard's job is to say how much is waiting rather than to sort it.
+ */
+export function waitingCount(listing: Listing, dismissed: ReadonlySet<string>): number {
+	return listing.suggestions.filter(
+		(entry) =>
+			!dismissed.has(entry.event_id) &&
+			(entry.standing === 'approvable' || entry.approval?.publication === 'unpublished')
+	).length;
+}

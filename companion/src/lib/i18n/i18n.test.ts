@@ -88,7 +88,14 @@ describe('the catalogues', () => {
 			// The room chooser's counts (ticket #137): how many rooms the search
 			// is showing, out of how many the account has.
 			shown: 4,
-			total: 112
+			total: 112,
+			// The approval screen (ticket #100). `sequence` is where a reply
+			// landed on the bus, `attempt` which suggestion this is for one
+			// message, `type` a contract event type — the identity of the
+			// message being answered, which is all this screen is given of it.
+			sequence: 4217,
+			attempt: 1,
+			type: 'fr.linagora.twalk.inbound.message.received.v1'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();
