@@ -49,7 +49,9 @@ A messaging service a conversation comes from, as the user experiences it: Whats
 _Avoid_: channel (user-facing copy only), gmessages (a bridge, not a network)
 
 **Consent**:
-The data-processing agreement state of a contact or a whole network: `granted`, `pending`, or `revoked`. A network-level decision is the default for that network; a per-contact decision always overrides it. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
+**The user's** decision about whether a contact's messages, or a whole network's, may be processed: `granted`, `pending`, or `revoked`. A network-level decision is the default for that network; a per-contact decision always overrides it. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
+
+The name is a term of art and it is **not the contact's own consent**: the contact is neither asked nor told, and `granted` records that the user decided, not that anyone agreed. Writing "the contact's agreement" here for months is how the gap went unnoticed, so the distinction stays in the glossary rather than in a comment somewhere. Whether and how a contact should be informed is open (issue #122); a persona's own disclosure to the contact is a separate mechanism (ADR 0019).
 
 **Consent snapshot**:
 The consent state of every known subject at one point in the event stream, served by the Companion Gateway and read by a consumer whose cache is cold (ADR 0010). It names the stream position it reflects, and states revocations explicitly: an absent subject means no decision was ever recorded, never a revoked one.
