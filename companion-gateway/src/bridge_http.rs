@@ -367,10 +367,36 @@ fn refused(refusal: BridgeRefusal) -> Response {
                  has forgotten, or a login id that is not one of its own"
             ),
         ),
+        // `bridge_refused` is what is left once the refusals a caller can
+        // act on have been named, and "the bridge refused with M_BAD_STATE
+        // (500)" is not something anybody can read. So the three refusals a
+        // real mautrix bridge was actually observed to give here each say
+        // what to check; see `tests/harness/fixtures` for the captured
+        // answers.
         BridgeRefusal::BridgeRefused { errcode, status } => api_error(
             StatusCode::BAD_GATEWAY,
             "bridge_refused",
-            &format!("the bridge refused the provisioning call with {errcode} ({status})"),
+            &match (*status, errcode.as_str()) {
+                (401, _) => format!(
+                    "the bridge rejected this Gateway's provisioning secret ({errcode}): the \
+                     secret configured here for this bridge is not the one in the bridge's \
+                     own `provisioning.shared_secret`"
+                ),
+                (403, _) => format!(
+                    "the bridge will not act for this user ({errcode}): mautrix requires the \
+                     acting user in `?user_id=` on every provisioning call, and grants login \
+                     permissions only to the Matrix IDs in its own `permissions:` block. \
+                     Check that the owner's Matrix ID is one of them"
+                ),
+                (500, "M_BAD_STATE") => format!(
+                    "the bridge and this Gateway disagree about where this login has got to \
+                     ({errcode}): the transaction id, the step id or the step type sent did \
+                     not match the step the bridge is on. Every step answer carries a fresh \
+                     `txn_id` and the bridge validates it, so poll the login and act on the \
+                     step it reports"
+                ),
+                _ => format!("the bridge refused the provisioning call with {errcode} ({status})"),
+            },
         ),
         BridgeRefusal::BridgeUnreachable { detail } => api_error(
             StatusCode::BAD_GATEWAY,

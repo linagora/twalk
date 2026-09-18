@@ -1,0 +1,34 @@
+{
+  "endpoint": "GET /_matrix/provision/v3/login/flows?user_id={mxid}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "two_flows": {
+      "status": 200,
+      "note": "The same list whoami carries under `login_flows`. WhatsApp offers two; Signal offers one.",
+      "substituted": [],
+      "body": {
+        "flows": [
+          {
+            "name": "QR",
+            "description": "Scan a QR code to pair the bridge to your WhatsApp account",
+            "id": "qr"
+          },
+          {
+            "name": "Pairing code",
+            "description": "Input your phone number to get a pairing code, to pair the bridge to your WhatsApp account",
+            "id": "phone"
+          }
+        ]
+      }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}

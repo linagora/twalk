@@ -1,0 +1,27 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/login/cancel/{process}?user_id={mxid}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "cancelled": {
+      "status": 200,
+      "note": "200 with an empty JSON object — not 204, and not an empty body. This is also what releases a held `display_and_wait` request, which then answers 410 FI.MAU.BRIDGE.LOGIN_CANCELLED.",
+      "substituted": [],
+      "body": {}
+    },
+    "already_gone": {
+      "status": 404,
+      "note": "Cancelling a process the bridge has already forgotten. The Gateway treats this as success on purpose: the login is over either way, which is what was asked for.",
+      "substituted": [],
+      "body": { "errcode": "M_NOT_FOUND", "error": "Login not found" }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}
