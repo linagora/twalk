@@ -27,6 +27,14 @@
 //! with the position of its last decision. See that method for why the
 //! prefix, and not the journal's head, is the only honest answer.
 //!
+//! Ticket #54 added a table on the same terms as #56's, and it is governed by
+//! one rule rather than three: **`contact_seen` holds four columns and will
+//! hold four columns**. It is the list of who has written to the user, kept
+//! so the Companion can show what is waiting for a decision, and its
+//! restraint is the only thing between it and a surveillance log — no body,
+//! no display name, no `network_identifier`. See the migration's own comment
+//! and [`crate::contacts`].
+//!
 //! The schema migrations are embedded in the binary ([`MIGRATIONS`]) and
 //! applied at open, so an operator upgrades the image and nothing else.
 //!
@@ -54,7 +62,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 3] = [
+pub const MIGRATIONS: [&str; 4] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -249,6 +257,75 @@ pub const MIGRATIONS: [&str; 3] = [
     )
     WHERE recency = 1;
     "#,
+    // v4 — who has written to the user, and the list of them nobody has
+    // decided about yet (ticket #54).
+    r#"
+    -- The pending-contact projection's whole store. Four columns, and it is
+    -- meant to stay four columns.
+    --
+    -- This table is a list of the people who write to the user: a social
+    -- graph with timestamps. The only thing keeping it from being a
+    -- surveillance log is what it refuses to hold — no message body, no
+    -- display name, no `network_identifier`. The Sensor withholds the
+    -- network identifier until consent is granted (the contract's
+    -- `data.contact.network_identifier`), and the Gateway must not undo that
+    -- by keeping a copy of its own. A display name is read from the bus when
+    -- a screen needs one and is never written here
+    -- (`crate::contacts::Contacts::display_names`).
+    --
+    -- The uncomfortable part, stated where the columns are rather than only
+    -- in a document: a bridged ghost user's Matrix ID conventionally embeds
+    -- the network identifier (`@whatsapp_33612345678:example.com`), so
+    -- storing the ID is not as neutral as "an opaque handle" sounds — this
+    -- table keeps the phone number even though it has no column for one. It
+    -- is stored anyway because a consent decision has to name its subject
+    -- and that ID *is* the subject; what the schema can do is hold nothing
+    -- else. `docs/architecture/security-model.md`, residual risk 5, says the
+    -- same thing to an operator deciding whether to run this.
+    CREATE TABLE contact_seen (
+        -- The sender's Matrix user ID, as the bridge materialised it: the
+        -- contract's `subject`, and the id a decision about this contact
+        -- will name.
+        contact_id TEXT NOT NULL,
+        -- The network it wrote on, as the user experiences it (ADR 0005),
+        -- `matrix` included (ADR 0009) — the contract's `network`
+        -- extension, never a bridge id.
+        network    TEXT NOT NULL CHECK (network IN ('whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix')),
+        -- When this contact first and last wrote, from the event's own
+        -- `time` and never from the Gateway's clock: a Gateway installed
+        -- after weeks of Sensor traffic builds this table from the stream's
+        -- history, and stamping "now" on all of it would make every old
+        -- contact look new.
+        first_seen TEXT NOT NULL,
+        last_seen  TEXT NOT NULL,
+        PRIMARY KEY (contact_id, network)
+    ) WITHOUT ROWID;
+
+    -- The pending list: every seen contact that no decision covers on the
+    -- network it wrote on.
+    --
+    -- "No decision" is the same question `GET /api/consent/effective`
+    -- answers with `decided_by: null` — neither the contact's own decision
+    -- nor the network's default exists — so a network default the user set
+    -- takes every contact on that network out of this list at once, which is
+    -- exactly what the default is for. A contact decided `pending`
+    -- explicitly is *not* in this list: the user answered, and the answer
+    -- was "not yet".
+    --
+    -- A view rather than a table, for the same reason `consent_state` is
+    -- one: there is no second copy to keep in step, and a decision recorded
+    -- through the write API moves the contact out of the list by arithmetic
+    -- rather than by someone remembering to update a projection.
+    CREATE VIEW pending_contact AS
+    SELECT s.contact_id, s.network, s.first_seen, s.last_seen
+    FROM contact_seen s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM consent_state c
+        WHERE c.network = s.network
+          AND ((c.subject_type = 'contact' AND c.subject_id = s.contact_id)
+            OR (c.subject_type = 'network' AND c.subject_id = s.network))
+    );
+    "#,
 ];
 
 /// The consent store. One connection behind a mutex: a decision is a handful
@@ -296,6 +373,24 @@ pub struct BridgeStatusCommitted {
     /// instant — was already in the store. Nothing was recorded and the id is
     /// the first one's.
     pub replayed: bool,
+}
+
+/// One contact the Gateway has seen write, on one network (ticket #54).
+///
+/// The whole of what the Gateway keeps about a correspondent, and the whole
+/// of what any read of this store can hand out: an ID, a network and two
+/// instants. There is no field here for a body, a display name or a network
+/// identifier, and adding one would be the change a reviewer refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenContact {
+    /// The contact's Matrix user ID, as the bridge materialised it.
+    pub contact: String,
+    pub network: Network,
+    /// RFC 3339, from the event's own `time` — the instant the Sensor
+    /// produced the first and the last event this contact was the subject
+    /// of.
+    pub first_seen: String,
+    pub last_seen: String,
 }
 
 /// A committed decision the outbox has not published yet.
@@ -969,6 +1064,120 @@ impl Store {
         Ok(())
     }
 
+    // -----------------------------------------------------------------
+    // The pending-contact projection (ticket #54)
+    // -----------------------------------------------------------------
+
+    /// Records that a contact wrote on a network at an instant.
+    ///
+    /// Three values in, three values stored. The caller
+    /// ([`crate::contacts`]) never even parses the rest of the event, so
+    /// there is nothing here to have dropped: this method could not write a
+    /// message body if it wanted to.
+    ///
+    /// Idempotent by construction, which is what makes the consumer's
+    /// commit-then-ack safe: the same event delivered twice moves neither
+    /// timestamp, because `first_seen` only ever goes earlier and
+    /// `last_seen` only ever goes later. The stream is not necessarily in
+    /// timestamp order — a full first delivery replays weeks of history at
+    /// once — so the extremes are taken rather than the last write winning.
+    pub fn observe_contact(&self, contact: &str, network: Network, at: &str) -> Result<()> {
+        self.observe_contacts(&[(contact.to_owned(), network, at.to_owned())])
+    }
+
+    /// The same, for a whole batch of sightings, in **one** transaction.
+    ///
+    /// This is what the projection calls, and the transaction is not an
+    /// optimisation detail: the store is opened `synchronous=FULL`, so every
+    /// separate write costs an fsync, and a Gateway's first delivery replays
+    /// the stream's whole history through this method. One fsync per batch
+    /// instead of one per message is the difference between a first start
+    /// that takes seconds and one that takes minutes.
+    ///
+    /// It is also the right transactional boundary for the consumer: the
+    /// batch is committed, and only then are its messages acked. A crash in
+    /// between redelivers the whole batch, which changes nothing — the upsert
+    /// only ever moves `first_seen` earlier and `last_seen` later, so
+    /// applying a sighting twice is applying it once.
+    pub fn observe_contacts(&self, sightings: &[(String, Network, String)]) -> Result<()> {
+        if sightings.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.connection();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("failed to open the sightings transaction")?;
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO contact_seen (contact_id, network, first_seen, last_seen) \
+                     VALUES (?1, ?2, ?3, ?3) \
+                     ON CONFLICT (contact_id, network) DO UPDATE SET \
+                         first_seen = MIN(first_seen, excluded.first_seen), \
+                         last_seen  = MAX(last_seen,  excluded.last_seen)",
+                )
+                .context("failed to prepare the sighting statement")?;
+            for (contact, network, at) in sightings {
+                statement
+                    .execute(rusqlite::params![contact, network.as_str(), at])
+                    .context("failed to record a seen contact")?;
+            }
+        }
+        transaction
+            .commit()
+            .context("failed to commit the sightings")?;
+        Ok(())
+    }
+
+    /// The contacts waiting for a decision: every seen contact no decision
+    /// covers on the network it wrote on, oldest first sighting first.
+    ///
+    /// Ordered by `first_seen` because that is the order the user met them
+    /// in, and because a stable order is what lets the Companion render a
+    /// list that does not jump between polls.
+    pub fn pending_contacts(&self) -> Result<Vec<SeenContact>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT contact_id, network, first_seen, last_seen FROM pending_contact \
+                 ORDER BY first_seen, contact_id, network",
+            )
+            .context("failed to prepare the pending-contact query")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .context("failed to read the pending contacts")?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (contact, network, first_seen, last_seen) =
+                row.context("failed to read a pending-contact row")?;
+            pending.push(SeenContact {
+                contact,
+                network: Network::parse(&network)
+                    .with_context(|| format!("the store holds the network {network:?}"))?,
+                first_seen,
+                last_seen,
+            });
+        }
+        Ok(pending)
+    }
+
+    /// How many contacts are waiting for a decision — the dashboard's one
+    /// number, and the operator's gauge.
+    pub fn pending_contact_count(&self) -> Result<u64> {
+        let count: i64 = self
+            .connection()
+            .query_row("SELECT COUNT(*) FROM pending_contact", [], |row| row.get(0))
+            .context("failed to count the pending contacts")?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
     fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.connection
             .lock()
@@ -1545,6 +1754,221 @@ mod tests {
             Err(SnapshotRefusal::TooLarge { max_entries }) => assert_eq!(max_entries, 2),
             other => panic!("an oversized snapshot must be refused: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The pending-contact projection (ticket #54)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_seen_contact_keeps_its_earliest_and_its_latest_sighting() {
+        let store = store("seen-extremes");
+        // Deliberately out of order: a full first delivery replays the
+        // stream's history, and the stream is not sorted by the Sensor's
+        // clock.
+        for at in [
+            "2026-09-17T12:00:00.000Z",
+            "2026-09-17T09:00:00.000Z",
+            "2026-09-17T18:00:00.000Z",
+        ] {
+            store
+                .observe_contact("@whatsapp_33612345678:example.com", Network::Whatsapp, at)
+                .expect("the sighting records");
+        }
+        let pending = store.pending_contacts().unwrap();
+        assert_eq!(pending.len(), 1, "one contact, one network: {pending:?}");
+        assert_eq!(pending[0].first_seen, "2026-09-17T09:00:00.000Z");
+        assert_eq!(pending[0].last_seen, "2026-09-17T18:00:00.000Z");
+        // The same event delivered twice changes nothing, which is what
+        // makes the consumer's commit-then-ack safe.
+        store
+            .observe_contact(
+                "@whatsapp_33612345678:example.com",
+                Network::Whatsapp,
+                "2026-09-17T12:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(store.pending_contacts().unwrap(), pending);
+    }
+
+    #[test]
+    fn a_contact_is_pending_per_network_it_wrote_on() {
+        let store = store("seen-per-network");
+        store
+            .observe_contact(
+                "@a:example.com",
+                Network::Whatsapp,
+                "2026-09-17T10:00:00.000Z",
+            )
+            .unwrap();
+        store
+            .observe_contact(
+                "@a:example.com",
+                Network::Signal,
+                "2026-09-17T10:01:00.000Z",
+            )
+            .unwrap();
+        store
+            .observe_contact(
+                "@b:example.com",
+                Network::Whatsapp,
+                "2026-09-17T10:02:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(store.pending_contact_count().unwrap(), 3);
+        // Oldest first sighting first: the order the user met them in.
+        let pending = store.pending_contacts().unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|seen| (seen.contact.as_str(), seen.network))
+                .collect::<Vec<_>>(),
+            vec![
+                ("@a:example.com", Network::Whatsapp),
+                ("@a:example.com", Network::Signal),
+                ("@b:example.com", Network::Whatsapp),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_decision_takes_a_contact_out_of_the_pending_list() {
+        let store = store("seen-decided");
+        store
+            .observe_contact(
+                "@a:example.com",
+                Network::Whatsapp,
+                "2026-09-17T10:00:00.000Z",
+            )
+            .unwrap();
+        store
+            .observe_contact(
+                "@a:example.com",
+                Network::Signal,
+                "2026-09-17T10:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(store.pending_contact_count().unwrap(), 2);
+
+        record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T11:00:00.000Z",
+        );
+        let pending = store.pending_contacts().unwrap();
+        assert_eq!(
+            pending.iter().map(|seen| seen.network).collect::<Vec<_>>(),
+            vec![Network::Signal],
+            "the decision covered whatsapp and left the other network waiting: {pending:?}"
+        );
+
+        // A revocation is a decision too: the contact is answered, so it is
+        // not waiting.
+        record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Revoked,
+                &[Network::Signal],
+            ),
+            "2026-09-17T11:01:00.000Z",
+        );
+        assert_eq!(store.pending_contact_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_network_default_answers_for_every_contact_on_it() {
+        let store = store("seen-default");
+        for contact in ["@a:example.com", "@b:example.com", "@c:example.com"] {
+            store
+                .observe_contact(contact, Network::Whatsapp, "2026-09-17T10:00:00.000Z")
+                .unwrap();
+        }
+        store
+            .observe_contact(
+                "@d:example.com",
+                Network::Telegram,
+                "2026-09-17T10:00:00.000Z",
+            )
+            .unwrap();
+        assert_eq!(store.pending_contact_count().unwrap(), 4);
+
+        record(
+            &store,
+            &decision(
+                SubjectType::Network,
+                "whatsapp",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T11:00:00.000Z",
+        );
+        let pending = store.pending_contacts().unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "one default answered for three contacts at once: {pending:?}"
+        );
+        assert_eq!(pending[0].contact, "@d:example.com");
+    }
+
+    #[test]
+    fn a_contact_the_user_decided_pending_is_not_waiting_for_a_decision() {
+        let store = store("seen-decided-pending");
+        store
+            .observe_contact(
+                "@a:example.com",
+                Network::Whatsapp,
+                "2026-09-17T10:00:00.000Z",
+            )
+            .unwrap();
+        record(
+            &store,
+            &decision(
+                SubjectType::Contact,
+                "@a:example.com",
+                State::Pending,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T11:00:00.000Z",
+        );
+        assert_eq!(
+            store.pending_contact_count().unwrap(),
+            0,
+            "the user answered, and the answer was \"not yet\": an absent decision \
+             and a decision to wait are not the same thing (ADR 0010)"
+        );
+    }
+
+    #[test]
+    fn the_contact_table_has_no_column_for_content() {
+        // The restraint is the feature, so it is asserted rather than
+        // trusted: this test fails the day somebody adds a `body`, a
+        // `display_name` or a `network_identifier` column to the store of
+        // who writes to the user.
+        let store = store("seen-columns");
+        let connection = store.connection();
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info('contact_seen') ORDER BY cid")
+            .unwrap();
+        let columns: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|column| column.unwrap())
+            .collect();
+        assert_eq!(
+            columns,
+            vec!["contact_id", "network", "first_seen", "last_seen"],
+            "the pending-contact store holds a Matrix ID, a network and two instants, \
+             and nothing else: see the migration's own comment and \
+             docs/architecture/security-model.md"
+        );
     }
 
     #[test]

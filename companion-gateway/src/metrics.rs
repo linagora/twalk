@@ -58,6 +58,15 @@ pub struct Metrics {
     /// waiting — the same pair as consent's, for the same question.
     bridge_status_published: Mutex<u64>,
     bridge_status_outbox_pending: Mutex<Option<u64>>,
+    /// Inbound events the pending-contact projection turned into a sighting
+    /// (#54), and how many contacts are currently waiting for a decision.
+    /// The gauge is the number screen 5 shows, which is exactly why an
+    /// operator wants it: a dashboard that says "3 waiting" and a Gateway
+    /// that says nothing is waiting is a bug worth seeing. `None` until the
+    /// projection is configured, so a Gateway that consumes nothing exposes
+    /// no contact series at all.
+    contacts_observed: Mutex<u64>,
+    pending_contacts: Mutex<Option<u64>>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -118,6 +127,8 @@ impl Metrics {
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
             bridge_status_outbox_pending: Mutex::new(None),
+            contacts_observed: Mutex::new(0),
+            pending_contacts: Mutex::new(None),
             started_unix_seconds: now_unix_seconds,
         }
     }
@@ -233,6 +244,25 @@ impl Metrics {
             .expect("the metrics mutex is never poisoned") = Some(pending);
     }
 
+    /// Inbound events projected into a contact sighting (#54), a batch at a
+    /// time. Counts events read, not contacts: the same contact writing
+    /// twice moves this twice and the gauge below not at all.
+    pub fn record_contacts_observed(&self, observed: u64) {
+        *self
+            .contacts_observed
+            .lock()
+            .expect("the metrics mutex is never poisoned") += observed;
+    }
+
+    /// How many contacts are waiting for a decision, as the store counts
+    /// them — the number the Companion's dashboard shows.
+    pub fn set_pending_contacts(&self, pending: u64) {
+        *self
+            .pending_contacts
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(pending);
+    }
+
     /// Renders the Prometheus text exposition (format version 0.0.4). `now`
     /// is the scrape time in seconds since the epoch.
     pub fn render(&self, now_unix_seconds: u64) -> String {
@@ -296,6 +326,27 @@ impl Metrics {
             out.push_str("# TYPE twalk_companion_gateway_consent_outbox_pending gauge\n");
             out.push_str(&format!(
                 "twalk_companion_gateway_consent_outbox_pending {pending}\n"
+            ));
+        }
+        // The pending-contact series (#54), on the same terms: present once
+        // the projection is configured, absent otherwise.
+        let waiting = *self
+            .pending_contacts
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        if let Some(waiting) = waiting {
+            out.push_str("# HELP twalk_companion_gateway_contacts_observed_total Inbound events projected into a contact sighting.\n");
+            out.push_str("# TYPE twalk_companion_gateway_contacts_observed_total counter\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_contacts_observed_total {}\n",
+                self.contacts_observed
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            out.push_str("# HELP twalk_companion_gateway_pending_contacts Contacts that have written and that no consent decision covers.\n");
+            out.push_str("# TYPE twalk_companion_gateway_pending_contacts gauge\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_pending_contacts {waiting}\n"
             ));
         }
         out.push_str(
@@ -505,6 +556,37 @@ mod tests {
                 .render(1_000)
                 .contains("twalk_companion_gateway_consent_outbox_pending 0\n"),
             "a drained outbox still reports its gauge, at zero"
+        );
+    }
+
+    #[test]
+    fn the_pending_contact_series_appear_only_once_the_projection_is_configured() {
+        let metrics = Metrics::started_at(1_000);
+        metrics.record_contacts_observed(1);
+        assert!(
+            !metrics.render(1_000).contains("contact"),
+            "a Gateway that consumes no inbound stream exposes no contact series"
+        );
+
+        metrics.set_pending_contacts(3);
+        metrics.record_contacts_observed(1);
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_companion_gateway_contacts_observed_total 2\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_companion_gateway_pending_contacts 3\n"),
+            "{body}"
+        );
+        // The number screen 5 shows, at zero once everything is decided —
+        // still reported, because "nothing waiting" is an answer.
+        metrics.set_pending_contacts(0);
+        assert!(
+            metrics
+                .render(1_000)
+                .contains("twalk_companion_gateway_pending_contacts 0\n"),
+            "a fully decided deployment still reports its gauge, at zero"
         );
     }
 

@@ -53,6 +53,7 @@ use harness::{
     OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN, STUB_AS_TOKEN, STUB_BRIDGE_ID,
     STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID, UNREACHABLE_STATUS_BRIDGE_ID,
 };
+use harness::{sha256_hex, unreachable_nats_url, validate_against_contract, Bus};
 use reqwest::Method;
 use serde_json::{json, Value};
 use twalk_companion_gateway::bridge_status::is_reserved_path;
@@ -122,6 +123,12 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "/_twalk/bridges/{bridge_id}/status",
         "500",
         "store_unavailable needs the Gateway's own SQLite file to fail under a running process: the same fault-injection seam this suite does not have",
+    ),
+    (
+        "get",
+        "/api/contacts/pending",
+        "500",
+        "store_unavailable needs the pending-contact store to fail under a running process: the same fault-injection seam this suite does not have",
     ),
 ];
 
@@ -458,6 +465,45 @@ fn essence(content_type: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
+}
+
+/// One `inbound.message.received.v1` as the Sensor publishes it — the full
+/// shape, carrying a body, a display name and a `network_identifier`.
+///
+/// The pending-contact projection (#54) is shown all three and keeps none of
+/// them; that property is `tests/pending.rs`'s to assert against the store's
+/// own bytes. Here the event exists so the description's pending-list and
+/// display-name answers have something to be about.
+fn inbound_event(subject: &str) -> Value {
+    let at = "2026-09-17T10:00:00Z";
+    let room: String = sha256_hex(&format!("openapi-room:{subject}"))
+        .chars()
+        .take(18)
+        .collect();
+    let event = json!({
+        "specversion": "1.0",
+        "id": sha256_hex(&format!("openapi:{subject}:{at}")),
+        "source": format!("matrix://{SERVER_NAME}/!{room}:{SERVER_NAME}"),
+        "type": "fr.linagora.twalk.inbound.message.received.v1",
+        "time": at,
+        "subject": subject,
+        "datacontenttype": "application/json",
+        "network": "whatsapp",
+        "consent": "pending",
+        "data": {
+            "body": "un message que la Gateway ne garde pas",
+            "format": "text/plain",
+            "reply_to": null,
+            "attachments": [],
+            "contact": {
+                "display_name": "Aicha Benali",
+                "network_identifier": "+33612345678"
+            }
+        }
+    });
+    validate_against_contract(&event, "inbound.message.received")
+        .expect("the fixture is an event the contract allows");
+    event
 }
 
 /// A client that follows no redirect and keeps no cookie: the tests drive
@@ -1073,6 +1119,16 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/consent/snapshot",
             "/api/consent/snapshot",
         ),
+        (
+            Method::GET,
+            "/api/contacts/pending",
+            "/api/contacts/pending",
+        ),
+        (
+            Method::GET,
+            "/api/contacts/display-names",
+            "/api/contacts/display-names?contact=%40a%3Atest.twalk",
+        ),
         (Method::GET, "/api/bridges", "/api/bridges"),
         (
             Method::GET,
@@ -1177,6 +1233,28 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             body,
             503,
             Some("consent_not_configured"),
+        )
+        .await?;
+    }
+    // The pending contacts are the same half of the same configuration: no
+    // bus, so no projection, and the answer says so rather than claiming
+    // that nobody has written to the user (#54).
+    for (template, target) in [
+        ("/api/contacts/pending", "/api/contacts/pending"),
+        (
+            "/api/contacts/display-names",
+            "/api/contacts/display-names?contact=%40a%3Atest.twalk",
+        ),
+    ] {
+        call.check(
+            Method::GET,
+            &base,
+            template,
+            target,
+            &consent_cookie,
+            None,
+            503,
+            Some("contacts_not_configured"),
         )
         .await?;
     }
@@ -1766,6 +1844,113 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         snapshot.body
     );
 
+    // The pending contacts (#54), on the same Gateway: it consumes the
+    // inbound stream the Sensor publishes to, so the contact this test
+    // invents appears in the list once the projection has read it. The
+    // behaviour is `tests/pending.rs`'s; what is driven here is every answer
+    // the description declares.
+    let correspondent = format!(
+        "@whatsapp_g54_openapi_{}:{SERVER_NAME}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let inbound = inbound_event(&correspondent);
+    let bus = Bus::connect().await?;
+    bus.ensure_stream("twalk", &["twalk.>"]).await?;
+    bus.publish_event("twalk.inbound.message.received.v1", &inbound)
+        .await?;
+    poll_until(
+        || async {
+            let listed: Value = http
+                .get(format!("{consenting_base}/api/contacts/pending"))
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("twalk_device={deciding_device}"),
+                )
+                .send()
+                .await
+                .ok()?
+                .json()
+                .await
+                .ok()?;
+            listed["contacts"]
+                .as_array()?
+                .iter()
+                .any(|entry| entry["contact"] == json!(correspondent))
+                .then_some(())
+        },
+        "the projection to put the published contact in the pending list",
+    )
+    .await?;
+    let pending = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/contacts/pending",
+            "/api/contacts/pending?network=whatsapp",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        pending.body["contacts"]
+            .as_array()
+            .is_some_and(|contacts| contacts
+                .iter()
+                .any(|entry| entry["contact"] == json!(correspondent))),
+        "the contact that wrote is waiting for a decision: {}",
+        pending.body
+    );
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/contacts/pending",
+        "/api/contacts/pending?network=irc",
+        &deciding_cookie,
+        None,
+        400,
+        Some("unknown_value"),
+    )
+    .await?;
+
+    // The display names: read from the bus, and never stored — which is why
+    // they are their own call.
+    let names = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/contacts/display-names",
+            &format!(
+                "/api/contacts/display-names?contact={}",
+                correspondent.replace('@', "%40").replace(':', "%3A")
+            ),
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        names.body["contacts"][0]["display_name"].as_str(),
+        Some("Aicha Benali"),
+        "the name comes from the bus: {}",
+        names.body
+    );
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/contacts/display-names",
+        "/api/contacts/display-names",
+        &deciding_cookie,
+        None,
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
+
     // The write path's refusals, one per code the description enumerates.
     for (body, error) in [
         (
@@ -1898,6 +2083,32 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
     capped.stop().await;
+
+    // --- a Gateway configured with a bus nothing listens on: its pending
+    // list still answers, because that comes from its own store, and the
+    // display names — which do come from the bus — say which half failed
+    // (#54).
+    let dead_bus_static = companion_build("openapi-dead-bus")?;
+    let dead_bus = GatewayProc::start(&gateway_env_with_consent(
+        &dead_bus_static,
+        &unreachable_nats_url()?,
+    ))?;
+    let dead_bus_base = dead_bus.base_url().await?;
+    wait_until_answering(&dead_bus_base).await?;
+    let (dead_bus_device, _) =
+        sign_in_cookies(&http, &dead_bus_base, &owner, "the offline device").await?;
+    call.check(
+        Method::GET,
+        &dead_bus_base,
+        "/api/contacts/display-names",
+        "/api/contacts/display-names?contact=%40a%3Atest.twalk",
+        &[("twalk_device", dead_bus_device.as_str())],
+        None,
+        502,
+        Some("bus_unreachable"),
+    )
+    .await?;
+    dead_bus.stop().await;
 
     // --- a Gateway that serves no snapshot at all: no service token, so
     // there is no credential that would open it, and the answer says which

@@ -312,6 +312,13 @@ services:
       # entries; empty means its default. There is no pagination — a state
       # over the cap is an error naming this variable, never a truncation.
       GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES: ${GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES:-}
+      # The pending-contact projection (ticket #54): the durable JetStream
+      # consumer the Gateway reads inbound.message.received through, to know
+      # who has written and is still waiting for a decision. Empty means its
+      # default, which is right for a deployment with one Gateway — set it
+      # only if you run a second Gateway against this bus, where sharing one
+      # durable name would split the stream between them.
+      GATEWAY_INBOUND_CONSUMER: ${GATEWAY_INBOUND_CONSUMER:-}
     volumes:
       # The device list and the session tokens' digests — a restart keeps the
       # user signed in on every device they signed in on — and the consent

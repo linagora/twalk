@@ -12,6 +12,7 @@ use twalk_companion_gateway::bootstrap::Bootstrap;
 use twalk_companion_gateway::bridge_status::{reconcile, Statuses};
 use twalk_companion_gateway::config::{Config, Consent};
 use twalk_companion_gateway::consent_snapshot::Snapshots;
+use twalk_companion_gateway::contacts::{project_until_shutdown, Contacts};
 use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
@@ -132,23 +133,44 @@ async fn main() -> Result<()> {
     // journal, publishes whatever the last run left unpublished, and serves
     // the write API; unconfigured, the consent endpoints answer a 503 naming
     // what is missing and the rest of the origin is untouched.
-    let consent = match &config.consent {
+    // Consent's two halves are wired together because they share one store
+    // and one bus: the outbox that publishes decisions (#49) and the
+    // projection that consumes the inbound stream to know who is waiting for
+    // one (#54).
+    let (consent, contacts) = match &config.consent {
         Some(consent) => {
-            let outbox = open_consent(consent, &metrics)?;
+            let (store, outbox) = open_consent(consent, &metrics)?;
             tokio::spawn(publish_until_shutdown(
                 outbox.clone(),
                 consent.nats_url.clone(),
             ));
-            Some(outbox)
+            let projection = Arc::new(Contacts::new(
+                store,
+                metrics.clone(),
+                consent.owner.clone(),
+                consent.nats_url.clone(),
+                config.inbound_consumer.clone(),
+            ));
+            info!(
+                consumer = %projection.consumer_name(),
+                owner = %consent.owner,
+                "the pending-contact projection is on: this Gateway keeps a contact's Matrix ID, \
+                 its network and its first and last sighting — no body, no display name, no \
+                 network identifier"
+            );
+            tokio::spawn(project_until_shutdown(projection.clone()));
+            (Some(outbox), Some(projection))
         }
         None => {
             if config.sign_in.is_some() {
                 warn!(
                     "GATEWAY_NATS_URL is not set: the consent endpoints answer 503, because a \
-                     decision the bus never hears is a decision no persona can honour"
+                     decision the bus never hears is a decision no persona can honour — and so \
+                     do the pending-contact endpoints, because the list of who is waiting is \
+                     read from the bus"
                 );
             }
-            None
+            (None, None)
         }
     };
 
@@ -279,7 +301,8 @@ async fn main() -> Result<()> {
             .with_consent(consent)
             .with_bridges(bridges.clone())
             .with_snapshots(snapshots)
-            .with_statuses(statuses.clone()),
+            .with_statuses(statuses.clone())
+            .with_contacts(contacts),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming
@@ -324,14 +347,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Opens the consent store and hands back the outbox the router and the
-/// publication task share.
+/// Opens the consent store and hands back it and the outbox the router and
+/// the publication task share. The store is handed back as well because the
+/// pending-contact projection (#54) writes into the same file: the pending
+/// list is a view over the seen contacts *and* the decision journal, so the
+/// two must be one database and not two.
 ///
 /// Opening applies the embedded schema migrations, so an operator upgrades
 /// the image and nothing else. The outbox gauge is published here, before
 /// the origin binds: a restart that inherits unpublished decisions reports
 /// them from its first scrape, not from its first request.
-fn open_consent(consent: &Consent, metrics: &Arc<Metrics>) -> Result<Arc<Outbox>> {
+fn open_consent(consent: &Consent, metrics: &Arc<Metrics>) -> Result<(Arc<Store>, Arc<Outbox>)> {
     let store = Store::open(&consent.state_dir).context("failed to open the consent store")?;
     info!(
         store = %store.path().display(),
@@ -353,13 +379,16 @@ fn open_consent(consent: &Consent, metrics: &Arc<Metrics>) -> Result<Arc<Outbox>
             "committed consent decisions were not published before the last stop; publishing them now"
         );
     }
-    Ok(Arc::new(Outbox::new(
-        store,
-        metrics.clone(),
-        consent.matrix_domain.clone(),
-        consent.owner.clone(),
-        std::time::SystemTime::now,
-    )))
+    Ok((
+        store.clone(),
+        Arc::new(Outbox::new(
+            store,
+            metrics.clone(),
+            consent.matrix_domain.clone(),
+            consent.owner.clone(),
+            std::time::SystemTime::now,
+        )),
+    ))
 }
 
 /// Resolves when the process is asked to stop (SIGTERM, or SIGINT from an

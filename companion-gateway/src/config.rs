@@ -67,6 +67,21 @@ pub struct Config {
     /// when GATEWAY_SERVICE_TOKEN is unset — in which case the snapshot
     /// endpoint answers 503 naming it. See [`Snapshot`].
     pub snapshot: Option<Snapshot>,
+    /// The durable JetStream consumer the pending-contact projection reads
+    /// `inbound.message.received` through (GATEWAY_INBOUND_CONSUMER, default
+    /// [`crate::contacts::DEFAULT_INBOUND_CONSUMER`], ticket #54).
+    ///
+    /// One Gateway owns this consumer per deployment, and the default is
+    /// right for every deployment that has one. It is configurable for the
+    /// operator who points a second Gateway at the same bus — a staging copy
+    /// reading production traffic, a migration running two at once — where
+    /// sharing a durable name would split the stream between them and leave
+    /// each showing half the contacts. The name is also what carries the
+    /// "full delivery on first creation, its ack floor afterwards" property:
+    /// renaming it makes the next start a first start, which replays the
+    /// stream's whole history into a store that already holds it (harmless,
+    /// because the sightings are idempotent, and slow).
+    pub inbound_consumer: String,
 }
 
 /// The bridges from the environment.
@@ -435,6 +450,10 @@ impl Config {
             consent: Consent::from_env(sign_in.as_ref())?,
             bridges: bridges_from_env()?,
             snapshot: Snapshot::from_env()?,
+            inbound_consumer: env("GATEWAY_INBOUND_CONSUMER")
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| crate::contacts::DEFAULT_INBOUND_CONSUMER.to_owned()),
             sign_in,
             bootstrap,
         })

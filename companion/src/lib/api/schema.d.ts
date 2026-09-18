@@ -541,6 +541,96 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/contacts/display-names": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What these contacts are called, read from the bus.
+         * @description A separate call from the list, because the Gateway stores no display
+         *     name: a record of who writes to the user *and what they are called*
+         *     is a directory, and the pending-contact store exists precisely to not
+         *     be one. A name is looked up when a screen needs it and kept nowhere
+         *     afterwards - not in the store, not in a cache, not in the logs.
+         *
+         *     The Gateway reads the tail of the inbound stream, takes the most
+         *     recent name it finds for each contact asked about, and drops
+         *     everything else it walked past. The read is bounded, so a contact
+         *     whose last message has fallen outside that window comes back with
+         *     `display_name: null`. That is a real answer and not a failure: the
+         *     Companion then shows the Matrix ID, which is what the decision will
+         *     name anyway.
+         *
+         *     `contact` repeats, once per contact
+         *     (`?contact=@a:example.com&contact=@b:example.com`), and the answer
+         *     holds one entry per distinct contact asked about, in the order they
+         *     were asked. Asking about more than 200 at once is refused rather than
+         *     truncated, so a short answer never passes for a complete one.
+         */
+        get: operations["getContactDisplayNames"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/contacts/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The contacts waiting for a consent decision.
+         * @description Screen 5's "3 consent decisions waiting", and the list behind it.
+         *
+         *     **What a contact is here.** Four values, and there will never be a
+         *     fifth: the sender's Matrix user ID as the bridge materialised it, the
+         *     network it wrote on, and the first and last instants it did - taken
+         *     from the events' own `time`, never from the Gateway's clock, so a
+         *     Gateway installed after weeks of Sensor traffic reports when those
+         *     contacts actually wrote. There is no message body here, no display
+         *     name and no `network_identifier`: the Gateway's store holds none of
+         *     them, so no read of it can hand them out. Display names are a
+         *     separate call, answered from the bus and written nowhere - see
+         *     `GET /api/contacts/display-names`.
+         *
+         *     Note what storing the Matrix ID does and does not hide: a bridged
+         *     ghost user's ID conventionally embeds the network identifier
+         *     (`@whatsapp_33612345678:example.com`), so this list keeps phone
+         *     numbers although it has no field for one. It is stored because a
+         *     consent decision has to name its subject and that ID is the subject.
+         *
+         *     **What "waiting" means.** The same question
+         *     `GET /api/consent/effective` answers with `decided_by: null`: neither
+         *     this contact's own decision nor its network's default exists. So
+         *     granting or revoking a whole network empties this list of every
+         *     contact on it at once, and a contact the owner deliberately left
+         *     `pending` is *not* in it - they answered, and the answer was "not
+         *     yet". The owner's own Matrix ID is never in it either: their messages
+         *     travel through the same rooms, and nobody is their own correspondent.
+         *
+         *     **The numbers.** `total` and `networks` always count the whole list,
+         *     whatever `?network=` narrows `contacts` to, so a badge and the list
+         *     beside it can never disagree.
+         *
+         *     Not paginated and not capped, like `GET /api/consent/state`.
+         */
+        get: operations["getPendingContacts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/devices": {
         parameters: {
             query?: never;
@@ -1097,6 +1187,19 @@ export interface components {
              */
             type: "contact" | "network";
         };
+        ContactDisplayName: {
+            /** @description The contact asked about. */
+            contact: string;
+            /**
+             * @description What the bus's most recent event says this contact is called, or
+             *     `null` when the read found none. Never stored by the Gateway.
+             */
+            display_name: string | null;
+        };
+        ContactDisplayNames: {
+            /** @description One entry per distinct contact asked about, in order. */
+            contacts: components["schemas"]["ContactDisplayName"][];
+        };
         /**
          * @description A username and a password, and deliberately nothing else: a closed
          *     object is what makes "no recovery key can arrive here" a property of
@@ -1313,6 +1416,56 @@ export interface components {
          * @enum {string}
          */
         Network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+        /**
+         * @description One contact waiting for a decision, on one network. Four members, and
+         *     deliberately no fifth: a body, a display name or a network identifier
+         *     would each turn this list into something else.
+         */
+        PendingContact: {
+            /**
+             * @description The contact's Matrix user ID, as the bridge materialised it, and
+             *     what a decision about them will name as its subject.
+             * @example @whatsapp_33612345678:example.com
+             */
+            contact: string;
+            /**
+             * Format: date-time
+             * @description When this contact first wrote, from the event's own `time` - not
+             *     when this Gateway happened to read it.
+             */
+            first_seen: string;
+            /**
+             * Format: date-time
+             * @description When this contact last wrote, on the same terms.
+             */
+            last_seen: string;
+            network: components["schemas"]["Network"];
+        };
+        PendingContactCount: {
+            /** @description How many contacts are waiting on that network. */
+            count: number;
+            network: components["schemas"]["Network"];
+        };
+        PendingContacts: {
+            /**
+             * @description The contacts themselves, oldest first sighting first - the order
+             *     the user met them in, and stable between polls. Narrowed by
+             *     `?network=` when one was given.
+             */
+            contacts: components["schemas"]["PendingContact"][];
+            /**
+             * @description The same total, broken down per network, in the contract's own
+             *     order of network values. A network with nothing waiting is absent
+             *     rather than present at zero.
+             */
+            networks: components["schemas"]["PendingContactCount"][];
+            /**
+             * @description How many contacts are waiting for a decision in all - the
+             *     dashboard's number. Counts the whole list, never only what a
+             *     `?network=` filter left in `contacts`.
+             */
+            total: number;
+        };
         /** @description A decision as the journal holds it. */
         RecordedConsentDecision: {
             /**
@@ -1493,6 +1646,24 @@ export interface components {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
                     error?: "store_unavailable";
+                };
+            };
+        };
+        /**
+         * @description This deployment projects no pending contacts: `GATEWAY_NATS_URL` is
+         *     unset, so the Gateway consumes no inbound stream and has no list to
+         *     answer with. An empty list would claim that nobody has written to the
+         *     user, which is a very different statement from "this Gateway is not
+         *     watching"; `detail` names the variables.
+         */
+        ContactsNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "contacts_not_configured";
                 };
             };
         };
@@ -2580,6 +2751,120 @@ export interface operations {
             401: components["responses"]["Unauthenticated"];
             500: components["responses"]["ConsentStoreUnavailable"];
             503: components["responses"]["ConsentNotConfigured"];
+        };
+    };
+    getContactDisplayNames: {
+        parameters: {
+            query: {
+                /**
+                 * @description A contact's Matrix user ID. Repeat the parameter to ask about
+                 *     several, at most 200 per call.
+                 * @example [
+                 *       "@whatsapp_33612345678:example.com"
+                 *     ]
+                 */
+                contact: string[];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description One entry per contact asked about, its `display_name` `null` when
+             *     the bus no longer carries one for it.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactDisplayNames"];
+                };
+            };
+            /**
+             * @description `malformed_request` - no `contact` parameter at all, or more than
+             *     200 of them.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `bus_unreachable` - the display names could not be read from the
+             *     bus. The pending list itself is unaffected: it comes from the
+             *     Gateway's own store, and the Companion can show the Matrix IDs.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            503: components["responses"]["ContactsNotConfigured"];
+        };
+    };
+    getPendingContacts: {
+        parameters: {
+            query?: {
+                /** @description Narrows `contacts` to one network. The counts are unaffected. */
+                network?: components["schemas"]["Network"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The contacts waiting for a decision, and their counts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PendingContacts"];
+                };
+            };
+            /** @description `unknown_value` - `network` is not one of the contract's. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unknown_value";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description `store_unavailable` - the Gateway's store could not be read. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            503: components["responses"]["ContactsNotConfigured"];
         };
     };
     listDevices: {
