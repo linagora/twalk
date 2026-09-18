@@ -22,7 +22,10 @@ Last reviewed: 2026-09-17.
 | Contract — CloudEvents v1 | v0.1 | — (landed with the docs seed) | done — 8 schemas, one validated fixture each |
 | Sensor | v0.1 | [#1](https://github.com/linagora/twalk/issues/1) | done — tickets 01–11 merged, reviewed 2026-09-17 |
 | Reference deployment (Compose) | v0.1 | part of the Sensor lot (ticket 11) | done for Synapse + NATS + Sensor; grows with each component |
-| Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) merged, H2 [#21](https://github.com/linagora/twalk/issues/21) is the frontier |
+| Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 merged, H2 [#21](https://github.com/linagora/twalk/issues/21) under way; H4 absorbed the persona consent gate, H5 gained a current-state re-check |
+| Human approval (Gateway + Companion) | v0.1 | #46 and #65 | specced — [#97](https://github.com/linagora/twalk/issues/97), [#100](https://github.com/linagora/twalk/issues/100) |
+| Model, language and tracing configuration | v0.1 | #46 and #65 | specced — [#98](https://github.com/linagora/twalk/issues/98), [#101](https://github.com/linagora/twalk/issues/101), [#99](https://github.com/linagora/twalk/issues/99) |
+| Five interface languages | v0.1 | #65 | specced — [#102](https://github.com/linagora/twalk/issues/102) |
 | Matrix as a network | v0.1 | — (standalone tickets) | in progress — contract [#17](https://github.com/linagora/twalk/issues/17) merged, Sensor [#18](https://github.com/linagora/twalk/issues/18) open |
 | Bridges | v0.1 | — (standalone ticket) | in progress — WhatsApp and Signal in the reference deployment ([#73](https://github.com/linagora/twalk/issues/73)); mautrix-gmessages (SMS) still planned |
 | Companion Gateway — consent and auth | v0.1 | [#46](https://github.com/linagora/twalk/issues/46) | specced — tickets #48–#54 |
@@ -64,6 +67,13 @@ Known follow-ups, none blocking: [#13](https://github.com/linagora/twalk/issues/
 Spec [#19](https://github.com/linagora/twalk/issues/19), tickets H1–H6, mostly sequential: **H1** [#20](https://github.com/linagora/twalk/issues/20) shared test harness crate and stub LLM → **H2** [#21](https://github.com/linagora/twalk/issues/21) Python persona SDK and `assistant` skeleton → **H3** [#22](https://github.com/linagora/twalk/issues/22) suggestion production and **H4** [#23](https://github.com/linagora/twalk/issues/23) runtime lifecycle (parallel) → **H5** [#24](https://github.com/linagora/twalk/issues/24) approval API → **H6** [#25](https://github.com/linagora/twalk/issues/25) the full loop end-to-end.
 
 The runtime is Rust, personas are separate processes talking to the bus, and the reference persona `assistant` is Python against the SDK ([ADR 0008](adr/0008-hermes-rust-runtime-personas-as-processes.md)).
+
+A design review on 2026-09-18 revisited only what had changed since that spec was written, and produced four decisions with consequences outside the H-series:
+
+- **Human approval has a surface.** Spec #19 called the Companion Gateway the approval API's "future caller"; it exists, so the Gateway relays approvals and reads suggestions from the bus without persisting them ([#97](https://github.com/linagora/twalk/issues/97)), and the Companion carries an approval screen separate from the dashboard ([#100](https://github.com/linagora/twalk/issues/100)). H5 also re-checks the contact's **current** consent before publishing, which closes a gap between two earlier decisions: a revocation after a suggestion was produced previously left the approval passing.
+- **No default model** ([ADR 0015](adr/0015-no-default-llm-configured-through-the-companion.md)): a persona refuses to start without an endpoint the operator chose, the configuration is held by the Gateway and injected by the runtime, and an operator-supplied credential file wins over one set from the browser.
+- **A suggestion follows the conversation's language, not the user's** ([ADR 0016](adr/0016-a-reply-follows-the-conversation-not-the-user.md)) — the user's native language is a stored preference governing the interface and the fallback. The Companion ships five languages, three of them not yet reviewed by native speakers, with a contribution path in `CONTRIBUTING.md`.
+- **Agent observability is OpenTelemetry, off by default** ([ADR 0017](adr/0017-agent-observability-is-otlp-and-opt-in.md)): the bus says what a persona did, traces say why it proposed that, and prompt content is a second, separately named decision because those prompts are the user's messages.
 
 ### Bridges · in progress
 
