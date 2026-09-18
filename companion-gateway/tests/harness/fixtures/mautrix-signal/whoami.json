@@ -1,0 +1,47 @@
+{
+  "endpoint": "GET /_matrix/provision/v3/whoami?user_id={mxid}",
+  "bridge": "mautrix-signal v26.09",
+  "answers": {
+    "no_logins": {
+      "status": 200,
+      "note": "Verbatim, including the empty `logins` array: nobody had logged this bridge in. Note what the network block does NOT have next to WhatsApp's — no `default_command_prefix` — and that `login_flows` holds exactly one flow.",
+      "substituted": [],
+      "body": {
+        "network": {
+          "displayname": "Signal",
+          "network_url": "https://signal.org",
+          "network_icon": "mxc://maunium.net/wPJgTQbZOtpBFmDNkiNEMDUp",
+          "network_id": "signal",
+          "beeper_bridge_type": "signal",
+          "default_port": 29328
+        },
+        "login_flows": [
+          {
+            "name": "QR",
+            "description": "Scan a QR code to pair the bridge to your Signal app",
+            "id": "qr"
+          }
+        ],
+        "homeserver": "twalk.localhost",
+        "bridge_bot": "@signalbot:twalk.localhost",
+        "command_prefix": "!signal",
+        "logins": []
+      }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    },
+    "bad_secret": {
+      "status": 401,
+      "note": "",
+      "substituted": [],
+      "body": { "errcode": "M_UNKNOWN_TOKEN", "error": "Invalid auth token" }
+    }
+  }
+}

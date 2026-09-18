@@ -1,0 +1,29 @@
+{
+  "endpoint": "GET /_matrix/provision/v3/login/flows?user_id={mxid}",
+  "bridge": "mautrix-signal v26.09",
+  "answers": {
+    "one_flow": {
+      "status": 200,
+      "note": "One flow, not two: Signal has no phone-number flow. Nothing may assume WhatsApp's flow set.",
+      "substituted": [],
+      "body": {
+        "flows": [
+          {
+            "name": "QR",
+            "description": "Scan a QR code to pair the bridge to your Signal app",
+            "id": "qr"
+          }
+        ]
+      }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}

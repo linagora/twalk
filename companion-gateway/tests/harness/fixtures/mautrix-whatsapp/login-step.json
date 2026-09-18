@@ -1,0 +1,99 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/login/step/{process}/{step}/{type}?user_id={mxid}&txn_id={txn}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "refreshed_qr": {
+      "status": 200,
+      "note": "What the held `display_and_wait` answers when nobody has scanned yet: the same process id and step id, a new payload — and a NEW `txn_id`. The transaction id is re-issued with every step answer, so the next call must echo this one, not the one the start gave.",
+      "substituted": ["display_and_wait.data, as in login-start.json"],
+      "body": {
+        "login_id": "damc6h3agr7c7398n6kg",
+        "type": "display_and_wait",
+        "step_id": "fi.mau.whatsapp.login.qr",
+        "txn_id": "bls_damc703agr7c7398n6qg",
+        "instructions": "Scan the QR code with the WhatsApp mobile app to log in",
+        "display_and_wait": {
+          "type": "qr",
+          "data": "https://wa.me/settings/linked_devices#PLACEHOLDER-not-a-real-whatsapp-pairing-credential-this-is-the-refreshed-code-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    "rejected_user_input": {
+      "status": 400,
+      "note": "A phone number the network would not take. The errcode is the connector's own, not a bridgev2 one — so the Gateway must not switch on a closed set of mautrix codes here. Note what follows: this answer DESTROYS the login process. Every later call against it, the step cancel and the process cancel included, was 404 M_NOT_FOUND. There is no retrying a step.",
+      "substituted": [],
+      "body": {
+        "errcode": "FI.MAU.WHATSAPP.PHONE_NUMBER_TOO_SHORT",
+        "error": "Phone number too short"
+      }
+    },
+    "wrong_txn_id": {
+      "status": 500,
+      "note": "The bug of #106: the Gateway invented a transaction id instead of echoing the one the step carried. A 500, not a 4xx.",
+      "substituted": [],
+      "body": {
+        "errcode": "M_BAD_STATE",
+        "error": "Transaction ID does not match"
+      }
+    },
+    "wrong_step_type": {
+      "status": 500,
+      "note": "The last path segment must be the step's own type.",
+      "substituted": [],
+      "body": { "errcode": "M_BAD_STATE", "error": "Step type does not match" }
+    },
+    "wrong_step_id": {
+      "status": 500,
+      "note": "",
+      "substituted": [],
+      "body": { "errcode": "M_BAD_STATE", "error": "Step ID does not match" }
+    },
+    "unknown_process": {
+      "status": 404,
+      "note": "A process the bridge never had, or one it has forgotten — which is what a bridge restart looks like from outside, and what a cancelled process answers.",
+      "substituted": [],
+      "body": { "errcode": "M_NOT_FOUND", "error": "Login not found" }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "The second bug of #106: the Gateway sent ?user_id= only on the calls that start something, so the step and the cancel got this.",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    },
+    "step_cancel_unsupported": {
+      "status": 500,
+      "note": "POST .../{step}/cancel on a live `display_and_wait` step. The step-cancel endpoint is not usable for a QR flow on either reference bridge; what releases a held request is the *process* cancel.",
+      "substituted": [],
+      "body": {
+        "errcode": "M_BAD_STATE",
+        "error": "Login process does not support cancelling steps"
+      }
+    },
+    "held_request_when_process_cancelled": {
+      "status": 410,
+      "note": "What the held `display_and_wait` request comes back with when the process is cancelled underneath it. Captured on the Signal bridge (the WhatsApp bridge was in use by the deployment's owner); it is bridgev2's own error, not a connector's.",
+      "substituted": [],
+      "body": {
+        "errcode": "FI.MAU.BRIDGE.LOGIN_CANCELLED",
+        "error": "Login process was cancelled"
+      }
+    },
+    "complete": {
+      "status": 200,
+      "note": "NOT CAPTURED. Completing a login needs a human with the account's phone, so no real `complete` answer exists in this fixture set. This body is bridgev2's declared shape (RespLoginComplete: the created login's id and the user login it belongs to) and it is the one remaining unverified shape in the Gateway's bridge facade — see the PR for #106. Treat any mismatch here as the fourth occurrence of the same bug, not as a surprise.",
+      "substituted": ["the whole body: this is a declared shape, not a captured one"],
+      "body": {
+        "type": "complete",
+        "step_id": "fi.mau.whatsapp.login.complete",
+        "instructions": "Successfully logged in",
+        "complete": {
+          "login_id": "33612345678",
+          "user_login_id": "33612345678"
+        }
+      }
+    }
+  }
+}

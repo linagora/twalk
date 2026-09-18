@@ -1,0 +1,27 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/logout/{login_id}?user_id={mxid}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "unknown_login": {
+      "status": 404,
+      "note": "A login id that is not one of this bridge's own.",
+      "substituted": [],
+      "body": { "errcode": "M_NOT_FOUND", "error": "Login not found" }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    },
+    "logged_out": {
+      "status": 200,
+      "note": "NOT CAPTURED. The only login on the reference deployment was the owner's and logging it out was out of the question. This is the shape by analogy with the process cancel, which is the neighbouring bridgev2 endpoint. The Gateway reads nothing out of the body, so the risk this carries is confined to the status code.",
+      "substituted": ["the whole body: not a captured answer"],
+      "body": {}
+    }
+  }
+}

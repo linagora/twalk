@@ -1,0 +1,21 @@
+{
+  "endpoint": "GET /_matrix/provision/v3/logins?user_id={mxid}",
+  "bridge": "mautrix-signal v26.09",
+  "answers": {
+    "no_logins": {
+      "status": 200,
+      "note": "`login_ids`, and nothing else — the same shape as the WhatsApp bridge, which is what makes it the contract rather than a connector's quirk.",
+      "substituted": [],
+      "body": { "login_ids": [] }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}

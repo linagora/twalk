@@ -1,0 +1,103 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/login/step/{process}/{step}/{type}?user_id={mxid}&txn_id={txn}",
+  "bridge": "mautrix-signal v26.09",
+  "answers": {
+    "refreshed_qr": {
+      "status": 200,
+      "note": "The held step, answered with a fresh code. The process id is unchanged, the `txn_id` is not: `bls_damc5sgmuijs73ah014g` at the start, `bls_damc68omuijs73ah01a0` here. Echo the latest.",
+      "substituted": [
+        "display_and_wait.data, as in login-start.json"
+      ],
+      "body": {
+        "login_id": "damc5s8muijs73ah0140",
+        "type": "display_and_wait",
+        "step_id": "fi.mau.signal.login.qr",
+        "txn_id": "bls_damc68omuijs73ah01a0",
+        "instructions": "Scan the QR code on your Signal app to log in",
+        "display_and_wait": {
+          "type": "qr",
+          "data": "sgnl://linkdevice?pub_key=PLACEHOLDER1111111111111111111111111111111&uuid=PLACEHOLDER11111111111111"
+        }
+      }
+    },
+    "wrong_txn_id": {
+      "status": 500,
+      "note": "Same errcode and same message as the WhatsApp bridge: this is bridgev2's, not a connector's.",
+      "substituted": [],
+      "body": {
+        "errcode": "M_BAD_STATE",
+        "error": "Transaction ID does not match"
+      }
+    },
+    "wrong_step_type": {
+      "status": 500,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_BAD_STATE",
+        "error": "Step type does not match"
+      }
+    },
+    "wrong_step_id": {
+      "status": 500,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_BAD_STATE",
+        "error": "Step ID does not match"
+      }
+    },
+    "unknown_process": {
+      "status": 404,
+      "note": "Also what a cancelled process answers from then on.",
+      "substituted": [],
+      "body": {
+        "errcode": "M_NOT_FOUND",
+        "error": "Login not found"
+      }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    },
+    "step_cancel_unsupported": {
+      "status": 500,
+      "note": "POST .../{step}/cancel on a live `display_and_wait`, on the bridge whose QR flow is its only flow. Both reference bridges refuse it.",
+      "substituted": [],
+      "body": {
+        "errcode": "M_BAD_STATE",
+        "error": "Login process does not support cancelling steps"
+      }
+    },
+    "held_request_when_process_cancelled": {
+      "status": 410,
+      "note": "The held request, after the process was cancelled underneath it. This is the 410 the Gateway maps to `login_expired`; note the errcode says cancelled, and it is NOT the `FI.MAU.LOGIN_STEP_CANCELLED` the Gateway also maps at 409.",
+      "substituted": [],
+      "body": {
+        "errcode": "FI.MAU.BRIDGE.LOGIN_CANCELLED",
+        "error": "Login process was cancelled"
+      }
+    },
+    "complete": {
+      "status": 200,
+      "note": "NOT CAPTURED. Completing a Signal login needs a human linking a device from the Signal app, so no real `complete` answer exists in this fixture set. This is bridgev2's declared shape (RespLoginComplete) and it is unverified against a real bridge — see the PR for #106.",
+      "substituted": [
+        "the whole body: this is a declared shape, not a captured one"
+      ],
+      "body": {
+        "type": "complete",
+        "step_id": "fi.mau.signal.login.complete",
+        "instructions": "Successfully logged in",
+        "complete": {
+          "login_id": "+33612345678",
+          "user_login_id": "+33612345678"
+        }
+      }
+    }
+  }
+}

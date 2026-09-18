@@ -25,9 +25,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use harness::stub_bridge::{COOKIES_FLOW, COOKIES_STEP, PHONE_FLOW, PHONE_STEP, QR_FLOW, QR_STEP};
 use harness::{
-    companion_build, ensure_stack, gateway_env_with_bridges, gateway_state_dir, owner_user_id,
-    poll_until, GatewayProc, MatrixUser, StubBridge, OWNER_LOCALPART, STUB_BRIDGE_ID,
-    UNREACHABLE_BRIDGE_ID,
+    bridge_fixtures, companion_build, ensure_stack, gateway_env_with_bridges, gateway_state_dir,
+    owner_user_id, poll_until, FixtureBridge, GatewayProc, MatrixUser, StubBridge, OWNER_LOCALPART,
+    STUB_BRIDGE_ID, UNREACHABLE_BRIDGE_ID,
 };
 use serde_json::{json, Value};
 
@@ -44,8 +44,16 @@ struct Fixture {
 
 impl Fixture {
     async fn start(test_name: &str) -> Result<Self> {
+        Self::start_as(test_name, FixtureBridge::Whatsapp).await
+    }
+
+    /// The same fixture against the other reference bridge's captured
+    /// answers. The two do not agree — one flow versus two, different step
+    /// ids, and an unknown flow id that is a `404` on one and a silent
+    /// fallback to QR on the other — so the Gateway is held to both.
+    async fn start_as(test_name: &str, bridge: FixtureBridge) -> Result<Self> {
         ensure_stack().await?;
-        let stub = StubBridge::start().await?;
+        let stub = StubBridge::start_as(bridge).await?;
         let static_dir = companion_build(test_name)?;
         let gateway = GatewayProc::start(&gateway_env_with_bridges(&static_dir, &stub.base_url()))?;
         let base = gateway.base_url().await?;
@@ -244,7 +252,13 @@ async fn a_whole_qr_login_runs_through_the_gateway_while_the_browser_only_polls(
         .as_str()
         .context("a QR step carries the raw payload the browser draws")?
         .to_owned();
-    assert!(first_code.starts_with("2@"), "{first_code}");
+    // The prefix a real mautrix-whatsapp sends, not the `2@` this test used
+    // to assert — WhatsApp's own QR payload is a `https://wa.me/...` link and
+    // the `2@` form was invented along with the old stub (#106).
+    assert!(
+        first_code.starts_with(fixture.stub.qr_payload_prefix()),
+        "the payload the browser draws is the network's own: {first_code}"
+    );
     assert_eq!(
         started["step"]["valid_for_seconds"],
         json!(20),
@@ -926,5 +940,506 @@ async fn every_bridge_route_needs_a_device_token() -> Result<()> {
     assert!(fixture.stub.starts().is_empty());
 
     fixture.stop().await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// One test per divergence a real bridge was found to have (#106)
+//
+// Every test below exists because the stub used to answer something a real
+// mautrix bridge does not, and a real login failed on it. The stub now serves
+// the captured documents (`tests/harness/fixtures/`), so these hold the
+// Gateway to the bridge's contract rather than to somebody's memory of it.
+// ---------------------------------------------------------------------------
+
+/// `GET /logins` answers `{"login_ids": ["…"]}` — bare strings. The Gateway
+/// read it as a list of objects, found neither, and reported the bridge
+/// unreachable, so the reconnect list never worked against a real bridge.
+#[tokio::test]
+async fn the_reconnect_list_reads_the_bare_login_ids_a_real_bridge_answers() -> Result<()> {
+    let fixture = Fixture::start("bridges-login-ids").await?;
+    fixture
+        .stub
+        .add_existing_login("33612345678", "+33612345678");
+
+    let (status, logins) = fixture
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/logins"),
+            None,
+        )
+        .await?;
+    assert_eq!(
+        status, 200,
+        "a bridge that answered its logins is not unreachable: {logins}"
+    );
+    assert_eq!(logins["logins"][0]["login_id"], json!("33612345678"));
+    // And the name is honestly absent: this endpoint carries none, whoami is
+    // where a login's name and profile live. A name here would be a fiction.
+    assert_eq!(
+        logins["logins"][0]["name"],
+        Value::Null,
+        "GET /logins answers ids only: {logins}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// mautrix wants `?user_id=` on **every** provisioning call and answers
+/// `403 M_FORBIDDEN` without it. The stub now refuses it too, so a cancel or
+/// a logout that forgot it fails here rather than in front of a user.
+#[tokio::test]
+async fn the_cancel_and_the_logout_carry_the_acting_user_too() -> Result<()> {
+    let fixture = Fixture::start("bridges-acting-user").await?;
+    fixture.stub.add_existing_login("33612345678", "a session");
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+
+    // The cancel: two provisioning calls, and the stub 403s either one that
+    // omits the acting user.
+    let (status, cancelled) = fixture
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{cancelled}");
+    poll_until(
+        || async { (!fixture.stub.cancelled_processes().is_empty()).then_some(()) },
+        "the bridge to have been told to cancel the process",
+    )
+    .await?;
+
+    // And the logout.
+    let (status, logged_out) = fixture
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/logins/33612345678"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{logged_out}");
+    assert_eq!(fixture.stub.logged_out(), vec!["33612345678".to_owned()]);
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A bridge issues a fresh `txn_id` with **every** step answer and validates
+/// it on the call that advances that step, answering `500 M_BAD_STATE:
+/// Transaction ID does not match` for anything else. So the Gateway has to
+/// echo the *latest* one — not the first, and not one of its own.
+#[tokio::test]
+async fn each_held_step_echoes_the_transaction_id_that_step_carried() -> Result<()> {
+    let fixture = Fixture::start("bridges-txn-id").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+
+    // A refresh: the stub answers with a new code and a new transaction id,
+    // and the Gateway must sit back down in the step quoting the new one. If
+    // it quoted the old one the stub would answer M_BAD_STATE and the login
+    // would fail instead of refreshing.
+    fixture.stub.release_refreshed_qr("a-refreshed-code");
+    let refreshed = fixture
+        .poll_login_until("a refreshed code", |view| {
+            view["step"]["payload"]["data"] == json!("a-refreshed-code")
+        })
+        .await?;
+    assert_eq!(refreshed["state"], json!("awaiting_remote"), "{refreshed}");
+    poll_until(
+        || async { (fixture.stub.blocking_arrivals() >= 2).then_some(()) },
+        "the gateway to hold the refreshed code's step",
+    )
+    .await?;
+
+    let held: Vec<Option<String>> = fixture
+        .stub
+        .submits()
+        .iter()
+        .filter(|submit| submit.step_type == "display_and_wait")
+        .map(|submit| submit.txn_id.clone())
+        .collect();
+    assert!(held.len() >= 2, "two held steps were expected: {held:?}");
+    assert!(
+        held.iter().all(Option::is_some),
+        "every held step quotes the transaction id the bridge issued: {held:?}"
+    );
+    assert_ne!(
+        held[0], held[1],
+        "a bridge re-issues the transaction id with every answer, so the second \
+         held step must quote the second one: {held:?}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The same rule on the non-blocking path: a submitted step quotes the
+/// transaction id the step it answers carried.
+#[tokio::test]
+async fn a_submitted_step_echoes_its_own_transaction_id() -> Result<()> {
+    let fixture = Fixture::start("bridges-txn-id-submit").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": PHONE_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    let (status, done) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit"),
+            Some(json!({ "step_id": PHONE_STEP, "data": { "phone_number": "+33612345678" } })),
+        )
+        .await?;
+    assert_eq!(
+        status, 200,
+        "a submit quoting the wrong transaction id would be M_BAD_STATE: {done}"
+    );
+    let submitted = fixture
+        .stub
+        .submits()
+        .into_iter()
+        .find(|submit| submit.step_type == "user_input")
+        .context("the user_input step reached the bridge")?;
+    assert!(
+        submitted.txn_id.is_some(),
+        "the submit quotes the transaction id the step carried: {submitted:?}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// Neither reference bridge supports cancelling a `display_and_wait` step:
+/// both answer `500 M_BAD_STATE: Login process does not support cancelling
+/// steps`. What releases the held request is the **process** cancel, which
+/// then answers the held request `410 FI.MAU.BRIDGE.LOGIN_CANCELLED`. The
+/// Gateway has to end up with a cancelled login either way.
+#[tokio::test]
+async fn the_process_cancel_is_what_releases_a_held_step() -> Result<()> {
+    let fixture = Fixture::start("bridges-step-cancel").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    poll_until(
+        || async { (fixture.stub.held() == 1).then_some(()) },
+        "the gateway to be holding the blocking step",
+    )
+    .await?;
+
+    let (status, cancelled) = fixture
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{cancelled}");
+    // The step cancel was refused, so it is the process cancel that let the
+    // held request go.
+    poll_until(
+        || async { (fixture.stub.held() == 0).then_some(()) },
+        "the held request to be released by the process cancel",
+    )
+    .await?;
+    let after = fixture.login().await?;
+    assert_eq!(
+        after["state"],
+        json!("cancelled"),
+        "a 410 arriving after the cancel must not overwrite it: {after}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The network refusing a submitted value — WhatsApp's
+/// `400 FI.MAU.WHATSAPP.PHONE_NUMBER_TOO_SHORT` — is something the user can
+/// act on, so it must not arrive as a bad gateway. And the bridge drops the
+/// login process along with the refusal, which the detail has to say or the
+/// user retries into a `404`.
+#[tokio::test]
+async fn a_value_the_network_refuses_is_a_400_that_says_to_start_again() -> Result<()> {
+    let fixture = Fixture::start("bridges-network-refused").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": PHONE_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    fixture
+        .stub
+        .refuse_next_step(400, "FI.MAU.WHATSAPP.PHONE_NUMBER_TOO_SHORT");
+    let (status, refused) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit"),
+            Some(json!({ "step_id": PHONE_STEP, "data": { "phone_number": "+1" } })),
+        )
+        .await?;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["error"], json!("invalid_request"));
+    let detail = refused["detail"].as_str().context("a detail")?;
+    assert!(
+        detail.contains("FI.MAU.WHATSAPP.PHONE_NUMBER_TOO_SHORT"),
+        "the detail names the network's own code: {detail}"
+    );
+    assert!(
+        detail.contains("start the login again"),
+        "the detail says the process is gone, so the user does not retry into a 404: {detail}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The network refusing another linked device, enforced by the bridge rather
+/// than canned: bridgev2's `max_logins`. The one refusal in the stub that no
+/// capture confirms — the reference deployment sets no cap — so it is
+/// exercised here and called out in the PR as unverified.
+#[tokio::test]
+async fn a_bridge_at_its_login_cap_refuses_another_one() -> Result<()> {
+    let fixture = Fixture::start("bridges-login-cap").await?;
+    fixture.stub.add_existing_login("33612345678", "a session");
+    fixture.stub.set_max_logins(1);
+
+    let (status, refused) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 403, "{refused}");
+    assert_eq!(refused["error"], json!("too_many_logins"));
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// mautrix-whatsapp does not validate the flow id: any unknown one silently
+/// gives you the QR flow. mautrix-signal answers `404 M_NOT_FOUND "Invalid
+/// login flow ID"` for the same call — asserted in the Signal test below.
+/// A flow-id typo being invisible on one bridge and fatal on the other is
+/// exactly what a fixture set exists to make visible.
+#[tokio::test]
+async fn an_unknown_flow_id_is_a_silent_qr_fallback_on_whatsapp() -> Result<()> {
+    let fixture = Fixture::start("bridges-unknown-flow-wa").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": "not-a-flow-this-bridge-has" })),
+        )
+        .await?;
+    assert_eq!(
+        status, 201,
+        "mautrix-whatsapp answers 200 and the QR flow for any flow id: {started}"
+    );
+    assert_eq!(started["step"]["step_id"], json!(QR_STEP), "{started}");
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The whole QR login again, against mautrix-signal's captured answers: one
+/// flow rather than two, a step id namespaced to Signal, an `sgnl://` payload
+/// rather than an `https://` one, and a `404` for a flow it does not have.
+/// Nothing in the Gateway may be WhatsApp-shaped.
+#[tokio::test]
+async fn the_same_flow_runs_against_signals_own_shapes() -> Result<()> {
+    let fixture = Fixture::start_as("bridges-signal", FixtureBridge::Signal).await?;
+
+    // One captured flow, not two. (The stub adds its own two for the step
+    // types no reference bridge offers, and marks them as such.)
+    let (status, flows) = fixture
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login/flows"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{flows}");
+    let ids: Vec<&str> = flows["flows"]
+        .as_array()
+        .context("flows")?
+        .iter()
+        .filter_map(|flow| flow["id"].as_str())
+        .collect();
+    assert!(ids.contains(&QR_FLOW), "{flows}");
+    assert!(
+        !ids.contains(&PHONE_FLOW),
+        "Signal has no phone-number flow: {flows}"
+    );
+
+    // Signal's own step id and its own payload scheme.
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    assert_eq!(
+        started["step"]["step_id"],
+        json!(FixtureBridge::Signal.qr_step_id()),
+        "step ids are namespaced per connector: {started}"
+    );
+    let code = started["step"]["payload"]["data"]
+        .as_str()
+        .context("a QR payload")?;
+    assert!(
+        code.starts_with(fixture.stub.qr_payload_prefix()),
+        "Signal's payload is a device-linking URI, not WhatsApp's link: {code}"
+    );
+
+    // And the flow it does not have is a hard error here, unlike on WhatsApp.
+    let (status, cancelled) = fixture
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{cancelled}");
+    let (status, unknown) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": PHONE_FLOW })),
+        )
+        .await?;
+    assert_eq!(
+        status, 404,
+        "mautrix-signal validates the flow id where mautrix-whatsapp does not: {unknown}"
+    );
+    assert_eq!(unknown["error"], json!("not_found_on_bridge"));
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The fixtures themselves: every captured step answer must be readable by
+/// the Gateway's own parser, and every captured error document must be the
+/// `{errcode, error}` pair the facade reads a refusal out of.
+///
+/// This is the test that would have caught all three bugs of #106 on the day
+/// the answers were recorded, which is the whole argument for recording them.
+#[test]
+fn the_gateways_parser_reads_every_captured_step_answer() -> Result<()> {
+    use twalk_companion_gateway::bridge::parse_step;
+
+    for bridge in [FixtureBridge::Whatsapp, FixtureBridge::Signal] {
+        let mut checked = 0;
+        for (endpoint, name) in [
+            ("login-start", "qr"),
+            ("login-step", "refreshed_qr"),
+            ("login-step", "complete"),
+        ] {
+            let body = bridge_fixtures::body(bridge, endpoint, name);
+            let step = parse_step(&body).map_err(|detail| {
+                anyhow::anyhow!(
+                    "{}'s captured {endpoint}/{name} answer is not a login step: {detail}. \
+                     This is the failure #106 hit three times: the Gateway reading a field \
+                     the bridge does not send",
+                    bridge.as_str(),
+                )
+            })?;
+            if name == "complete" {
+                assert!(
+                    step.login_id.is_some(),
+                    "a completion names the login it created: {body}"
+                );
+            } else {
+                // The process id the rest of the flow travels on, which
+                // mautrix puts in `login_id` at the top level.
+                assert!(
+                    step.process_id.is_some(),
+                    "{}'s {endpoint}/{name} must name the login process: {body}",
+                    bridge.as_str(),
+                );
+                assert!(
+                    step.txn_id.is_some(),
+                    "{}'s {endpoint}/{name} must carry the transaction id the next call \
+                     echoes: {body}",
+                    bridge.as_str(),
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 3, "{} had no step answers", bridge.as_str());
+
+        // And the refusals: a status and mautrix's two-member error document.
+        for (endpoint, name) in [
+            ("whoami", "no_user_id"),
+            ("whoami", "bad_secret"),
+            ("login-step", "unknown_process"),
+            ("login-step", "wrong_txn_id"),
+            ("login-step", "step_cancel_unsupported"),
+            ("login-step", "held_request_when_process_cancelled"),
+            ("login-cancel", "already_gone"),
+            ("logout", "unknown_login"),
+        ] {
+            let answer = bridge_fixtures::answer(bridge, endpoint, name);
+            assert!(
+                answer.status >= 400,
+                "{}'s {endpoint}/{name} is a refusal: {}",
+                bridge.as_str(),
+                answer.status
+            );
+            assert!(
+                answer.body["errcode"].is_string() && answer.body["error"].is_string(),
+                "a mautrix refusal is {{errcode, error}}: {}",
+                answer.body
+            );
+        }
+    }
+
+    // The captured logins answer is ids, not objects. The assertion is here
+    // rather than in prose because prose is what failed last time.
+    for bridge in [FixtureBridge::Whatsapp, FixtureBridge::Signal] {
+        let body = bridge_fixtures::body(bridge, "logins", "no_logins");
+        assert!(
+            body["login_ids"].is_array(),
+            "{} answers GET /logins as {{login_ids: [...]}}: {body}",
+            bridge.as_str(),
+        );
+        assert!(
+            body.get("logins").is_none(),
+            "there is no `logins` member in that answer, which is the trap: {body}"
+        );
+    }
+
     Ok(())
 }

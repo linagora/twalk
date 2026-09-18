@@ -1,0 +1,72 @@
+{
+  "endpoint": "POST /_matrix/provision/v3/login/start/{flow}?user_id={mxid}",
+  "bridge": "mautrix-whatsapp v26.09",
+  "answers": {
+    "qr": {
+      "status": 200,
+      "note": "The login *process* id travels as `login_id` at the top level — the same word mautrix's ?login_id= query parameter uses for an existing login. `txn_id` is issued here and validated on the call that advances this step. `display_and_wait` carries only `type` and `data`; there is no `can_cancel`, and the bridge renders no image.",
+      "substituted": [
+        "display_and_wait.data is a placeholder of the real length and prefix: the real value is a WhatsApp pairing credential"
+      ],
+      "body": {
+        "login_id": "damc6h3agr7c7398n6kg",
+        "type": "display_and_wait",
+        "step_id": "fi.mau.whatsapp.login.qr",
+        "txn_id": "bls_damc6h3agr7c7398n6l0",
+        "instructions": "Scan the QR code with the WhatsApp mobile app to log in",
+        "display_and_wait": {
+          "type": "qr",
+          "data": "https://wa.me/settings/linked_devices#PLACEHOLDER-not-a-real-whatsapp-pairing-credential-the-real-value-is-277-characters-of-base64url-and-is-a-network-credential-which-does-not-belong-in-a-repository-ADR-0011-0000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    "phone": {
+      "status": 200,
+      "note": "The other WhatsApp flow. `instructions` is an empty string rather than absent, and `user_input.attachments` is explicitly null. `fields[].id` is the key the submitted body must carry.",
+      "substituted": [],
+      "body": {
+        "login_id": "damc7i3agr7c7398n700",
+        "type": "user_input",
+        "step_id": "fi.mau.whatsapp.login.phone",
+        "txn_id": "bls_damc7i3agr7c7398n70g",
+        "instructions": "",
+        "user_input": {
+          "fields": [
+            {
+              "type": "phone_number",
+              "id": "phone_number",
+              "name": "Phone number",
+              "description": "Your WhatsApp phone number in international format"
+            }
+          ],
+          "attachments": null
+        }
+      }
+    },
+    "unknown_flow": {
+      "status": 200,
+      "note": "POST /login/start/definitely-not-a-flow. WhatsApp does not validate the flow id: it silently gives you the QR flow. Signal answers 404 M_NOT_FOUND for the same call. A flow-id typo is therefore invisible on one bridge and fatal on the other.",
+      "substituted": ["display_and_wait.data, as above"],
+      "body": {
+        "login_id": "damc7j3agr7c7398n73g",
+        "type": "display_and_wait",
+        "step_id": "fi.mau.whatsapp.login.qr",
+        "txn_id": "bls_damc7jbagr7c7398n740",
+        "instructions": "Scan the QR code with the WhatsApp mobile app to log in",
+        "display_and_wait": {
+          "type": "qr",
+          "data": "https://wa.me/settings/linked_devices#PLACEHOLDER-not-a-real-whatsapp-pairing-credential-see-the-qr-answer-above-0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    },
+    "no_user_id": {
+      "status": 403,
+      "note": "",
+      "substituted": [],
+      "body": {
+        "errcode": "M_FORBIDDEN",
+        "error": "User does not have login permissions"
+      }
+    }
+  }
+}
