@@ -1,15 +1,23 @@
 // What the Companion does before it shows a screen, in the order it must.
 //
 //   1. Pick the language, from `navigator.languages`.
-//   2. Ask the browser what it can do. If something onboarding needs is
+//   2. Adopt whatever Gateway session this browser already holds, and start
+//      keeping it alive (`$lib/session/refresh.ts`). Not awaited: no screen
+//      waits on it, and the client wrapper repairs a `401` that arrives first.
+//   3. Ask the browser what it can do. If something onboarding needs is
 //      missing, the gate screen replaces the app — spec #65 asks for that
 //      *before* onboarding starts, never in the middle of it.
-//   3. Ask the Gateway its version. On a mismatch the shell is stale and
+//   4. Ask the Gateway its version. On a mismatch the shell is stale and
 //      reloads itself; on a match it registers the service worker.
 //
-// Step 3 after step 2 on purpose: a browser with no service worker cannot hold
-// a stale shell, and a browser that cannot store keys should be told that
-// rather than reloaded.
+// Step 2 first among the network calls because it is the one that decides
+// whether the rest of the app has a credential at all: a page restored from a
+// background tab reaches this line with a token that died hours ago, and the
+// refresh is what it needs before its first screen asks anything (#111).
+//
+// The version handshake comes after the capability probe on purpose: a browser
+// with no service worker cannot hold a stale shell, and a browser that cannot
+// store keys should be told that rather than reloaded.
 //
 // This module holds no browser API of its own. The probe and the reload are
 // dynamically imported, so the whole boot sequence is reachable from a module
@@ -19,6 +27,7 @@ import { writable } from 'svelte/store';
 
 import type { CapabilityReport } from '$lib/capabilities/report';
 import { initLocale } from '$lib/i18n';
+import { startSessionKeeper } from '$lib/session/refresh';
 import {
 	EXPECTED_GATEWAY_VERSION,
 	shakeHands,
@@ -66,6 +75,11 @@ export async function startBoot(): Promise<void> {
 	started = true;
 
 	initLocale(navigator.languages ?? [navigator.language]);
+
+	// Deliberately not awaited: the capability gate must not wait on a network
+	// round trip, and every call this app makes is already repaired centrally
+	// if it overtakes the refresh.
+	void startSessionKeeper();
 
 	// Dynamic: `probe.ts` reads `indexedDB` and `isSecureContext`, which do
 	// not exist in the Node process that prerenders this app.

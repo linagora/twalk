@@ -36,6 +36,7 @@
 	import { onDestroy, onMount } from 'svelte';
 
 	import { gateway } from '$lib/api/client';
+	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import { looksLikeIos } from '$lib/networks/catalogue';
@@ -48,6 +49,11 @@
 	let ios = $state(false);
 	let bridgeId = $state<string | null>(null);
 	let bridgeKnown = $state(false);
+	/**
+	 * Why the bridge list could not be read, or `null` when it could (#111).
+	 * Three outcomes, not two: `$lib/api/trouble.ts`.
+	 */
+	let bridgesTrouble = $state<ApiTrouble | null>(null);
 	let accepted = $state(false);
 	let session = $state<LoginSession | null>(null);
 	let loginState = $state<LoginState>({ view: { kind: 'idle' }, conflict: null, trouble: null });
@@ -71,9 +77,28 @@
 		} catch {
 			accepted = false;
 		}
-		const listed = await gateway.GET('/api/bridges');
-		bridgeKnown = listed.error === undefined;
-		bridgeId = listed.data?.bridges.find((bridge) => bridge.network === 'sms')?.bridge_id ?? null;
+		await findBridge();
+	});
+
+	/**
+	 * Which bridge serves SMS, and the login on it. Retryable, because a
+	 * Gateway that could not answer is a dead end this screen must be able to
+	 * leave (#111) rather than a spinner.
+	 */
+	async function findBridge() {
+		bridgeKnown = false;
+		bridgesTrouble = null;
+		unsubscribe?.();
+		unsubscribe = null;
+		session?.stop();
+		session = null;
+		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		if (listed === null || listed.error !== undefined) {
+			bridgesTrouble = troubleOf(listed);
+			return;
+		}
+		bridgeKnown = true;
+		bridgeId = listed.data.bridges.find((bridge) => bridge.network === 'sms')?.bridge_id ?? null;
 		if (bridgeId !== null) {
 			session = new LoginSession(bridgeId);
 			unsubscribe = session.state.subscribe((next: LoginState) => (loginState = next));
@@ -81,7 +106,7 @@
 				await session.start({ prefer: 'cookies' });
 			}
 		}
-	});
+	}
 
 	onDestroy(() => {
 		unsubscribe?.();
@@ -152,6 +177,37 @@
 			<p>
 				<a class="button button--primary" href="/networks">{$t('sms.ios.skip')}</a>
 			</p>
+		</div>
+	{:else if bridgesTrouble !== null}
+		<!-- #111: a Gateway that would not answer is not a login in progress —
+		     and a Gateway that answered is not one that could not be reached. -->
+		<div
+			class="card card--warning"
+			data-testid="bridges-unreadable"
+			data-trouble={bridgesTrouble}
+			role="alert"
+		>
+			<p class="card__title">
+				<Icon name="warning" size="dense" />
+				{$t('networks.bridgesUnreadable.title')}
+			</p>
+			<p>
+				{#if bridgesTrouble === 'unreachable'}
+					{$t('api.trouble.unreachable')}
+				{:else if bridgesTrouble === 'session-refused'}
+					{$t('api.trouble.sessionRefused')}
+				{:else}
+					{$t('api.trouble.refused')}
+				{/if}
+			</p>
+			{#if bridgesTrouble !== 'session-refused'}
+				<p>
+					<button class="button button--primary" type="button" onclick={findBridge} data-testid="retry-bridges">
+						<Icon name="reload" size="dense" />
+						{$t('networks.retry')}
+					</button>
+				</p>
+			{/if}
 		</div>
 	{:else if bridgeKnown && bridgeId === null}
 		<div class="card card--warning" data-testid="no-bridge">

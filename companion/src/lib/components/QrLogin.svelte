@@ -23,11 +23,20 @@
 	It stores nothing. The payload lives in the component's state and in the
 	SVG; the only thing that outlives the page is the disclosure dismissal,
 	which is a boolean.
+
+	It does not present a failure as loading (#111). `GET /api/bridges` is the
+	first thing this screen asks, and when it does not answer there is no bridge
+	id, so no login is ever started — which used to leave the spinner and
+	"Asking for a code…" on screen for ever. That is the incident this component
+	caused: the owner waited on this screen, reported "I cannot get a QR code",
+	and the Signal bridge had never been contacted. An unreadable bridge list is
+	now a terminal state with a way out.
 -->
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 
 	import { gateway } from '$lib/api/client';
+	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import Icon from '$lib/icons/Icon.svelte';
 	import QrCode from '$lib/components/QrCode.svelte';
 	import { t } from '$lib/i18n';
@@ -44,6 +53,14 @@
 	/** `null` until `GET /api/bridges` has answered. */
 	let bridgeId = $state<string | null>(null);
 	let bridgeKnown = $state(false);
+	/**
+	 * Why the bridge list could not be read, or `null` when it could.
+	 *
+	 * Three outcomes rather than two, because "could not be reached" and
+	 * "answered, and refused this session" send the user to look in completely
+	 * different places — see `$lib/api/trouble.ts`.
+	 */
+	let bridgesTrouble = $state<ApiTrouble | null>(null);
 	/** Set in `onMount`: a screen with no disclosure has nothing to accept. */
 	let disclosureAccepted = $state(false);
 	let session = $state<LoginSession | null>(null);
@@ -64,12 +81,33 @@
 
 	onMount(async () => {
 		ticker = setInterval(() => (now = Date.now()), 1000);
-		const listed = await gateway.GET('/api/bridges');
-		bridgeKnown = listed.error === undefined;
-		const row = listed.data?.bridges.find((bridge) => bridge.network === copy.network);
+		disclosureAccepted = copy.disclosure === null || remembered(copy.disclosure.storageKey);
+		await findBridge();
+	});
+
+	/**
+	 * Which bridge serves this network, and the login on it.
+	 *
+	 * Separate from `onMount` so the terminal state below can offer it again:
+	 * the Gateway being momentarily unreadable is a thing that passes, and the
+	 * user's only useful action is to ask once more.
+	 */
+	async function findBridge() {
+		bridgeKnown = false;
+		bridgesTrouble = null;
+		// A retry must not leave the previous attempt's subscription behind.
+		unsubscribe?.();
+		unsubscribe = null;
+		session?.stop();
+		session = null;
+		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		if (listed === null || listed.error !== undefined) {
+			bridgesTrouble = troubleOf(listed);
+			return;
+		}
+		bridgeKnown = true;
+		const row = listed.data.bridges.find((bridge) => bridge.network === copy.network);
 		bridgeId = row?.bridge_id ?? null;
-		disclosureAccepted =
-			copy.disclosure === null || remembered(copy.disclosure.storageKey);
 		if (bridgeId !== null) {
 			session = new LoginSession(bridgeId);
 			unsubscribe = session.state.subscribe((next: LoginState) => (loginState = next));
@@ -77,7 +115,7 @@
 				await session.start({ prefer: 'qr' });
 			}
 		}
-	});
+	}
 
 	onDestroy(() => {
 		unsubscribe?.();
@@ -135,7 +173,39 @@
 		<p class="subtitle">{$t(copy.caption)}</p>
 	</header>
 
-	{#if bridgeKnown && bridgeId === null}
+	{#if bridgesTrouble !== null}
+		<!-- #111: never a spinner. With no bridge list there is no login to
+		     start, so this screen says so — and says which of the two things
+		     happened, because they are fixed in different places. -->
+		<div
+			class="card card--warning"
+			data-testid="bridges-unreadable"
+			data-trouble={bridgesTrouble}
+			role="alert"
+		>
+			<p class="card__title">
+				<Icon name="warning" size="dense" />
+				{$t('networks.bridgesUnreadable.title')}
+			</p>
+			<p>
+				{#if bridgesTrouble === 'unreachable'}
+					{$t('api.trouble.unreachable')}
+				{:else if bridgesTrouble === 'session-refused'}
+					{$t('api.trouble.sessionRefused')}
+				{:else}
+					{$t('api.trouble.refused')}
+				{/if}
+			</p>
+			{#if bridgesTrouble !== 'session-refused'}
+				<p>
+					<button class="button button--primary" type="button" onclick={findBridge} data-testid="retry-bridges">
+						<Icon name="reload" size="dense" />
+						{$t('networks.retry')}
+					</button>
+				</p>
+			{/if}
+		</div>
+	{:else if bridgeKnown && bridgeId === null}
 		<!-- The deployment has no bridge for this network. Configuration, not a
 		     failure: say which variable turns it on rather than "error". -->
 		<div class="card card--warning" data-testid="no-bridge">

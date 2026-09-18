@@ -31,6 +31,7 @@
 	import { onMount } from 'svelte';
 
 	import { gateway } from '$lib/api/client';
+	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
@@ -51,17 +52,36 @@
 	let options = $state<ScopeOption[]>([]);
 	let selected = $state<string[]>([]);
 	let loaded = $state(false);
+	/**
+	 * The Gateway would not say which bridges exist (#111).
+	 *
+	 * This mattered more here than it looks: an unanswered `GET /api/bridges`
+	 * used to leave this screen saying *no network is connected yet*, which is
+	 * a statement about the user's deployment made from no information at all
+	 * — and one a user acts on by going off to re-connect a network that was
+	 * never disconnected.
+	 */
+	let bridgesTrouble = $state<ApiTrouble | null>(null);
 	let stage = $state<Stage>('choosing');
 	let failure = $state<ActivationFailure | null>(null);
 	let activatedOn = $state<string[]>([]);
 
-	onMount(async () => {
-		const listed = await gateway.GET('/api/bridges');
-		const bridges = (listed.data?.bridges ?? []) as BridgeRow[];
-		options = scopeOptions(bridges);
+	onMount(() => {
+		void readScope();
+	});
+
+	async function readScope() {
+		bridgesTrouble = null;
+		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		if (listed === null || listed.error !== undefined) {
+			bridgesTrouble = troubleOf(listed);
+			loaded = true;
+			return;
+		}
+		options = scopeOptions(listed.data.bridges as BridgeRow[]);
 		selected = defaultSelection(options);
 		loaded = true;
-	});
+	}
 
 	const anyProven = $derived(options.some((option) => option.proven));
 
@@ -183,7 +203,26 @@
 			</p>
 			<p class="small muted">{$t('persona.scope.intro')}</p>
 
-			{#if loaded && !anyProven}
+			{#if bridgesTrouble !== null}
+				<p class="small" role="alert" data-testid="scope-unknown" data-trouble={bridgesTrouble}>
+					{$t('persona.scope.unknown')}
+					{#if bridgesTrouble === 'unreachable'}
+						{$t('api.trouble.unreachable')}
+					{:else if bridgesTrouble === 'session-refused'}
+						{$t('api.trouble.sessionRefused')}
+					{:else}
+						{$t('api.trouble.refused')}
+					{/if}
+				</p>
+				{#if bridgesTrouble !== 'session-refused'}
+					<p>
+						<button class="button button--secondary" type="button" onclick={readScope} data-testid="retry-scope">
+							<Icon name="reload" size="dense" />
+							{$t('networks.retry')}
+						</button>
+					</p>
+				{/if}
+			{:else if loaded && !anyProven}
 				<p class="small" data-testid="no-network">{$t('persona.scope.none')}</p>
 				<p>
 					<a class="button button--secondary" href="/networks">

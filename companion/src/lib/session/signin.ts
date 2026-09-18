@@ -15,6 +15,8 @@
 // outlives the page is what "stay signed in" is made of.
 
 import { gateway } from '$lib/api/client';
+import { sessionIssued } from './refresh';
+import { noteLive } from './state';
 
 /** Why signing in to the Gateway did not work. */
 export type SignInProblem =
@@ -69,6 +71,11 @@ export async function signInToGateway(options: {
 	});
 
 	if (result.data !== undefined) {
+		// The session starts being kept alive here, with the lifetime the
+		// Gateway just named: `expires_in` exists for exactly this, and until
+		// #111 nothing read it (`$lib/session/refresh.ts`).
+		noteLive(result.data);
+		sessionIssued(result.data);
 		return {
 			owner: result.data.owner,
 			homeserver: result.data.homeserver,
