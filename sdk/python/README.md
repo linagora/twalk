@@ -36,6 +36,8 @@ Two properties, both tested:
 - The decision reads the envelope's own `consent` extension and nothing else. It never looks inside `data`, so it cannot come to depend on a field that may not be there: a revoked sender's message arrives with no body, no excerpt and no attachment reference (ADR 0012, [#58](https://github.com/linagora/twalk/issues/58)), and the gate drops it before that shape could matter.
 - Anything that is not exactly `granted` is refused — a missing extension, a misspelled one, a value a future contract adds — because the safe default when consent cannot be read is to not process the message.
 
+**Known limitation, and it is this gate's to close:** a bridge mirrors a conversation in both directions, so the messages the *user* sends from their own phone also arrive as `inbound.message.received` — on a live WhatsApp account, under a ghost of the user's own network identity (`@whatsapp_lid-…`), not their Matrix ID. Consent cannot help: the user is the most consenting subject in the system, so as soon as that thread is granted the gate passes their own messages and a persona drafts a reply to its own operator. [#109](https://github.com/linagora/twalk/issues/109) holds the live evidence and the decision — the contract has no event for a message the user sent, and labelling one versus adding a ninth type is a spec choice, not a code one. When it is made, the refusal belongs here beside the consent gate, for the same reason the consent gate is here: so that an author cannot forget it.
+
 ## What else the SDK does for you
 
 - **Deterministic ids**, from the contract's natural keys: `thinking` is `sha256(persona_id:trigger_event_id)`, `suggest` is `sha256(persona_id:trigger_event_id:attempt)`. A retry recomputes the same id, so a replay deduplicates on the bus instead of showing the user the same suggestion twice.
@@ -49,15 +51,18 @@ What it deliberately does **not** do: send anything. A persona produces suggesti
 
 ## Configuration
 
-Everything is an environment variable, so a persona joins the compose deployment the way the Sensor does. Three are required; the rest have deployment defaults.
+Everything is an environment variable, so a persona joins the compose deployment the way the Sensor does. Four are required; the rest have deployment defaults.
+
+Twalk ships no LLM and names no model of its own: a persona **refuses to start** without an endpoint and a model the operator chose (ADR 0015). In a deployment that configuration is held by the Companion Gateway, set from the Companion and injected into the persona's environment by the Hermes runtime when it spawns it (#23, #98) — the persona never fetches it, because the Gateway's service token also opens the consent snapshot. From the SDK's side that is invisible: it reads its environment.
 
 | Variable | Default | What it is |
 | --- | --- | --- |
 | `TWALK_PERSONA_ID` | — | The persona's id (`assistant`), and the first half of every deterministic id it produces. Must match the contract's `^[a-z0-9_-]+$`. |
 | `TWALK_HERMES_DOMAIN` | — | The authority of the events' `source`: `hermes://<domain>/personas/<persona_id>`. |
 | `TWALK_LLM_BASE_URL` | — | Any OpenAI-compatible chat-completions endpoint, e.g. `http://llm:8080/v1`. The operator's choice of endpoint is the only reason message content ever leaves their infrastructure. |
+| `TWALK_LLM_MODEL` | — | Sent with every request, and reported in `thinking` so oversight can say what reasoned. |
 | `TWALK_LLM_API_KEY` | none | Sent as a bearer token to that endpoint and nowhere else. |
-| `TWALK_LLM_MODEL` | `local-model` | Sent with every request, and reported in `thinking` so oversight can say what reasoned. |
+| `TWALK_LLM_PARAMS` | `{}` | A JSON object of provider parameters, merged into every request untouched — because providers differ in what they reject. A parameter set to `null` *removes* a field the request would otherwise carry (`{"temperature": null}`), which is how an endpoint that refuses one of them is made to work. |
 | `TWALK_LLM_TIMEOUT_SECONDS` | `60` | |
 | `TWALK_NATS_URL` | `nats://localhost:4222` | |
 | `TWALK_BUS_STREAM` | `twalk` | The JetStream stream the events live in. |
@@ -87,3 +92,7 @@ The halves that need a dependency (`Persona`, `Llm`) are imported on first use, 
 ## Scope
 
 v0.1 is a single completion per message: no tool calling, no multi-turn planning, no streaming. The suggestion policy — a second attempt for the same trigger, and the expiry that goes with it — is [#22](https://github.com/linagora/twalk/issues/22); this SDK builds the envelope that extends (`FIRST_ATTEMPT`, and no `expires_at`).
+
+Not here yet, and deliberately: **OpenTelemetry spans** for the model call, following the GenAI conventions, off until an OTLP endpoint is configured and with prompt content behind a second switch (ADR 0017, [#99](https://github.com/linagora/twalk/issues/99)). The `traceparent` the SDK already carries from the trigger is what those spans will hang from. Until then the SDK logs event ids, subjects and model names — never a message body, a prompt or a completion.
+
+One consequence of the gate is worth naming here, since ADR 0017 states it as a property of the system: an unconsented message never reaches the model, so it never reaches a trace either.
