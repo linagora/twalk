@@ -115,6 +115,50 @@ impl Drop for StubGateway {
     }
 }
 
+/// The service token the Sensor's tests present to this stub. A throwaway
+/// constant for the local stack, the same category as the test-bot passwords,
+/// and the length the real Gateway insists on.
+pub const SERVICE_TOKEN: &str = "test-only-service-token-0123456789abcdef";
+
+/// A stub Gateway serving `entries` as the whole current consent state, plus
+/// the Sensor environment that reads it — for a test that needs a contact
+/// already granted (or revoked) on the Sensor's very first event, with no
+/// decision racing the sync loop.
+///
+/// The position it serves is the head of the consent subject, which is what
+/// makes it deterministic: a snapshot there accounts for every decision
+/// already on the bus, so the durable consumer starts after all of them and
+/// nothing an earlier test in the same run published can drift into this one
+/// (ADR 0010). `entries` is therefore the whole truth, not an overlay.
+///
+/// Returned rather than started, because the stub stops when it is dropped:
+/// the caller has to keep it alive for the Sensor's lifetime.
+///
+/// `overrides` are `sensor_env_with`'s, for a test that also needs a state
+/// directory or a metrics port of its own.
+pub async fn sensor_env_granting(
+    bus: &super::Bus,
+    entries: Vec<Value>,
+    overrides: &[(&str, &str)],
+) -> Result<(StubGateway, Vec<(String, String)>)> {
+    let head = bus
+        .fetch_all_with_headers(STREAM, CONSENT_SUBJECT)
+        .await?
+        .last()
+        .map(|message| message.sequence)
+        .unwrap_or(0);
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    gateway.serve(entries, head);
+    let url = gateway.url();
+    let mut settings: Vec<(&str, &str)> = vec![
+        ("SENSOR_GATEWAY_URL", &url),
+        ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
+    ];
+    settings.extend_from_slice(overrides);
+    let env = super::sensor_env_with(&settings);
+    Ok((gateway, env))
+}
+
 /// One `ConsentStateEntry` about a contact, as `companion-gateway/
 /// openapi.yaml` shapes it.
 pub fn contact_entry(subject_id: &str, network: &str, state: &str) -> Value {

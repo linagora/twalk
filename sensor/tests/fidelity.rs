@@ -14,6 +14,7 @@ mod harness;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use harness::gateway::{contact_entry, sensor_env_granting};
 use harness::{
     ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sha256_hex,
     validate_against_contract, Bot, Bus, SensorProc, StoredMessage, SENSOR_USER_ID,
@@ -73,8 +74,18 @@ async fn a_reply_carries_the_parent_id_and_a_capped_excerpt() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
-    let sensor = SensorProc::start(&sensor_env())?;
     let alpha = Bot::login("bot_alpha").await?;
+    // An excerpt quotes a message somebody wrote, and is published only once
+    // *that* author has granted (issue #110). Here alpha writes both the
+    // parent and the reply, so granting alpha is what makes the excerpt part
+    // of this test's subject observable at all.
+    let (_gateway, env) = sensor_env_granting(
+        &bus,
+        vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
+        &[],
+    )
+    .await?;
+    let sensor = SensorProc::start(&env)?;
 
     let room_id = observed_portal(&alpha, "reply-portal").await?;
 
@@ -126,8 +137,16 @@ async fn a_threaded_message_carries_the_thread_root() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
-    let sensor = SensorProc::start(&sensor_env())?;
     let alpha = Bot::login("bot_alpha").await?;
+    // Granted for the same reason as the reply test: the in-thread reply's
+    // excerpt quotes alpha's own root message (issue #110).
+    let (_gateway, env) = sensor_env_granting(
+        &bus,
+        vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
+        &[],
+    )
+    .await?;
+    let sensor = SensorProc::start(&env)?;
 
     let room_id = observed_portal(&alpha, "thread-portal").await?;
 

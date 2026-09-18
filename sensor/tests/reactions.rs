@@ -10,6 +10,7 @@
 mod harness;
 
 use anyhow::Result;
+use harness::gateway::{contact_entry, sensor_env_granting};
 use harness::{
     ensure_stack, make_whatsapp_portal, sensor_env, sha256_hex, validate_against_contract, Bot,
     Bus, SensorProc, SENSOR_USER_ID,
@@ -36,9 +37,20 @@ async fn a_reaction_becomes_a_schema_valid_cloud_event() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
-    let sensor = SensorProc::start(&sensor_env())?;
     let alpha = Bot::login("bot_alpha").await?;
     let beta = Bot::login("bot_beta").await?;
+
+    // The excerpt below is the *target message's author's* content, so it is
+    // published only once that author has granted (issue #110) — alpha writes
+    // the message this reaction points at, so alpha is who the snapshot has to
+    // name. The reactor's own state is irrelevant to it, and stays `pending`.
+    let (_gateway, env) = sensor_env_granting(
+        &bus,
+        vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
+        &[],
+    )
+    .await?;
+    let sensor = SensorProc::start(&env)?;
 
     let room_id = observed_portal_with_reactor(&alpha, &beta, "reaction-portal").await?;
     let target_id = alpha.send_message(&room_id, "on décale à 20h ?").await?;
