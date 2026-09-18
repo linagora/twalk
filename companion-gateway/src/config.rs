@@ -124,7 +124,9 @@ pub struct Config {
 /// A bridge that is named and then left without a URL or a secret is a
 /// startup error naming the variable: a facade that silently has no bridge
 /// to talk to would be discovered by a user on the QR screen.
-pub fn bridges_from_env() -> Result<Vec<crate::bridge::BridgeConfig>> {
+/// `acting_as` is the deployment's owner: mautrix takes the acting user on
+/// trust with shared-secret auth, and requires it on every call (#106).
+pub fn bridges_from_env(acting_as: &str) -> Result<Vec<crate::bridge::BridgeConfig>> {
     let Some(listed) = env("GATEWAY_BRIDGES") else {
         return Ok(Vec::new());
     };
@@ -159,6 +161,7 @@ pub fn bridges_from_env() -> Result<Vec<crate::bridge::BridgeConfig>> {
             .map(|value| value.trim().to_owned())
             .unwrap_or_else(|| default_status_bridge_id(bridge_id));
         bridges.push(crate::bridge::BridgeConfig {
+            acting_as: acting_as.to_owned(),
             bridge_id: bridge_id.to_owned(),
             status_bridge_id,
             network,
@@ -448,7 +451,15 @@ impl Config {
             // Before `sign_in` is moved below: consent reads the owner, the
             // state directory and the domain from it.
             consent: Consent::from_env(sign_in.as_ref())?,
-            bridges: bridges_from_env()?,
+            // The owner is the acting user for every provisioning call
+            // (#106); with no sign-in configured there is no owner, and a
+            // bridge login could not be authenticated anyway.
+            bridges: bridges_from_env(
+                sign_in
+                    .as_ref()
+                    .map(|sign_in| sign_in.owner.as_str())
+                    .unwrap_or_default(),
+            )?,
             snapshot: Snapshot::from_env()?,
             inbound_consumer: env("GATEWAY_INBOUND_CONSUMER")
                 .map(|name| name.trim().to_owned())

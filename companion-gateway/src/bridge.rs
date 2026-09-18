@@ -216,6 +216,13 @@ impl LoginFailure {
 /// day, and the provisioning secret drives logins on the user's account.
 #[derive(Clone)]
 pub struct BridgeConfig {
+    /// The Matrix user every provisioning call acts as, in mautrix's
+    /// `?user_id=` query parameter. mautrix requires it on **every**
+    /// request, not only on the ones that start something: a step or a
+    /// cancel without it answers `403 M_FORBIDDEN` (#106). Keeping it here
+    /// rather than at each call site is deliberate — it is how a later call
+    /// cannot forget it.
+    pub acting_as: String,
     /// The instance's id, declared in configuration
     /// (`GATEWAY_BRIDGES`), e.g. `mautrix-whatsapp`. Never a network value
     /// (CONTEXT.md): it identifies the implementation, and the v0.1
@@ -1215,6 +1222,13 @@ async fn call_bridge(
     query: &[(&str, &str)],
     body: Option<Value>,
 ) -> Result<Value, BridgeRefusal> {
+    // Every provisioning call carries the acting user, whether or not the
+    // caller thought to pass it (#106).
+    let mut owned_query: Vec<(&str, &str)> = query.to_vec();
+    if !owned_query.iter().any(|(name, _)| *name == "user_id") {
+        owned_query.push(("user_id", config.acting_as.as_str()));
+    }
+    let query: &[(&str, &str)] = &owned_query;
     let mut url = reqwest::Url::parse(&format!("{}/{PROVISION_PREFIX}", config.base_url)).map_err(
         |error| BridgeRefusal::BridgeUnreachable {
             detail: format!("the bridge's base URL is not a URL: {error}"),

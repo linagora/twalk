@@ -398,8 +398,18 @@ fn authorised(headers: &HeaderMap) -> bool {
         == Some(STUB_PROVISIONING_SECRET)
 }
 
-async fn flows(headers: HeaderMap) -> Response {
-    if !authorised(&headers) {
+/// mautrix requires the acting user in `?user_id=` on **every** provisioning
+/// call, and answers `403 M_FORBIDDEN` without it — including on a step or a
+/// cancel, which is how a real WhatsApp login failed while ten tests here
+/// passed (#106). The stub refuses it too, so that cannot happen again.
+fn acting_user_named(query: &HashMap<String, String>) -> bool {
+    query
+        .get("user_id")
+        .is_some_and(|user_id| user_id.starts_with('@') && user_id.contains(':'))
+}
+
+async fn flows(headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Response {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     Json(json!({
@@ -413,8 +423,12 @@ async fn flows(headers: HeaderMap) -> Response {
     .into_response()
 }
 
-async fn whoami(headers: HeaderMap, State(state): State<Arc<StubState>>) -> Response {
-    if !authorised(&headers) {
+async fn whoami(
+    headers: HeaderMap,
+    State(state): State<Arc<StubState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     let logins = state
@@ -427,8 +441,12 @@ async fn whoami(headers: HeaderMap, State(state): State<Arc<StubState>>) -> Resp
         .into_response()
 }
 
-async fn logins(headers: HeaderMap, State(state): State<Arc<StubState>>) -> Response {
-    if !authorised(&headers) {
+async fn logins(
+    headers: HeaderMap,
+    State(state): State<Arc<StubState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     let logins = state
@@ -446,7 +464,7 @@ async fn start(
     Path(flow_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     let (process_id, first_qr) = {
@@ -533,7 +551,7 @@ async fn step(
     Query(query): Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
-    if !authorised(&headers) {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     // A process the stub does not know: what a restarted bridge answers, and
