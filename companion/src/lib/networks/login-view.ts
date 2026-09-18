@@ -59,6 +59,19 @@ export type LoginView =
 			expiresAt: string;
 			validForSeconds: number;
 	  }
+	/**
+	 * An emoji to match on the phone: the SMS preview path's pairing step,
+	 * which is the same blocking step with a different payload type. Shown
+	 * large; there is nothing to submit, only to confirm on the device.
+	 */
+	| {
+			kind: 'emoji';
+			emoji: string;
+			generation: number;
+			instructions: string | null;
+			expiresAt: string;
+			validForSeconds: number;
+	  }
 	/** Scanned, or a blocking step with nothing to draw: "verifying your session…". */
 	| { kind: 'verifying'; instructions: string | null }
 	| { kind: 'input'; stepId: string; instructions: string | null; fields: readonly InputField[] }
@@ -128,6 +141,17 @@ function stepView(step: BridgeLoginStep | null): LoginView {
 	}
 	switch (step.type) {
 		case 'display_and_wait': {
+			const emoji = displayPayload(step, 'emoji');
+			if (emoji !== null) {
+				return {
+					kind: 'emoji',
+					emoji,
+					generation: 0, // filled in by `stateOf`, which has the login
+					instructions: step.instructions,
+					expiresAt: step.expires_at,
+					validForSeconds: step.valid_for_seconds
+				};
+			}
 			const data = qrPayload(step);
 			if (data === null) {
 				// A blocking step with nothing to draw: the code was scanned and
@@ -174,7 +198,10 @@ function stepView(step: BridgeLoginStep | null): LoginView {
 export function stateOf(login: BridgeLogin): LoginState {
 	const view = viewOf(login);
 	return {
-		view: view.kind === 'qr' ? { ...view, generation: login.generation } : view,
+		view:
+			view.kind === 'qr' || view.kind === 'emoji'
+				? { ...view, generation: login.generation }
+				: view,
 		conflict: null,
 		trouble: null
 	};
@@ -188,12 +215,26 @@ export function stateOf(login: BridgeLogin): LoginState {
  * draw, and `null` — "verifying" — is a better answer than a broken image.
  */
 export function qrPayload(step: BridgeLoginStep): string | null {
+	return displayPayload(step, 'qr');
+}
+
+/**
+ * The `data` of a `display_and_wait` payload of a given type, or `null`.
+ *
+ * bridgev2 answers `{"type": "qr" | "emoji" | …, "data": "…"}`. A type this
+ * Companion cannot render reads as `null` — "verifying" — which is a better
+ * answer than a broken image or a blank box.
+ *
+ * A payload with no `type` at all is treated as a QR code: that is what every
+ * bridge this ticket drives sends, and the alternative is drawing nothing.
+ */
+function displayPayload(step: BridgeLoginStep, wanted: 'qr' | 'emoji'): string | null {
 	const payload = step.payload;
 	if (payload === null || typeof payload !== 'object') {
 		return null;
 	}
 	const type = payload['type'];
-	if (type !== undefined && type !== 'qr') {
+	if (type === undefined ? wanted !== 'qr' : type !== wanted) {
 		return null;
 	}
 	const data = payload['data'];

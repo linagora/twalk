@@ -224,7 +224,14 @@ export class LoginSession {
 	/** Only a login that can still change is worth polling. */
 	#pollable(): boolean {
 		const kind = get(this.#state).view.kind;
-		return kind === 'qr' || kind === 'verifying' || kind === 'starting' || kind === 'input' || kind === 'cookies';
+		return (
+			kind === 'qr' ||
+			kind === 'emoji' ||
+			kind === 'verifying' ||
+			kind === 'starting' ||
+			kind === 'input' ||
+			kind === 'cookies'
+		);
 	}
 
 	async #poll() {

@@ -138,6 +138,12 @@ export class StubBridge {
 		blocking_arrivals: number;
 		held: number;
 		starts: { flow_id: string; user_id: string | null; login_id: string | null }[];
+		/** Every step body the Gateway relayed: how a credential is proved to have passed *through*. */
+		submits: {
+			step_id: string;
+			step_type: string;
+			body: { cookies?: Record<string, string> } | null;
+		}[];
 		cancelled: string[];
 		logins: { id: string }[];
 	}> {
