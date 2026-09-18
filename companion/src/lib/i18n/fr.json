@@ -156,7 +156,7 @@
 	"done.title": "Votre compte est prêt",
 	"done.body": "{id} existe, votre identité cryptographique est en place et votre clé de récupération est enregistrée.",
 	"done.next.title": "Ensuite : connecter un réseau",
-	"done.next.body": "Connecter WhatsApp, Signal, les SMS ou un compte Matrix existant est l'étape suivante, et elle n'est pas encore construite. Votre compte et votre clé, eux, sont faits.",
+	"done.next.body": "Connectez WhatsApp, Signal, les SMS ou un compte Matrix existant, puis activez votre assistant dessus. Si votre serveur Twalk n’a aucune passerelle configurée, c’est la carte Matrix qui fonctionnera — les autres le disent à l’écran.",
 	"done.diagnostics": "Ouvrir les diagnostics",
 
 	"recover.title": "Vos clés ne sont plus sur cet appareil",
@@ -490,5 +490,10 @@
 
 	"dashboard.version": "Version du déploiement {version}",
 
-	"networks.toAssistant": "Passer à votre assistant"
+	"networks.toAssistant": "Passer à votre assistant",
+
+	"done.next.cta": "Connecter un réseau",
+	"done.next.after": "Ensuite : activez votre assistant sur les réseaux que vous avez connectés, et arrivez sur votre tableau de bord.",
+	"done.dashboard": "Aller à mon tableau de bord",
+	"dashboard.chip.noInbox": "Décider à leur sujet un par un n’existe pas dans cette version. Accorder ou révoquer un réseau entier décide pour tous ceux qui y écrivent, d’un coup."
 }

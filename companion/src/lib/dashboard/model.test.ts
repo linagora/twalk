@@ -135,21 +135,22 @@ describe('personaRows', () => {
 });
 
 describe('pendingDecisions', () => {
-	it('counts the contacts whose recorded state is pending, once each', () => {
-		expect(
-			pendingDecisions([
-				entry('contact', '@a:example.com', 'whatsapp', 'pending'),
-				entry('contact', '@a:example.com', 'signal', 'pending'),
-				entry('contact', '@b:example.com', 'whatsapp', 'granted'),
-				entry('network', 'whatsapp', 'whatsapp', 'pending')
-			])
-		).toBe(1);
+	it('is the projection’s own total', () => {
+		// The projection (#54) counts contacts who wrote and about whom
+		// nothing was ever decided, which a read of the decision journal
+		// cannot know: a contact with no decision has no entry in it.
+		expect(pendingDecisions({ total: 3 })).toBe(3);
 	});
 
 	it('is unknown rather than zero when the read did not answer', () => {
 		// The chip is hidden on `null`. A zero would tell the user there is
-		// nothing waiting, which is not what an unanswered read means.
+		// nothing waiting, which is not what an unanswered read means — and a
+		// deployment that projects no inbound stream answers nothing at all.
 		expect(pendingDecisions(null)).toBeNull();
+	});
+
+	it('draws nothing for an empty inbox, which the screen treats as no chip', () => {
+		expect(pendingDecisions({ total: 0 })).toBe(0);
 	});
 });
 

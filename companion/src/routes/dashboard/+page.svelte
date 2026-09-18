@@ -24,10 +24,13 @@
 	    publishes `bridge.status.changed.v1` — but no read on this origin
 	    serves it to a browser, so both facts are said on the screen rather
 	    than drawn as a confident green.
-	  - the **pending-decisions chip** counts contacts whose recorded consent is
-	    `pending`. The fuller source is #54's projection over the inbound
-	    stream, which is in flight; until it lands this count under-reports, so
-	    the chip is drawn only when it has something to say.
+	The pending-decisions chip is a real number now: #54's projection over the
+	inbound stream answers `GET /api/contacts/pending`, and the chip reads its
+	`total`. Its `contacts` array — the list of who has written and not been
+	decided about — is dropped in `$lib/dashboard/load.ts` and never reaches
+	this file. What it has no destination for yet is the tap: the consent inbox
+	is v0.2, so the chip says where the decisions are not, instead of pretending
+	to lead somewhere.
 
 	The version handshake is not repeated here: `$lib/boot.ts` runs it before
 	any screen renders and `VersionBanner` (in the root layout) is what tells
@@ -102,7 +105,7 @@
 		)
 	);
 	const expired = $derived(expiredBridges(bridges));
-	const pending = $derived(pendingDecisions(snapshot.consent));
+	const pending = $derived(pendingDecisions(snapshot.pending));
 	const messages = $derived(messageCount());
 	const feed = $derived(
 		activityFeed({
@@ -220,10 +223,16 @@
 	{/each}
 
 	{#if pending !== null && pending > 0}
-		<p class="chip" data-testid="pending-chip">
-			<Icon name="consent" size="dense" />
-			{$t('dashboard.chip.pending', { count: pending })}
-		</p>
+		<div class="waiting" data-testid="pending-waiting">
+			<p class="chip" data-testid="pending-chip" data-count={pending}>
+				<Icon name="consent" size="dense" />
+				{$t('dashboard.chip.pending', { count: pending })}
+			</p>
+			<!-- A count, and where to act on it: nowhere yet. The searchable
+			     consent inbox is v0.2, and a chip that led to a screen that does
+			     not exist would be worse than one that says so. -->
+			<p class="small muted" data-testid="pending-no-inbox">{$t('dashboard.chip.noInbox')}</p>
+		</div>
 	{/if}
 
 	<div class="card" data-testid="system-health">
@@ -526,6 +535,12 @@
 
 	.dot[data-tone='bad'] {
 		background: var(--color-danger);
+	}
+
+	.waiting {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
 	}
 
 	.chip {

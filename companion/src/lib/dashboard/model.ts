@@ -38,7 +38,9 @@
 //     read, or the merged event stream the wireframe names, is what turns this
 //     row's dot into the wireframe's dot.
 //   - **a message count.** Nothing between the bus and the Companion counts
-//     messages; the Gateway exposes no such read.
+//     messages; the Gateway exposes no such read. The pending-decision count
+//     beside it *is* real (#54), and is a count of people waiting rather than
+//     of messages.
 //   - **persona activity.** Hermes is not implemented (#21–#25): only its test
 //     harness has landed. An activated persona therefore produces nothing, and
 //     [`personaRows`] carries that as a fact about the row, not as a footnote.
@@ -235,28 +237,22 @@ export function personaRows(
 }
 
 /**
- * The count for the wireframe's purple chip: contacts whose recorded consent
- * state is `pending` — a decision the user has been asked for and has not
- * taken.
+ * The count for the wireframe's purple chip: contacts who have written and
+ * about whom neither their own decision nor their network's default exists.
  *
- * `null` means *unknown*, and the chip is not drawn. That is the honest answer
- * while #54's pending-contact projection is not deployed: the chip's fuller
- * source is the inbound stream, which knows about a contact who wrote before
- * any decision was recorded about them, and this read knows only about
- * decisions that exist. Counting from here never invents a number, but it does
- * under-count, so the screen must not promise it is complete.
+ * It comes from `GET /api/contacts/pending` (#54), which projects the inbound
+ * stream — so it knows about a contact who wrote before anything was ever
+ * recorded about them, which a read of the decision journal cannot. The
+ * summary reaching this function already has the identities stripped
+ * (`$lib/dashboard/load.ts`); this is a count and can only ever be a count.
+ *
+ * `null` means *unknown* — the deployment projects no inbound stream, or the
+ * read did not answer — and the chip is not drawn. A zero is a different
+ * statement, and so is drawn as nothing rather than as "0 waiting": the user
+ * has an empty inbox, which needs no chip.
  */
-export function pendingDecisions(entries: readonly ConsentEntry[] | null): number | null {
-	if (entries === null) {
-		return null;
-	}
-	const contacts = new Set<string>();
-	for (const entry of entries) {
-		if (entry.subject.type === 'contact' && entry.state === 'pending') {
-			contacts.add(entry.subject.id);
-		}
-	}
-	return contacts.size;
+export function pendingDecisions(pending: { total: number } | null): number | null {
+	return pending === null ? null : pending.total;
 }
 
 /**

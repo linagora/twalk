@@ -323,7 +323,7 @@
 	"done.title": "Your account is ready",
 	"done.body": "{id} exists, your cryptographic identity is set up, and your recovery key is saved.",
 	"done.next.title": "Next: connect a network",
-	"done.next.body": "Connecting WhatsApp, Signal, SMS or an existing Matrix account is the next step, and it is not built yet. Your account and your key are done.",
+	"done.next.body": "Connect WhatsApp, Signal, SMS or an existing Matrix account, then activate your assistant on it. If your Twalk server has no bridge configured, the Matrix card is the one that will work — the others say so on the screen.",
 	"done.diagnostics": "Open diagnostics",
 
 	"recover.title": "Your keys are not on this device",
@@ -491,5 +491,10 @@
 
 	"dashboard.version": "Deployment version {version}",
 
-	"networks.toAssistant": "Continue to your assistant"
+	"networks.toAssistant": "Continue to your assistant",
+
+	"done.next.cta": "Connect a network",
+	"done.next.after": "After that: activate your assistant on the networks you connected, and land on your dashboard.",
+	"done.dashboard": "Go to my dashboard",
+	"dashboard.chip.noInbox": "Deciding about them one by one is not in this version. Granting or revoking a whole network decides for everyone on it at once."
 }

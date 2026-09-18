@@ -45,6 +45,28 @@ const NATS_PORT = Number(process.env.TWALK_TEST_NATS_PORT ?? 15348);
 const SERVER_NAME = 'test.twalk';
 const REGISTRATION_SECRET = 'test-only-registration-shared-secret';
 
+/**
+ * The durable JetStream consumer the pending-contact projection reads from
+ * (#54), named per Gateway **and per run**.
+ *
+ * Per Gateway because two Gateways sharing one durable name would split the
+ * stream between them and leave each with half a list — the Gateway's own
+ * configuration warns about exactly that. Per run because the durable consumer
+ * *is* the cursor: each run gives its Gateway an empty state directory, so a
+ * consumer that had already acked the stream's history would rebuild that
+ * empty store from nothing and report an empty list. A fresh name replays the
+ * history into the fresh store, which is what makes the pending count a
+ * property of the bus rather than of how many times the suite has run.
+ *
+ * The consumers it leaves behind die with the stack (`docker compose down -v`).
+ */
+function inboundConsumer(which) {
+	return `companion-e2e-${which}-${RUN}`;
+}
+
+/** This run's tag, for anything that must not be shared with the last one. */
+const RUN = `${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`;
+
 /** Where the specs read what this run created. */
 export const STACK_FILE = join(here, '.real-stack.json');
 /** The same, for the bridge journeys' own Gateway (ticket #68). */
@@ -81,6 +103,11 @@ export async function startRealStack() {
 			GATEWAY_HOMESERVER_FEDERATION_URL: synapseUrl,
 			GATEWAY_REGISTRATION_SHARED_SECRET: REGISTRATION_SECRET,
 			GATEWAY_SENSOR_USER_ID: `@sensor:${SERVER_NAME}`,
+			// The consent endpoints answer `503 consent_not_configured`
+			// without a bus, and the journey ends by activating the assistant
+			// — which is a consent decision and nothing else (ADR 0013).
+			GATEWAY_NATS_URL: `nats://127.0.0.1:${NATS_PORT}`,
+			GATEWAY_INBOUND_CONSUMER: inboundConsumer('bootstrap'),
 			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'
 		},
 		stdio: ['ignore', 'inherit', 'inherit']
@@ -199,6 +226,7 @@ export async function startBridgeStack() {
 			// NATS, because "the UI said so" is not evidence that the
 			// decision left the Gateway (ADR 0013).
 			GATEWAY_NATS_URL: `nats://127.0.0.1:${NATS_PORT}`,
+			GATEWAY_INBOUND_CONSUMER: inboundConsumer('bridges'),
 			GATEWAY_BRIDGES: BRIDGES.map((bridge) => bridge.bridgeId).join(','),
 			...bridgeEnvironment,
 			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'

@@ -171,3 +171,61 @@ export function aboutPersona(persona: string) {
 	return (message: BusMessage) =>
 		message.event.data.subject.type === 'persona' && message.event.data.subject.id === persona;
 }
+
+/** The subject the Sensor publishes observed messages to. */
+export const INBOUND_SUBJECT = 'twalk.inbound.message.received.v1';
+
+/**
+ * Publishes one event, and waits for the server to have taken it.
+ *
+ * This is how a spec makes a contact *pending*: the Gateway's projection (#54)
+ * is a durable consumer on the inbound subject, so one message from an unknown
+ * sender is one more person waiting for a decision. Publishing from the test
+ * rather than running a Sensor is deliberate — the Sensor's own suites prove
+ * it produces these events; what the dashboard has to be held to is what it
+ * does when one arrives.
+ *
+ * A JetStream publish is an ordinary publish to a subject a stream captures,
+ * so `PUB` is all this needs. The round trip through `PING`/`PONG` is what
+ * makes it safe to assert on the consequence straight afterwards.
+ */
+export async function publish(port: number, subject: string, event: unknown): Promise<void> {
+	const socket: Socket = createConnection({ host: '127.0.0.1', port });
+	socket.setEncoding('utf8');
+	try {
+		await new Promise<void>((resolve, reject) => {
+			socket.once('error', reject);
+			socket.once('connect', () => resolve());
+		});
+		socket.write(
+			`CONNECT ${JSON.stringify({
+				verbose: false,
+				pedantic: false,
+				tls_required: false,
+				name: 'twalk-companion-e2e-publisher',
+				lang: 'nodejs',
+				version: '0.0.0',
+				protocol: 1,
+				headers: false
+			})}\r\n`
+		);
+		const payload = JSON.stringify(event);
+		socket.write(`PUB ${subject} ${Buffer.byteLength(payload)}\r\n${payload}\r\n`);
+		await new Promise<void>((resolve, reject) => {
+			const deadline = setTimeout(() => reject(new Error('NATS did not answer PING')), 10_000);
+			socket.on('data', (chunk: string) => {
+				if (chunk.includes('-ERR')) {
+					clearTimeout(deadline);
+					reject(new Error(`NATS refused the publish: ${chunk.trim()}`));
+				}
+				if (chunk.includes('PONG')) {
+					clearTimeout(deadline);
+					resolve();
+				}
+			});
+			socket.write('PING\r\n');
+		});
+	} finally {
+		socket.destroy();
+	}
+}

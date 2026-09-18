@@ -59,7 +59,7 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `tests/serve-like-gateway.mjs` | The Gateway's own path resolution, in Node, for Playwright. |
 | `tests/real-stack.mjs` | Brings up the compose stack and the Gateway binaries the stack-backed journeys run against. |
 | `tests/stub-bridge.mjs` | bridgev2's provisioning contract, stubbed — including its blocking step. |
-| `tests/e2e/dashboard/bus.ts` | Forty lines of the NATS wire protocol, so a journey can assert that a consent decision reached the bus and not only the screen. |
+| `tests/e2e/dashboard/bus.ts` | Forty lines of the NATS wire protocol: a journey subscribes, to assert that a consent decision reached the bus and not only the screen, and publishes, to make a contact pending without running a Sensor. |
 
 ## The decisions worth knowing before you change something
 
@@ -239,6 +239,23 @@ contact's consent on WhatsApp became granted" and puts no id in the row's
 values; `model.test.ts` asserts it, and the Playwright journey greps the whole
 rendered page for a Matrix ID.
 
+### The pending chip is a count, and the list behind it never arrives
+
+`GET /api/contacts/pending` (#54) answers with `total`, a per-network
+breakdown, **and** `contacts` — the Matrix IDs of everyone who has written and
+not been decided about. That array is the most sensitive document this origin
+serves, and it is dropped in `$lib/dashboard/load.ts`, at the seam, rather than
+carried into a component where a later row could render it. The chip is
+therefore a number by construction and not by discipline.
+
+It leads nowhere, and says so: the searchable consent inbox is v0.2, and the
+copy points at the one decision v0.1 does offer — granting or revoking a whole
+network, which decides for everyone on it at once. A chip linking to a screen
+that does not exist would be worse than one that explains itself.
+
+`null` (the deployment projects no inbound stream, or the read failed) and `0`
+(nobody is waiting) are different facts and both draw nothing.
+
 ### The dashboard says what it cannot know
 
 Three facts the wireframe assumes have no source in the deployment as it stands,
@@ -248,10 +265,7 @@ last login *process*, not a heartbeat; #56 landed the producer — bridges push
 their state, the Gateway publishes `bridge.status.changed.v1` — and no read on
 this origin serves it to a browser), a message count (nothing between the bus and the
 Companion counts), and persona output (Hermes is not implemented — only its test
-harness landed, so an activated assistant produces nothing today). The
-pending-decisions chip counts contacts whose *recorded* consent is `pending`;
-#54's projection over the inbound stream is the fuller source, and until it
-lands the chip is drawn only when it has something to say.
+harness landed, so an activated assistant produces nothing today).
 
 There is also no `GET /api/events/stream`. The wireframe subscribes to a merged
 SSE stream; the Gateway describes no such endpoint, so the screen polls and

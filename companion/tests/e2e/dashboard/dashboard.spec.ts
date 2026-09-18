@@ -8,6 +8,10 @@
 // form the regression would take: a later ticket adds a row, the row carries a
 // subject id, and nobody notices until the screen is open on a train.
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { expect, test } from '@playwright/test';
 
 import {
@@ -16,12 +20,33 @@ import {
 	connectWhatsApp,
 	expireWhatsAppSession,
 	NO_STACK,
+	pendingTotal,
 	sessionStatus,
 	signIn,
 	signInExtraDevice,
 	StubBridge,
 	WHATSAPP_BRIDGE
 } from './harness';
+import { INBOUND_SUBJECT, publish } from './bus';
+
+/** The contract's own fixture, so the bus carries a real event and not a shape. */
+const INBOUND_FIXTURE = JSON.parse(
+	readFileSync(
+		join(
+			dirname(fileURLToPath(import.meta.url)),
+			'..',
+			'..',
+			'..',
+			'..',
+			'contracts',
+			'cloudevents',
+			'v1',
+			'fixtures',
+			'inbound.message.received.json'
+		),
+		'utf8'
+	)
+) as Record<string, unknown>;
 
 const stack = bridgeStack();
 
@@ -92,6 +117,43 @@ test('the activity feed carries operational events and never a correspondent', a
 	await expect(page.getByTestId('feed-privacy')).toContainText(
 		/who writes to you|qui vous écrit/i
 	);
+});
+
+test('a contact who writes and has never been decided about becomes a number, and stays a number', async ({
+	page,
+	request
+}) => {
+	// The strongest form of screen 5's rule. The Gateway *knows* who this is —
+	// its pending-contact projection stores the Matrix ID, because a decision
+	// has to name its subject — and the home screen still does not say it. The
+	// chip is a count; the list behind it is the consent inbox, which is v0.2.
+	const before = await pendingTotal(request, deviceToken);
+
+	const contact = `@whatsapp_69_${Date.now()}:test.twalk`;
+	await publish(stack!.natsPort, INBOUND_SUBJECT, {
+		...INBOUND_FIXTURE,
+		// A fresh id: the bus deduplicates on it, and this event must land.
+		id: `${Date.now().toString(16)}${'0'.repeat(48)}`.slice(0, 64),
+		subject: contact,
+		time: new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z')
+	});
+
+	// The projection is a durable consumer, so the count moves on its own
+	// schedule rather than on the request's.
+	await expect.poll(async () => pendingTotal(request, deviceToken)).toBeGreaterThan(before);
+
+	await page.goto('/dashboard');
+	const chip = page.getByTestId('pending-chip');
+	await expect(chip).toBeVisible();
+	await expect(chip).toContainText(/waiting|attend/i);
+	// And it says where those decisions are not taken, rather than leading to a
+	// screen that does not exist.
+	await expect(page.getByTestId('pending-no-inbox')).toBeVisible();
+
+	// The whole screen, again, now that the Gateway has a name to leak.
+	const rendered = (await page.getByTestId('screen-dashboard').innerText()).replace(/\s+/gu, ' ');
+	expect(rendered).not.toContain(contact);
+	expect(rendered).not.toMatch(/@[a-z0-9._=\-/]+:[a-z0-9.\-]+/iu);
 });
 
 test('revoking a device from the dashboard refuses its session on the next request', async ({

@@ -84,6 +84,24 @@ export async function consentState(
 }
 
 /**
+ * How many contacts the Gateway says are waiting for a decision.
+ *
+ * Read for the number alone. The same answer carries the contacts themselves,
+ * and a spec that pulled them out to assert on would be building the document
+ * screen 5 exists not to render.
+ */
+export async function pendingTotal(
+	request: APIRequestContext,
+	token: string
+): Promise<number> {
+	const answer = await request.get('/api/contacts/pending', {
+		headers: { cookie: `twalk_device=${token}` }
+	});
+	expect(answer.ok(), await answer.text()).toBeTruthy();
+	return ((await answer.json()) as { total: number }).total;
+}
+
+/**
  * Loses the bridge's session: a login started on the bridge and refused with
  * the `410` mautrix answers when it has ended one, which the Gateway records
  * as `login_expired` — the wireframe's amber state.
