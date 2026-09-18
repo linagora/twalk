@@ -3,6 +3,52 @@
 // this file no longer matches the description.
 
 export interface paths {
+    "/_twalk/bridges/{bridge_id}/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * A bridge pushes its connection state.
+         * @description Mautrix's **only** push channel, and the producer behind
+         *     `bridge.status.changed.v1` on the bus. Each bridge's
+         *     `homeserver.status_endpoint` names this URL; the bridge POSTs its
+         *     `BridgeState` here whenever its connection state changes, retried
+         *     with backoff and deduplicated on its own side within a TTL.
+         *
+         *     This is not an endpoint the Companion calls, and not one a generated
+         *     client has any use for. It is described because every answer this
+         *     origin gives is described.
+         *
+         *     **Authentication.** The calling bridge's own `as_token`, as
+         *     `Authorization: Bearer` — the same value as that bridge's
+         *     `appservice.as_token` and as `GATEWAY_BRIDGE_<ID>_AS_TOKEN` in the
+         *     Gateway's configuration. Trusting the caller's position on the
+         *     compose network instead was explicitly refused: every container on
+         *     that network can reach this port, and a forged push could tell the
+         *     user a dead session was healthy. A device token is not accepted here,
+         *     and an `as_token` opens nothing else.
+         *
+         *     **What the Gateway does with it.** `state_event` is translated into
+         *     the contract's vocabulary — `BAD_CREDENTIALS` to `session_expired`
+         *     (this, not `LOGGED_OUT`, is what a remotely revoked session reports),
+         *     `TRANSIENT_DISCONNECT` to `degraded`, `CONNECTING` and `BACKFILLING`
+         *     to `starting`, `CONNECTED` to `connected`, anything else to
+         *     `disconnected` — compared with the state this bridge was last known
+         *     to be in, and published as a transition only if the two differ. A
+         *     repeated identical state is accepted and publishes nothing.
+         */
+        post: operations["pushBridgeStatus"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/{companionPath}": {
         parameters: {
             query?: never;
@@ -873,6 +919,51 @@ export interface components {
              */
             valid_for_seconds: number;
         };
+        BridgeStatePush: {
+            /**
+             * @description The bridge's error code. Used as `reason` when there is no
+             *     `message`: a code is a worse sentence than a message and a much
+             *     better one than nothing.
+             */
+            error?: string;
+            /**
+             * @description Mautrix's free-form map. `last_message_at` (or
+             *     `last_message_ts`) is read out of it into the event's
+             *     `last_message_at` when a bridge puts one there; none does today.
+             */
+            info?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * @description The bridge's own human-readable cause, which becomes the event's
+             *     `reason` (truncated to the contract's 1024 characters).
+             */
+            message?: string;
+            /**
+             * @description The state the bridge is reporting. Mautrix declares seven;
+             *     anything else is read as `disconnected`, because telling a
+             *     dashboard that an unrecognised state is fine is the one wrong
+             *     direction.
+             * @enum {string}
+             */
+            state_event: "CONNECTING" | "BACKFILLING" | "CONNECTED" | "TRANSIENT_DISCONNECT" | "BAD_CREDENTIALS" | "UNKNOWN_ERROR" | "LOGGED_OUT";
+            /**
+             * @description When the state changed, in whole seconds since the epoch — the
+             *     instant of the last *change*, not of this push. It becomes the
+             *     event's `occurred_at`, and therefore part of its deterministic
+             *     id. Absent: the Gateway's own clock is used.
+             */
+            timestamp?: number;
+            /**
+             * @description What the bridge thinks the user has to do. Logged by the Gateway
+             *     and not published: `bridge.status.changed.v1` has no field for
+             *     it, and a producer inventing one would be a contract change.
+             * @enum {string}
+             */
+            user_action?: "OPEN_NATIVE" | "RELOGIN" | "RESTART";
+        } & {
+            [key: string]: unknown;
+        };
         ConfiguredBridge: {
             /**
              * @description The bridge instance's id, as this deployment's configuration
@@ -1493,6 +1584,15 @@ export interface components {
          * @example mautrix-whatsapp
          */
         bridgeId: string;
+        /**
+         * @description The bridge as the **event contract** names it: `^bridge-[a-z0-9-]+$`,
+         *     which is what `bridge.status.changed.v1` carries as `data.bridge_id`.
+         *     Distinct from the instance id above on purpose — that one names the
+         *     software an operator configured, this one is the identity third
+         *     parties code against, and it is stable across restarts.
+         * @example bridge-whatsapp
+         */
+        statusBridgeId: string;
     };
     requestBodies: never;
     headers: never;
@@ -1500,6 +1600,135 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    pushBridgeStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The bridge as the **event contract** names it: `^bridge-[a-z0-9-]+$`,
+                 *     which is what `bridge.status.changed.v1` carries as `data.bridge_id`.
+                 *     Distinct from the instance id above on purpose — that one names the
+                 *     software an operator configured, this one is the identity third
+                 *     parties code against, and it is stable across restarts.
+                 * @example bridge-whatsapp
+                 */
+                bridge_id: components["parameters"]["statusBridgeId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * @description A mautrix `BridgeState`. Only `state_event` is required; the rest
+         *     is read when present and ignored when not. A `GlobalBridgeState`
+         *     wrapper (`remoteState`) is unwrapped.
+         */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BridgeStatePush"];
+            };
+        };
+        responses: {
+            /**
+             * @description The push was verified and applied. No body, and deliberately the
+             *     same answer whether or not it changed anything: a bridge has no
+             *     use for the difference, and a distinct status would only invite
+             *     it to retry on one of them.
+             */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description `invalid_request` — the body is not JSON, or not a mautrix
+             *     `BridgeState`: it carries no `state_event`, which is the one
+             *     thing this endpoint exists to receive.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request";
+                    };
+                };
+            };
+            /**
+             * @description `unauthenticated` — no `Authorization: Bearer` header, one the
+             *     Gateway cannot read, or a token that is not this bridge's
+             *     `as_token`. One answer for all of them. The bridge retries with
+             *     backoff, so an operator whose two halves disagree sees this
+             *     again rather than once.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unauthenticated";
+                    };
+                };
+            };
+            /**
+             * @description `unknown_bridge` — no configured bridge reports status under this
+             *     id. It is `GATEWAY_BRIDGE_<ID>_STATUS_ID`, which defaults to the
+             *     instance id with `mautrix-` stripped under a `bridge-` prefix.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unknown_bridge";
+                    };
+                };
+            };
+            /**
+             * @description `store_unavailable` — the transition could not be recorded. The
+             *     push is not applied, and the bridge's retry is the recovery.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            /**
+             * @description - `sign_in_not_configured` — this deployment has no owner, so it
+             *       has no store and no bus either.
+             *     - `bridge_status_not_configured` — `GATEWAY_NATS_URL` is unset,
+             *       so there is nowhere to record a transition and nowhere to
+             *       publish it. Saying so beats accepting a push and throwing it
+             *       away.
+             *     - `as_token_not_configured` — the bridge is configured, but this
+             *       Gateway holds no `as_token` for it, so the push cannot be
+             *       verified. An unverified push is refused, never trusted.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "sign_in_not_configured" | "bridge_status_not_configured" | "as_token_not_configured";
+                    };
+                };
+            };
+        };
+    };
     getCompanionFile: {
         parameters: {
             query?: never;

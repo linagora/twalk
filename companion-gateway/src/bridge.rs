@@ -221,6 +221,19 @@ pub struct BridgeConfig {
     /// (CONTEXT.md): it identifies the implementation, and the v0.1
     /// constraint is one login per instance.
     pub bridge_id: String,
+    /// The `bridge_id` this instance's **events** carry (ticket #56): the
+    /// contract's `^bridge-[a-z0-9-]+$`, e.g. `bridge-whatsapp`. It is also
+    /// the segment of the status webhook's URL, which is what an operator
+    /// writes into the bridge's `homeserver.status_endpoint`.
+    ///
+    /// Separate from [`Self::bridge_id`] because the two identify different
+    /// things: that one is the software instance an operator configured
+    /// (`mautrix-whatsapp`) and names the Gateway's own API routes, this one
+    /// is the identity the event contract froze and third parties code
+    /// against. Derived from the instance id by default, so a deployment
+    /// sets nothing; stable across restarts either way, which is the
+    /// property the contract needs.
+    pub status_bridge_id: String,
     /// The network the user experiences, e.g. `whatsapp` — what the
     /// Companion labels the screen with.
     pub network: String,
@@ -231,6 +244,15 @@ pub struct BridgeConfig {
     /// on the user's account, so it stays on this side: never in a response,
     /// never in a log line.
     pub provisioning_secret: String,
+    /// The bridge's appservice token, which is what it authenticates its
+    /// **status pushes** with (ticket #56) — the Gateway holds it to verify
+    /// them, and for nothing else: it never acts as the appservice.
+    ///
+    /// `None` when the operator configured none, in which case that bridge's
+    /// webhook is refused rather than trusted. Trusting the compose network
+    /// instead was explicitly rejected — the same reasoning that gave the
+    /// Sensor a service token (`docs/architecture/security-model.md`).
+    pub as_token: Option<String>,
 }
 
 impl std::fmt::Debug for BridgeConfig {
@@ -238,9 +260,18 @@ impl std::fmt::Debug for BridgeConfig {
         formatter
             .debug_struct("BridgeConfig")
             .field("bridge_id", &self.bridge_id)
+            .field("status_bridge_id", &self.status_bridge_id)
             .field("network", &self.network)
             .field("base_url", &self.base_url)
             .field("provisioning_secret", &"<redacted>")
+            .field(
+                "as_token",
+                &self
+                    .as_token
+                    .as_ref()
+                    .map(|_| "<redacted>")
+                    .unwrap_or("None"),
+            )
             .finish()
     }
 }
@@ -623,6 +654,39 @@ impl Bridges {
                 })
             })
             .collect())
+    }
+
+    /// `GET /_matrix/provision/v3/whoami` — what the bridge says about
+    /// itself, as the `logins` array of its answer.
+    ///
+    /// This is the **reconciliation read** (ticket #56): it is called at
+    /// startup, once per bridge, so that a Gateway which restarts does not
+    /// carry a stale state forward. It is never a substitute for the
+    /// webhook. A bridge's state lives in the bridge's own memory, is empty
+    /// right after a bridge restart, and carries no "last connected" field —
+    /// so polling it would miss every transition between two reads. The
+    /// translation of what comes back is [`crate::bridge_status`]'s.
+    pub async fn whoami(
+        &self,
+        bridge_id: &str,
+        acting_as: &str,
+    ) -> Result<Vec<Value>, BridgeRefusal> {
+        let bridge = self.bridge(bridge_id)?;
+        let body = self
+            .call(
+                bridge,
+                &self.clients.http,
+                reqwest::Method::GET,
+                &["whoami"],
+                &[("user_id", acting_as)],
+                None,
+            )
+            .await?;
+        Ok(body
+            .get("logins")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// The login in flight on this bridge, as the Companion polls it.
@@ -1475,9 +1539,11 @@ mod tests {
     fn two_bridges_cannot_share_an_id() {
         let config = |bridge_id: &str| BridgeConfig {
             bridge_id: bridge_id.to_owned(),
+            status_bridge_id: format!("bridge-{bridge_id}"),
             network: "whatsapp".to_owned(),
             base_url: "http://bridge:29318".to_owned(),
             provisioning_secret: "a-secret-of-at-least-16".to_owned(),
+            as_token: None,
         };
         assert!(Bridges::new(vec![config("a"), config("b")]).is_ok());
         let error = match Bridges::new(vec![config("a"), config("a")]) {
@@ -1493,14 +1559,20 @@ mod tests {
             "{:?}",
             BridgeConfig {
                 bridge_id: "mautrix-whatsapp".to_owned(),
+                status_bridge_id: "bridge-whatsapp".to_owned(),
                 network: "whatsapp".to_owned(),
                 base_url: "http://bridge-whatsapp:29318".to_owned(),
                 provisioning_secret: "the-secret-that-drives-logins".to_owned(),
+                as_token: Some("the-token-that-impersonates-the-appservice".to_owned()),
             }
         );
         assert!(
             !printed.contains("the-secret"),
             "a bridge configuration must not print its provisioning secret: {printed}"
+        );
+        assert!(
+            !printed.contains("the-token"),
+            "nor its as_token, which impersonates the appservice: {printed}"
         );
         assert!(printed.contains("<redacted>"), "{printed}");
     }
@@ -1509,9 +1581,11 @@ mod tests {
     fn a_base_url_that_is_not_one_fails_at_startup() {
         let error = match Bridges::new(vec![BridgeConfig {
             bridge_id: "mautrix-whatsapp".to_owned(),
+            status_bridge_id: "bridge-whatsapp".to_owned(),
             network: "whatsapp".to_owned(),
             base_url: "bridge-whatsapp:29318".to_owned(),
             provisioning_secret: "a-secret-of-at-least-16".to_owned(),
+            as_token: None,
         }]) {
             Ok(_) => panic!("a base URL without a scheme is not a URL"),
             Err(error) => error,
@@ -1548,9 +1622,11 @@ mod tests {
             Arc::new(Bridge {
                 config: BridgeConfig {
                     bridge_id: "mautrix-whatsapp".to_owned(),
+                    status_bridge_id: "bridge-whatsapp".to_owned(),
                     network: "whatsapp".to_owned(),
                     base_url: "http://bridge:29318".to_owned(),
                     provisioning_secret: "a-secret-of-at-least-16".to_owned(),
+                    as_token: None,
                 },
                 slot: Mutex::new(Slot::Active(Arc::new(ActiveLogin {
                     view: Mutex::new(view(phase)),

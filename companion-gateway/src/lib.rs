@@ -20,7 +20,14 @@
 //! the login; ticket #50 added the consent snapshot ([`consent_snapshot`]) —
 //! the whole current state with the JetStream sequence it reflects,
 //! authenticated by a service token, which is how a consumer whose cache is
-//! cold recovers consent and then follows the bus (ADR 0010).
+//! cold recovers consent and then follows the bus (ADR 0010); ticket #56
+//! added the other half of the bridge facade — bridge *status*
+//! ([`bridge_status`], [`bridge_status_http`]): the webhook each bridge
+//! pushes its connection state to, verified against that bridge's own
+//! `as_token`, a `whoami` reconciliation at startup, the mapping from
+//! mautrix's state vocabulary to the contract's, and the transitions
+//! published as `bridge.status.changed.v1` through #49's outbox, so the
+//! Gateway is the single producer of that event.
 //!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
@@ -36,6 +43,8 @@ pub mod bootstrap;
 pub mod bootstrap_http;
 pub mod bridge;
 pub mod bridge_http;
+pub mod bridge_status;
+pub mod bridge_status_http;
 pub mod config;
 pub mod consent;
 pub mod consent_http;

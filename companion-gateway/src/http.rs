@@ -32,6 +32,8 @@ use crate::bootstrap::Bootstrap;
 use crate::bootstrap_http;
 use crate::bridge::Bridges;
 use crate::bridge_http;
+use crate::bridge_status::Statuses;
+use crate::bridge_status_http;
 use crate::consent_http;
 use crate::consent_snapshot::{self, Snapshots};
 use crate::metrics::{Metrics, Route};
@@ -71,6 +73,13 @@ pub struct Gateway {
     /// endpoint then answers `503 service_token_not_configured`, and nothing
     /// else changes.
     snapshots: Option<Arc<Snapshots>>,
+    /// The bridge status half ([`crate::bridge_status`], ticket #56): each
+    /// bridge's contract id, its network and the `as_token` its status
+    /// pushes are verified against. `None` when this Gateway has no store to
+    /// record a transition in and no bus to publish it on — the webhook then
+    /// answers `503 bridge_status_not_configured`, rather than accepting a
+    /// push it would throw away.
+    statuses: Option<Arc<Statuses>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -89,6 +98,7 @@ impl Gateway {
                 Bridges::new(Vec::new()).expect("no bridge configured is a valid configuration"),
             ),
             snapshots: None,
+            statuses: None,
             now_unix_seconds,
         }
     }
@@ -150,6 +160,20 @@ impl Gateway {
         self.snapshots.clone()
     }
 
+    /// Adds the bridge status half (ticket #56), the same way. Separate from
+    /// [`Self::with_bridges`] because the two are independently available: a
+    /// Gateway always has a bridge facade (possibly empty), and it has a
+    /// status half only once it has the store and the bus that a transition
+    /// needs.
+    pub fn with_statuses(mut self, statuses: Option<Arc<Statuses>>) -> Self {
+        self.statuses = statuses;
+        self
+    }
+
+    pub fn statuses(&self) -> Option<Arc<Statuses>> {
+        self.statuses.clone()
+    }
+
     /// The Matrix ID every bridge call acts as: this deployment's owner,
     /// from configuration and never from a request. mautrix's shared-secret
     /// auth takes the acting user on trust, so the Gateway is what decides
@@ -199,6 +223,11 @@ pub fn router(gateway: Gateway) -> Router {
         // behind the same guard, which for this one route requires the
         // service token instead of a device cookie.
         .merge(consent_snapshot::routes())
+        // The bridge status webhook (ticket #56): the one route a *bridge*
+        // calls. Outside `/api/` because its caller is not a browser, and
+        // still inside the guard's table — as `Requirement::BridgeToken`, so
+        // the policy has no hole in it.
+        .merge(bridge_status_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))
@@ -373,6 +402,11 @@ fn classify(path: &str) -> Route {
         "/openapi.yaml" => Route::OpenApi,
         "/api" => Route::Api,
         path if path.starts_with("/api/") => Route::Api,
+        // The bridge status webhook and anything else under the Gateway's
+        // reserved prefix (#56): its own label, so a flapping bridge is
+        // visible in the exposition without being mistaken for the
+        // Companion's own traffic.
+        path if crate::bridge_status::is_reserved_path(path) => Route::BridgeStatus,
         _ => Route::Companion,
     }
 }
@@ -389,6 +423,10 @@ mod tests {
         assert_eq!(classify("/api"), Route::Api);
         assert_eq!(classify("/api/consent"), Route::Api);
         assert_eq!(classify("/api/bridges/mautrix-whatsapp/login"), Route::Api);
+        assert_eq!(
+            classify("/_twalk/bridges/bridge-whatsapp/status"),
+            Route::BridgeStatus
+        );
         assert_eq!(classify("/"), Route::Companion);
         assert_eq!(classify("/onboarding/whatsapp"), Route::Companion);
         // A path that merely starts with the same letters is not the API.

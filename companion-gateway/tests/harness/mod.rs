@@ -21,7 +21,7 @@
 
 pub mod stub_bridge;
 
-pub use stub_bridge::{StubBridge, STUB_PROVISIONING_SECRET};
+pub use stub_bridge::{StubBridge, STUB_AS_TOKEN, STUB_PROVISIONING_SECRET};
 pub use twalk_test_harness::*;
 
 use std::path::{Path, PathBuf};
@@ -542,6 +542,25 @@ pub fn gateway_env_with_consent(static_dir: &Path, nats_url: &str) -> Vec<(Strin
 pub const STUB_BRIDGE_ID: &str = "mautrix-stub";
 pub const UNREACHABLE_BRIDGE_ID: &str = "mautrix-unreachable";
 
+/// The same two bridges as the **event contract** names them (ticket #56):
+/// `^bridge-[a-z0-9-]+$`, which is what `bridge.status.changed.v1` carries
+/// and what the status webhook's URL has in it. Neither is configured
+/// explicitly — these are `config::default_status_bridge_id` of the ids
+/// above, which is the whole point of the default.
+pub const STUB_STATUS_BRIDGE_ID: &str = "bridge-stub";
+pub const UNREACHABLE_STATUS_BRIDGE_ID: &str = "bridge-unreachable";
+
+/// The bus subject `bridge.status.changed.v1` is published on, and its
+/// contract type.
+pub const BRIDGE_STATUS_SUBJECT: &str = "twalk.bridge.status.changed.v1";
+pub const BRIDGE_STATUS_TYPE: &str = "fr.linagora.twalk.bridge.status.changed.v1";
+
+/// The status webhook's path for one bridge, as an operator writes it into
+/// that bridge's `homeserver.status_endpoint`.
+pub fn bridge_status_path(status_bridge_id: &str) -> String {
+    format!("/_twalk/bridges/{status_bridge_id}/status")
+}
+
 /// [`gateway_env`] plus the bridge facade's configuration: the stub bridge
 /// above, and an instance whose listener is dead.
 ///
@@ -563,6 +582,11 @@ pub fn gateway_env_with_bridges(static_dir: &Path, stub_base_url: &str) -> Vec<(
                 STUB_PROVISIONING_SECRET,
             ),
             ("GATEWAY_BRIDGE_MAUTRIX_STUB_NETWORK", "whatsapp"),
+            // The appservice token this bridge's status pushes are verified
+            // against (ticket #56). The unreachable bridge deliberately has
+            // none: a bridge an operator wired up without giving the Gateway
+            // its token is a state that must be refused, not trusted.
+            ("GATEWAY_BRIDGE_MAUTRIX_STUB_AS_TOKEN", STUB_AS_TOKEN),
             ("GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_URL", &dead),
             (
                 "GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_PROVISIONING_SECRET",
@@ -571,6 +595,40 @@ pub fn gateway_env_with_bridges(static_dir: &Path, stub_base_url: &str) -> Vec<(
             ("GATEWAY_BRIDGE_MAUTRIX_UNREACHABLE_NETWORK", "signal"),
         ],
     )
+}
+
+/// [`gateway_env_with_bridges`] plus the bus: what a deployment that reports
+/// bridge status has (ticket #56). The status half shares the consent
+/// store's journal and the consent bus, so it is on exactly when they are.
+pub fn gateway_env_with_bridges_and_consent(
+    static_dir: &Path,
+    stub_base_url: &str,
+    nats_url: &str,
+) -> Vec<(String, String)> {
+    let mut env = gateway_env_with_bridges(static_dir, stub_base_url);
+    env.push(("GATEWAY_NATS_URL".to_owned(), nats_url.to_owned()));
+    env
+}
+
+/// Pushes one mautrix `BridgeState` at the Gateway's status webhook, as a
+/// bridge does — with a bearer token the caller chooses, so a test can send
+/// the right one, the wrong one, or none.
+pub async fn push_bridge_status(
+    base: &str,
+    status_bridge_id: &str,
+    as_token: Option<&str>,
+    state: &serde_json::Value,
+) -> Result<reqwest::Response> {
+    let mut request = reqwest::Client::new()
+        .post(format!("{base}{}", bridge_status_path(status_bridge_id)))
+        .json(state);
+    if let Some(as_token) = as_token {
+        request = request.bearer_auth(as_token);
+    }
+    request
+        .send()
+        .await
+        .context("the status webhook did not answer")
 }
 
 /// An HTTP URL nothing listens on: asked of the kernel, then released.

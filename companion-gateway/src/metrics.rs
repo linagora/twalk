@@ -42,6 +42,22 @@ pub struct Metrics {
     /// writes no consent exposes no consent series at all.
     consent_published: Mutex<u64>,
     consent_outbox_pending: Mutex<Option<u64>>,
+    /// Bridge states observed (#56), by the channel they arrived on
+    /// (`webhook`, `startup`) and what they said: one of the contract's five
+    /// states, `unchanged` when the bridge reported the state it was already
+    /// in, or `unreachable` when startup reconciliation could not ask. Both
+    /// label sets are closed, so the cardinality is bounded by the number of
+    /// states and not by anything a bridge sends.
+    bridge_statuses: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
+    /// Status webhook calls that were refused, by reason
+    /// (`unauthenticated`, `unknown_bridge`, …). The one an operator watches:
+    /// a bridge whose `as_token` does not match the Gateway's shows up here
+    /// and nowhere else.
+    bridge_status_refusals: Mutex<BTreeMap<&'static str, u64>>,
+    /// Bridge transitions the outbox published, and how many are still
+    /// waiting — the same pair as consent's, for the same question.
+    bridge_status_published: Mutex<u64>,
+    bridge_status_outbox_pending: Mutex<Option<u64>>,
     /// When the process started, in seconds since the epoch: the uptime
     /// gauge is computed against the scrape clock, as the Sensor's sync age
     /// is.
@@ -64,6 +80,11 @@ pub enum Route {
     OpenApi,
     /// The Gateway's own API surface (`/api/...`), empty in this skeleton.
     Api,
+    /// The bridge status webhook (`/_twalk/bridges/{id}/status`, ticket
+    /// #56). Its own label: its caller is a bridge and not a browser, and a
+    /// bridge pushing every few seconds would otherwise be indistinguishable
+    /// from the Companion's own traffic.
+    BridgeStatus,
     /// The Companion's static files, the app shell included.
     Companion,
 }
@@ -75,6 +96,7 @@ impl Route {
             Route::Metrics => "metrics",
             Route::OpenApi => "openapi",
             Route::Api => "api",
+            Route::BridgeStatus => "bridge_status",
             Route::Companion => "companion",
         }
     }
@@ -92,6 +114,10 @@ impl Metrics {
             consent_decisions: Mutex::new(BTreeMap::new()),
             consent_published: Mutex::new(0),
             consent_outbox_pending: Mutex::new(None),
+            bridge_statuses: Mutex::new(BTreeMap::new()),
+            bridge_status_refusals: Mutex::new(BTreeMap::new()),
+            bridge_status_published: Mutex::new(0),
+            bridge_status_outbox_pending: Mutex::new(None),
             started_unix_seconds: now_unix_seconds,
         }
     }
@@ -165,6 +191,44 @@ impl Metrics {
     pub fn set_consent_outbox_pending(&self, pending: u64) {
         *self
             .consent_outbox_pending
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(pending);
+    }
+
+    /// One bridge state observed (#56). Both labels are static: `channel` is
+    /// `webhook` or `startup`, and `state` is one of the contract's five,
+    /// `unchanged` or `unreachable` — never anything a bridge sent.
+    pub fn record_bridge_status(&self, channel: &'static str, state: &'static str) {
+        *self
+            .bridge_statuses
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry((channel, state))
+            .or_insert(0) += 1;
+    }
+
+    /// One status webhook refused, by the refusal's own label.
+    pub fn record_bridge_status_refusal(&self, outcome: &'static str) {
+        *self
+            .bridge_status_refusals
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
+    /// One bridge transition published on the bus and marked as such.
+    pub fn record_bridge_status_published(&self) {
+        *self
+            .bridge_status_published
+            .lock()
+            .expect("the metrics mutex is never poisoned") += 1;
+    }
+
+    /// How many bridge transitions are waiting for the bus.
+    pub fn set_bridge_status_outbox_pending(&self, pending: u64) {
+        *self
+            .bridge_status_outbox_pending
             .lock()
             .expect("the metrics mutex is never poisoned") = Some(pending);
     }
@@ -260,6 +324,54 @@ impl Metrics {
         {
             out.push_str(&format!(
                 "twalk_companion_gateway_sensor_invitations_total{{outcome=\"{outcome}\"}} {count}\n"
+            ));
+        }
+        // The bridge status series (#56), on the same rule as consent's: the
+        // gauge is `None` until this Gateway has a store to record a
+        // transition in, so a deployment with no bus exposes none of them.
+        let bridge_pending = *self
+            .bridge_status_outbox_pending
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        if let Some(bridge_pending) = bridge_pending {
+            out.push_str("# HELP twalk_companion_gateway_bridge_statuses_total Bridge states observed, by the channel they arrived on and the state they reported.\n");
+            out.push_str("# TYPE twalk_companion_gateway_bridge_statuses_total counter\n");
+            for ((channel, state), count) in self
+                .bridge_statuses
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_bridge_statuses_total{{channel=\"{channel}\",state=\"{state}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_bridge_status_refusals_total Bridge status webhook calls refused, by reason.\n");
+            out.push_str("# TYPE twalk_companion_gateway_bridge_status_refusals_total counter\n");
+            for (outcome, count) in self
+                .bridge_status_refusals
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_bridge_status_refusals_total{{outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_bridge_status_events_published_total Bridge state changes published on the bus by the transactional outbox.\n");
+            out.push_str(
+                "# TYPE twalk_companion_gateway_bridge_status_events_published_total counter\n",
+            );
+            out.push_str(&format!(
+                "twalk_companion_gateway_bridge_status_events_published_total {}\n",
+                self.bridge_status_published
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            out.push_str("# HELP twalk_companion_gateway_bridge_status_outbox_pending Recorded bridge state changes still waiting to be published.\n");
+            out.push_str("# TYPE twalk_companion_gateway_bridge_status_outbox_pending gauge\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_bridge_status_outbox_pending {bridge_pending}\n"
             ));
         }
         out.push_str(
