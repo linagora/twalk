@@ -818,6 +818,102 @@ fn starting(now: SystemTime) -> Observed {
     }
 }
 
+/// One login the bridge actually holds, as `whoami` describes it (#108).
+///
+/// # Why this is read from `whoami` and from nothing else
+///
+/// A login is a **persistent** thing: it lives in the bridge, with the
+/// network's credentials behind it, and it outlives every process on this
+/// side. A login *process* — [`crate::bridge::LoginView`] — is the opposite:
+/// a QR scan in flight, in the Gateway's memory, for at most thirty minutes.
+/// The Companion used to compute "connected" from the second one, so starting
+/// a login, cancelling one or restarting the Gateway all made a working
+/// connection look broken (#108). This is the first thing.
+///
+/// The second is that `GET /v3/logins` cannot answer it. That endpoint
+/// answers bare id strings (`{"login_ids":["33660469852"]}`, #106) — no name,
+/// no profile, no state. `whoami`'s `logins` array carries the whole object,
+/// state document included, so it is the only provisioning call that can say
+/// *which account is linked, since when, and how it is doing*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedLogin {
+    /// What `POST .../login` takes as `login_id` to re-link, and what
+    /// `DELETE .../logins/{login_id}` drops.
+    pub login_id: String,
+    /// The name the network gives the account — a phone number, on both
+    /// reference bridges. `None` when the bridge names none.
+    pub name: Option<String>,
+    /// The bridge's own profile object, passed through unread: its shape is
+    /// the connector's and the network's, not the Gateway's.
+    pub profile: Value,
+    /// The contract's state, through [`BridgeStateEvent::contract_state`] —
+    /// the same five values the dashboard and `bridge.status.changed.v1`
+    /// use. One vocabulary, defined by #56, not a second one.
+    pub state: ContractState,
+    /// Mautrix's own `state_event`, verbatim, when the bridge reported one.
+    pub reported: Option<String>,
+    /// The bridge's human message for the state it is in.
+    pub reason: Option<String>,
+    /// When the state last changed, from the login's `state.timestamp`. For a
+    /// login that is `connected`, this is when it connected — which is the
+    /// honest answer to the management screen's "since when", and the only
+    /// one a bridge offers. `None` on a bridge that has just restarted: its
+    /// state lives in memory and it has not reported one yet.
+    pub since: Option<String>,
+}
+
+/// Every login `whoami` reported, described.
+///
+/// A login with no `state` document is `starting`, not `disconnected`: the
+/// bridge holds the login and is bringing it up, which is what a bridge that
+/// has just restarted looks like from outside. Reporting `disconnected` there
+/// would tell a user their working link is broken — the very thing #108 is
+/// about.
+pub fn linked_logins(logins: &[Value], now: SystemTime) -> Vec<LinkedLogin> {
+    logins
+        .iter()
+        .filter_map(|login| {
+            let login_id = login
+                .get("id")
+                .or_else(|| login.get("login_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())?
+                .to_owned();
+            let observed = match login.get("state") {
+                Some(state) if state.get("state_event").is_some() => {
+                    observe(state, now).unwrap_or_else(|_| starting(now))
+                }
+                _ => starting(now),
+            };
+            // Only when the bridge actually timestamped a change. `observe`
+            // falls back to the Gateway's clock so an *event* always has an
+            // `occurred_at`; "since when" must not inherit that fallback, or
+            // the screen would say a link has existed since the page loaded.
+            let since = login
+                .get("state")
+                .and_then(|state| timestamp_of(state))
+                .or_else(|| {
+                    // mautrix repeats the login's state at the top level as
+                    // `state_event` / `state_ts`, and a capture shows both.
+                    login.get("state_ts").and_then(from_unix_seconds)
+                });
+            Some(LinkedLogin {
+                login_id,
+                name: login
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+                profile: login.get("profile").cloned().unwrap_or(Value::Null),
+                state: observed.state,
+                reported: observed.reported,
+                reason: observed.reason,
+                since,
+            })
+        })
+        .collect()
+}
+
 /// Compares two digests without an early return, so the time a refusal takes
 /// says nothing about how much of a guess was right.
 fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {

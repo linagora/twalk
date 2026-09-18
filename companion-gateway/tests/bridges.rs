@@ -119,6 +119,60 @@ impl Fixture {
         Ok((status, body))
     }
 
+    /// `GET /api/bridges`, as the networks screen reads it.
+    async fn bridges(&self) -> Result<Value> {
+        let (status, body) = self
+            .call(reqwest::Method::GET, "/api/bridges", None)
+            .await?;
+        anyhow::ensure!(status == 200, "the bridge list answered {status}: {body}");
+        Ok(body)
+    }
+
+    /// One row of that list, by bridge id.
+    async fn bridge_row(&self, bridge_id: &str) -> Result<Value> {
+        let listed = self.bridges().await?;
+        listed["bridges"]
+            .as_array()
+            .context("the bridge list is not a list")?
+            .iter()
+            .find(|row| row["bridge_id"] == json!(bridge_id))
+            .cloned()
+            .with_context(|| format!("no {bridge_id} row in {listed}"))
+    }
+
+    /// Restarts the Gateway process against the same state directory and the
+    /// same stub, and signs a device in again.
+    ///
+    /// The point of doing it for real rather than clearing a field: a login
+    /// process lives in the Gateway's memory and does not survive this, while
+    /// the bridge's own logins do. That asymmetry is the whole of #108, and
+    /// the only way to assert it is to actually restart.
+    async fn restart_gateway(&mut self) -> Result<()> {
+        let stopped = std::mem::replace(
+            &mut self.gateway,
+            GatewayProc::start(&gateway_env_with_bridges(
+                &self.static_dir,
+                &self.stub.base_url(),
+            ))?,
+        );
+        stopped.stop().await;
+        self.base = self.gateway.base_url().await?;
+        let base = self.base.clone();
+        poll_until(
+            || async {
+                reqwest::get(format!("{base}/health"))
+                    .await
+                    .ok()?
+                    .error_for_status()
+                    .ok()
+            },
+            "the restarted gateway health endpoint",
+        )
+        .await?;
+        self.device = sign_in(&self.http, &self.base, "the device after the restart").await?;
+        Ok(())
+    }
+
     /// The pollable login state, as the Companion reads it.
     async fn login(&self) -> Result<Value> {
         let (status, body) = self
@@ -1441,5 +1495,351 @@ fn the_gateways_parser_reads_every_captured_step_answer() -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Ticket #108: a network's connected state comes from the bridge's logins,
+// never from a login process
+// ---------------------------------------------------------------------------
+
+/// Exactly these members and no others, which is what `openapi.yaml` says of
+/// both objects this ticket adds.
+fn assert_members(value: &Value, expected: &[&str]) {
+    let mut found: Vec<&str> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("expected an object, got {value}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut wanted = expected.to_vec();
+    found.sort_unstable();
+    wanted.sort_unstable();
+    assert_eq!(found, wanted, "in {value}");
+}
+
+/// A `whoami` login in a given mautrix state, shaped as the reference bridges
+/// nest it: the same `BridgeState` document the status webhook carries, under
+/// the login, with `timestamp` in whole seconds.
+fn login_state(state_event: &str, timestamp: u64) -> Value {
+    json!({
+        "state_event": state_event,
+        "timestamp": timestamp,
+        "ttl": 21600,
+        "source": "bridge",
+    })
+}
+
+/// The defect, at the seam it was found at.
+///
+/// The live incident: a WhatsApp bridge reporting `logins: 1, id
+/// 33660469852, state CONNECTED` throughout, and a Companion showing no badge
+/// at all — because the badge was read from the login *process*, which the
+/// Gateway had lost across a restart. So the assertion is not "connected is
+/// reported" but "connected is reported **while the login process says
+/// something else entirely**", three times over: with nothing in flight, with
+/// a QR scan in flight, and after the Gateway has been restarted under it.
+#[tokio::test]
+async fn a_connected_bridge_reads_as_connected_whatever_the_login_process_is_doing() -> Result<()> {
+    let mut fixture = Fixture::start("bridges-connected-not-login").await?;
+    fixture
+        .stub
+        .add_existing_login("33660469852", "+33660469852");
+    fixture
+        .stub
+        .set_login_state("33660469852", login_state("CONNECTED", 1_789_706_879));
+
+    // Nothing in flight at all: the old Companion's `login?.state` was `null`
+    // here, and the card said nothing.
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    // The description closes both objects (`additionalProperties: false`), so
+    // the members are part of the contract and not an implementation detail.
+    assert_members(&row, &["bridge_id", "network", "connection", "login"]);
+    assert_members(
+        &row["connection"],
+        &[
+            "reachable",
+            "state",
+            "reported",
+            "reason",
+            "logins",
+            "unreachable_because",
+        ],
+    );
+    assert_members(
+        &row["connection"]["logins"][0],
+        &[
+            "login_id", "name", "profile", "state", "reported", "reason", "since",
+        ],
+    );
+    assert_eq!(row["login"], Value::Null, "nothing is in flight: {row}");
+    assert_eq!(
+        row["connection"]["state"],
+        json!("connected"),
+        "the bridge holds a CONNECTED login: {row}"
+    );
+    assert_eq!(row["connection"]["reachable"], json!(true));
+    // And the management screen's three facts come with it.
+    let login = &row["connection"]["logins"][0];
+    assert_eq!(login["login_id"], json!("33660469852"));
+    assert_eq!(
+        login["name"],
+        json!("+33660469852"),
+        "which account is linked, as the bridge names it: {row}"
+    );
+    assert_eq!(login["state"], json!("connected"));
+    assert_eq!(
+        login["reported"],
+        json!("CONNECTED"),
+        "mautrix's own word is kept for the operator: {row}"
+    );
+    assert!(
+        login["since"]
+            .as_str()
+            .is_some_and(|since| since.starts_with("2026-")),
+        "since when, from the bridge's own state.timestamp: {row}"
+    );
+
+    // A login in flight must not make a connected network look disconnected.
+    // This is the acceptance criterion in as many words.
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(
+        row["login"]["state"],
+        json!("awaiting_remote"),
+        "a QR scan really is in flight: {row}"
+    );
+    assert_eq!(
+        row["connection"]["state"],
+        json!("connected"),
+        "a scan in progress says nothing about the link that already exists: {row}"
+    );
+
+    // And a cancelled one does not either.
+    let (status, cancelled) = fixture
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{cancelled}");
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(row["login"]["state"], json!("cancelled"), "{row}");
+    assert_eq!(
+        row["connection"]["state"],
+        json!("connected"),
+        "cancelling a scan does not unlink an account: {row}"
+    );
+
+    // The case that was actually in front of the owner: the Gateway has been
+    // restarted, so there is no login process left at all, and the bridge is
+    // still holding the same connected login.
+    fixture.restart_gateway().await?;
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(
+        row["login"],
+        Value::Null,
+        "a login process does not survive a restart, and is not supposed to: {row}"
+    );
+    assert_eq!(
+        row["connection"]["state"],
+        json!("connected"),
+        "the link is the bridge's, so a Gateway restart cannot break it: {row}"
+    );
+    assert_eq!(
+        row["connection"]["logins"][0]["login_id"],
+        json!("33660469852"),
+        "{row}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The vocabulary is #56's, including the mapping that matters most: a
+/// session revoked from the user's own phone reports `BAD_CREDENTIALS`, and
+/// no mautrix bridge emits `LOGGED_OUT` at all. A Gateway that waited for the
+/// latter would never tell a user their session had expired.
+#[tokio::test]
+async fn the_connection_state_uses_the_mapping_table_56_already_defined() -> Result<()> {
+    let fixture = Fixture::start("bridges-connection-vocabulary").await?;
+    fixture
+        .stub
+        .add_existing_login("33612345678", "+33612345678");
+
+    for (reported, expected) in [
+        ("CONNECTED", "connected"),
+        ("CONNECTING", "starting"),
+        ("BACKFILLING", "starting"),
+        ("TRANSIENT_DISCONNECT", "degraded"),
+        ("BAD_CREDENTIALS", "session_expired"),
+        ("UNKNOWN_ERROR", "disconnected"),
+        // Handled, and never expected: no bridge sends it.
+        ("LOGGED_OUT", "disconnected"),
+        // A state a future bridge might invent is disconnected, not fine.
+        ("FUTURE_STATE", "disconnected"),
+    ] {
+        fixture
+            .stub
+            .set_login_state("33612345678", login_state(reported, 1_789_706_879));
+        let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+        assert_eq!(
+            row["connection"]["state"],
+            json!(expected),
+            "{reported} maps to {expected}: {row}"
+        );
+        assert_eq!(
+            row["connection"]["logins"][0]["state"],
+            json!(expected),
+            "the login says the same as the bridge: {row}"
+        );
+    }
+
+    // A login the bridge holds but has said nothing about — a bridge that has
+    // just restarted, its state being in memory — is `starting`, not
+    // `disconnected`. Reporting a working link as broken is the whole defect.
+    fixture.stub.clear_logins();
+    fixture
+        .stub
+        .add_existing_login("33612345678", "+33612345678");
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(row["connection"]["state"], json!("starting"), "{row}");
+    assert_eq!(
+        row["connection"]["logins"][0]["since"],
+        Value::Null,
+        "a bridge that reported no timestamp is not given one: {row}"
+    );
+
+    // No login at all: nothing is connected, and nothing can be.
+    fixture.stub.clear_logins();
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(row["connection"]["state"], json!("disconnected"), "{row}");
+    assert_eq!(row["connection"]["logins"], json!([]), "{row}");
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A bridge the Gateway cannot ask is *unknown*, not disconnected — and the
+/// list still answers for the bridges it could reach.
+///
+/// The temptation is to report `disconnected` and be done with it. That is
+/// the same lie in a new place: it would tell a user with a working link that
+/// it is broken, which is what sent the owner to re-pair a live WhatsApp
+/// account.
+#[tokio::test]
+async fn a_bridge_that_cannot_be_asked_is_unknown_rather_than_disconnected() -> Result<()> {
+    let fixture = Fixture::start("bridges-connection-unknown").await?;
+    fixture
+        .stub
+        .add_existing_login("33612345678", "+33612345678");
+    fixture
+        .stub
+        .set_login_state("33612345678", login_state("CONNECTED", 1_789_706_879));
+
+    let listed = fixture.bridges().await?;
+    let dead = fixture.bridge_row(UNREACHABLE_BRIDGE_ID).await?;
+    assert_eq!(
+        dead["connection"]["reachable"],
+        json!(false),
+        "nothing listens on that port: {listed}"
+    );
+    assert_eq!(
+        dead["connection"]["state"],
+        Value::Null,
+        "the Gateway does not know, and does not guess: {dead}"
+    );
+    assert_eq!(dead["connection"]["logins"], json!([]), "{dead}");
+    assert_eq!(
+        dead["connection"]["unreachable_because"],
+        json!("bridge_unreachable"),
+        "and it says why, in the same stable codes the errors use: {dead}"
+    );
+
+    // The bridge that is up is unaffected: one bridge being down must not
+    // cost the networks screen the other's badge.
+    let alive = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(alive["connection"]["state"], json!("connected"), "{alive}");
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// The manage journey's Gateway half: connected → disconnect → not connected
+/// → connect again. Nothing here is the login process's doing.
+#[tokio::test]
+async fn disconnecting_a_login_leaves_the_network_not_connected_until_it_is_linked_again(
+) -> Result<()> {
+    let fixture = Fixture::start("bridges-disconnect-reconnect").await?;
+    fixture
+        .stub
+        .add_existing_login("33660469852", "+33660469852");
+    fixture
+        .stub
+        .set_login_state("33660469852", login_state("CONNECTED", 1_789_706_879));
+
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(row["connection"]["state"], json!("connected"), "{row}");
+
+    // Disconnect: what the management screen's button does, and the only
+    // provisioning call that ends a link.
+    let (status, logged_out) = fixture
+        .call(
+            reqwest::Method::DELETE,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/logins/33660469852"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 204, "{logged_out}");
+    assert_eq!(fixture.stub.logged_out(), vec!["33660469852".to_owned()]);
+
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(
+        row["connection"]["state"],
+        json!("disconnected"),
+        "the bridge holds no login now: {row}"
+    );
+    assert_eq!(row["connection"]["logins"], json!([]), "{row}");
+
+    // And connecting again works: a full QR login, and the card reads
+    // connected off the login the bridge is left holding.
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": QR_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    poll_until(
+        || async { (fixture.stub.held() > 0).then_some(()) },
+        "the gateway to be holding the blocking step",
+    )
+    .await?;
+    fixture.stub.release_completion("33660469852");
+    fixture
+        .poll_login_until("complete", |view| view["state"] == json!("complete"))
+        .await?;
+    fixture
+        .stub
+        .set_login_state("33660469852", login_state("CONNECTED", 1_789_707_000));
+
+    let row = fixture.bridge_row(STUB_BRIDGE_ID).await?;
+    assert_eq!(row["connection"]["state"], json!("connected"), "{row}");
+    assert_eq!(
+        row["connection"]["logins"][0]["login_id"],
+        json!("33660469852"),
+        "{row}"
+    );
+
+    fixture.stop().await;
     Ok(())
 }

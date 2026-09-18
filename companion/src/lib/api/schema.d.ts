@@ -187,10 +187,30 @@ export interface paths {
         };
         /**
          * The bridges this deployment can connect a network through.
-         * @description Configuration plus the Gateway's own memory: **no bridge is
-         *     contacted**, so the networks screen draws even while every bridge is
-         *     down. Each entry carries the login that bridge has in flight, or
-         *     `null` when nothing has been started on it.
+         * @description Each entry carries two different things, and the difference is the
+         *     whole point of this endpoint:
+         *
+         *     - **`connection`** — what the bridge itself says, read live from its
+         *       `whoami`: the logins it holds, the account each one is linked to,
+         *       and the state of the link. This is what "is this network
+         *       connected?" is a question about. It is persistent, it lives in the
+         *       bridge, and it survives a restart of this Gateway.
+         *     - **`login`** — the login *process* this Gateway has in flight: a QR
+         *       scan somebody is in the middle of. It lives in memory for at most
+         *       thirty minutes and it is **never** an answer to whether the network
+         *       is connected.
+         *
+         *     Reading the second where the first was meant is what made a live
+         *     WhatsApp link read as no link at all whenever a login was started,
+         *     cancelled, or the Gateway restarted.
+         *
+         *     Because `connection` is the bridge's answer, this endpoint does
+         *     contact each configured bridge — all of them at once, on a short
+         *     leash. A bridge that cannot be reached answers
+         *     `connection.reachable: false` with a `null` state: the Gateway does
+         *     not know, and says so rather than reporting `disconnected`. The list
+         *     itself never fails, so the networks screen still draws while every
+         *     bridge is down.
          *
          *     A deployment with no bridge configured answers an empty list. That is
          *     the honest answer to "what can I connect?", not an error — bridges
@@ -866,6 +886,96 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description What one bridge says about the logins it holds — the persistent
+         *     links, with the network's credentials behind them. Read from the
+         *     bridge's `whoami`, which is the only provisioning call that describes
+         *     a login: `GET /v3/logins` answers bare id strings and nothing else.
+         */
+        BridgeConnection: {
+            /**
+             * @description One entry per login the bridge holds. v0.1 is one login per
+             *     bridge instance, so this is empty or has one member; it is a list
+             *     because the bridge's answer is one, and truncating it here would
+             *     hide a deployment that has somehow grown a second.
+             */
+            logins: components["schemas"]["BridgeLinkedLogin"][];
+            /**
+             * @description Whether the bridge answered at all. `false` means the Gateway
+             *     could not ask — not that the network is disconnected.
+             */
+            reachable: boolean;
+            /** @description The bridge's own human-readable message for that state. */
+            reason: string | null;
+            /**
+             * @description Mautrix's own `state_event`, verbatim, when the bridge reported
+             *     one and this build recognises it. For an operator's eyes: branch
+             *     on `state`.
+             */
+            reported: string | null;
+            /**
+             * @description The bridge's overall state, in the contract's vocabulary — the
+             *     same five values `bridge.status.changed.v1` carries, translated
+             *     from mautrix's by the one mapping table the Gateway owns. Notably
+             *     `BAD_CREDENTIALS` is `session_expired`: that, and not
+             *     `LOGGED_OUT`, is what a session revoked from the user's own phone
+             *     reports, and no mautrix bridge emits `LOGGED_OUT` at all.
+             *
+             *     A bridge holding no login is `disconnected`. A bridge holding one
+             *     it has not reported on yet is `starting`, not `disconnected`: its
+             *     state lives in its memory and it has just come back up.
+             *
+             *     `null` exactly when `reachable` is `false`.
+             */
+            state: ("starting" | "connected" | "degraded" | "disconnected" | "session_expired") | null;
+            /**
+             * @description Why the bridge could not be asked, as one of the same stable
+             *     codes the error answers use (`bridge_unreachable`,
+             *     `bridge_refused`, …). `null` when it was reached.
+             */
+            unreachable_because: string | null;
+        };
+        /**
+         * @description One link the bridge holds: which account, since when, and how it is
+         *     doing. This is what the management screen shows and what
+         *     `DELETE .../logins/{login_id}` drops.
+         */
+        BridgeLinkedLogin: {
+            /**
+             * @description What `POST .../login` takes as `login_id` to re-link, and what
+             *     `DELETE .../logins/{login_id}` drops.
+             */
+            login_id: string;
+            /**
+             * @description The name the network gives the account — a phone number on both
+             *     reference bridges. `null` when the bridge names none.
+             */
+            name: string | null;
+            /**
+             * @description The bridge's own profile object for the login, passed through
+             *     unread: its shape is the connector's and the network's.
+             */
+            profile: unknown;
+            /** @description The bridge's human-readable message for this login. */
+            reason: string | null;
+            /** @description Mautrix's own `state_event` for this login, verbatim. */
+            reported: string | null;
+            /**
+             * Format: date-time
+             * @description When this login's state last changed, from the bridge's own
+             *     `state.timestamp`. For a `connected` login that is when it
+             *     connected — the honest answer to "linked since when?", and the
+             *     only one a bridge offers. `null` when the bridge has reported no
+             *     timestamp, which is what a bridge that has just restarted looks
+             *     like: its state is in memory.
+             */
+            since: string | null;
+            /**
+             * @description This login's state, in the same vocabulary as above.
+             * @enum {string}
+             */
+            state: "starting" | "connected" | "degraded" | "disconnected" | "session_expired";
+        };
         BridgeList: {
             bridges: components["schemas"]["ConfiguredBridge"][];
         };
@@ -1103,10 +1213,15 @@ export interface components {
              *     every other path below takes.
              */
             bridge_id: string;
+            connection: components["schemas"]["BridgeConnection"];
             /**
-             * @description The login this bridge has in flight, or `null` when nothing has
-             *     been started on it. A login that completed, failed or was
-             *     cancelled is still reported here until the next one replaces it.
+             * @description The login **process** this Gateway has in flight, or `null` when
+             *     nothing has been started on it. A login that completed, failed or
+             *     was cancelled is still reported here until the next one replaces
+             *     it.
+             *
+             *     This is a QR scan in somebody's browser, not a connection. It is
+             *     never what a "connected" badge is read from: use `connection`.
              */
             login: components["schemas"]["BridgeLogin"] | null;
             /**
