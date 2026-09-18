@@ -15,6 +15,10 @@ pub const REACTION_ADDED_TYPE: &str = "fr.linagora.twalk.inbound.reaction.added.
 pub const REACTION_ADDED_DATASCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/inbound.reaction.added.schema.json";
 
+pub const OUTBOUND_MESSAGE_SENT_TYPE: &str = "fr.linagora.twalk.outbound.message.sent.v1";
+pub const OUTBOUND_MESSAGE_SENT_DATASCHEMA: &str =
+    "https://schemas.twalk.dev/cloudevents/v1/outbound.message.sent.schema.json";
+
 pub const PRESENCE_UPDATED_TYPE: &str = "fr.linagora.twalk.inbound.presence.updated.v1";
 pub const PRESENCE_UPDATED_DATASCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/inbound.presence.updated.schema.json";
@@ -119,12 +123,12 @@ fn contact_entry(display_name: &str, consent: Consent, network_identifier: Optio
 pub enum QuotedAuthor {
     /// The deployment's own account: the user's own message, or a reply the
     /// Sensor sent on their behalf. Their own words are not a third party's,
-    /// and there is no decision about the user to consult. Today this is the
-    /// Sensor's Matrix ID alone; the user's own network ghosts still resolve
-    /// as contacts, so a message they sent from their phone is quoted like
-    /// anybody else's until ADR 0018 lands ([#109]).
-    ///
-    /// [#109]: https://github.com/linagora/twalk/issues/109
+    /// and there is no decision about the user to consult. Since ADR 0018
+    /// this is the Sensor's Matrix ID **and** every identity the deployment
+    /// has confirmed as the operator's (see [`crate::owner`]), so a message
+    /// the user sent from their phone is no longer quoted as a contact's.
+    /// An identity that was not confirmed stays a contact: unknown is not
+    /// the operator, just as unknown is not consent.
     Owner,
     /// A contact the Sensor resolved, with the consent state that applies to
     /// them on the network the quoted message arrived on — the state of the
@@ -171,6 +175,18 @@ impl QuotedExcerpt {
     /// in the right state, and this is the one place that consults them.
     fn publishable(&self, carrier: Consent) -> Option<String> {
         (!carrier.reduces_publication() && self.author.is_granted()).then(|| excerpt(&self.text))
+    }
+
+    /// The text to publish inside an event **no consent label describes** —
+    /// the operator's own `outbound.message.sent`, which carries no `consent`
+    /// extension at all (ADR 0018). There is no carrier decision to reduce
+    /// publication, so only the second decision is left: the user's decision
+    /// about the author being quoted (issue #110). A quoted contact who is
+    /// not granted is withheld here exactly as they are inside a contact's
+    /// event — the user's own message is not a way around their own decision
+    /// about somebody else.
+    fn publishable_unlabelled(&self) -> Option<String> {
+        self.author.is_granted().then(|| excerpt(&self.text))
     }
 }
 
@@ -519,6 +535,100 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
     })
 }
 
+/// Everything needed to build an `outbound.message.sent.v1` envelope — a
+/// message the user sent themselves, already resolved at the seam.
+///
+/// Notice what is not here, next to [`InboundMessage`]: no `consent`, no
+/// `display_name`, no `network_identifier`. The user is not a contact
+/// (ADR 0018), so there is no decision to label the event with, no contact
+/// object to fill and no contact PII to gate. The sender on the wire — the
+/// network ghost the message arrived under — is not carried either: the
+/// subject is the operator's own Matrix ID, so one operator appears on the
+/// bus rather than one per network and one per ghost.
+pub struct OutboundMessage {
+    pub matrix_event_id: String,
+    pub matrix_room_id: String,
+    /// Server name of the Sensor's homeserver (the `source` authority).
+    pub server_name: String,
+    /// The operator's Matrix ID (the CloudEvents `subject`).
+    pub owner_matrix_id: String,
+    pub body: String,
+    pub network: Network,
+    /// Structured reply reference, when the message replies to a parent.
+    pub reply_to: Option<ReplyTo>,
+    /// Thread root event id, when the message is part of a Matrix thread.
+    pub thread_root: Option<String>,
+    /// Media references carried by the message — never the binaries.
+    pub attachments: Vec<Attachment>,
+    /// RFC 3339 timestamp of when the Sensor produced the event.
+    pub produced_at: String,
+    /// RFC 3339 timestamp reported by the source network, when the bridge
+    /// provides one.
+    pub network_timestamp: Option<String>,
+}
+
+/// Builds the `outbound.message.sent.v1` envelope: the user's own message,
+/// with their Matrix ID as the subject and **no `consent` extension at all**
+/// (ADR 0018).
+///
+/// There is no reduced shape here, because reduction answers a revoked
+/// contact's decision (ADR 0012) and this event has no contact. The one
+/// thing that can still be withheld is the excerpt of a quoted message: that
+/// text belongs to whoever wrote it, and the user's decision about *them*
+/// governs it (issue #110). It is simply absent when it may not be
+/// published — the type has no consent label to say "withheld" with, and
+/// nothing may pretend otherwise — which is why the contract leaves
+/// `reply_to.excerpt` optional on this type and required on the inbound one.
+pub fn build_outbound_message_sent(input: &OutboundMessage) -> Value {
+    let reply_to = match &input.reply_to {
+        Some(reply) => {
+            let mut entry = json!({ "matrix_event_id": reply.matrix_event_id });
+            if let Some(excerpt) = reply
+                .quoted
+                .as_ref()
+                .and_then(QuotedExcerpt::publishable_unlabelled)
+            {
+                entry["excerpt"] = json!(excerpt);
+            }
+            entry
+        }
+        None => Value::Null,
+    };
+    let attachments: Vec<Value> = input
+        .attachments
+        .iter()
+        .map(|attachment| attachment_entry(attachment, false))
+        .collect();
+    let mut data = json!({
+        "body": cap_chars(&input.body, 65536),
+        "format": "text/plain",
+        "reply_to": reply_to,
+        "attachments": attachments,
+    });
+    if let Some(thread_root) = &input.thread_root {
+        data["thread_root"] = json!(thread_root);
+    }
+    if let Some(network_timestamp) = &input.network_timestamp {
+        data["network_timestamp"] = json!(network_timestamp);
+    }
+    // The same natural key as the inbound message it would otherwise have
+    // been published as: one Matrix event still has one deterministic id.
+    let id = cloud_event_id(&input.matrix_event_id, &input.matrix_room_id);
+    json!({
+        "specversion": "1.0",
+        "id": id,
+        "source": format!("matrix://{}/{}", input.server_name, input.matrix_room_id),
+        "type": OUTBOUND_MESSAGE_SENT_TYPE,
+        "time": input.produced_at,
+        "subject": input.owner_matrix_id,
+        "datacontenttype": "application/json",
+        "dataschema": OUTBOUND_MESSAGE_SENT_DATASCHEMA,
+        "traceparent": originate_traceparent(&id),
+        "network": input.network.as_str(),
+        "data": data,
+    })
+}
+
 /// Everything needed to build an `inbound.reaction.added.v1` envelope,
 /// already resolved at the seam.
 pub struct InboundReaction {
@@ -746,6 +856,109 @@ mod tests {
             attachments: Vec::new(),
             produced_at: "2026-09-17T10:00:00Z".to_owned(),
             network_timestamp: None,
+        }
+    }
+
+    fn sample_outbound() -> OutboundMessage {
+        OutboundMessage {
+            matrix_event_id: "$AbCdEfGh1234".to_owned(),
+            matrix_room_id: "!abcXYZ123:example.com".to_owned(),
+            server_name: "example.com".to_owned(),
+            owner_matrix_id: "@michel:example.com".to_owned(),
+            body: "je confirme pour 20h".to_owned(),
+            network: Network::Whatsapp,
+            reply_to: None,
+            thread_root: None,
+            attachments: Vec::new(),
+            produced_at: "2026-09-17T10:00:00Z".to_owned(),
+            network_timestamp: None,
+        }
+    }
+
+    #[test]
+    fn the_users_own_message_carries_no_consent_and_no_contact() {
+        // ADR 0018, as two absences. The consent extension is a contact's
+        // decision; there is no contact here, so there is nothing to label
+        // and nothing to resolve.
+        let event = build_outbound_message_sent(&sample_outbound());
+        assert_eq!(event["type"], OUTBOUND_MESSAGE_SENT_TYPE);
+        assert_eq!(
+            event["subject"], "@michel:example.com",
+            "the operator's Matrix ID, not the ghost the message arrived under"
+        );
+        assert!(event.get("consent").is_none(), "{event}");
+        assert!(event["data"].get("contact").is_none(), "{event}");
+        assert_eq!(event["data"]["body"], "je confirme pour 20h");
+        assert_eq!(event["data"]["format"], "text/plain");
+        assert_eq!(event["data"]["reply_to"], Value::Null);
+        assert_eq!(event["data"]["attachments"], json!([]));
+        // The natural key is unchanged: one Matrix event, one id, whichever
+        // door it goes out of.
+        assert_eq!(
+            event["id"],
+            "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0"
+        );
+    }
+
+    #[test]
+    fn the_users_own_message_has_no_reduced_shape() {
+        // Reduction answers a revoked contact's decision (ADR 0012) and this
+        // event has no contact: the body and the media references are always
+        // published, because the only place they go is the user's own
+        // infrastructure.
+        let mut input = sample_outbound();
+        input.attachments = vec![Attachment {
+            kind: AttachmentKind::Image,
+            mxc_uri: "mxc://example.com/abc123".to_owned(),
+            mime_type: Some("image/jpeg".to_owned()),
+            size_bytes: Some(1024),
+            caption: Some("regarde".to_owned()),
+            dimensions: Some((800, 600)),
+            duration_ms: None,
+            encryption: None,
+        }];
+        let event = build_outbound_message_sent(&input);
+        let attachment = &event["data"]["attachments"][0];
+        assert_eq!(attachment["mxc_uri"], "mxc://example.com/abc123");
+        assert_eq!(attachment["caption"], "regarde");
+    }
+
+    #[test]
+    fn a_quoted_contact_is_published_only_when_granted() {
+        // The one thing the user's own event can still withhold: the excerpt
+        // is somebody else's content, and the user's own message is not a way
+        // around their own decision about that person (issue #110). With no
+        // consent extension to say "withheld" with, the field simply goes.
+        for (author, expected) in [
+            (
+                QuotedAuthor::Contact(Consent::Granted),
+                Some("et le cadeau ?"),
+            ),
+            (QuotedAuthor::Contact(Consent::Pending), None),
+            (QuotedAuthor::Contact(Consent::Revoked), None),
+            (QuotedAuthor::Unknown, None),
+            (QuotedAuthor::Owner, Some("et le cadeau ?")),
+        ] {
+            let mut input = sample_outbound();
+            input.reply_to = Some(ReplyTo {
+                matrix_event_id: "$Parent".to_owned(),
+                quoted: Some(QuotedExcerpt {
+                    text: "et le cadeau ?".to_owned(),
+                    author,
+                }),
+            });
+            let event = build_outbound_message_sent(&input);
+            assert_eq!(
+                event["data"]["reply_to"]["matrix_event_id"], "$Parent",
+                "the relation is kept whatever the author's state: {author:?}"
+            );
+            assert_eq!(
+                event["data"]["reply_to"]
+                    .get("excerpt")
+                    .and_then(Value::as_str),
+                expected,
+                "quoted author {author:?}"
+            );
         }
     }
 

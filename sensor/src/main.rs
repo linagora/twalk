@@ -265,6 +265,25 @@ async fn main() -> Result<()> {
 
     let own_user = client.user_id().unwrap().to_owned();
 
+    // The operator, when the deployment named one (ADR 0018). Their own
+    // messages arrive under network ghosts indistinguishable in shape from a
+    // contact's, so the set is confirmed by the deployment and handed over
+    // here; an identity that is not in it stays a contact. Logged at startup
+    // because the set is the whole of what makes the exemption correct: an
+    // operator has to be able to read back what their deployment confirmed.
+    let owner = config.owner();
+    match &owner {
+        Some(owner) => info!(
+            operator = %owner.matrix_id(),
+            identities = ?owner.identities(),
+            "recognising the operator's own messages as outbound.message.sent"
+        ),
+        None => info!(
+            "no operator configured (SENSOR_OWNER): the user's own messages are published as \
+             a contact's"
+        ),
+    }
+
     // Observation scope is invitation-driven: join when the inviter is a
     // configured bridge provisioning user or the operator, ignore everyone
     // else. No room is observed by default.
@@ -301,12 +320,14 @@ async fn main() -> Result<()> {
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
+        let owner = owner.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
         client.add_event_handler(move |event: OriginalSyncRoomMessageEvent, room: Room, _client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
+            let owner = owner.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -339,6 +360,61 @@ async fn main() -> Result<()> {
                     warn!(room = %room.room_id(), %sender, "cannot determine the network, skipping event");
                     return;
                 };
+
+                // The user's own message. Its own event type, the operator's
+                // Matrix ID as the subject, and no consent extension at all:
+                // the extension carries a contact's decision, and the user is
+                // not a contact (ADR 0018). Nothing below this branch runs
+                // for it — the consent cache is not consulted, no contact is
+                // resolved, and no display name of the operator's reaches the
+                // bus, so the user never enters the consent model.
+                if let Some(owner) = owner.as_ref().filter(|o| o.is_owner(sender.as_str())) {
+                    let (reply_target, thread_root) = relation_targets(&event.content);
+                    let reply_to = match reply_target {
+                        Some(parent_id) => Some(normalize::ReplyTo {
+                            matrix_event_id: parent_id.to_string(),
+                            // The quoted message is somebody else's content
+                            // travelling inside the user's event, and the
+                            // user's own message is not a way around their
+                            // own decision about that person (issue #110).
+                            quoted: quoted_message(
+                                &room,
+                                &parent_id,
+                                &own_user,
+                                Some(owner),
+                                &consent_cache,
+                            )
+                            .await,
+                        }),
+                        None => None,
+                    };
+                    let input = normalize::OutboundMessage {
+                        matrix_event_id: event.event_id.to_string(),
+                        matrix_room_id: room.room_id().to_string(),
+                        server_name: own_user.server_name().as_str().to_owned(),
+                        owner_matrix_id: owner.matrix_id().to_owned(),
+                        body,
+                        network,
+                        reply_to,
+                        thread_root: thread_root.map(|event_id| event_id.to_string()),
+                        attachments,
+                        produced_at: rfc3339(std::time::SystemTime::now()),
+                        network_timestamp: Some(rfc3339_ms(u64::from(event.origin_server_ts.0))),
+                    };
+                    let envelope = normalize::build_outbound_message_sent(&input);
+                    publish_tracker
+                        .publish(
+                            jetstream,
+                            normalize::OUTBOUND_MESSAGE_SENT_TYPE,
+                            envelope,
+                            network,
+                            None,
+                            metrics,
+                        )
+                        .await;
+                    return;
+                }
+
                 let display_name = room
                     .get_member(&sender)
                     .await
@@ -368,7 +444,7 @@ async fn main() -> Result<()> {
                         quoted: if consent.reduces_publication() {
                             None
                         } else {
-                            quoted_message(&room, &parent_id, &own_user, &consent_cache).await
+                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &consent_cache).await
                         },
                     }),
                     None => None,
@@ -405,7 +481,7 @@ async fn main() -> Result<()> {
                         normalize::MESSAGE_RECEIVED_TYPE,
                         envelope,
                         network,
-                        consent,
+                        Some(consent),
                         metrics,
                     )
                     .await;
@@ -443,12 +519,14 @@ async fn main() -> Result<()> {
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
+        let owner = owner.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
         client.add_event_handler(move |event: OriginalSyncReactionEvent, room: Room, _client: Client| {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
+            let owner = owner.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -480,7 +558,7 @@ async fn main() -> Result<()> {
                 let excerpt = if consent.reduces_publication() {
                     None
                 } else {
-                    quoted_message(&room, &target_event_id, &own_user, &consent_cache).await
+                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &consent_cache).await
                 };
                 let input = normalize::InboundReaction {
                     matrix_event_id: event.event_id.to_string(),
@@ -506,7 +584,7 @@ async fn main() -> Result<()> {
                         normalize::REACTION_ADDED_TYPE,
                         envelope,
                         network,
-                        consent,
+                        Some(consent),
                         metrics,
                     )
                     .await;
@@ -637,7 +715,7 @@ async fn main() -> Result<()> {
                         normalize::PRESENCE_UPDATED_TYPE,
                         envelope,
                         network,
-                        consent,
+                        Some(consent),
                         metrics,
                     )
                     .await;
@@ -763,7 +841,7 @@ impl PublishTracker {
         event_type: &'static str,
         envelope: serde_json::Value,
         network: network::Network,
-        consent: Consent,
+        consent: Option<Consent>,
         metrics: Arc<Metrics>,
     ) {
         self.in_flight.fetch_add(1, Ordering::Relaxed);
@@ -1143,9 +1221,11 @@ fn attachments_for(msgtype: &MessageType) -> Option<Vec<normalize::Attachment>> 
 /// practice, but derived per author rather than assumed.
 ///
 /// Three answers, and two of them withhold: the deployment's own account
-/// (`QuotedAuthor::Owner`, the user's own words, about whom there is no
-/// decision to consult), a contact with the state of the user's decision
-/// about them, or `Unknown` for an author no network can be attributed to. A
+/// (`QuotedAuthor::Owner` — the Sensor's Matrix ID, and every identity the
+/// deployment confirmed as the operator's (ADR 0018), whose own words are
+/// not a third party's and about whom there is no decision to consult), a
+/// contact with the state of the user's decision about them, or `Unknown`
+/// for an author no network can be attributed to. A
 /// target that cannot be fetched or read at all yields `None` — one more way
 /// an excerpt simply does not exist.
 ///
@@ -1161,6 +1241,7 @@ async fn quoted_message(
     room: &Room,
     event_id: &EventId,
     own_user: &OwnedUserId,
+    owner: Option<&twalk_sensor::owner::Owner>,
     consent_cache: &ConsentCache,
 ) -> Option<normalize::QuotedExcerpt> {
     let timeline_event = room.event(event_id, None).await.ok()?;
@@ -1170,7 +1251,9 @@ async fn quoted_message(
     else {
         return None;
     };
-    let author = if &message.sender == own_user {
+    let author = if &message.sender == own_user
+        || owner.is_some_and(|owner| owner.is_owner(message.sender.as_str()))
+    {
         normalize::QuotedAuthor::Owner
     } else {
         match resolve_network(room, &message.sender).await {
@@ -1215,14 +1298,21 @@ async fn publish_envelope(
     event_type: &str,
     envelope: &serde_json::Value,
     network: network::Network,
-    consent: Consent,
+    consent: Option<Consent>,
     metrics: &Metrics,
 ) {
     let id = envelope["id"].as_str().unwrap().to_owned();
     let mut headers = async_nats::header::HeaderMap::new();
     headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
     headers.insert("network", network.as_str());
-    headers.insert("consent", consent.as_str());
+    // `outbound.message.sent` carries no consent extension at all (ADR
+    // 0018), and the headers duplicate the envelope's extensions for
+    // server-side filtering — so a header the envelope does not have is one
+    // the bus must not carry either. A consumer filtering on `consent` is
+    // filtering for events about a contact, and this is not one.
+    if let Some(consent) = consent {
+        headers.insert("consent", consent.as_str());
+    }
     if let Some(traceparent) = envelope
         .get("traceparent")
         .and_then(serde_json::Value::as_str)

@@ -7,6 +7,9 @@ of that which is the same for every persona:
 * the **consent gate** (:mod:`twalk_sdk.consent`), applied by the SDK
   before any persona code runs, so that an author cannot breach consent by
   forgetting;
+* the **trigger-type gate** (:func:`twalk_sdk.trigger.triggers_a_persona`),
+  beside it and for the same reason: the user's own messages are on the bus
+  (ADR 0018) and no persona is woken by them;
 * the contract's envelopes and their deterministic ids
   (:mod:`twalk_sdk.envelope`);
 * the durable subscription, the publishing and the process loop
@@ -44,7 +47,15 @@ from .envelope import (
     thinking_event,
     thinking_id,
 )
-from .trigger import MESSAGE_RECEIVED_TYPE, InboundMessage, Trigger
+from .trigger import (
+    MESSAGE_RECEIVED_TYPE,
+    OUTBOUND_MESSAGE_SENT_TYPE,
+    PERSONA_TRIGGER_TYPES,
+    InboundMessage,
+    Trigger,
+    triggers_a_persona,
+    type_of,
+)
 
 __all__ = [
     "Config",
@@ -58,6 +69,8 @@ __all__ = [
     "LlmConfig",
     "LlmError",
     "MESSAGE_RECEIVED_TYPE",
+    "OUTBOUND_MESSAGE_SENT_TYPE",
+    "PERSONA_TRIGGER_TYPES",
     "Persona",
     "SUGGEST_TYPE",
     "Suggestion",
@@ -72,6 +85,8 @@ __all__ = [
     "system",
     "thinking_event",
     "thinking_id",
+    "triggers_a_persona",
+    "type_of",
     "user",
 ]
 

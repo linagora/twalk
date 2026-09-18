@@ -330,6 +330,26 @@ impl Bot {
         Ok(())
     }
 
+    /// Sets the bot's own display name **in one room**, by rewriting its own
+    /// `m.room.member` state there — which is what a mautrix ghost carries,
+    /// and what the Sensor reads to fill `contact.display_name`.
+    ///
+    /// Room-scoped on purpose: the bots are shared by every test in the
+    /// suite, so a global profile change would rewrite what another test
+    /// expects to see. And a contact choosing their own name is exactly what
+    /// makes it assertable that the Sensor never recognises the operator by
+    /// one (#109): a display name is a hint, never an identity.
+    pub async fn set_room_display_name(&self, room_id: &str, display_name: &str) -> Result<()> {
+        self.send_state_event(
+            room_id,
+            "m.room.member",
+            &self.user_id.clone(),
+            serde_json::json!({ "membership": "join", "displayname": display_name }),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Sets the bot's own presence (online, offline, unavailable).
     pub async fn set_presence(&self, presence: &str) -> Result<()> {
         self.send_json(

@@ -1,0 +1,258 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/outbound.message.sent.schema.json",
+  "title": "fr.linagora.twalk.outbound.message.sent.v1",
+  "description": "A message the user sent themselves, from their own phone, observed by the Sensor in the portal room that mirrors the conversation in both directions. Produced by the Sensor when the sender of an m.room.message is one of the operator's own identities — their Matrix account, or one of the network ghosts the deployment has confirmed as theirs. The subject is the operator's Matrix ID, whichever identity the message arrived under, so a consumer sees one operator rather than one per network or per ghost. This type carries NO consent extension at all: the extension is a contact's decision, and there is no contact in this event — the user is not a contact, has no consent row, and is not part of the consent model (ADR 0018). A persona is not triggered by this type; the Python SDK refuses it beside the consent gate. Consumers subscribe to it to know that a conversation has already been answered; a consumer that never subscribes to it cannot be surprised by it, which is why this is a type of its own rather than a flag on inbound.message.received.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "network",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(matrix_event_id + ':' + matrix_room_id), the same natural key as inbound.message.received. Replaying the same Matrix event always produces the same CloudEvents id, so consumers can deduplicate safely across bus resynchronizations."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
+      "description": "URI identifying the Matrix room the message was sent in. Format: matrix://<homeserver>/<room_id>. This is what names the conversation the user answered: the event carries no contact, so the room is the only thing that says who was being written to.",
+      "examples": [
+        "matrix://matrix.example.com/!abcXYZ123:example.com"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.outbound.message.sent.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the Sensor produced the event, not the original network timestamp. The original network timestamp is preserved in data.network_timestamp when available."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+      "description": "Matrix user ID of the operator — the deployment's one owner (ADR 0011), as the Companion Gateway knows them — and NEVER the network ghost the message arrived under. The operator has several ghosts per network (mautrix materializes one per network identifier: WhatsApp answers both @whatsapp_<phone> and @whatsapp_lid-<lid>), they are indistinguishable in shape from a contact's ghost, and a new one can start being used mid-conversation; publishing the ghost would make the operator look like several different subjects. Which ghosts are the operator's is a fact the deployment confirms and hands to the Sensor, never one derived by string-building from a bridge login id.",
+      "examples": [
+        "@michel:example.com"
+      ]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events. Binary payloads (images, files) are referenced by URL in data.attachments and stored separately in Matrix media storage."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema. Recommended for third-party consumers that validate events dynamically.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/outbound.message.sent.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header. Enables distributed tracing across Sensor, NATS, Hermes and downstream services without mandating a specific tracing backend.",
+      "examples": [
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+      ]
+    },
+    "network": {
+      "type": "string",
+      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "description": "Twalk extension. Identifies the network the user sent the message on, as they experience it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic, sent from the user's own Matrix account (see ADR 0009). Enables server-side filtering on NATS without deserializing the data payload."
+    },
+    "data": {
+      "type": "object",
+      "required": ["body", "format", "reply_to", "attachments"],
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "The message the user sent, in its canonical text form; for a media message, the caption, or the filename when there is none. Always present: this event has no reduced shape, because reduction (ADR 0012) answers a revoked contact's decision and there is no contact here. The user's own words are published to their own infrastructure, which is the only place any Twalk event goes."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["text/plain", "text/markdown", "text/html"],
+          "description": "Content type of the body field. text/plain is the default and safest; text/html is only used when the source network provided HTML-formatted content."
+        },
+        "reply_to": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": ["matrix_event_id"],
+              "additionalProperties": false,
+              "properties": {
+                "matrix_event_id": {
+                  "type": "string",
+                  "pattern": "^\\$[A-Za-z0-9_-]+$",
+                  "description": "The Matrix event ID of the message the user replied to."
+                },
+                "excerpt": {
+                  "type": "string",
+                  "maxLength": 512,
+                  "description": "A short excerpt of the replied-to message, so consumers do not need to look it up to reason about the reply. Optional, and deliberately so: the quoted message is somebody else's content travelling inside the user's event, so it is published only when the user's decision about its author is 'granted' (issue #110). A withheld excerpt is simply absent — this type has no consent extension to label it with, so there is no way to say 'withheld' in the envelope and nothing may pretend otherwise."
+                }
+              }
+            }
+          ],
+          "description": "If the message replies to a previous one, a structured reference to the parent. Null otherwise."
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "required": ["kind", "mxc_uri", "mime_type", "size_bytes"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": ["image", "video", "audio", "file", "sticker", "location"],
+                "description": "Coarse-grained category of the attachment."
+              },
+              "mxc_uri": {
+                "type": "string",
+                "pattern": "^mxc://[^/]+/[A-Za-z0-9]+$",
+                "description": "Matrix content URI, resolvable via the homeserver media API. Always present: a message the user sent has no reduced shape."
+              },
+              "mime_type": {
+                "type": "string",
+                "pattern": "^[a-z]+/[a-zA-Z0-9.+-]+$",
+                "description": "IANA media type of the attachment."
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Attachment size in bytes."
+              },
+              "caption": {
+                "type": "string",
+                "maxLength": 1024,
+                "description": "Optional caption the user wrote with the attachment."
+              },
+              "dimensions": {
+                "type": "object",
+                "required": ["width", "height"],
+                "additionalProperties": false,
+                "properties": {
+                  "width": { "type": "integer", "minimum": 1 },
+                  "height": { "type": "integer", "minimum": 1 }
+                },
+                "description": "Pixel dimensions for image and video attachments."
+              },
+              "duration_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Duration in milliseconds for audio and video attachments."
+              },
+              "encryption": {
+                "type": "object",
+                "required": ["key", "iv", "hashes", "v"],
+                "additionalProperties": false,
+                "properties": {
+                  "key": {
+                    "type": "object",
+                    "required": ["kty", "key_ops", "alg", "k", "ext"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kty": {
+                        "type": "string",
+                        "const": "oct",
+                        "description": "JSON Web Key type. Always oct (a symmetric octet sequence) for Matrix attachment encryption."
+                      },
+                      "key_ops": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": { "type": "string" },
+                        "allOf": [
+                          { "contains": { "const": "encrypt" } },
+                          { "contains": { "const": "decrypt" } }
+                        ],
+                        "description": "Permitted key operations. Must contain at least encrypt and decrypt, per the Matrix EncryptedFile definition."
+                      },
+                      "alg": {
+                        "type": "string",
+                        "const": "A256CTR",
+                        "description": "Key algorithm. Always A256CTR (AES-256 in counter mode) for version v2 attachment encryption."
+                      },
+                      "k": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]{43}$",
+                        "description": "The 256-bit AES key, URL-safe unpadded base64. This is decryption material for the user's own media: consumers MUST keep it inside the user's infrastructure and MUST NOT log it."
+                      },
+                      "ext": {
+                        "type": "boolean",
+                        "const": true,
+                        "description": "JSON Web Key extractability flag. Always true, so the key can be imported by a consumer's crypto implementation."
+                      }
+                    },
+                    "description": "The AES key as a JSON Web Key, exactly as carried by the Matrix event."
+                  },
+                  "iv": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9+/]{22}$",
+                    "description": "The 128-bit unique counter block used by AES-CTR, standard-alphabet unpadded base64 (22 characters). Note the alphabet differs from key.k, which the Matrix specification encodes URL-safe."
+                  },
+                  "hashes": {
+                    "type": "object",
+                    "required": ["sha256"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9+/]{43}$",
+                        "description": "SHA-256 digest of the ciphertext, standard-alphabet unpadded base64 (43 characters). Consumers MUST verify it before decrypting: it is what stops the homeserver from substituting the media bytes."
+                      }
+                    },
+                    "description": "Digests of the ciphertext, keyed by algorithm. The contract carries sha256 and nothing else, so every consumer has exactly one digest to verify and one algorithm to implement."
+                  },
+                  "v": {
+                    "type": "string",
+                    "const": "v2",
+                    "description": "Version of the attachment encryption scheme. v2 is the only version the Matrix specification defines."
+                  }
+                },
+                "description": "Optional decryption material for an attachment whose ciphertext is what mxc_uri resolves to. Mirrors the Matrix EncryptedFile object (key, iv, hashes, v), minus its url field, which mxc_uri already carries, and minus a mimetype, which the contract keeps in mime_type. Present when the media itself is encrypted, which is the normal case in a portal room; absent for media served in the clear. A producer that cannot fill this object completely publishes the attachment without it rather than publishing unusable material."
+              }
+            }
+          },
+          "description": "Ordered list of attachments the user sent. Only references and decryption material ever transit the bus; the bytes stay in Matrix media storage."
+        },
+        "network_timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Optional RFC 3339 timestamp of the original event as reported by the source network, when the bridge provides it. Distinct from the top-level 'time' attribute, which is the Sensor's own timestamp."
+        },
+        "thread_root": {
+          "type": "string",
+          "pattern": "^\\$[A-Za-z0-9_-]+$",
+          "description": "Optional Matrix event ID of the thread root, if the message is part of a Matrix thread."
+        }
+      },
+      "description": "What the user sent. There is deliberately no 'contact' member: the user is not a contact, and the event names no second party — a note the user wrote to themselves (Signal's Note to Self) has none at all, and a group conversation has many. The conversation is identified by 'source'."
+    }
+  }
+}

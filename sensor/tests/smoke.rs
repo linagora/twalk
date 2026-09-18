@@ -174,8 +174,8 @@ async fn every_contract_fixture_validates_against_its_schema() -> Result<()> {
     let types = contract_fixture_types()?;
     assert_eq!(
         types.len(),
-        8,
-        "the v1 contract defines exactly 8 fixture types; found {types:?}"
+        9,
+        "the v1 contract defines exactly 9 fixture types; found {types:?}"
     );
     for type_name in types {
         let fixture = contract_fixture(&type_name)?;
