@@ -126,8 +126,15 @@
 		{/each}
 	</ul>
 
-	<p>
-		<a class="skip-link" href="/onboarding" data-testid="skip-networks">{$t('networks.skip')}</a>
+	<!-- Screen 4 is next, whether or not a network was connected: its own
+	     screen says plainly that an assistant with no network to read has
+	     nothing to do, and offers the way back here. -->
+	<p class="onwards">
+		<a class="button button--primary" href="/personas" data-testid="to-personas">
+			{$t('networks.toAssistant')}
+			<Icon name="continue" size="dense" />
+		</a>
+		<a class="skip-link" href="/personas" data-testid="skip-networks">{$t('networks.skip')}</a>
 	</p>
 
 	<p class="card card--info small">
@@ -215,5 +222,16 @@
 
 	.skip-link {
 		color: var(--color-text-muted);
+	}
+
+	.onwards {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		flex-wrap: wrap;
+	}
+
+	.onwards .button {
+		text-decoration: none;
 	}
 </style>

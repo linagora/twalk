@@ -24,6 +24,8 @@ export interface BridgeStack {
 	synapseUrl: string;
 	gatewayOrigin: string;
 	stubOrigin: string;
+	/** The shared stack's NATS port, for the specs that read the bus (#69). */
+	natsPort: number;
 }
 
 const STACK_FILE = join(

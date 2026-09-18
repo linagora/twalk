@@ -136,13 +136,20 @@ impl OldState {
     }
 }
 
-/// What a decision applies to. `persona` is deliberately absent from the
-/// write API this ticket builds: persona activation is #60, and it will use
-/// this same write path rather than a control API (ADR 0013).
+/// What a decision applies to: one contact, a whole network's default, or a
+/// persona.
+///
+/// `persona` is on this write path and not on a control API of its own,
+/// because activating or pausing a persona *is* a consent decision (ADR
+/// 0013): the same journal, the same deterministic envelope, the same bus
+/// subject. `scope.networks` on a persona subject means the networks that
+/// persona may read, which is why activation never spreads — a network
+/// connected later is simply not in any scope the user has decided on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubjectType {
     Contact,
     Network,
+    Persona,
 }
 
 impl SubjectType {
@@ -150,6 +157,7 @@ impl SubjectType {
         match self {
             SubjectType::Contact => "contact",
             SubjectType::Network => "network",
+            SubjectType::Persona => "persona",
         }
     }
 
@@ -157,6 +165,7 @@ impl SubjectType {
         match value {
             "contact" => Some(SubjectType::Contact),
             "network" => Some(SubjectType::Network),
+            "persona" => Some(SubjectType::Persona),
             _ => None,
         }
     }
@@ -191,7 +200,10 @@ pub enum Invalid {
     /// type.
     Malformed(String),
     /// `subject.type` names something the contract knows but this write path
-    /// does not accept — today only `persona` (#60).
+    /// does not accept. Nothing does today — `persona` was the last one, and
+    /// ADR 0013 put it on this path — but the code stays part of the
+    /// description's contract so a client that branches on it keeps
+    /// compiling.
     UnsupportedSubjectType(String),
     /// A value outside the contract's enums: a state, a network, a subject
     /// type.
@@ -249,19 +261,10 @@ impl Decision {
     /// become two different decisions.
     pub fn parse(body: &Value) -> Result<Self, Invalid> {
         let kind = string(body, "/subject/type")?;
-        let kind = match SubjectType::parse(&kind) {
-            Some(kind) => kind,
-            // A subject type the contract knows but this endpoint does not
-            // is a different answer from a typo: one is "not yet", the other
-            // is "never".
-            None if kind == "persona" => return Err(Invalid::UnsupportedSubjectType(kind)),
-            None => {
-                return Err(Invalid::Unknown {
-                    field: "subject.type".to_owned(),
-                    value: kind,
-                })
-            }
-        };
+        let kind = SubjectType::parse(&kind).ok_or(Invalid::Unknown {
+            field: "subject.type".to_owned(),
+            value: kind,
+        })?;
         let id = string(body, "/subject/id")?;
         if id.is_empty() || id.chars().count() > 256 {
             return Err(Invalid::Malformed("subject.id".to_owned()));
@@ -661,14 +664,44 @@ mod tests {
     }
 
     #[test]
-    fn a_persona_subject_is_refused_as_not_yet_supported() {
-        let error = request(json!({
+    fn a_persona_is_activated_on_exactly_the_networks_the_scope_names() {
+        let decision = request(json!({
             "subject": { "type": "persona", "id": "assistant" },
+            "new_state": "granted",
+            "scope": { "networks": ["signal", "whatsapp"] }
+        }))
+        .unwrap();
+        assert_eq!(decision.subject.kind, SubjectType::Persona);
+        assert_eq!(decision.subject.id, "assistant");
+        // Not "every network this deployment has": activation does not
+        // spread, so a network connected later is in no scope the user
+        // decided on (ADR 0013).
+        assert_eq!(decision.networks, vec![Network::Signal, Network::Whatsapp]);
+    }
+
+    #[test]
+    fn a_persona_subject_is_not_bound_to_a_network_of_the_same_name() {
+        // The scope-contradiction rule is the *network* subject's alone: a
+        // persona named `assistant` is scoped to whatever networks the user
+        // gave it, and `whatsapp` is not its id.
+        let decision = request(json!({
+            "subject": { "type": "persona", "id": "assistant" },
+            "new_state": "revoked",
+            "scope": { "networks": ["whatsapp"] }
+        }))
+        .unwrap();
+        assert_eq!(decision.new_state, State::Revoked);
+    }
+
+    #[test]
+    fn a_subject_type_outside_the_contract_is_an_unknown_value() {
+        let error = request(json!({
+            "subject": { "type": "device", "id": "assistant" },
             "new_state": "granted",
             "scope": { "networks": ["whatsapp"] }
         }))
         .unwrap_err();
-        assert_eq!(error.code(), "unsupported_subject_type");
+        assert_eq!(error.code(), "unknown_value");
     }
 
     #[test]

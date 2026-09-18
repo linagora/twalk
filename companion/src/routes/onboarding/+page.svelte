@@ -199,14 +199,32 @@
 			<h1>{$t('done.title')}</h1>
 			<p class="subtitle" data-testid="account-id">{$t('done.body', { id: accountId })}</p>
 		</header>
+		<!--
+			The way on, and it is a real one. This card said the network screens
+			"are not built yet" — true when #67 wrote it, false since #68 merged
+			them, and it left the user of a finished account with nowhere to go.
+			The journey is: account, then a network (screen 3), then the
+			assistant (screen 4), then the dashboard (screen 5).
+		-->
 		<div class="card card--info" data-testid="onboarding-done">
 			<p class="card__title">
 				<Icon name="info" size="dense" />
 				{$t('done.next.title')}
 			</p>
 			<p>{$t('done.next.body')}</p>
+			<p>
+				<a class="button button--primary" href="/networks" data-testid="to-networks">
+					{$t('done.next.cta')}
+					<Icon name="continue" size="dense" />
+				</a>
+			</p>
+			<p class="small muted">{$t('done.next.after')}</p>
 		</div>
-		<p class="small"><a href="/diagnostics">{$t('done.diagnostics')}</a></p>
+		<p class="small">
+			<a href="/dashboard" data-testid="to-dashboard">{$t('done.dashboard')}</a>
+			·
+			<a href="/diagnostics">{$t('done.diagnostics')}</a>
+		</p>
 	{:else}
 		<header class="stack">
 			<p class="small">

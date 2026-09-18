@@ -1955,11 +1955,11 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     for (body, error) in [
         (
             json!({
-                "subject": { "type": "persona", "id": "assistant" },
+                "subject": { "type": "device", "id": "assistant" },
                 "new_state": "granted",
                 "scope": { "networks": ["whatsapp"] }
             }),
-            "unsupported_subject_type",
+            "unknown_value",
         ),
         (
             json!({

@@ -407,10 +407,14 @@ export interface paths {
          *     between the commit and the publication republishes rather than
          *     loses, deduplicated on the bus by the event's own deterministic id.
          *
-         *     `subject.type` is `contact` or `network` here. A `persona` subject is
-         *     refused with `unsupported_subject_type`: activating a persona is a
-         *     consent decision on the same write path (ADR 0013), and ticket #60
-         *     is what opens it.
+         *     `subject.type` is `contact`, `network` or `persona`. A persona is on
+         *     this path and not on a control API of its own, because activating or
+         *     pausing one *is* a consent decision (ADR 0013): `scope.networks` on a
+         *     persona subject names the networks that persona may read, so
+         *     activation never spreads — a network connected afterwards is in no
+         *     scope the user decided on, and the persona stays inactive on it until
+         *     they say otherwise. Pausing a persona is `new_state: revoked` on it:
+         *     the persona still runs and is still supervised, and receives nothing.
          */
         post: operations["recordConsentDecision"];
         delete?: never;
@@ -527,10 +531,13 @@ export interface paths {
          *     never "revoked".
          *
          *     This endpoint is the owner's own read, behind a device token, and it
-         *     names no stream position. The snapshot a cold consumer reads is
+         *     names no stream position. It **includes** `persona` subjects, which is
+         *     how the dashboard knows which personas the user activated and on which
+         *     networks. The snapshot a cold consumer reads is
          *     `GET /api/consent/snapshot`: the same entries plus the JetStream
          *     sequence they reflect, authenticated by the Sensor's service token,
-         *     and with `persona` subjects excluded. Neither is paginated.
+         *     and with `persona` subjects excluded — a persona is not consent state
+         *     a Sensor labels senders by. Neither is paginated.
          */
         get: operations["getConsentState"];
         put?: never;
@@ -1176,16 +1183,15 @@ export interface components {
             /**
              * @description A Matrix user ID for a contact; for a network subject, that
              *     network's own value — in which case the scope holds exactly that
-             *     one network.
+             *     one network; for a persona, the persona's name (`assistant`).
              */
             id: string;
             /**
              * @description `contact` for one contact, `network` for a whole network's
-             *     default. `persona` exists in the contract and is not writable
-             *     here yet (#60).
+             *     default, `persona` for a persona's own activation (ADR 0013).
              * @enum {string}
              */
-            type: "contact" | "network";
+            type: "contact" | "network" | "persona";
         };
         ContactDisplayName: {
             /** @description The contact asked about. */
@@ -2584,8 +2590,10 @@ export interface operations {
              *     - `unknown_value` — a value outside the contract's enums: a
              *       `new_state`, a network, a `subject.type`. `unset` is not a
              *       state to move to; it is the absence of a decision.
-             *     - `unsupported_subject_type` — `persona`, which this endpoint
-             *       does not accept yet (#60).
+             *     - `unsupported_subject_type` — a subject type the contract has
+             *       that this endpoint does not accept. Nothing is in that state
+             *       today; the code stays enumerated so a client that branches on
+             *       it keeps working.
              *     - `scope_contradicts_subject` — a `network` subject whose scope
              *       is not exactly its own network, which the contract forbids.
              */

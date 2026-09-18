@@ -142,7 +142,10 @@
 			</p>
 			<p>{$t('screen1.signedIn.body', { owner: signedInAs })}</p>
 			<p>
-				<a class="button button--primary" href="/onboarding">
+				<!-- The dashboard, not the account form: the wireframe's screen 5
+				     is what a returning user opens the Companion for, and this
+				     browser already has the session screen 2 would create. -->
+				<a class="button button--primary" href="/dashboard">
 					{$t('screen1.signedIn.continue')}
 					<Icon name="continue" size="dense" />
 				</a>

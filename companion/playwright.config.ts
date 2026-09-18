@@ -56,7 +56,7 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
-			testIgnore: 'networks/**',
+			testIgnore: ['networks/**', 'dashboard/**'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',
@@ -71,6 +71,34 @@ export default defineConfig({
 			// every other spec that needs it.
 			name: 'networks',
 			testMatch: 'networks/**/*.spec.ts',
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
+		},
+		{
+			// Screens 4 and 5 (ticket #69), on the same origin as the network
+			// journeys: activating a persona needs a signed-in device, which
+			// is the bridge Gateway's owner, and pausing one needs a bridge to
+			// have been connected first.
+			//
+			// One worker, and after `networks`, because there is one Gateway
+			// and one stub bridge for the whole suite: one consent journal,
+			// one device list, one login per bridge instance. Two specs
+			// flipping the same persona, or two completing a login on the same
+			// bridge, would each be asserting the other's state — and a login
+			// one of them starts is a `409 login_in_flight` for the other.
+			//
+			// `fullyParallel: false` orders the tests inside a file; `workers`
+			// orders the files of this project; `dependencies` orders this
+			// project against the one that drives the same bridge.
+			name: 'dashboard',
+			testMatch: 'dashboard/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			dependencies: ['networks'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',

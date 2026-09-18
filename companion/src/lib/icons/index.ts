@@ -14,6 +14,7 @@
 import ArrowRight from '@lucide/svelte/icons/arrow-right';
 import AtSign from '@lucide/svelte/icons/at-sign';
 import Ban from '@lucide/svelte/icons/ban';
+import BotMessageSquare from '@lucide/svelte/icons/bot-message-square';
 import Bug from '@lucide/svelte/icons/bug';
 import Check from '@lucide/svelte/icons/check';
 import ChevronLeft from '@lucide/svelte/icons/chevron-left';
@@ -21,6 +22,7 @@ import CircleAlert from '@lucide/svelte/icons/circle-alert';
 import CircleCheck from '@lucide/svelte/icons/circle-check';
 import CircleX from '@lucide/svelte/icons/circle-x';
 import ClipboardCheck from '@lucide/svelte/icons/clipboard-check';
+import CircleSlash from '@lucide/svelte/icons/circle-slash';
 import CloudDownload from '@lucide/svelte/icons/cloud-download';
 import Cookie from '@lucide/svelte/icons/cookie';
 import Copy from '@lucide/svelte/icons/copy';
@@ -31,16 +33,21 @@ import FileDown from '@lucide/svelte/icons/file-down';
 import Gamepad2 from '@lucide/svelte/icons/gamepad-2';
 import Globe from '@lucide/svelte/icons/globe';
 import Hash from '@lucide/svelte/icons/hash';
+import Inbox from '@lucide/svelte/icons/inbox';
 import Info from '@lucide/svelte/icons/info';
 import KeyRound from '@lucide/svelte/icons/key-round';
 import Languages from '@lucide/svelte/icons/languages';
 import LockKeyhole from '@lucide/svelte/icons/lock-keyhole';
+import LogOut from '@lucide/svelte/icons/log-out';
 import MessageCircle from '@lucide/svelte/icons/message-circle';
 import MessageSquareLock from '@lucide/svelte/icons/message-square-lock';
 import MessageSquareText from '@lucide/svelte/icons/message-square-text';
 import MonitorSmartphone from '@lucide/svelte/icons/monitor-smartphone';
 import QrCode from '@lucide/svelte/icons/qr-code';
 import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+import Pause from '@lucide/svelte/icons/pause';
+import Play from '@lucide/svelte/icons/play';
+import Plug from '@lucide/svelte/icons/plug';
 import Send from '@lucide/svelte/icons/send';
 import Settings from '@lucide/svelte/icons/settings';
 import ShieldCheck from '@lucide/svelte/icons/shield-check';
@@ -87,6 +94,15 @@ export const icons = {
 	manage: Settings,
 	cookie: Cookie,
 	unavailable: Ban,
+
+	// The dashboard of screen 5
+	persona: BotMessageSquare,
+	bridge: Plug,
+	consent: Inbox,
+	pause: Pause,
+	activate: Play,
+	revoke: LogOut,
+	locked: CircleSlash,
 
 	// The networks of screen 3. Lucide dropped its brand marks, so each card
 	// gets the symbol that says what the network *is* rather than a logo we
