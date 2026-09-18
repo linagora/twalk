@@ -11,6 +11,11 @@ a reduced event (a revoked sender's message, ADR 0012) has no body, an
 unknown ``network`` value is forward-compatible by design (a network the
 contract adds later must not crash a persona), and an event that reaches a
 persona at all has already passed the consent gate.
+
+This module also holds the **trigger-type gate** (:func:`triggers_a_persona`):
+whether an event may wake a persona at all, which is the question that comes
+before "may this be processed?" — and the one the consent gate structurally
+cannot answer for the user's own messages (ADR 0018).
 """
 
 from __future__ import annotations
@@ -19,6 +24,46 @@ from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional
 
 MESSAGE_RECEIVED_TYPE = "fr.linagora.twalk.inbound.message.received.v1"
+
+#: A message the **user** sent, from their own phone (ADR 0018). It is on the
+#: bus so that a persona can know a conversation has already been answered,
+#: and it is never a trigger: suggesting a reply to it means answering the
+#: operator — or, in Signal's Note to Self, answering nobody at all.
+OUTBOUND_MESSAGE_SENT_TYPE = "fr.linagora.twalk.outbound.message.sent.v1"
+
+#: The event types a persona may be woken by. An allowlist, for the same
+#: reason the consent gate is one: a type added to the contract later must
+#: not start triggering personas because nobody thought to exclude it.
+PERSONA_TRIGGER_TYPES = frozenset({MESSAGE_RECEIVED_TYPE})
+
+
+def type_of(event: Mapping[str, Any]) -> Optional[str]:
+    """The event's ``type`` attribute, or ``None`` when it has none.
+
+    A non-string value counts as absent, like an unreadable consent state:
+    the contract's attribute is a string, and a producer that sent something
+    else has told us nothing we can act on.
+    """
+    value = event.get("type")
+    return value if isinstance(value, str) else None
+
+
+def triggers_a_persona(event: Mapping[str, Any]) -> bool:
+    """Whether a persona may be woken by this event at all.
+
+    The second gate, beside the consent gate and for the same reason: an
+    author cannot forget it. It exists because of one event in particular —
+    ``outbound.message.sent``, the user's own message — which the consent
+    gate structurally cannot stop. That event carries **no consent extension
+    at all** (ADR 0018: the extension is a contact's decision, and there is
+    no contact in it), so a gate that reads consent has nothing to read; and
+    under the alternative the ADR rejected, where the user's own traffic
+    stayed an ``inbound.message.received``, the sender would have been the
+    user, whose own consent is the most granting in the system. Either way
+    the consent gate says yes to answering the operator. So this one says no
+    first, on the type, which is the only attribute that tells the two apart.
+    """
+    return type_of(event) in PERSONA_TRIGGER_TYPES
 
 
 @dataclass(frozen=True)

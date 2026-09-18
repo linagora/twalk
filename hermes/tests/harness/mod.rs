@@ -67,6 +67,7 @@ pub const LLM_API_KEY: &str = "test-only-llm-key";
 pub const LLM_PARAMS: &str = r#"{"top_p": 0.9, "temperature": null}"#;
 
 pub const INBOUND_TYPE: &str = "fr.linagora.twalk.inbound.message.received.v1";
+pub const OUTBOUND_TYPE: &str = "fr.linagora.twalk.outbound.message.sent.v1";
 pub const THINKING_TYPE: &str = "fr.linagora.twalk.persona.thinking.emitted.v1";
 pub const SUGGEST_TYPE: &str = "fr.linagora.twalk.persona.suggest.produced.v1";
 
@@ -86,7 +87,11 @@ fn run_id(test_name: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .expect("the clock is after the epoch")
         .as_nanos();
-    format!("h21-{test_name}-{}-{}", std::process::id(), nanos % 1_000_000)
+    format!(
+        "h21-{test_name}-{}-{}",
+        std::process::id(),
+        nanos % 1_000_000
+    )
 }
 
 /// One compose project, with the variables its file requires.
@@ -115,10 +120,7 @@ impl Compose {
                 ("TWALK_TEST_PERSONA_PREFIX", "unused".to_owned()),
                 ("TWALK_TEST_PERSONA_CONSUMER", "unused".to_owned()),
                 ("TWALK_TEST_PERSONA_NATS_URL", nats_url()),
-                (
-                    "TWALK_TEST_PERSONA_LLM_URL",
-                    "http://unused/v1".to_owned(),
-                ),
+                ("TWALK_TEST_PERSONA_LLM_URL", "http://unused/v1".to_owned()),
             ],
         )
     }
@@ -287,6 +289,20 @@ impl PersonaRun {
             .await
     }
 
+    /// Publishes an event onto the subject its **own type** maps to, the way
+    /// a producer other than the Sensor's inbound path does. The persona's
+    /// consumer is filtered to the inbound subject, so nothing published
+    /// here reaches it — which is itself a property worth asserting, beside
+    /// the SDK gate that would refuse it if it did.
+    pub async fn publish_typed(&self, event: &Value) -> Result<()> {
+        let event_type = event["type"]
+            .as_str()
+            .expect("an event to publish has a string type");
+        self.bus
+            .publish_event(&self.subject(event_type), event)
+            .await
+    }
+
     /// Every event of a type the persona published in this run, in stream
     /// order.
     pub async fn published(&self, event_type: &str) -> Result<Vec<StoredMessage>> {
@@ -316,11 +332,7 @@ impl PersonaRun {
         }
     }
 
-    async fn poll_for(
-        &self,
-        event_type: &str,
-        trigger_event_id: &str,
-    ) -> Result<StoredMessage> {
+    async fn poll_for(&self, event_type: &str, trigger_event_id: &str) -> Result<StoredMessage> {
         poll_until(
             || async {
                 self.published(event_type)

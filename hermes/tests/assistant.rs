@@ -13,6 +13,12 @@
 //! `pending` or `revoked` message — and case by case in the SDK's own unit
 //! tests (`sdk/python/tests/test_consent_gate.py`), because a gate that is
 //! "impossible for an author to forget" has to be both.
+//!
+//! The trigger-type gate is asserted the same way, for the same reason: a
+//! message the **user** sent (`outbound.message.sent`, ADR 0018) is on the
+//! bus and must wake no persona — answering the operator, or in Signal's
+//! Note to Self answering nobody at all — and the consent gate cannot stop
+//! it, because that type carries no consent extension to read.
 
 mod harness;
 
@@ -20,7 +26,7 @@ use anyhow::Result;
 use harness::{
     contract_fixture, contract_variant_fixture, sha256_hex, trace_id, traceparent_for,
     validate_against_contract, PersonaRun, HERMES_DOMAIN, INBOUND_TYPE, LLM_API_KEY, MODEL,
-    PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
+    OUTBOUND_TYPE, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
 };
 use serde_json::{json, Value};
 
@@ -151,10 +157,7 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
         trace_id(attribute(event, "traceparent")),
         trace_id(attribute(&trigger, "traceparent"))
     );
-    assert_eq!(
-        suggest.header("Nats-Msg-Id"),
-        Some(attribute(event, "id"))
-    );
+    assert_eq!(suggest.header("Nats-Msg-Id"), Some(attribute(event, "id")));
     assert!(
         event["data"].get("expires_at").is_none(),
         "the suggestion policy — the attempt counter and the expiry — is H3 (#22); \
@@ -215,6 +218,143 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
     run.shutdown().await
 }
 
+/// The `outbound.message.sent` fixture — the user's own message — re-keyed
+/// onto this run. Re-validated, so what is published stays a contract
+/// citizen: this is an event the Sensor really produces, not a fabrication.
+fn own_message(marker: &str, body: &str) -> Result<Value> {
+    let mut event = contract_fixture("outbound.message.sent")?;
+    let id = sha256_hex(marker);
+    event["id"] = json!(id);
+    event["traceparent"] = json!(traceparent_for(&id));
+    event["data"]["body"] = json!(format!("{body} [{marker}]"));
+    validate_against_contract(&event, "outbound.message.sent")?;
+    Ok(event)
+}
+
+#[tokio::test]
+async fn the_users_own_message_never_triggers_a_persona() -> Result<()> {
+    let run = PersonaRun::start("own-message", "this reply must never be drafted").await?;
+
+    // 1. On its own subject, which is where the Sensor publishes it. The
+    //    persona's consumer is filtered to the inbound subject, so this
+    //    never reaches it — the first of the two things that have to hold.
+    let on_its_subject = own_message(
+        &format!("own-subject-{}", run.prefix),
+        "je confirme pour 20h",
+    )?;
+    run.publish_typed(&on_its_subject).await?;
+
+    // 2. On the **inbound** subject, which is a deliberate misroute: it is
+    //    what a widened consumer filter, a mis-declared stream or a
+    //    third-party producer would produce, and it is the only way to put
+    //    the SDK's own gate under the container's process boundary. The
+    //    event is still the contract's shape.
+    let misrouted = own_message(
+        &format!("misrouted-{}", run.prefix),
+        "et j'apporte le dessert",
+    )?;
+    run.publish_inbound(&misrouted).await?;
+
+    // 3. The same misroute wearing a `granted` consent extension. This one
+    //    is deliberately NOT contract-valid — the type forbids the
+    //    extension — and it is here to prove which gate does the work: the
+    //    consent gate would wave it through, and the trigger-type gate
+    //    refuses it on the type, which is the only attribute that says
+    //    "this is the operator writing".
+    let mut consent_wearing = own_message(&format!("wearing-{}", run.prefix), "et le café")?;
+    consent_wearing["consent"] = json!("granted");
+    assert!(
+        validate_against_contract(&consent_wearing, "outbound.message.sent").is_err(),
+        "the contract itself refuses a consent extension on this type (ADR 0018)"
+    );
+    run.publish_inbound(&consent_wearing).await?;
+
+    // The fence: a granted inbound message, published last. Its suggestion
+    // proves the persona has been through the three above, which is what
+    // turns an absence into an assertion instead of a wait.
+    let fence_marker = format!("fence-{}", run.prefix);
+    let fence = inbound_message(&fence_marker, "granted", "On décale à 20h ?")?;
+    let fence_id = event_id(&fence);
+    run.publish_inbound(&fence).await?;
+    run.wait_for(SUGGEST_TYPE, &fence_id).await?;
+
+    for (label, event) in [
+        ("on its own subject", &on_its_subject),
+        ("misrouted onto the inbound subject", &misrouted),
+        ("misrouted wearing a granted consent", &consent_wearing),
+    ] {
+        let trigger_id = event_id(event);
+        for event_type in [THINKING_TYPE, SUGGEST_TYPE] {
+            let about: Vec<String> = run
+                .published(event_type)
+                .await?
+                .into_iter()
+                .filter(|message| message.payload["subject"].as_str() == Some(&trigger_id))
+                .map(|message| {
+                    message.payload["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+                .collect();
+            assert!(
+                about.is_empty(),
+                "the user's own message ({label}) must produce no {event_type}, got {about:?}"
+            );
+        }
+    }
+
+    // And the model was never asked about any of them: the gate runs before
+    // the handler and before the LLM client is touched, so no word the user
+    // wrote was ever sent anywhere.
+    let requests = run.llm.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "four events, one of them a persona's business: the model must have been asked \
+         exactly once, got {} requests",
+        requests.len()
+    );
+    assert!(
+        requests[0].body.to_string().contains(&fence_marker),
+        "the one completion request must be the inbound message's"
+    );
+    for marker in ["own-subject-", "misrouted-", "wearing-"] {
+        assert!(
+            !requests[0].body.to_string().contains(marker),
+            "nothing the user wrote themselves reached the model: {marker}"
+        );
+    }
+
+    // Nothing the persona published in this run is about anything but the
+    // fence, and its type is still the inbound one.
+    for event_type in [THINKING_TYPE, SUGGEST_TYPE] {
+        let published = run.published(event_type).await?;
+        assert_eq!(
+            published.len(),
+            1,
+            "only the inbound message may produce a {event_type}"
+        );
+        assert_eq!(published[0].payload["subject"].as_str(), Some(&*fence_id));
+    }
+    let thinking = run.published(THINKING_TYPE).await?;
+    assert_eq!(
+        thinking[0].payload["data"]["trigger"]["event_type"],
+        json!(INBOUND_TYPE),
+        "and the one thing that woke the persona was an inbound message"
+    );
+
+    // The user's own event is still on the bus, unconsumed and intact: not
+    // triggering a persona is not the same as not being published — a
+    // persona that cannot see the user already replied would suggest answers
+    // to closed conversations (ADR 0018).
+    let own = run.published(OUTBOUND_TYPE).await?;
+    assert_eq!(own.len(), 1, "the user's own message stays on the bus");
+    validate_against_contract(&own[0].payload, "outbound.message.sent")?;
+
+    run.shutdown().await
+}
+
 #[tokio::test]
 async fn a_pending_or_revoked_message_produces_no_event_and_no_llm_call() -> Result<()> {
     let run = PersonaRun::start("gate", "this reply must never be drafted").await?;
@@ -247,7 +387,12 @@ async fn a_pending_or_revoked_message_produces_no_event_and_no_llm_call() -> Res
                 .await?
                 .into_iter()
                 .filter(|message| message.payload["subject"].as_str() == Some(&trigger_id))
-                .map(|message| message.payload["id"].as_str().unwrap_or_default().to_owned())
+                .map(|message| {
+                    message.payload["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
                 .collect();
             assert!(
                 about.is_empty(),

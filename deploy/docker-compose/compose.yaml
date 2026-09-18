@@ -164,6 +164,15 @@ services:
       SENSOR_LOG_LEVEL: ${SENSOR_LOG_LEVEL:-info}
       SENSOR_METRICS_LISTEN: ${SENSOR_METRICS_LISTEN:-}
       SENSOR_RECOVERY_KEY: ${SENSOR_RECOVERY_KEY:-}
+      # The operator, and the identities their own messages arrive under
+      # (ticket #109, ADR 0018). SENSOR_OWNER is the same human as
+      # GATEWAY_OWNER and defaults to it; SENSOR_OWNER_IDENTITIES is the set
+      # of that account's network ghosts, which nothing can derive today —
+      # see the .env.example entry, which explains how to read them off the
+      # rooms. Both empty: the user's own messages keep going out as a
+      # contact's, which is the behaviour #109 is about.
+      SENSOR_OWNER: ${SENSOR_OWNER:-${GATEWAY_OWNER:-}}
+      SENSOR_OWNER_IDENTITIES: ${SENSOR_OWNER_IDENTITIES:-}
       # The consent snapshot (ticket #51, ADR 0010): where the Sensor reads
       # the whole consent state at startup, and the token it reads it with.
       # Both derive from the one secret GATEWAY_SERVICE_TOKEN, so setting that

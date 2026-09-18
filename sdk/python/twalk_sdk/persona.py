@@ -6,13 +6,18 @@ construction:
 
 1. a **durable** pull consumer on ``inbound.message.received``, so a
    restart resumes where it stopped instead of losing events;
-2. the **consent gate** (:mod:`twalk_sdk.consent`), applied before the
+2. the **trigger-type gate** (:func:`twalk_sdk.trigger.triggers_a_persona`),
+   which refuses to wake a persona on anything but an inbound message — the
+   user's own messages (``outbound.message.sent``, ADR 0018) are on the bus
+   and are not a persona's business, and the consent gate cannot stop them
+   because they carry no consent extension to read;
+3. the **consent gate** (:mod:`twalk_sdk.consent`), applied before the
    author's handler is called and before the LLM client is ever touched: a
    ``pending`` or ``revoked`` event produces no event and no completion
    request, and no persona code runs on it;
-3. ``persona.thinking.emitted`` the moment processing starts, so oversight
+4. ``persona.thinking.emitted`` the moment processing starts, so oversight
    can show activity in real time;
-4. ``persona.suggest.produced`` from whatever the handler returns, with the
+5. ``persona.suggest.produced`` from whatever the handler returns, with the
    contract's deterministic id, ``Nats-Msg-Id`` set, and the trigger's
    ``network``, ``consent`` and trace carried through.
 
@@ -62,7 +67,7 @@ from .config import Config
 from .consent import GRANTED, consent_of, is_granted
 from .envelope import FIRST_ATTEMPT, Suggestion, nats_headers, suggest_event, thinking_event
 from .llm import Llm
-from .trigger import MESSAGE_RECEIVED_TYPE, InboundMessage
+from .trigger import MESSAGE_RECEIVED_TYPE, InboundMessage, triggers_a_persona, type_of
 
 logger = logging.getLogger("twalk_sdk")
 
@@ -272,6 +277,22 @@ class Persona:
         if not isinstance(event, dict):
             logger.error("dropped a message that is not a CloudEvents envelope")
             await message.term()
+            return
+
+        # THE TRIGGER-TYPE GATE, and it runs *before* the consent gate
+        # because the event it exists for has no consent to read. The user's
+        # own message (`outbound.message.sent`, ADR 0018) carries no consent
+        # extension at all, so the gate below would refuse it — but with the
+        # wrong reason in the log, and only by the accident of a missing
+        # attribute. This one refuses it on the type, which is what actually
+        # says "this is the operator writing, not somebody writing to them".
+        if not triggers_a_persona(event):
+            logger.info(
+                "dropped an event a persona is not triggered by event_id=%s type=%s",
+                event.get("id"),
+                type_of(event),
+            )
+            await message.ack()
             return
 
         # THE CONSENT GATE. Before the handler, before the LLM, before

@@ -56,6 +56,8 @@ The 8 event types in [`contracts/cloudevents/v1/`](../../contracts/cloudevents/v
 
 Spec [#1](https://github.com/linagora/twalk/issues/1), tickets 01–11, all merged. The inbound chokepoint: joins portal rooms, decrypts, enriches with contact and consent context, publishes schema-valid CloudEvents exactly once per occurrence, and posts approved replies back into portal rooms. A code review of the whole lot on 2026-09-17 produced six bug tickets ([#26](https://github.com/linagora/twalk/issues/26)–[#31](https://github.com/linagora/twalk/issues/31)), all fixed and merged the same day.
 
+Since then the Sensor also knows who its operator is: [#109](https://github.com/linagora/twalk/issues/109) gave the user's own messages a type of their own, `outbound.message.sent`, with the operator's Matrix ID as the subject and no `consent` extension at all ([ADR 0018](adr/0018-the-users-own-messages-are-their-own-event-type.md)) — before it, a portal room's other direction went out as `inbound.message.received` with the user labelled `pending`, and the full-loop ticket [#25](https://github.com/linagora/twalk/issues/25) would have demonstrated a persona answering its own operator. Which network ghosts are the operator's is handed to the Sensor by the deployment (`SENSOR_OWNER`, `SENSOR_OWNER_IDENTITIES`) and is not resolvable from the bridges today; see the ticket.
+
 Known follow-ups, none blocking: [#13](https://github.com/linagora/twalk/issues/13) (reaction excerpts in encrypted rooms), [#38](https://github.com/linagora/twalk/issues/38) (test isolation). [#16](https://github.com/linagora/twalk/issues/16) (the consent cache restarts cold) was the seventh, and it is closed by the Gateway lot's [#51](https://github.com/linagora/twalk/issues/51): the Sensor reads the Gateway's consent snapshot at startup and follows the bus from the sequence it names.
 
 ### Matrix as a network · in progress
@@ -67,6 +69,8 @@ Known follow-ups, none blocking: [#13](https://github.com/linagora/twalk/issues/
 Spec [#19](https://github.com/linagora/twalk/issues/19), tickets H1–H6, mostly sequential: **H1** [#20](https://github.com/linagora/twalk/issues/20) shared test harness crate and stub LLM → **H2** [#21](https://github.com/linagora/twalk/issues/21) Python persona SDK and `assistant` skeleton → **H3** [#22](https://github.com/linagora/twalk/issues/22) suggestion production and **H4** [#23](https://github.com/linagora/twalk/issues/23) runtime lifecycle (parallel) → **H5** [#24](https://github.com/linagora/twalk/issues/24) approval API → **H6** [#25](https://github.com/linagora/twalk/issues/25) the full loop end-to-end.
 
 The runtime is Rust, personas are separate processes talking to the bus, and the reference persona `assistant` is Python against the SDK ([ADR 0008](adr/0008-hermes-rust-runtime-personas-as-processes.md)).
+
+Two gates live in the SDK rather than in a persona, for the same reason — an author cannot forget them: the **consent gate**, and since [#109](https://github.com/linagora/twalk/issues/109) the **trigger-type gate**, which refuses to wake a persona on anything but an inbound message. The second exists because the consent gate structurally cannot stop the user's own messages: `outbound.message.sent` carries no consent extension to read ([ADR 0018](adr/0018-the-users-own-messages-are-their-own-event-type.md)).
 
 A design review on 2026-09-18 revisited only what had changed since that spec was written, and produced four decisions with consequences outside the H-series:
 
@@ -81,7 +85,7 @@ Configurations and appservice registrations for mautrix-whatsapp, mautrix-signal
 
 ### Companion Gateway · specced
 
-The Companion's backend, in Rust: bridge provisioning facade, persona orchestrator, and **sole writer of consent state** ([ADR 0006](adr/0006-consent-state-owned-by-companion-gateway.md)). It produces two of the eight event types — `consent.state.changed.v1` and `bridge.status.changed.v1` — and it owns the consent snapshot the Sensor needs to label events correctly after a restart, which is the real fix for [#16](https://github.com/linagora/twalk/issues/16).
+The Companion's backend, in Rust: bridge provisioning facade, persona orchestrator, and **sole writer of consent state** ([ADR 0006](adr/0006-consent-state-owned-by-companion-gateway.md)). It produces two of the nine event types — `consent.state.changed.v1` and `bridge.status.changed.v1` — and it owns the consent snapshot the Sensor needs to label events correctly after a restart, which is the real fix for [#16](https://github.com/linagora/twalk/issues/16).
 
 It blocks the Companion lot: the PWA is a client of this API and has nothing to call without it.
 

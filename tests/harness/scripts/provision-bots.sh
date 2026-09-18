@@ -13,7 +13,14 @@ COMPOSE="docker compose -p ${TWALK_TEST_STACK:-twalk-sensor-test} -f $COMPOSE_FI
 # bot_alpha / bot_beta play bridges and contacts; sensor is the account the
 # Sensor process logs in as; whatsapp_33612345678 is a ghost-style user for
 # the network-prefix tests (mautrix puppet naming convention).
-for bot in bot_alpha bot_beta sensor whatsapp_33612345678; do
+#
+# whatsapp_33660469852 and whatsapp_lid-115332874281144 play the *operator's*
+# own ghosts (#109, ADR 0018), and there are two of them on one network on
+# purpose: that is what the reference deployment answers for one WhatsApp
+# account — a phone-number ghost and a LID ghost — and the messages the owner
+# sent from their phone arrived under the LID one.
+for bot in bot_alpha bot_beta sensor whatsapp_33612345678 \
+           whatsapp_33660469852 whatsapp_lid-115332874281144; do
   output=$($COMPOSE exec -T synapse register_new_matrix_user \
       -u "$bot" -p "test-only-password-$bot" --no-admin \
       -c /config/homeserver.yaml http://localhost:8008 2>&1) || true

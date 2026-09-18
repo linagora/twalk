@@ -75,6 +75,28 @@ pub struct Config {
     /// — which is what issue #16 is about, so a deployment that runs a
     /// Gateway sets it.
     pub gateway_url: Option<String>,
+    /// The operator's Matrix ID (SENSOR_OWNER), the deployment's one owner
+    /// (ADR 0011) — the same account the Gateway holds as `GATEWAY_OWNER`.
+    /// It is the `subject` of every `outbound.message.sent` event, whichever
+    /// identity the message arrived under. Unset: the Sensor has no notion of
+    /// the operator, every sender is a contact, and the user's own messages
+    /// keep going out as `inbound.message.received` — the behaviour issue
+    /// #109 is about, so a deployment that has an owner sets it.
+    pub owner: Option<String>,
+    /// The Matrix IDs the operator's own messages arrive under
+    /// (SENSOR_OWNER_IDENTITIES, comma-separated): their network ghosts, as
+    /// the deployment has **confirmed** them. Several per network is normal —
+    /// WhatsApp materialises both `@whatsapp_<phone>` and
+    /// `@whatsapp_lid-<lid>` for one account — and the set can grow, because
+    /// a new ghost can start being used mid-conversation.
+    ///
+    /// Not derived: neither by string-building `@<network>_<login id>` in the
+    /// Sensor (the localpart template belongs to each bridge) nor from the
+    /// bridge's provisioning answers, which carry a login's id and profile
+    /// and no ghost Matrix ID at all. Whoever resolves it hands the answer
+    /// over; see `crate::owner`. An identity that is not in this set stays a
+    /// contact, which is the safe failure.
+    pub owner_identities: Vec<String>,
     /// The Gateway's service token (SENSOR_GATEWAY_SERVICE_TOKEN), the same
     /// secret the Gateway holds as GATEWAY_SERVICE_TOKEN. The snapshot is the
     /// one Gateway route a service reads, and it takes this token as an
@@ -117,10 +139,23 @@ impl Config {
             recovery_key: optional_string("SENSOR_RECOVERY_KEY"),
             gateway_url: optional_string("SENSOR_GATEWAY_URL"),
             gateway_service_token: optional_string("SENSOR_GATEWAY_SERVICE_TOKEN"),
+            owner: optional_string("SENSOR_OWNER"),
+            owner_identities: optional_list("SENSOR_OWNER_IDENTITIES"),
         };
         config.validate_credentials()?;
         config.validate_gateway()?;
+        config.validate_owner()?;
         Ok(config)
+    }
+
+    /// The operator, when the deployment named one: their Matrix ID and every
+    /// identity their messages are confirmed to arrive under. `None` is a
+    /// deployment that has not been told who its owner is — every sender is
+    /// then a contact, which is what the Sensor did before ADR 0018.
+    pub fn owner(&self) -> Option<crate::owner::Owner> {
+        self.owner
+            .as_ref()
+            .map(|matrix_id| crate::owner::Owner::new(matrix_id, self.owner_identities.clone()))
     }
 
     /// Where the consent snapshot is read from, and with what: both halves or
@@ -173,12 +208,45 @@ impl Config {
             _ => Ok(()),
         }
     }
+
+    /// The operator's ghosts are meaningless without the operator: they are
+    /// recognised so that the messages arriving under them can be published
+    /// with the operator's Matrix ID as their subject (ADR 0018), and there
+    /// is no subject to publish without `SENSOR_OWNER`. Silently ignoring
+    /// them would leave the user's own messages going out as a contact's,
+    /// which is exactly the bug — so it is refused on startup, with the
+    /// missing name to fix.
+    fn validate_owner(&self) -> Result<()> {
+        if self.owner.is_none() && !self.owner_identities.is_empty() {
+            anyhow::bail!(
+                "SENSOR_OWNER_IDENTITIES is set without SENSOR_OWNER: the operator's own \
+                 messages are published with their Matrix ID as the subject, and there is none \
+                 to publish"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// An environment variable that is absent or empty is unset: an empty value
 /// in a compose `.env` file is how an operator leaves an option out.
 fn optional_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// A comma-separated list, trimmed, with empty entries dropped — the same
+/// shape as SENSOR_ALLOWED_INVITERS, so an operator writes one kind of list.
+fn optional_list(name: &str) -> Vec<String> {
+    optional_string(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn required(name: &str) -> Result<String> {
