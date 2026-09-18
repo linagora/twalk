@@ -420,6 +420,10 @@
 	"tabs.body": "Twalk keeps your encryption keys in one place, and two tabs writing to it at once would damage them. Go back to the other tab, or take over here.",
 	"tabs.takeOver": "Use this tab instead",
 	"tabs.waiting": "Taking over…",
+	"tabs.unanswered.title": "The other tab is not answering",
+	"tabs.unanswered.body": "Twalk asked the other tab to let go and heard nothing back for {seconds, plural, one {# second} other {# seconds}}. That tab is still open: your browser puts tabs to sleep when it thinks you have forgotten them, and a sleeping tab keeps its hold on your keys without being able to answer.",
+	"tabs.unanswered.remedy": "Find the other Twalk tab and close it. Switching to it is enough to wake it, and this button then works. If you cannot find it, restarting your browser releases the hold.",
+	"tabs.unanswered.retry": "Ask again",
 
 	"persona.assistant.name": "Assistant",
 	"persona.assistant.description": "Your assistant reads the messages arriving on the networks you connected, and suggests replies for you to review. It never sends anything without your approval.",

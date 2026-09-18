@@ -46,9 +46,9 @@
 	import { t } from '$lib/i18n';
 	import type { MatrixSession } from '$lib/crypto/bootstrap';
 	import { discoverHomeserver } from '$lib/matrix/discovery';
+	import { takeLoginToken } from '$lib/matrix/login-token';
 	import {
 		loginFlows,
-		loginTokenFrom,
 		loginWithPassword,
 		loginWithToken,
 		MatrixLoginError,
@@ -118,18 +118,12 @@
 			baseUrl = found.ok ? found.homeserver.baseUrl : `https://${$domain}`;
 		}
 
-		// Coming back from the homeserver's SSO page.
-		const token = loginTokenFrom(new URL(window.location.href));
+		// Coming back from the homeserver's SSO page. The token was taken out
+		// of the address bar by the root layout, before any screen decided
+		// what to render: stripping it here meant not stripping it at all on a
+		// load where this route never mounted (#135, and #125 before it).
+		const token = takeLoginToken();
 		if (token !== null) {
-			// Out of the address bar before anything else, and whatever
-			// happens next: a login token is a credential, and a copied URL
-			// must not carry one. Previously this ran only on the path that
-			// went on to use the token, so a round trip that could not be
-			// completed left the credential in the address bar (#125).
-			const clean = new URL(window.location.href);
-			clean.searchParams.delete('loginToken');
-			history.replaceState(null, '', clean.toString());
-
 			// The token is exchanged against the homeserver that issued it, or
 			// not at all. Falling back to whatever this screen happens to know
 			// is how a linagora.com token was presented to twalk.localhost.
