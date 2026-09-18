@@ -1,0 +1,46 @@
+# The deployment's Hermes starts personas through the host's Docker socket
+
+The reference deployment runs the Hermes runtime as a compose service, and that service holds the host's Docker socket. A persona is still a container image started per persona, by the runtime, through `run-persona` — the wrapper that carries the environment the runtime constructed across the container wall. The runtime and its persona containers run in the host's network namespace, and reach the bus through the port the stack publishes on loopback.
+
+This makes the deployment's threat model strictly worse and the change is not neutral: a service that can talk to the Docker daemon can start a privileged container, bind-mount the host's root filesystem, and read every other container's secrets. It is root on the host, delivered through a socket. `docs/architecture/security-model.md` records it as a residual risk; this ADR records why it was chosen over the alternatives, because the reasons are not obvious and the decision should be re-openable by someone who disagrees with them.
+
+The one sentence to take away, because it is what makes the socket the price rather than a convenience: **a persona process inside the runtime's container, under the runtime's uid, can read `/proc/1/environ`.** The container wall is what makes ADR 0015's constructed environment a control rather than a convention — every option that keeps the socket out of the deployment also puts a persona on the runtime's side of that wall, or takes the injection away from the runtime entirely. The rest of this document is that trade examined four times.
+
+## What had to be true at once
+
+- **`docker compose up -d --wait` closes the loop.** A message arrives, a persona drafts, the owner approves, the reply reaches the room — with no process on the host beside the stack ([#158](https://github.com/linagora/twalk/issues/158)).
+- **A third-party persona takes the same path as `assistant`** ([ADR 0008](0008-hermes-rust-runtime-personas-as-processes.md)). "Ours is trustworthy" is not an argument this platform is allowed to make.
+- **The runtime constructs a persona's environment and the persona cannot get at the runtime's own** ([ADR 0015](0015-no-default-llm-configured-through-the-companion.md)): the Companion Gateway's service token opens the consent snapshot — the list of every contact — and the control is that the variable is not there.
+- **A persona can reach the operator's LLM.** On the reference deployment that is a LiteLLM proxy on the host's loopback, `http://127.0.0.1:4000/v1`, and a container in a network namespace of its own dials itself.
+
+## The four options
+
+**The socket, with its consequences stated — chosen.** The runtime keeps the model #23 built: it spawns a process, constructs its environment, supervises it, and moves a durable consumer rather than a process when the user pauses a persona. A persona keeps its container, which matters for more than packaging (below). Adding a third-party persona is one more object in `HERMES_PERSONAS` and no edit to `compose.yaml`. The cost is the first paragraph of this document, and one more thing worth naming: `HERMES_PERSONAS` becomes root-equivalent configuration, because its argv is executed by a process holding the socket. It was already operator-only configuration; it is now operator-only configuration that grants the host.
+
+**The runtime on the host, beside the stack — rejected.** What the test suite does today and what an operator does by hand. It is honest about the privilege — a process the operator started has the privileges the operator has — and it fails the criterion the ticket exists for: Twalk stops being one `docker compose up`, and "the loop is proven" stays a property of the test suite rather than of the deployment. The gap this closes was found by the person who wrote the proof, not by an operator, which is the only reason it is being fixed before it hurt somebody.
+
+**Personas as long-lived compose services — rejected, and it is the closest call.** The observation behind it is real and it is the runtime's own: activation moves a *consumer*, not a process (ADR 0013), so a persona that is always running is not foreign to this design — it is what a paused persona already is. A persona service would need no socket at all. Three things sank it.
+
+The first is a change to something this ticket does not own. The runtime creates the durable consumer for each persona it is configured with *and* starts that persona's process; a persona it does not start is a mode `hermes/src/` does not have, and giving it one is #23's work, not the deployment's. Configuring the runtime with a placeholder command so that it supervises a `sleep` while the real persona runs elsewhere would be a lie in the one place the platform reports what it is hosting.
+
+The second is that the injection would stop being an injection. Compose would set each persona's environment, so ADR 0015's control — a closed list built by `environment::persona_environment`, asserted by reading the container's environment back from Docker — would become "the list of variables somebody remembered to write in `compose.yaml`", and the assertion in `hermes/tests/runtime_lifecycle.rs` would be asserting the test's own fixture.
+
+The third is the cost the ticket already names: a persona could no longer be added without editing `compose.yaml`, which for a third-party persona means an operator hand-writing a service for software they did not build. That is a worse door than an argv in a variable.
+
+It stays the right answer to revisit if the socket is ever judged intolerable, and it is the shape a Kubernetes deployment will want anyway, where a persona is a pod and nothing spawns anything.
+
+**A persona supervisor with a narrower grant — rejected for v0.1, and it is the one to build next.** The grant is the right thing to narrow: the runtime needs to create, start, stop and watch containers from a fixed set of images, with no bind mounts, no privileges and one network. None of that can be expressed with parts that exist. A read-only socket proxy (`tecnativa/docker-socket-proxy` and its kin) filters by HTTP method and path and cannot look inside a request body, so it must allow `POST /containers/create` whole — and a create call can ask for a privileged container with the host's root filesystem mounted, which is the full grant again with an extra hop. Docker-in-Docker moves the daemon inside a container that must then be `privileged`, which is the same thing wearing a different hat. What would actually narrow it is a small supervisor that accepts "start persona X" and nothing else, and it is a component, not a compose service — so it belongs in `hermes/`, with its own ticket, not in this one.
+
+Two mitigations exist today and cost nothing, so the deployment supports both: `HERMES_DOCKER_SOCKET` can point at a **rootless** daemon's socket, which narrows the grant from root to the account that daemon runs as; and a persona container is handed no socket, no bind mount and none of the runtime's own variables, so the third-party persona ADR 0008 is about does not inherit any of this.
+
+## Why the persona keeps its container
+
+Bundling the personas into the Hermes image — Python and the SDK beside the Rust binary, each persona a child process — was considered and is the option that would have needed no socket at all. It fails on the control it would dissolve. A persona process inside the runtime's container, under the runtime's uid, can read `/proc/1/environ`: the Gateway's service token, which ADR 0015 exists to keep away from it, would be one file read away, and the closed-list environment would become a gesture. The container wall is what makes the constructed environment a control rather than a convention. It also reintroduces exactly the privilege gap ADR 0008 forbids — a first-party persona would be baked into Twalk's own image and a third-party one would have nowhere to go.
+
+## The network arrangement, and what it costs
+
+The runtime hands each persona the bus URL it uses itself, so the runtime and its personas must see the bus at the same address; and the persona must reach an LLM that, on the reference deployment, listens on the host's loopback. One arrangement satisfies both: the Hermes service runs with `network_mode: host`, its persona containers run with `--network host`, and the bus is reached at `nats://127.0.0.1:<the port the stack publishes>`.
+
+What an operator accepts with it: the runtime and every persona can reach anything bound to the host's loopback, which on a Twalk host includes Synapse and the Companion Gateway. The compose network's segmentation does not apply to them. That is a smaller concession than the socket and it is a second one, not a free consequence of the first.
+
+The alternative is available and documented rather than merely possible: an operator whose LLM is reachable at a routable address — a proxy on another host, or one listening on a docker network — puts Hermes back on the stack's own network, points `HERMES_NATS_URL` at `nats://nats:4222`, and adds `--network <the stack's network>` to each persona's argv. What the deployment cannot do is make `127.0.0.1` mean the host from inside a network namespace that is not the host's; for that, the answer is the one the runtime already warns about at startup.

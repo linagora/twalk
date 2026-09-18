@@ -53,9 +53,12 @@
 //! - **Messages that arrive while a persona is paused are not replayed** on
 //!   reactivation, which is why the user's activation decision is taken and
 //!   observed on the bus *before* the runtime starts.
-//! - **The reference deployment runs no Hermes** (#158): the runtime is
-//!   started on the host here, so what this test proves an operator cannot
-//!   yet run with `docker compose up`.
+//! - **The runtime starts the persona through the host's Docker socket**
+//!   (#158, ADR 0023), which is what `docker compose up` now gives an
+//!   operator and what it costs them. This test runs the deployment's own
+//!   `hermes` service and asserts it, because the loop closing with a
+//!   runtime somebody started by hand is a different claim from the one the
+//!   product makes.
 //!
 //! The stack, its ports and its teardown are documented in
 //! `hermes/tests/harness/deployment.rs`.
@@ -118,6 +121,18 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
     stack.wait_for_decision(&decided.user_id, "granted").await?;
 
     stack.start_hermes().await?;
+
+    // The runtime is the deployment's, not this test's (#158). Asked of
+    // Docker rather than of the harness, and asserted before anything else
+    // happens: every absence below is only worth something if the thing that
+    // produced the presences is the thing an operator gets from
+    // `docker compose up`.
+    assert_eq!(
+        stack.hermes_container_state().await?,
+        "running",
+        "the loop must close on the deployment's own Hermes, with no process started \
+         beside the stack"
+    );
 
     // The Sensor labels a message with the consent state it holds, which it
     // learns from the Gateway's snapshot at startup and from the bus after

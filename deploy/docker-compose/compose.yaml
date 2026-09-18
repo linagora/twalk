@@ -21,8 +21,10 @@
 # Running only the second is a loud failure, not a subtle one — ../README.md
 # names both shapes it takes.
 #
-# Hermes and the other planes join this stack as they land (see the repository
-# roadmap).
+# Hermes joins this stack as of issue #158, and with it the one service that
+# holds the host's Docker socket — read ADR 0023 and the `hermes` service
+# below before running this on a host you share. The other planes join as
+# they land (see the repository roadmap).
 
 name: twalk
 
@@ -359,6 +361,166 @@ services:
       timeout: 5s
       retries: 30
       start_period: 5s
+    restart: unless-stopped
+
+  # --- Hermes: the runtime, and the personas it hosts ----------------------
+  #
+  # One-shot: builds the `assistant` persona's image and exits. A persona
+  # ships as a container image (ADR 0008) and the runtime starts that image
+  # itself, so nothing in this file ever *runs* a persona — but the image has
+  # to exist before the runtime reaches for it, and `docker compose up` only
+  # builds images for services it starts. Hence a service that exists to be
+  # built: its entrypoint is overridden to `/bin/true`, it exits 0, and
+  # `hermes` below waits for that completion.
+  #
+  # It is also the answer to "where does the persona's image come from?"
+  # (#158): from this repository, built on the operator's own host, like the
+  # Sensor's and the Gateway's. Nothing is published to a registry yet.
+  persona-assistant-image:
+    build:
+      # The repository root: a persona image carries the SDK from
+      # sdk/python/. See hermes/personas/assistant/Dockerfile.
+      context: ../..
+      dockerfile: hermes/personas/assistant/Dockerfile
+    # Overridable per stack (issue #38), like every other locally built image
+    # here, and it must match the image named in HERMES_PERSONAS below.
+    image: ${TWALK_PERSONA_IMAGE:-twalk/persona-assistant:local}
+    entrypoint: ["/bin/true"]
+
+  # The Hermes runtime: it reads the persona list from its environment,
+  # starts one process per persona, follows `consent.state.changed` to learn
+  # which personas the user activated, and moves each persona's durable
+  # consumer rather than its process when that changes (ADR 0013).
+  #
+  # Two things about this service are deliberate and neither is free.
+  #
+  # **It holds the host's Docker socket.** A persona is an image and the
+  # runtime spawns a process, so something has to turn one into the other;
+  # in this deployment that is `run-persona` inside this container, talking
+  # to the daemon that runs this stack. Mounting that socket into a service
+  # is giving that service root on the host — not a smaller thing because
+  # the service is ours. ADR 0023 argues the alternatives and records what an
+  # operator is accepting; docs/architecture/security-model.md carries it as
+  # a residual risk. The personas themselves are handed no socket: the
+  # runtime constructs their environment (ADR 0015) and the wrapper mounts
+  # nothing into them.
+  #
+  # **It runs in the host's network namespace,** and so do the persona
+  # containers it starts. The runtime hands a persona one bus URL — the one
+  # it uses itself — so the runtime and its personas must see the bus at the
+  # same address; and a persona must be able to reach the operator's LLM,
+  # which on the reference deployment is a proxy published on the host's
+  # loopback (`http://127.0.0.1:4000/v1`). A container on this stack's
+  # network dials itself for the second, and this host firewalls the docker
+  # bridge, so loopback is the only address that serves both. The bus is
+  # reached through its published port below, which is why NATS_PORT appears
+  # in the default URL.
+  #
+  # What that costs, stated: this container can reach every service bound to
+  # the host's loopback, which on a typical Twalk host includes Synapse and
+  # the Gateway. An operator whose LLM is reachable at a routable address —
+  # a proxy on another machine, or one listening on a docker network — can
+  # put Hermes back on this stack's network instead: replace `network_mode`
+  # with the default, set HERMES_NATS_URL to nats://nats:4222, and add
+  # `--network <this stack's network>` to each persona's argv in
+  # HERMES_PERSONAS.
+  hermes:
+    build:
+      # The repository root, for the same reason as the Sensor's and the
+      # Gateway's. See hermes.Dockerfile.
+      context: ../..
+      dockerfile: deploy/docker-compose/hermes.Dockerfile
+    image: ${TWALK_HERMES_IMAGE:-twalk/hermes:local}
+    depends_on:
+      nats:
+        condition: service_started
+      # The image the runtime is configured to start has to exist first: a
+      # persona whose image is not there is announced as failed to start,
+      # which would be an honest report of a deployment problem this stack
+      # can simply not have.
+      persona-assistant-image:
+        condition: service_completed_successfully
+    network_mode: host
+    # tini as pid 1: a persona's wrapper leaves short-lived `docker` clients
+    # behind, and the runtime reaps only the children it spawned.
+    init: true
+    volumes:
+      # The socket above. Overridable so that an operator can hand this
+      # service a *rootless* daemon's socket
+      # (e.g. /run/user/1000/docker.sock) instead of the system one, which
+      # narrows the grant from root to that user's own account — the one
+      # mitigation ADR 0023 names that costs nothing.
+      - ${HERMES_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      # The endpoint credential as a file, which wins over the variable so a
+      # production stack can lock it down (ADR 0015). The operator names a
+      # path on the host; the container always sees the same path. Unset,
+      # /dev/null is mounted here and HERMES_LLM_API_KEY_FILE stays empty, so
+      # nothing reads it. Docker creates a *directory* for a path that does
+      # not exist, so a typo here shows up as "is a directory" rather than as
+      # a missing file.
+      - ${HERMES_LLM_API_KEY_FILE:-/dev/null}:/run/secrets/llm-api-key:ro
+    environment:
+      # The personas this deployment hosts: a JSON array of an id and an
+      # argv, exactly as the runtime reads it. The argv is
+      # `run-persona <container name> <image>`, the wrapper this image ships
+      # — so adding a third-party persona is one more object in this array
+      # and no change to this file, which is what ADR 0008 asks for.
+      # Empty: the runtime hosts nothing and says so (see hermes-entrypoint.sh).
+      HERMES_PERSONAS: ${HERMES_PERSONAS:-}
+      # The authority of every hosted persona's `source` URI
+      # (hermes://<domain>/personas/<persona id>). One deployment, one
+      # domain: the homeserver's, unless the operator says otherwise.
+      HERMES_DOMAIN: ${HERMES_DOMAIN:-${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}}
+      # This stack's bus, through the port it publishes on loopback: the
+      # runtime is in the host's network namespace and so are its personas,
+      # and both are handed this one URL.
+      HERMES_NATS_URL: ${HERMES_NATS_URL:-nats://127.0.0.1:${NATS_PORT:-4222}}
+      # The LLM the operator named. There is no default, for either of them
+      # (ADR 0015): left empty, this service starts, states the refusal in
+      # its log and hosts nothing, rather than sending the user's messages to
+      # a model nobody chose.
+      HERMES_LLM_BASE_URL: ${HERMES_LLM_BASE_URL:-}
+      HERMES_LLM_MODEL: ${HERMES_LLM_MODEL:-}
+      HERMES_LLM_API_KEY: ${HERMES_LLM_API_KEY:-}
+      # Set only when the operator gave a host path above; the container's
+      # side of that mount is fixed.
+      HERMES_LLM_API_KEY_FILE: ${HERMES_LLM_API_KEY_FILE:+/run/secrets/llm-api-key}
+      # Provider parameters passed to the persona untouched, and the
+      # endpoint's timeout. A parameter set to null removes a field the
+      # request would otherwise carry, which is how a provider that rejects
+      # one is made to work (ADR 0015).
+      HERMES_LLM_PARAMS: ${HERMES_LLM_PARAMS:-}
+      HERMES_LLM_TIMEOUT_SECONDS: ${HERMES_LLM_TIMEOUT_SECONDS:-}
+      # How long a suggestion stays approvable (#22). Empty leaves the SDK's
+      # own default of an hour; the Gateway refuses an expired one.
+      HERMES_SUGGESTION_TTL_SECONDS: ${HERMES_SUGGESTION_TTL_SECONDS:-}
+      HERMES_LOG_LEVEL: ${HERMES_LOG_LEVEL:-info}
+      # The personas' own level: debugging a persona should not make the
+      # supervisor noisy too.
+      HERMES_PERSONA_LOG_LEVEL: ${HERMES_PERSONA_LOG_LEVEL:-info}
+      # Names of the runtime's own variables a persona's argv may inherit.
+      # Empty means the runtime's default, PATH — which is what
+      # `run-persona` needs to find the docker client, and nothing more. Add
+      # DOCKER_HOST here when you point HERMES_DOCKER_SOCKET at a rootless
+      # daemon on a non-default path: it configures the client, and a
+      # persona never sees it (run-persona strips it).
+      HERMES_PERSONA_ENV_PASSTHROUGH: ${HERMES_PERSONA_ENV_PASSTHROUGH:-}
+      # The bus stream and subject prefix, `twalk` in every deployment;
+      # empty leaves the runtime's defaults.
+      HERMES_BUS_STREAM: ${HERMES_BUS_STREAM:-}
+      HERMES_BUS_SUBJECT_PREFIX: ${HERMES_BUS_SUBJECT_PREFIX:-}
+      # Supervision: how long a run must last to count as one, how many
+      # failed starts in a row are announced as a failure, and the backoff
+      # between restarts. Empty leaves the runtime's defaults (10s, 3,
+      # 1s → 60s, 10s), which are right for a deployment and too slow for
+      # anything watching a persona fail on purpose.
+      HERMES_PERSONA_HEALTHY_AFTER_MS: ${HERMES_PERSONA_HEALTHY_AFTER_MS:-}
+      HERMES_PERSONA_START_FAILURES: ${HERMES_PERSONA_START_FAILURES:-}
+      HERMES_RESTART_BACKOFF_BASE_MS: ${HERMES_RESTART_BACKOFF_BASE_MS:-}
+      HERMES_RESTART_BACKOFF_MAX_MS: ${HERMES_RESTART_BACKOFF_MAX_MS:-}
+      HERMES_SHUTDOWN_GRACE_MS: ${HERMES_SHUTDOWN_GRACE_MS:-}
+    # The runtime exits on unreadable configuration and on a bus it cannot
+    # reach at startup; compose brings it back, as it does the Sensor.
     restart: unless-stopped
 
   # --- Bridges: mautrix-whatsapp and mautrix-signal ------------------------
