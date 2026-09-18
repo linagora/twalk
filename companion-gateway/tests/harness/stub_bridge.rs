@@ -398,8 +398,18 @@ fn authorised(headers: &HeaderMap) -> bool {
         == Some(STUB_PROVISIONING_SECRET)
 }
 
-async fn flows(headers: HeaderMap) -> Response {
-    if !authorised(&headers) {
+/// mautrix requires the acting user in `?user_id=` on **every** provisioning
+/// call, and answers `403 M_FORBIDDEN` without it — including on a step or a
+/// cancel, which is how a real WhatsApp login failed while ten tests here
+/// passed (#106). The stub refuses it too, so that cannot happen again.
+fn acting_user_named(query: &HashMap<String, String>) -> bool {
+    query
+        .get("user_id")
+        .is_some_and(|user_id| user_id.starts_with('@') && user_id.contains(':'))
+}
+
+async fn flows(headers: HeaderMap, Query(query): Query<HashMap<String, String>>) -> Response {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     Json(json!({
@@ -413,8 +423,12 @@ async fn flows(headers: HeaderMap) -> Response {
     .into_response()
 }
 
-async fn whoami(headers: HeaderMap, State(state): State<Arc<StubState>>) -> Response {
-    if !authorised(&headers) {
+async fn whoami(
+    headers: HeaderMap,
+    State(state): State<Arc<StubState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     let logins = state
@@ -427,8 +441,12 @@ async fn whoami(headers: HeaderMap, State(state): State<Arc<StubState>>) -> Resp
         .into_response()
 }
 
-async fn logins(headers: HeaderMap, State(state): State<Arc<StubState>>) -> Response {
-    if !authorised(&headers) {
+async fn logins(
+    headers: HeaderMap,
+    State(state): State<Arc<StubState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     let logins = state
@@ -446,7 +464,7 @@ async fn start(
     Path(flow_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&headers) {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     let (process_id, first_qr) = {
@@ -472,7 +490,7 @@ async fn start(
     match flow_id.as_str() {
         QR_FLOW => Json(qr_step(&process_id, &first_qr)).into_response(),
         PHONE_FLOW => Json(json!({
-            "login_process_id": process_id,
+            "login_id": process_id,
             "type": "user_input",
             "step_id": PHONE_STEP,
             "instructions": "Enter the phone number of the account",
@@ -484,7 +502,7 @@ async fn start(
         }))
         .into_response(),
         COOKIES_FLOW => Json(json!({
-            "login_process_id": process_id,
+            "login_id": process_id,
             "type": "cookies",
             "step_id": COOKIES_STEP,
             "instructions": "Paste the cookies from a private window",
@@ -495,7 +513,7 @@ async fn start(
         }))
         .into_response(),
         WEBAUTHN_FLOW => Json(json!({
-            "login_process_id": process_id,
+            "login_id": process_id,
             "type": "webauthn",
             "step_id": "fi.mau.stub.login.webauthn",
             "instructions": "Use your passkey",
@@ -509,9 +527,18 @@ async fn start(
     }
 }
 
+/// Shaped like a real mautrix answer: the login **process** id travels as
+/// `login_id` at the top level — the same word mautrix's `?login_id=` query
+/// parameter uses for an existing login. The Gateway was first written
+/// against a stub that called it `login_process_id`, and the real bridge
+/// then failed with "names no login process" (see the ticket in the PR).
 fn qr_step(process_id: &str, data: &str) -> Value {
     json!({
-        "login_process_id": process_id,
+        "login_id": process_id,
+        // Issued with the step and validated on the call that advances it,
+        // exactly as mautrix does — it answers `500 M_BAD_STATE:
+        // Transaction ID does not match` for anything else (#106).
+        "txn_id": format!("stub-txn-{process_id}"),
         "type": "display_and_wait",
         "step_id": QR_STEP,
         "instructions": "Scan this code from the phone",
@@ -528,7 +555,7 @@ async fn step(
     Query(query): Query<HashMap<String, String>>,
     body: String,
 ) -> Response {
-    if !authorised(&headers) {
+    if !authorised(&headers) || !acting_user_named(&query) {
         return forbidden();
     }
     // A process the stub does not know: what a restarted bridge answers, and
@@ -537,6 +564,14 @@ async fn step(
         let inner = state.inner.lock().expect("the stub is not poisoned");
         if !inner.processes.contains_key(&process_id) {
             return mautrix_error(StatusCode::NOT_FOUND, "M_NOT_FOUND");
+        }
+    }
+    // The transaction id must be the one issued with the step being
+    // advanced. A caller that invents one gets mautrix's own answer (#106):
+    // this is what a real WhatsApp login failed on while the tests passed.
+    if let Some(txn_id) = query.get("txn_id") {
+        if txn_id != &format!("stub-txn-{process_id}") {
+            return mautrix_error(StatusCode::INTERNAL_SERVER_ERROR, "M_BAD_STATE");
         }
     }
     if step_type == "cancel" {
