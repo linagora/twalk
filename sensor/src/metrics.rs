@@ -65,6 +65,32 @@ pub struct Metrics {
     /// bus.
     dropped_bridge_bot: AtomicU64,
     dropped_unattributable_subject: AtomicU64,
+    /// The owner's own device (ADR 0025, issue #123): whether the deployment
+    /// has one at all, how many portal rooms it is joined to, and what became
+    /// of the invitations it was sent.
+    ///
+    /// The gauge renders **only** when the device is configured, so an absent
+    /// sample means "this deployment posts approved replies as `@sensor:` and
+    /// the bridge ignores them" rather than "the device is in no rooms" — two
+    /// facts a flat zero would merge, which is the shape of the defect itself.
+    ///
+    /// `refused` is the one to read after "the user approved a reply and the
+    /// contact got nothing": the owner's device joins a room only when a
+    /// configured bridge bot invited it, and a climbing `refused` with a flat
+    /// `joined` is `SENSOR_BRIDGE_BOTS` naming the wrong accounts.
+    owner_device_present: AtomicBool,
+    owner_device_rooms: AtomicU64,
+    owner_device_invites_joined: AtomicU64,
+    owner_device_invites_refused: AtomicU64,
+    owner_device_invites_failed: AtomicU64,
+    /// Approved replies the Sensor posted, by what they reached (issue #216).
+    ///
+    /// This is the count behind the sentence the approval screen was getting
+    /// wrong: a reply is *published on the bus* and *posted into a room*, and
+    /// neither of those is *delivered to the contact*. `nobody` climbing is a
+    /// deployment whose every reply stops at Synapse.
+    replies_reaching_contact: AtomicU64,
+    replies_reaching_nobody: AtomicU64,
 }
 
 /// Why an observed event was deliberately not published.
@@ -85,6 +111,30 @@ impl DropReason {
         match self {
             Self::BridgeBot => "bridge_bot",
             Self::UnattributableSubject => "unattributable_subject",
+        }
+    }
+}
+
+/// What became of one invitation sent to the owner's own device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerDeviceInvite {
+    /// A portal of a configured bridge: joined, so the owner is a member of the
+    /// room their conversation lives in.
+    Joined,
+    /// Not a portal of a configured bridge — the inviter is somebody else, or
+    /// the deployment named no bridge bots at all.
+    Refused,
+    /// A portal invitation the join request itself failed on.
+    Failed,
+}
+
+impl OwnerDeviceInvite {
+    /// The metric's label value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Joined => "joined",
+            Self::Refused => "refused",
+            Self::Failed => "failed",
         }
     }
 }
@@ -112,6 +162,13 @@ impl Metrics {
             invites_failed: AtomicU64::new(0),
             dropped_bridge_bot: AtomicU64::new(0),
             dropped_unattributable_subject: AtomicU64::new(0),
+            owner_device_present: AtomicBool::new(false),
+            owner_device_rooms: AtomicU64::new(0),
+            owner_device_invites_joined: AtomicU64::new(0),
+            owner_device_invites_refused: AtomicU64::new(0),
+            owner_device_invites_failed: AtomicU64::new(0),
+            replies_reaching_contact: AtomicU64::new(0),
+            replies_reaching_nobody: AtomicU64::new(0),
         }
     }
 
@@ -186,6 +243,39 @@ impl Metrics {
 
     pub fn record_invite_failed(&self) {
         self.invites_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The deployment holds a device of the owner's own account: recorded once
+    /// at startup, and what makes the room gauge below render at all.
+    pub fn record_owner_device_present(&self) {
+        self.owner_device_present.store(true, Ordering::Relaxed);
+    }
+
+    /// How many rooms the owner's own device is joined to, as the SDK's own
+    /// state answers it — the number a bridge's relaying depends on.
+    pub fn record_owner_device_rooms(&self, rooms: u64) {
+        self.owner_device_rooms.store(rooms, Ordering::Relaxed);
+    }
+
+    /// What became of one invitation sent to the owner's device. Returns the
+    /// running total of that outcome, for the log line.
+    pub fn record_owner_device_invite(&self, outcome: OwnerDeviceInvite) -> u64 {
+        let counter = match outcome {
+            OwnerDeviceInvite::Joined => &self.owner_device_invites_joined,
+            OwnerDeviceInvite::Refused => &self.owner_device_invites_refused,
+            OwnerDeviceInvite::Failed => &self.owner_device_invites_failed,
+        };
+        counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// What one posted approved reply reached (issue #216).
+    pub fn record_reply_reach(&self, reach: crate::owner_device::Reach) {
+        let counter = if reach.reaches_the_contact() {
+            &self.replies_reaching_contact
+        } else {
+            &self.replies_reaching_nobody
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Renders the Prometheus text exposition (format version 0.0.4). `now`
@@ -270,6 +360,52 @@ impl Metrics {
                 "twalk_sensor_events_dropped_total{{reason=\"{}\"}} {}\n",
                 reason.as_str(),
                 count.load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP twalk_sensor_owner_device_invites_total Invitations the owner's own device received, by what it did with them.\n");
+        out.push_str("# TYPE twalk_sensor_owner_device_invites_total counter\n");
+        for (outcome, count) in [
+            (OwnerDeviceInvite::Joined, &self.owner_device_invites_joined),
+            (
+                OwnerDeviceInvite::Refused,
+                &self.owner_device_invites_refused,
+            ),
+            (OwnerDeviceInvite::Failed, &self.owner_device_invites_failed),
+        ] {
+            out.push_str(&format!(
+                "twalk_sensor_owner_device_invites_total{{outcome=\"{}\"}} {}\n",
+                outcome.as_str(),
+                count.load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str("# HELP twalk_sensor_outbound_replies_total Approved replies posted, by what they reached: the contact, or nobody.\n");
+        out.push_str("# TYPE twalk_sensor_outbound_replies_total counter\n");
+        for (reach, count) in [
+            (
+                crate::owner_device::Reach::Contact,
+                &self.replies_reaching_contact,
+            ),
+            (
+                crate::owner_device::Reach::Nobody,
+                &self.replies_reaching_nobody,
+            ),
+        ] {
+            out.push_str(&format!(
+                "twalk_sensor_outbound_replies_total{{reach=\"{}\"}} {}\n",
+                reach.as_str(),
+                count.load(Ordering::Relaxed)
+            ));
+        }
+        // Renders only when the deployment holds a device of the owner's own
+        // account, so an absent sample says "approved replies go out as
+        // @sensor: and no bridge relays them" (issue #123) rather than "the
+        // device is in no rooms yet". Two facts a zero would merge.
+        if self.owner_device_present.load(Ordering::Relaxed) {
+            out.push_str("# HELP twalk_sensor_owner_device_rooms Portal rooms the owner's own device has joined, and whose conversations a bridge will therefore relay its replies to.\n");
+            out.push_str("# TYPE twalk_sensor_owner_device_rooms gauge\n");
+            out.push_str(&format!(
+                "twalk_sensor_owner_device_rooms {}\n",
+                self.owner_device_rooms.load(Ordering::Relaxed)
             ));
         }
         // The sync age only exists once a sync has completed; a Sensor that
@@ -391,6 +527,85 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn the_owner_device_gauge_tells_no_device_from_a_device_in_no_rooms() {
+        // The absent sample is the point: on a deployment with no device of the
+        // owner's account every approved reply is posted by @sensor: and
+        // relayed by nobody (issue #123), and a zero would read as "the device
+        // is in no rooms yet".
+        let metrics = Metrics::new();
+        assert!(
+            !metrics
+                .render(1_000)
+                .contains("twalk_sensor_owner_device_rooms"),
+            "a deployment with no owner device renders no room gauge"
+        );
+        metrics.record_owner_device_present();
+        assert!(
+            metrics
+                .render(1_000)
+                .contains("twalk_sensor_owner_device_rooms 0\n"),
+            "a configured device that has joined nothing yet still renders"
+        );
+    }
+
+    #[test]
+    fn every_reach_and_every_invite_outcome_exists_at_zero() {
+        // A Sensor that has posted no reply must be distinguishable from one
+        // whose replies all reached the contact, and one that refused every
+        // invitation from one nobody ever invited.
+        let body = Metrics::new().render(1_000);
+        for reach in ["contact", "nobody"] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_sensor_outbound_replies_total{{reach=\"{reach}\"}} 0\n"
+                )),
+                "{body}"
+            );
+        }
+        for outcome in ["joined", "refused", "failed"] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_sensor_owner_device_invites_total{{outcome=\"{outcome}\"}} 0\n"
+                )),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reply_that_reached_nobody_is_counted_apart() {
+        let metrics = Metrics::new();
+        metrics.record_reply_reach(crate::owner_device::Reach::Contact);
+        metrics.record_reply_reach(crate::owner_device::Reach::Nobody);
+        metrics.record_reply_reach(crate::owner_device::Reach::Nobody);
+        assert_eq!(
+            metrics.record_owner_device_invite(OwnerDeviceInvite::Refused),
+            1
+        );
+        assert_eq!(
+            metrics.record_owner_device_invite(OwnerDeviceInvite::Refused),
+            2,
+            "the running total is what the log line names"
+        );
+        metrics.record_owner_device_present();
+        metrics.record_owner_device_rooms(33);
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_sensor_outbound_replies_total{reach=\"contact\"} 1\n")
+                && body.contains("twalk_sensor_outbound_replies_total{reach=\"nobody\"} 2\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_owner_device_invites_total{outcome=\"refused\"} 2\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_sensor_owner_device_rooms 33\n"),
+            "{body}"
+        );
     }
 
     #[test]
