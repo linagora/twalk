@@ -108,7 +108,7 @@
 //! homeserver, and a kind computed here could contradict, in the same answer,
 //! the bridge's own id it was computed from.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -245,13 +245,26 @@ pub struct Portal {
 /// replacements resolves to its last room, each hop bounded so a cycle a
 /// misbehaving server produced cannot spin this for ever.
 ///
-/// A successor that is not among the readable rooms — the bridge bot is not in
-/// it — is still answered: a row built from the tombstone, carrying the
-/// predecessor's name, network and bridge, marked `unreadable` and `moved`
-/// when the Sensor was in the predecessor. The alternative, folding the
-/// conversation into nothing, is exactly the silence this state exists to
-/// break.
-pub fn fold_tombstones(portals: Vec<Portal>) -> Vec<Portal> {
+/// A successor that is not among the readable portals is still answered: a
+/// row built from the tombstone, carrying the predecessor's name, network and
+/// bridge, marked `unreadable` and `moved` when the Sensor was in the
+/// predecessor. The alternative, folding the conversation into nothing, is
+/// exactly the silence this state exists to break. `bot_rooms` — every room
+/// any bridge bot is in — tells the two reasons apart, because they are two
+/// situations: a successor the bot is in but has not marked as a portal yet
+/// (the ordinary window right after a migration, since a room upgrade copies
+/// no custom state) and a successor the bot is not in at all.
+///
+/// Two dead rooms may name one successor; the fold is deterministic (rooms
+/// are walked in id order) and the Sensor's presence in *any* of them is what
+/// carries — a decision on record in one of two predecessors is still a
+/// decision on record.
+pub fn fold_tombstones(portals: Vec<Portal>, bot_rooms: &BTreeSet<String>) -> Vec<Portal> {
+    /// How many replacements one conversation may have been through before
+    /// the walk stops where it stands. Far above anything real — a room is
+    /// upgraded when a room version changes, a handful of times in a
+    /// homeserver's life — and small enough that a cycle a misbehaving server
+    /// produced costs a few iterations rather than a hung register.
     const MAX_HOPS: usize = 32;
     let by_room: BTreeMap<String, Portal> = portals
         .into_iter()
@@ -319,12 +332,17 @@ pub fn fold_tombstones(portals: Vec<Portal>) -> Vec<Portal> {
                     members: predecessor.members,
                     observation: Observation::Absent,
                     moved_from: None,
-                    unreadable: Some(
-                        "this conversation's room was replaced, and the bridge bot is not in the \
-                     new room, so it cannot be read: what is known about it is what the old \
-                     room's tombstone says"
-                            .to_owned(),
-                    ),
+                    unreadable: Some(if bot_rooms.contains(&successor_id) {
+                        "this conversation's room was replaced, and the bridge is in the new \
+                         room but has not marked it as a portal yet: the name and count are \
+                         the old room's until it does"
+                            .to_owned()
+                    } else {
+                        "this conversation's room was replaced, and the bridge bot is not in \
+                         the new room, so it cannot be read: what is known about it is what \
+                         the old room's tombstone says"
+                            .to_owned()
+                    }),
                     replaced_by: None,
                 },
             });
@@ -415,6 +433,9 @@ impl Register {
 struct BridgeRooms {
     portals: Vec<Portal>,
     joined_rooms: u64,
+    /// Every room the bot is in, portal or not — what tells a successor the
+    /// bridge has not marked yet from one it is not in at all.
+    room_ids: Vec<String>,
 }
 
 /// What happened to one room of an observation request.
@@ -594,6 +615,7 @@ impl Portals {
     /// last read whoever made it.
     pub async fn read(&self) -> Register {
         let mut register = Register::default();
+        let mut bot_rooms: BTreeSet<String> = BTreeSet::new();
         for bridge in &self.bridges {
             let Some(as_token) = &bridge.as_token else {
                 register.bridges.push(BridgeReading {
@@ -642,6 +664,7 @@ impl Portals {
                     }
                     let mut portals = reading.portals;
                     register.portals.append(&mut portals);
+                    bot_rooms.extend(reading.room_ids);
                     register.bridges.push(BridgeReading {
                         bridge_id: bridge.bridge_id.clone(),
                         network: bridge.network.clone(),
@@ -667,7 +690,7 @@ impl Portals {
                 }
             }
         }
-        register.portals = fold_tombstones(register.portals);
+        register.portals = fold_tombstones(register.portals, &bot_rooms);
         // A stable order, so two reads of an unchanged deployment are the
         // same list: by bridge as configured, then by name, then by room id.
         let order: BTreeMap<&str, usize> = self
@@ -695,7 +718,7 @@ impl Portals {
     ) -> Result<BridgeRooms, String> {
         let rooms = self.joined_rooms(as_token, Self::asking_as(bridge)).await?;
         let joined_rooms = rooms.len() as u64;
-        let portals: Vec<Option<Portal>> = futures::stream::iter(rooms.into_iter())
+        let portals: Vec<Option<Portal>> = futures::stream::iter(rooms.clone())
             .map(|room_id| async move {
                 match self.portal_of(bridge, as_token, &room_id).await {
                     Ok(portal) => portal,
@@ -718,6 +741,7 @@ impl Portals {
         Ok(BridgeRooms {
             portals: portals.into_iter().flatten().collect(),
             joined_rooms,
+            room_ids: rooms,
         })
     }
 
@@ -994,7 +1018,10 @@ impl Portals {
         asking_as: Option<&str>,
         portal: &Portal,
     ) -> OutcomeStatus {
-        if portal.observation != Observation::Absent {
+        // `moved` is a room the Sensor is not in either: ticking a moved
+        // conversation is the user re-deciding it at its successor, which is
+        // exactly the decision ADR 0029 returns to them above the threshold.
+        if portal.observation.sensor_is_in_the_room() {
             return OutcomeStatus::AlreadyObserved;
         }
         let url = match self.url(
@@ -1062,7 +1089,7 @@ impl Portals {
         asking_as: Option<&str>,
         portal: &Portal,
     ) -> OutcomeStatus {
-        if portal.observation == Observation::Absent {
+        if !portal.observation.sensor_is_in_the_room() {
             return OutcomeStatus::NotObserved;
         }
         let url = match self.url(
@@ -1166,6 +1193,10 @@ pub async fn refresh_until_shutdown(portals: Arc<Portals>, interval_seconds: u64
                 .unwrap_or_default(),
             absent = summary
                 .get(&Observation::Absent)
+                .copied()
+                .unwrap_or_default(),
+            moved = summary
+                .get(&Observation::Moved)
                 .copied()
                 .unwrap_or_default(),
             unreadable_bridges = register.unreadable_bridges(),
@@ -1284,13 +1315,16 @@ mod tests {
         // ADR 0029: the dead room is not a row; the successor says where it
         // came from; and the Sensor's presence in the dead room is what makes
         // the successor `moved` rather than `absent`.
-        let rows = fold_tombstones(vec![
-            replaced("!old:x", Observation::Observing, "!new:x"),
-            successor_of("!new:x", Observation::Absent, "!old:x"),
-            replaced("!ignored-old:x", Observation::Absent, "!ignored-new:x"),
-            successor_of("!ignored-new:x", Observation::Absent, "!ignored-old:x"),
-            portal("!untouched:x", Observation::Observing),
-        ]);
+        let rows = fold_tombstones(
+            vec![
+                replaced("!old:x", Observation::Observing, "!new:x"),
+                successor_of("!new:x", Observation::Absent, "!old:x"),
+                replaced("!ignored-old:x", Observation::Absent, "!ignored-new:x"),
+                successor_of("!ignored-new:x", Observation::Absent, "!ignored-old:x"),
+                portal("!untouched:x", Observation::Observing),
+            ],
+            &BTreeSet::new(),
+        );
         assert_eq!(rows.len(), 3, "{rows:?}");
         assert_eq!(row(&rows, "!new:x").observation, Observation::Moved);
         assert_eq!(row(&rows, "!new:x").moved_from.as_deref(), Some("!old:x"));
@@ -1310,10 +1344,13 @@ mod tests {
     fn a_successor_the_sensor_already_joined_is_observing_not_moved() {
         // The register invited the Sensor to the successor (#255) and it
         // joined: the live room knows better than the dead one.
-        let rows = fold_tombstones(vec![
-            replaced("!old:x", Observation::Observing, "!new:x"),
-            successor_of("!new:x", Observation::Observing, "!old:x"),
-        ]);
+        let rows = fold_tombstones(
+            vec![
+                replaced("!old:x", Observation::Observing, "!new:x"),
+                successor_of("!new:x", Observation::Observing, "!old:x"),
+            ],
+            &BTreeSet::new(),
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].observation, Observation::Observing);
         assert_eq!(rows[0].moved_from.as_deref(), Some("!old:x"));
@@ -1321,11 +1358,14 @@ mod tests {
 
     #[test]
     fn a_chain_ends_at_its_last_room_and_names_the_immediate_predecessor() {
-        let rows = fold_tombstones(vec![
-            replaced("!a:x", Observation::Observing, "!b:x"),
-            replaced("!b:x", Observation::Absent, "!c:x"),
-            successor_of("!c:x", Observation::Absent, "!b:x"),
-        ]);
+        let rows = fold_tombstones(
+            vec![
+                replaced("!a:x", Observation::Observing, "!b:x"),
+                replaced("!b:x", Observation::Absent, "!c:x"),
+                successor_of("!c:x", Observation::Absent, "!b:x"),
+            ],
+            &BTreeSet::new(),
+        );
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].room_id, "!c:x");
         assert_eq!(
@@ -1340,7 +1380,7 @@ mod tests {
     fn a_successor_in_the_dark_is_a_row_built_from_the_tombstone() {
         let mut dead = replaced("!old:x", Observation::Observing, "!dark:x");
         dead.name = Some("Maria".to_owned());
-        let rows = fold_tombstones(vec![dead]);
+        let rows = fold_tombstones(vec![dead], &BTreeSet::new());
         assert_eq!(rows.len(), 1, "{rows:?}");
         let named = &rows[0];
         assert_eq!(named.room_id, "!dark:x");
@@ -1362,11 +1402,57 @@ mod tests {
     }
 
     #[test]
+    fn a_successor_the_bot_is_in_but_has_not_marked_yet_says_so() {
+        // The ordinary window right after a migration: a room upgrade copies
+        // no custom state, so the successor has no m.bridge until the bridge
+        // writes one. The bot is in it; the reason must say that, not "not in
+        // the room".
+        let rows = fold_tombstones(
+            vec![replaced("!old:x", Observation::Observing, "!new:x")],
+            &BTreeSet::from(["!new:x".to_owned()]),
+        );
+        let why = rows[0].unreadable.as_deref().expect("unreadable");
+        assert!(why.contains("has not marked it as a portal yet"), "{why}");
+        let rows = fold_tombstones(
+            vec![replaced("!old:x", Observation::Observing, "!dark:x")],
+            &BTreeSet::new(),
+        );
+        let why = rows[0].unreadable.as_deref().expect("unreadable");
+        assert!(why.contains("is not in the new room"), "{why}");
+    }
+
+    #[test]
+    fn two_dead_rooms_naming_one_successor_fold_deterministically_and_keep_the_decision() {
+        let rows = fold_tombstones(
+            vec![
+                replaced("!b-old:x", Observation::Absent, "!new:x"),
+                replaced("!a-old:x", Observation::Invited, "!new:x"),
+                successor_of("!new:x", Observation::Absent, "!a-old:x"),
+            ],
+            &BTreeSet::new(),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].observation,
+            Observation::Moved,
+            "an invitation is a decision on record"
+        );
+        assert_eq!(
+            rows[0].moved_from.as_deref(),
+            Some("!a-old:x"),
+            "the successor's own predecessor wins"
+        );
+    }
+
+    #[test]
     fn a_cycle_a_misbehaving_server_produced_does_not_spin_for_ever() {
-        let rows = fold_tombstones(vec![
-            replaced("!a:x", Observation::Observing, "!b:x"),
-            replaced("!b:x", Observation::Absent, "!a:x"),
-        ]);
+        let rows = fold_tombstones(
+            vec![
+                replaced("!a:x", Observation::Observing, "!b:x"),
+                replaced("!b:x", Observation::Absent, "!a:x"),
+            ],
+            &BTreeSet::new(),
+        );
         assert!(!rows.is_empty(), "the chain ends somewhere: {rows:?}");
     }
 

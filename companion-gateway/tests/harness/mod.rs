@@ -551,11 +551,7 @@ impl MatrixUser {
     /// quietly act as the wrong account — the mistake #171 was.
     fn url(&self, path: &str) -> String {
         match &self.masquerade {
-            Some(user_id) => format!(
-                "{}{path}?user_id={}",
-                synapse_url(),
-                path_segment(user_id)
-            ),
+            Some(user_id) => format!("{}{path}?user_id={}", synapse_url(), path_segment(user_id)),
             None => format!("{}{path}", synapse_url()),
         }
     }
@@ -773,8 +769,16 @@ impl MatrixUser {
     /// knows not to count the bot as somebody in the conversation.
     pub async fn make_portal(&self, name: &str, protocol_id: &str) -> Result<String> {
         let room_id = self.create_room(name).await?;
+        self.mark_as_portal(&room_id, protocol_id, name).await?;
+        Ok(room_id)
+    }
+
+    /// Writes the `m.bridge` marker into a room that already exists — what a
+    /// bridge does to a successor it re-creates after a migration, since the
+    /// homeserver's room upgrade copies no custom state.
+    pub async fn mark_as_portal(&self, room_id: &str, protocol_id: &str, name: &str) -> Result<()> {
         self.send_state_event(
-            &room_id,
+            room_id,
             "m.bridge",
             &format!("test.twalk/{protocol_id}"),
             serde_json::json!({
@@ -783,8 +787,7 @@ impl MatrixUser {
                 "channel": { "id": format!("{protocol_id}-{name}"), "displayname": name },
             }),
         )
-        .await?;
-        Ok(room_id)
+        .await
     }
 
     /// Replaces a room with a new one, as the homeserver does it: the old
@@ -1038,8 +1041,7 @@ pub fn gateway_env_with_bridges_and_consent(
 /// #206). Long enough to pass the Gateway's own minimum, which is the point:
 /// a suite that used a short one would be testing a Gateway that refuses to
 /// start.
-pub const HERMES_ANSWER_SECRET: &str =
-    "a-throwaway-hermes-answer-secret-for-the-test-stack-only";
+pub const HERMES_ANSWER_SECRET: &str = "a-throwaway-hermes-answer-secret-for-the-test-stack-only";
 
 /// The domain the Gateway names a published suggestion's persona under
 /// (`GATEWAY_HERMES_DOMAIN`), and therefore the authority of every `source`

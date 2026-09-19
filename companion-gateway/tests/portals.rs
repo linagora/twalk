@@ -83,6 +83,22 @@ impl Running {
         Ok(room_id)
     }
 
+    /// A bridge migrating a conversation to a new room, as mautrix does on a
+    /// Telegram supergroup migration and as a homeserver does on a room
+    /// upgrade: the old room is tombstoned, the successor re-marked as a
+    /// portal, and the conversation's members pulled back in. Nobody invites
+    /// the Sensor anywhere — that is the register's decision (#255), not the
+    /// bridge's.
+    async fn replace_portal(&self, old: &str, name: &str) -> Result<String> {
+        let new = self.bridge_bot.upgrade_room(old).await?;
+        self.bridge_bot
+            .mark_as_portal(&new, "whatsapp", name)
+            .await?;
+        self.bridge_bot.invite(&new, &self.owner.user_id).await?;
+        self.owner.join(&new).await?;
+        Ok(new)
+    }
+
     async fn register(&self) -> Result<Value> {
         let body: Value = reqwest::Client::new()
             .get(format!("{}/api/portals", self.base))
@@ -285,30 +301,6 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
     Ok(())
 }
 
-/// The register acts as the **bridge bot**, and a register that did not could
-/// not see a single conversation (ticket #171).
-///
-/// This is the test #105's suite could not contain. That suite handed the
-/// register an ordinary account's access token, and for an ordinary token
-/// Synapse ignores `?user_id=` — `_get_appservice_user` returns early when the
-/// token belongs to no appservice, and normal token auth then acts as the
-/// token's own user. So the parameter that decides which account reads a
-/// bridge's rooms was unobservable in both directions: the register never sent
-/// it, every assertion passed, and the reference deployment reported
-/// `observing=0 invited=0 absent=0 unreadable_bridges=0` against 32 portal
-/// rooms.
-///
-/// Here the credential is the stack's real appservice token, whose
-/// `sender_localpart` is an account in no rooms, and the bot is a different
-/// account named in configuration. Two facts are asserted, and the first fails
-/// on the code as it was:
-///
-/// 1. the conversations are found — which they are only if `?user_id=` names
-///    the bot;
-/// 2. and the bridge configured **without** a bot named — #171's own
-///    configuration — answers `readable: true` with `joined_rooms: 0` and
-///    names the account it asked as, so that a zero can be told apart from the
-///    truthful zero of a deployment whose bridges have built nothing yet.
 /// Issue #253 / ADR 0029: a conversation outlives its room, but the room stays
 /// the key — and the tombstone chain is what reconciles the two.
 ///
@@ -322,14 +314,14 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
 /// never in moves too, and stays what it was: `absent`.
 #[tokio::test]
 async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() -> Result<()> {
-    let it = Running::start("portals-moved").await?;
+    let running = Running::start("portals-moved").await?;
 
-    let chosen = it.build_portal("Maria (moves)").await?;
-    let ignored = it.build_portal("Chess club (moves)").await?;
+    let chosen = running.build_portal("Maria (moves)").await?;
+    let ignored = running.build_portal("Chess club (moves)").await?;
     // The user chose one of them: the Gateway invites the Sensor, which joins.
-    it.set_observation(&[&chosen], true).await?;
-    it.sensor.join(&chosen).await?;
-    let before = it.register().await?;
+    running.set_observation(&[&chosen], true).await?;
+    running.sensor.join(&chosen).await?;
+    let before = running.register().await?;
     assert_eq!(
         observation_of(&before, &chosen).as_deref(),
         Some("observing")
@@ -341,18 +333,11 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
     // back in; nobody invites the Sensor anywhere.
     let mut successors = Vec::new();
     for old in [&chosen, &ignored] {
-        let new = it.bridge_bot.upgrade_room(old).await?;
-        let (state_key, marker) = harness_marker(&it.bridge_bot.user_id, "whatsapp", "moved");
-        it.bridge_bot
-            .send_state_event(&new, "m.bridge", &state_key, marker)
-            .await?;
-        it.bridge_bot.invite(&new, &it.owner.user_id).await?;
-        it.owner.join(&new).await?;
-        successors.push(new);
+        successors.push(running.replace_portal(old, "moved").await?);
     }
     let (chosen_successor, ignored_successor) = (&successors[0], &successors[1]);
 
-    let register = it.register().await?;
+    let register = running.register().await?;
     // Once, at the successor: two rows would make "the Sensor is outside 30
     // of your 32 conversations" false by one at every migration.
     assert!(
@@ -381,7 +366,7 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
     assert_eq!(register["summary"]["moved"], json!(1), "{register}");
 
     // The fact is a number too.
-    let metrics = it.metrics().await?;
+    let metrics = running.metrics().await?;
     assert_eq!(
         sample(
             &metrics,
@@ -394,12 +379,29 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
     // The homeserver agrees about where the Sensor is, which is the only
     // thing the register was allowed to derive `moved` from.
     assert_eq!(
-        it.sensor_membership(&chosen).await?.as_deref(),
+        running.sensor_membership(&chosen).await?.as_deref(),
         Some("join")
     );
-    assert_eq!(it.sensor_membership(chosen_successor).await?, None);
+    assert_eq!(running.sensor_membership(chosen_successor).await?, None);
 
-    it.stop().await;
+    // And a moved conversation can be decided again where it now lives: a
+    // tick on the successor invites the Sensor there, rather than answering
+    // "already observed" about a room it is not in.
+    let answer = running.set_observation(&[chosen_successor], true).await?;
+    assert_eq!(
+        outcome_for(&answer, chosen_successor).as_deref(),
+        Some("invited"),
+        "{answer}"
+    );
+    assert_eq!(
+        running
+            .sensor_membership(chosen_successor)
+            .await?
+            .as_deref(),
+        Some("invite")
+    );
+
+    running.stop().await;
     Ok(())
 }
 
@@ -409,27 +411,21 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
 #[tokio::test]
 async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_named() -> Result<()>
 {
-    let it = Running::start("portals-moved-chain").await?;
+    let running = Running::start("portals-moved-chain").await?;
 
-    let first = it.build_portal("Maria (chain)").await?;
-    it.set_observation(&[&first], true).await?;
-    it.sensor.join(&first).await?;
+    let first = running.build_portal("Maria (chain)").await?;
+    running.set_observation(&[&first], true).await?;
+    running.sensor.join(&first).await?;
 
     // First → second → third, each re-marked as the bridge would.
-    let second = it.bridge_bot.upgrade_room(&first).await?;
-    let (key, marker) = harness_marker(&it.bridge_bot.user_id, "whatsapp", "chain-2");
-    it.bridge_bot
-        .send_state_event(&second, "m.bridge", &key, marker)
+    let second = running.bridge_bot.upgrade_room(&first).await?;
+    running
+        .bridge_bot
+        .mark_as_portal(&second, "whatsapp", "chain-2")
         .await?;
-    let third = it.bridge_bot.upgrade_room(&second).await?;
-    let (key, marker) = harness_marker(&it.bridge_bot.user_id, "whatsapp", "chain-3");
-    it.bridge_bot
-        .send_state_event(&third, "m.bridge", &key, marker)
-        .await?;
-    it.bridge_bot.invite(&third, &it.owner.user_id).await?;
-    it.owner.join(&third).await?;
+    let third = running.replace_portal(&second, "chain-3").await?;
 
-    let register = it.register().await?;
+    let register = running.register().await?;
     assert!(portal(&register, &first).is_none(), "{register}");
     assert!(portal(&register, &second).is_none(), "{register}");
     let last = portal(&register, &third).context("the last room is the row")?;
@@ -441,15 +437,15 @@ async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_
     );
     assert_eq!(register["summary"]["moved"], json!(1), "{register}");
 
-    // A successor the bot is not in: the bot leaves it, so the register can
-    // read the tombstone but not the room it points at.
-    let dark = it.build_portal("Maria (dark)").await?;
-    it.set_observation(&[&dark], true).await?;
-    it.sensor.join(&dark).await?;
-    let beyond = it.bridge_bot.upgrade_room(&dark).await?;
-    it.bridge_bot.leave(&beyond).await?;
+    // A successor the bridge bot is not in: the bot leaves it, so the register
+    // can read the tombstone but not the room it points at.
+    let dark = running.build_portal("Maria (dark)").await?;
+    running.set_observation(&[&dark], true).await?;
+    running.sensor.join(&dark).await?;
+    let beyond = running.bridge_bot.upgrade_room(&dark).await?;
+    running.bridge_bot.leave(&beyond).await?;
 
-    let register = it.register().await?;
+    let register = running.register().await?;
     assert!(portal(&register, &dark).is_none(), "{register}");
     let named = portal(&register, &beyond).context("the unreadable successor is still a row")?;
     assert_eq!(named["observation"], json!("moved"), "{named}");
@@ -461,23 +457,34 @@ async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_
         "the row says the successor could not be read: {named}"
     );
 
-    it.stop().await;
+    running.stop().await;
     Ok(())
 }
 
-/// The `m.bridge` marker a bridge writes into a successor it re-creates:
-/// the same shape `make_portal` writes, for a room that already exists.
-fn harness_marker(bot: &str, protocol_id: &str, name: &str) -> (String, Value) {
-    (
-        format!("test.twalk/{protocol_id}"),
-        json!({
-            "bridgebot": bot,
-            "protocol": { "id": protocol_id, "displayname": protocol_id },
-            "channel": { "id": format!("{protocol_id}-{name}"), "displayname": name },
-        }),
-    )
-}
-
+/// The register acts as the **bridge bot**, and a register that did not could
+/// not see a single conversation (ticket #171).
+///
+/// This is the test #105's suite could not contain. That suite handed the
+/// register an ordinary account's access token, and for an ordinary token
+/// Synapse ignores `?user_id=` — `_get_appservice_user` returns early when the
+/// token belongs to no appservice, and normal token auth then acts as the
+/// token's own user. So the parameter that decides which account reads a
+/// bridge's rooms was unobservable in both directions: the register never sent
+/// it, every assertion passed, and the reference deployment reported
+/// `observing=0 invited=0 absent=0 unreadable_bridges=0` against 32 portal
+/// rooms.
+///
+/// Here the credential is the stack's real appservice token, whose
+/// `sender_localpart` is an account in no rooms, and the bot is a different
+/// account named in configuration. Two facts are asserted, and the first fails
+/// on the code as it was:
+///
+/// 1. the conversations are found — which they are only if `?user_id=` names
+///    the bot;
+/// 2. and the bridge configured **without** a bot named — #171's own
+///    configuration — answers `readable: true` with `joined_rooms: 0` and
+///    names the account it asked as, so that a zero can be told apart from the
+///    truthful zero of a deployment whose bridges have built nothing yet.
 #[tokio::test]
 async fn the_register_reads_as_the_bridge_bot_and_not_as_the_appservices_sender() -> Result<()> {
     let running = Running::start("portals-asks-as-the-bot").await?;
