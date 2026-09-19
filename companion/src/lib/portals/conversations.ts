@@ -163,6 +163,13 @@ export interface ConversationRow {
 	readonly members: number;
 	readonly observation: Observation;
 	/**
+	 * The room this conversation lived in before it was replaced, or `null`
+	 * for one that never moved (ADR 0029, #256). The screen says so on the
+	 * row — a deployment that changed rooms under the user must be able to
+	 * say it — and never lists the dead room: the register already folded it.
+	 */
+	readonly movedFrom: string | null;
+	/**
 	 * The very summary [`asRoom`] built, carried rather than rebuilt.
 	 *
 	 * So that labelling and searching are two calls against **one** adapted
@@ -229,7 +236,8 @@ export function rows(portals: readonly Portal[]): ConversationRow[] {
 				kind: conversationKind(portal.network_conversation_id),
 				networkConversationId: portal.network_conversation_id,
 				members: portal.members,
-				observation: portal.observation
+				observation: portal.observation,
+				movedFrom: portal.moved_from
 			};
 		})
 		.sort(byLabel);

@@ -36,11 +36,13 @@ import { INBOUND_SUBJECT, watchBus } from '../dashboard/bus';
 import { startSensor, type RunningSensor } from '../consent/sensor';
 import {
 	buildPortal,
+	forgetPreviousRuns,
 	ghostSays,
 	groupId,
 	NO_STACK,
 	personId,
 	portalStack,
+	replacePortal,
 	sensorMembership,
 	type BuiltPortal,
 	type PortalStack
@@ -78,6 +80,9 @@ test.describe('the conversation chooser', () => {
 		// same thirty seconds, which is a race rather than a limit.
 		test.setTimeout(180_000);
 		const real = stack as PortalStack;
+		// A tenth run says what the first did (#211): what the bot still holds
+		// from earlier runs is left before this run builds its own account.
+		await forgetPreviousRuns(real);
 		const { ghost, crowd } = real.portals;
 		account = {
 			maria: await buildPortal(real, 'maria (WA)', personId('33612345678'), [ghost]),
@@ -311,6 +316,70 @@ test.describe('the conversation chooser', () => {
 			// stack's bus into the next project's assertions.
 			await sensor?.stop();
 		}
+	});
+
+	test('a conversation that moved appears once, followed or asking again', async ({
+		page,
+		context,
+		request
+	}) => {
+		// Two upgrades take a while each: members re-join one by one.
+		test.setTimeout(180_000);
+		const real = stack as PortalStack;
+		const token = await signIn(context, request, 'portals-moved');
+		const observe = async (roomIds: string[]) => {
+			const answer = await request.post('/api/portals/observation', {
+				headers: { cookie: `twalk_device=${token}` },
+				data: { rooms: roomIds, observed: true }
+			});
+			expect(answer.ok(), await answer.text()).toBeTruthy();
+		};
+
+		// Two conversations the user observes: the Gateway invites the Sensor,
+		// which is enough for the register to hold the decision on record —
+		// an invitation is the Sensor in the room, as far as ADR 0029 goes.
+		const bookClub = await buildPortal(real, 'Club de lecture', groupId(21), [real.portals.ghost]);
+		const choir = await buildPortal(real, 'Chorale', groupId(22), [real.portals.ghost]);
+		await observe([bookClub.roomId, choir.roomId]);
+		expect(await sensorMembership(real, bookClub.roomId)).toBe('invite');
+
+		// Both rooms are replaced. The book club stays small: under the served
+		// threshold, the register follows the decision (#255). The choir's new
+		// room holds a crowd: the decision returns to the user.
+		const smallSuccessor = await replacePortal(real, bookClub, [real.portals.ghost]);
+		const crowdSuccessor = await replacePortal(real, choir, real.portals.crowd);
+
+		await page.goto('/networks/conversations?network=whatsapp');
+		await expect(page.getByTestId('screen-conversations')).toHaveAttribute('data-loaded', 'yes');
+
+		// Once, at the successor: the dead rooms are nowhere on screen.
+		await expect(page.getByTestId(`conversation-${bookClub.roomId}`)).toHaveCount(0);
+		await expect(page.getByTestId(`conversation-${choir.roomId}`)).toHaveCount(0);
+
+		// Followed: invited where the conversation now lives, the move visible
+		// on the row so the user can see their deployment changed rooms.
+		await expect(page.getByTestId(`conversation-${smallSuccessor.roomId}`)).toBeVisible();
+		await expect(page.getByTestId(`moved-${smallSuccessor.roomId}`)).toBeVisible();
+		await expect(page.getByTestId(`conversation-${smallSuccessor.roomId}`)).toBeChecked();
+		expect(await sensorMembership(real, smallSuccessor.roomId)).toBe('invite');
+
+		// Returned: the crowd's row says it moved and is not observed, and it
+		// is unticked — the decision is the user's again.
+		const returned = page.getByTestId(`conversation-${crowdSuccessor.roomId}`);
+		await expect(returned).toBeVisible();
+		await expect(returned).not.toBeChecked();
+		await expect(page.getByTestId(`moved-badge-${crowdSuccessor.roomId}`)).toBeVisible();
+		await expect(page.getByTestId(`moved-${crowdSuccessor.roomId}`)).toBeVisible();
+		expect(await sensorMembership(real, crowdSuccessor.roomId)).toBeNull();
+
+		// Ticking it again lands in the crowds section, which says where it
+		// comes from and how many they are now.
+		await returned.check();
+		const acknowledge = page.getByTestId('conversations-acknowledge');
+		await expect(acknowledge).toBeVisible();
+		await expect(acknowledge).toContainText('Chorale');
+		await expect(acknowledge).toContainText(`${real.portals.crowd.length} people`);
+		await expect(acknowledge).toContainText('moved to a larger room');
 	});
 
 	test('a bridge with no portal register is reported, never rendered as silence', async ({

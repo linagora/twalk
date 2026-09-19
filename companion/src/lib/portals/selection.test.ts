@@ -69,7 +69,7 @@ describe('consequence', () => {
 		);
 		expect(one.starting).toBe(1);
 		expect(one.people).toBe(246);
-		expect(one.largest).toEqual({ label: 'Échecs en Yvelines', members: 246 });
+		expect(one.largest).toEqual({ label: 'Échecs en Yvelines', members: 246, moved: false });
 	});
 
 	it('names the largest rather than letting a total hide it', () => {
@@ -129,6 +129,23 @@ describe('consequence', () => {
 		);
 		expect(wholeAccount.people).toBe(253);
 		expect(filteredOnly.people).toBe(7);
+	});
+
+	it('says which crowd is a conversation that moved here', () => {
+		// #256: "a crowd you never ticked" and "a conversation you observe,
+		// grown past the threshold" are two different things to acknowledge.
+		const account = ACCOUNT.map((row) =>
+			row.label === 'Échecs en Yvelines' ? { ...row, movedFrom: '!old:twalk.localhost' } : row
+		);
+		const cost = consequence(
+			account,
+			new Set([id('Échecs en Yvelines'), id('Communauté CKCP')]),
+			CROWD_THRESHOLD
+		);
+		expect(cost.crowds.map((crowd) => [crowd.label, crowd.moved])).toEqual([
+			['Échecs en Yvelines', true],
+			['Communauté CKCP', false]
+		]);
 	});
 
 	it('draws the crowds from the served threshold, not from a number of its own', () => {

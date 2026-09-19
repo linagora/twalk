@@ -388,6 +388,13 @@
 									<!-- What tells two rows with one name apart. -->
 									· <span class="mono">{row.networkConversationId}</span>
 								{/if}
+								{#if row.movedFrom !== null}
+									<!-- The conversation's room was replaced (ADR 0029). Said on
+									     the row, whatever else is true of it: a deployment that
+									     changed rooms under the user must be able to say so. The
+									     old room is not listed — the register folded it. -->
+									· <span data-testid={`moved-${row.roomId}`}>{$t('conversations.moved')}</span>
+								{/if}
 							</span>
 						</span>
 						{#if row.observation === 'observing'}
@@ -399,6 +406,19 @@
 							<span class="badge badge--attention" title={$t('conversations.invitedWhy')}>
 								<Icon name="warning" size="dense" />
 								{$t('conversations.invited')}
+							</span>
+						{:else if row.observation === 'moved'}
+							<!-- A decision on record that stopped holding: the user observed
+							     this conversation, it moved to a room whose audience crosses
+							     the threshold, and the register returned it here (#255).
+							     Ticking it again is the decision. -->
+							<span
+								class="badge badge--attention"
+								title={$t('conversations.movedWhy')}
+								data-testid={`moved-badge-${row.roomId}`}
+							>
+								<Icon name="warning" size="dense" />
+								{$t('conversations.movedBadge')}
 							</span>
 						{/if}
 					</label>
@@ -558,7 +578,12 @@
 					</p>
 					<ul class="crowds">
 						{#each cost.crowds as crowd (crowd.label)}
-							<li>{crowd.label} — {$t('conversations.members', { count: crowd.members })}</li>
+							<li>
+								{crowd.label} — {$t('conversations.members', { count: crowd.members })}
+								{#if crowd.moved}
+									· {$t('conversations.crowdMoved')}
+								{/if}
+							</li>
 						{/each}
 					</ul>
 					<p>{$t('conversations.acknowledge.body')}</p>

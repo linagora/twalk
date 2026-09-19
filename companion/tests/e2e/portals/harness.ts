@@ -159,6 +159,76 @@ export async function buildPortal(
 	return { roomId, name, conversationId, members: members.length };
 }
 
+/**
+ * A conversation's room replaced by a new one, as a homeserver upgrade does it
+ * and as a bridge does on a Telegram supergroup migration: the old room is
+ * tombstoned, the successor re-marked as a portal — an upgrade copies no
+ * custom state — and the conversation's members pulled back in. Nobody
+ * invites the Sensor anywhere: that is the register's decision (#255), not the
+ * bridge's. Returns the successor.
+ */
+export async function replacePortal(
+	stack: PortalStack,
+	portal: BuiltPortal,
+	members: readonly string[]
+): Promise<BuiltPortal> {
+	const bot = stack.portals.bot;
+	const upgraded = (await asUser(
+		stack,
+		bot,
+		'POST',
+		`/_matrix/client/v3/rooms/${encodeURIComponent(portal.roomId)}/upgrade`,
+		{ new_version: '10' }
+	)) as { replacement_room: string };
+	const roomId = upgraded.replacement_room;
+	const room = encodeURIComponent(roomId);
+	await asUser(
+		stack,
+		bot,
+		'PUT',
+		`/_matrix/client/v3/rooms/${room}/state/m.bridge/${encodeURIComponent('test.twalk/whatsapp')}`,
+		{
+			bridgebot: bot,
+			protocol: { id: 'whatsapp', displayname: 'WhatsApp' },
+			channel: { id: portal.conversationId, displayname: portal.name }
+		}
+	);
+	await Promise.all(
+		members.map(async (member) => {
+			await asUser(stack, bot, 'POST', `/_matrix/client/v3/rooms/${room}/invite`, {
+				user_id: member
+			});
+			await asUser(stack, member, 'POST', `/_matrix/client/v3/rooms/${room}/join`, {});
+		})
+	);
+	return { roomId, name: portal.name, conversationId: portal.conversationId, members: members.length };
+}
+
+/**
+ * Leaves every room the portal bot is in, so the register reads only what this
+ * run builds (#211). The bot is this suite's own appservice account and nothing
+ * else ever puts it in a room, so "which rooms are the previous runs'?" has an
+ * answer that does not depend on a name the fixture reuses on purpose: all of
+ * them. Left and forgotten, so the homeserver stops listing them for the bot
+ * — the register is a live read of the bot's own rooms, and a room the bot is
+ * not in is not a conversation it can offer.
+ */
+export async function forgetPreviousRuns(stack: PortalStack): Promise<number> {
+	const bot = stack.portals.bot;
+	const joined = (await asUser(stack, bot, 'GET', '/_matrix/client/v3/joined_rooms')) as {
+		joined_rooms?: string[];
+	};
+	const rooms = joined.joined_rooms ?? [];
+	await Promise.all(
+		rooms.map(async (roomId) => {
+			const room = encodeURIComponent(roomId);
+			await asUser(stack, bot, 'POST', `/_matrix/client/v3/rooms/${room}/leave`, {});
+			await asUser(stack, bot, 'POST', `/_matrix/client/v3/rooms/${room}/forget`, {});
+		})
+	);
+	return rooms.length;
+}
+
 /** Where the Sensor stands in a room, as the homeserver answers — not the Gateway. */
 export async function sensorMembership(
 	stack: PortalStack,
