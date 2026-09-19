@@ -23,6 +23,21 @@ construction:
    operator's suggestion policy gives it (:mod:`twalk_sdk.policy`) — so no
    persona can publish a draft that stays approvable for ever.
 
+Two things the loop refuses to do, both learned from a real model on a real
+deployment (issues #162 and #164):
+
+* it does not **retry an answer that will not change**. A trigger whose
+  completion failed is redelivered — an endpoint is briefly away often
+  enough to be worth it — unless the failure is one the same request would
+  reproduce, and a model that spent its whole budget reasoning is exactly
+  that (:mod:`twalk_sdk.completion`). Those are terminated on the first try,
+  with a message naming the remedy, because every attempt is billed;
+* it does not leave the **language fallback** implicit. ADR 0016 has a
+  persona answer in the incoming message's language and fall back to the
+  user's own only when it cannot tell, so the preference is configuration
+  (``TWALK_USER_LANGUAGE``) — and when it is unset the log says what will
+  happen instead of the gap passing unmentioned.
+
 The persona talks to the bus itself (ADR 0008): the Hermes runtime starts
 it as a process and supervises it, but never sits between it and the bus.
 
@@ -65,6 +80,7 @@ from nats.aio.msg import Msg
 from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
+from .completion import LlmError
 from .config import Config
 from .consent import GRANTED, consent_of, is_granted
 from .envelope import (
@@ -76,6 +92,7 @@ from .envelope import (
     thinking_event,
     utc_now,
 )
+from .language import USER_LANGUAGE_VARIABLE
 from .llm import Llm
 from .trigger import MESSAGE_RECEIVED_TYPE, InboundMessage, triggers_a_persona, type_of
 
@@ -90,6 +107,11 @@ FETCH_TIMEOUT_SECONDS = 2.0
 #: here is usually the LLM endpoint being briefly unavailable, so the retry
 #: is worth having — and bounded by ``MAX_DELIVER``, because a message that
 #: fails deterministically must not be retried forever.
+#:
+#: Retried, though, only when a retry could answer differently. A model that
+#: spent its budget reasoning will spend it again, and every attempt is
+#: billed: that outcome is terminated on the first try rather than retried
+#: (:attr:`twalk_sdk.completion.LlmError.transient`, issue #162).
 RETRY_DELAY_SECONDS = 5
 MAX_DELIVER = 3
 
@@ -159,7 +181,7 @@ class Persona:
 
         logger.info(
             "persona starting persona_id=%s source=%s nats=%s stream=%s subject_prefix=%s "
-            "consumer=%s model=%s",
+            "consumer=%s model=%s user_language=%s",
             self.config.persona_id,
             self.config.source,
             self.config.nats_url,
@@ -167,7 +189,9 @@ class Persona:
             self.config.subject_prefix,
             self.config.durable_name,
             self.config.llm.model,
+            self.config.user_language or "unset",
         )
+        self._say_what_the_language_fallback_will_do()
         connection = await self._connect()
         jetstream = connection.jetstream()
         await self._await_stream(jetstream)
@@ -185,6 +209,37 @@ class Persona:
     def stop(self) -> None:
         """Asks the loop to finish the event in flight and return."""
         self._stop.set()
+
+    def _say_what_the_language_fallback_will_do(self) -> None:
+        """States, at startup, what happens on a message whose language
+        cannot be told (ADR 0016, issue #164).
+
+        A persona does not refuse to start over this — it answers every
+        unambiguous message correctly without a preference — but it does not
+        choose silently either. With the preference, the fallback is named;
+        without it, so is its absence, in the log an operator reads, naming
+        the variable and where it is set.
+        """
+        if self.config.user_language:
+            logger.info(
+                "an ambiguous message will be answered in the user's own "
+                "language (%s=%s); one whose language the model can tell is "
+                "answered in that language, which is the decision ADR 0016 "
+                "makes",
+                USER_LANGUAGE_VARIABLE,
+                self.config.user_language,
+            )
+            return
+        logger.warning(
+            "no user language is configured (%s is unset), so ADR 0016's "
+            "fallback has no value: a message too short to tell — a greeting, "
+            "a single word, an emoji, a link — will be answered in whatever "
+            "language the model picks, which on the reference deployment was "
+            "English for a French speaker. The user sets it in the Companion's "
+            "settings; the Hermes runtime injects it as HERMES_USER_LANGUAGE. "
+            "Every message whose language is readable is unaffected.",
+            USER_LANGUAGE_VARIABLE,
+        )
 
     def _install_signal_handlers(self) -> None:
         """SIGTERM is how a container is asked to stop; an event in flight
@@ -371,9 +426,38 @@ class Persona:
                         FIRST_ATTEMPT,
                     )
         except Exception as error:
-            # The event is not acked: JetStream redelivers it after a delay
-            # (bounded by MAX_DELIVER), because the usual cause is an
-            # endpoint that was briefly away.
+            if isinstance(error, LlmError) and not error.transient:
+                # An answer that will not change. Retry is for a failure that
+                # might pass; this one is the model behaving exactly as
+                # configured, and every attempt is billed (issue #162). So the
+                # delivery is *terminated* — the trigger is not left pending
+                # and redelivered, and it is not left apparently unprocessed
+                # either: this line is the whole account of it.
+                logger.error(
+                    "no suggestion for event_id=%s network=%s and no retry: %s",
+                    trigger.event_id,
+                    trigger.network,
+                    error,
+                )
+                await message.term()
+                return
+            # Otherwise the event is not acked: JetStream redelivers it after
+            # a delay, because the usual cause is an endpoint that was briefly
+            # away. The redeliveries are bounded by the consumer's limit, and
+            # the last one says so rather than letting the trigger disappear.
+            deliveries = _deliveries(message)
+            if deliveries is not None and deliveries >= MAX_DELIVER:
+                logger.error(
+                    "no suggestion for event_id=%s network=%s after %s "
+                    "deliveries, which is this consumer's limit: the bus will "
+                    "not offer it again. %s",
+                    trigger.event_id,
+                    trigger.network,
+                    deliveries,
+                    error,
+                )
+                await message.term()
+                return
             logger.error(
                 "failed to process event_id=%s, retrying in %ss: %s",
                 trigger.event_id,
@@ -409,5 +493,14 @@ class Persona:
 def _sequence(message: Msg) -> Optional[int]:
     try:
         return message.metadata.sequence.stream
+    except Exception:  # pragma: no cover - metadata is absent off JetStream
+        return None
+
+
+def _deliveries(message: Msg) -> Optional[int]:
+    """How many times the bus has handed this message over, this one
+    included. ``None`` off JetStream, where there is no such count."""
+    try:
+        return message.metadata.num_delivered
     except Exception:  # pragma: no cover - metadata is absent off JetStream
         return None

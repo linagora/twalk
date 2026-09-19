@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from .language import USER_LANGUAGE_VARIABLE
+from .language import parse as parse_language
 from .policy import DEFAULT_SUGGESTION_TTL_SECONDS, SuggestionPolicy
 
 #: ``data.persona_id`` and the last segment of ``source`` in every
@@ -105,6 +107,17 @@ class Config:
     subject_prefix: str = DEFAULT_SUBJECT_PREFIX
     consumer_name: Optional[str] = None
     log_level: str = "info"
+    #: The user's own language, one of :data:`twalk_sdk.language.LANGUAGES`,
+    #: or ``None`` when they have set none. It is what a persona falls back
+    #: to when it cannot tell what language the message it answers was
+    #: written in, and **nothing else** (ADR 0016): it never governs a
+    #: suggestion whose language the persona *can* tell.
+    #:
+    #: ``None`` is a supported state and not a default: the persona writes in
+    #: the incoming message's language, the model chooses on an ambiguous
+    #: one, and :mod:`twalk_sdk.persona` says so in the log at startup rather
+    #: than letting the gap pass unmentioned (issue #164).
+    user_language: Optional[str] = None
     #: How the persona's suggestions age. A deployment default rather than
     #: a persona's own judgement: the window the user gets to approve in is
     #: the operator's to set, while what to suggest is the persona's.
@@ -210,6 +223,14 @@ class Config:
                 f"approvable, in whole seconds (got {ttl_raw!r}): {error}"
             ) from error
 
+        try:
+            user_language = parse_language(env.get(USER_LANGUAGE_VARIABLE))
+        except ValueError as error:
+            # A tag outside the five is a misconfiguration, not a preference:
+            # the Gateway refuses one on the way in, so a persona that saw it
+            # was configured by hand and has no name for it (ADR 0016).
+            raise ConfigError(str(error)) from error
+
         api_key = (env.get("TWALK_LLM_API_KEY") or "").strip() or None
         return cls(
             persona_id=required("TWALK_PERSONA_ID"),
@@ -227,4 +248,5 @@ class Config:
             consumer_name=(env.get("TWALK_PERSONA_CONSUMER") or "").strip() or None,
             log_level=optional("TWALK_LOG_LEVEL", "info"),
             suggestion=suggestion,
+            user_language=user_language,
         )

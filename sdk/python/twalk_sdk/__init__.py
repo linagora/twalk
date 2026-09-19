@@ -17,7 +17,13 @@ of that which is the same for every persona:
   (:mod:`twalk_sdk.policy`);
 * the durable subscription, the publishing and the process loop
   (:mod:`twalk_sdk.persona`);
-* an OpenAI-compatible chat-completions client (:mod:`twalk_sdk.llm`).
+* an OpenAI-compatible chat-completions client (:mod:`twalk_sdk.llm`), and
+  what its answers mean (:mod:`twalk_sdk.completion`) — including the one a
+  reasoning model gives when it spends its whole budget thinking, which is
+  named, is not retried, and names its own remedy (issue #162);
+* the user's own language (:mod:`twalk_sdk.language`), which a persona falls
+  back to only when it cannot tell what language it is answering
+  (ADR 0016).
 
 The reference persona built on it is ``hermes/personas/assistant/``.
 
@@ -35,6 +41,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from .completion import (
+    LlmAnsweredNothing,
+    LlmError,
+    LlmRefused,
+    LlmSpentItsBudgetThinking,
+    LlmUnreachable,
+    completion_text,
+)
 from .config import Config, ConfigError, LlmConfig
 from .consent import GRANTED, consent_of, is_granted
 from .envelope import (
@@ -49,6 +63,12 @@ from .envelope import (
     suggest_id,
     thinking_event,
     thinking_id,
+)
+from .language import (
+    LANGUAGE_NAMES,
+    LANGUAGES,
+    USER_LANGUAGE_VARIABLE,
+    language_name,
 )
 from .policy import DEFAULT_SUGGESTION_TTL_SECONDS, SuggestionPolicy
 from .trigger import (
@@ -71,9 +91,15 @@ __all__ = [
     "FIRST_ATTEMPT",
     "GRANTED",
     "InboundMessage",
+    "LANGUAGES",
+    "LANGUAGE_NAMES",
     "Llm",
+    "LlmAnsweredNothing",
     "LlmConfig",
     "LlmError",
+    "LlmRefused",
+    "LlmSpentItsBudgetThinking",
+    "LlmUnreachable",
     "MESSAGE_RECEIVED_TYPE",
     "OUTBOUND_MESSAGE_SENT_TYPE",
     "OUTBOUND_REACTION_ADDED_TYPE",
@@ -84,9 +110,12 @@ __all__ = [
     "SuggestionPolicy",
     "THINKING_TYPE",
     "Trigger",
+    "USER_LANGUAGE_VARIABLE",
+    "completion_text",
     "consent_of",
     "deterministic_id",
     "is_granted",
+    "language_name",
     "nats_headers",
     "suggest_event",
     "suggest_id",
@@ -102,7 +131,6 @@ __all__ = [
 #: from. Resolved on first attribute access (PEP 562).
 _LAZY = {
     "Llm": "twalk_sdk.llm",
-    "LlmError": "twalk_sdk.llm",
     "system": "twalk_sdk.llm",
     "user": "twalk_sdk.llm",
     "Context": "twalk_sdk.persona",

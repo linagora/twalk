@@ -38,7 +38,7 @@ use twalk_test_harness::{
     StubLlm, StubRequest,
 };
 
-use super::{HERMES_DOMAIN, INBOUND_TYPE, LLM_API_KEY, LLM_PARAMS, MODEL};
+use super::{HERMES_DOMAIN, INBOUND_TYPE, LLM_API_KEY, LLM_PARAMS, MODEL, USER_LANGUAGE};
 
 pub const CONSENT_CHANGED_TYPE: &str = "fr.linagora.twalk.consent.state.changed.v1";
 
@@ -260,6 +260,11 @@ impl RuntimeRun {
             ("HERMES_LLM_MODEL".to_owned(), MODEL.to_owned()),
             ("HERMES_LLM_API_KEY".to_owned(), LLM_API_KEY.to_owned()),
             ("HERMES_LLM_PARAMS".to_owned(), LLM_PARAMS.to_owned()),
+            // The user's own language (ADR 0016, ticket #164): held by the
+            // Gateway, injected by the runtime like the model configuration.
+            // Set here so that the injection is asserted on the environment
+            // the runtime really built, rather than only in its unit tests.
+            ("HERMES_USER_LANGUAGE".to_owned(), USER_LANGUAGE.to_owned()),
             ("HERMES_LOG_LEVEL".to_owned(), "info".to_owned()),
             ("HERMES_PERSONA_LOG_LEVEL".to_owned(), "debug".to_owned()),
             // A test must not sit through a production backoff, and the

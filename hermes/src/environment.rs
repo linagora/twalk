@@ -42,6 +42,12 @@ pub const LLM_API_KEY: &str = "TWALK_LLM_API_KEY";
 pub const LLM_PARAMS: &str = "TWALK_LLM_PARAMS";
 pub const LLM_TIMEOUT_SECONDS: &str = "TWALK_LLM_TIMEOUT_SECONDS";
 pub const SUGGESTION_TTL_SECONDS: &str = "TWALK_SUGGESTION_TTL_SECONDS";
+/// The user's own language, for the one thing it governs in a persona: the
+/// fallback when the language of the message being answered cannot be told
+/// (ADR 0016, ticket #164). It travels this channel and not the persona's own
+/// HTTP, for the reason the whole module exists — the token that would read
+/// it from the Gateway also opens the consent snapshot.
+pub const USER_LANGUAGE: &str = "TWALK_USER_LANGUAGE";
 pub const LOG_LEVEL: &str = "TWALK_LOG_LEVEL";
 
 /// Everything one persona process is started with, in a stable order.
@@ -81,6 +87,13 @@ pub fn persona_environment(config: &Config, persona: &PersonaSpec) -> Vec<(Strin
     if let Some(ttl) = &config.suggestion_ttl_seconds {
         environment.push((SUGGESTION_TTL_SECONDS.to_owned(), ttl.clone()));
     }
+    // The user's own language (ADR 0016). Unset is left out entirely rather
+    // than passed as an empty string, like the optional ones above: a persona
+    // handed no preference writes in each message's own language and says so,
+    // which is a different state from one handed a preference it cannot read.
+    if let Some(language) = &config.user_language {
+        environment.push((USER_LANGUAGE.to_owned(), language.clone()));
+    }
     environment
 }
 
@@ -118,6 +131,7 @@ mod tests {
             log_level: "info".to_owned(),
             persona_log_level: "debug".to_owned(),
             suggestion_ttl_seconds: Some("900".to_owned()),
+            user_language: Some("fr".to_owned()),
             restart: RestartPolicy::default(),
             shutdown_grace: Duration::from_secs(10),
             env_passthrough: vec!["PATH".to_owned()],
@@ -186,6 +200,22 @@ mod tests {
         );
     }
 
+    /// ADR 0016's fallback needs a value to fall back to, and this channel is
+    /// where it arrives: the preference is the user's, held by the Gateway,
+    /// injected here beside the model configuration and the suggestion window
+    /// (ticket #164). A persona cannot read a browser's language and must not
+    /// hold the token that would let it ask the Gateway.
+    #[test]
+    fn a_persona_is_handed_the_language_to_fall_back_to() {
+        let environment = persona_environment(&config(), &persona());
+        assert_eq!(
+            value(&environment, USER_LANGUAGE),
+            Some("fr"),
+            "the user's own language reaches the persona, which is the half of \
+             ADR 0016 that did not exist"
+        );
+    }
+
     /// The assertion ADR 0015 exists for, made the only way it can be made:
     /// the environment is a closed list, so anything the runtime holds and
     /// a persona does not need is absent by construction.
@@ -204,6 +234,7 @@ mod tests {
             LLM_PARAMS,
             LLM_TIMEOUT_SECONDS,
             SUGGESTION_TTL_SECONDS,
+            USER_LANGUAGE,
             LOG_LEVEL,
         ];
         for (name, _) in persona_environment(&config(), &persona()) {
@@ -227,12 +258,14 @@ mod tests {
         config.llm.params = None;
         config.llm.timeout_seconds = None;
         config.suggestion_ttl_seconds = None;
+        config.user_language = None;
         let environment = persona_environment(&config, &persona());
         for absent in [
             LLM_API_KEY,
             LLM_PARAMS,
             LLM_TIMEOUT_SECONDS,
             SUGGESTION_TTL_SECONDS,
+            USER_LANGUAGE,
         ] {
             assert_eq!(
                 value(&environment, absent),

@@ -46,6 +46,11 @@ services:
       # suite can test the default and a chosen window through the same
       # file.
       TWALK_SUGGESTION_TTL_SECONDS: ${TWALK_TEST_PERSONA_SUGGESTION_TTL:-}
+      # The user's own language, which a persona falls back to only when it
+      # cannot tell what language it is answering (ADR 0016). Empty means the
+      # user has set no preference — the state ADR 0016's fallback did not
+      # exist in before #164, and one the suite still has to be able to run.
+      TWALK_USER_LANGUAGE: ${TWALK_TEST_PERSONA_USER_LANGUAGE:-}
       TWALK_LOG_LEVEL: debug
     # A crash must be visible to the test, not papered over by a restart:
     # supervision is the runtime's job (H4), and asserting it needs a

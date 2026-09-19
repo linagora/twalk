@@ -30,10 +30,12 @@ If you do not want that trade on this machine, leave `HERMES_PERSONAS` empty: th
 HERMES_LLM_BASE_URL=http://127.0.0.1:4000/v1    # e.g. a LiteLLM proxy on this host
 HERMES_LLM_MODEL=qwen                           # a model that proxy serves, by its name there
 HERMES_LLM_API_KEY_FILE=/etc/twalk/llm.key      # a path on this host; it wins over the variable
-HERMES_LLM_PARAMS={"max_tokens":2000}           # a reasoning model needs the room to think
+HERMES_USER_LANGUAGE=fr                         # the language an ambiguous message falls back to
 ```
 
-That last line is not decoration. The `assistant` persona asks for 300 tokens; a model that reasons before it answers spends all of them thinking, and the answer comes back with no content at all — the persona then logs `the chat-completions answer carries no content` and retries for ever, with the endpoint answering `200` every time. It is the first thing to check when a persona is running, reaching the model, and producing nothing — and that the persona cannot tell you which of the two happened is [#162](https://github.com/linagora/twalk/issues/162).
+That last line is the user's preference rather than yours, and it does one thing: a persona writes its suggestion in the language of the message it is answering, and falls back to this only when it cannot tell — a single word, a greeting, an emoji, a link ([ADR 0016](../docs/architecture/adr/0016-a-suggested-reply-follows-the-conversations-language.md), [#164](https://github.com/linagora/twalk/issues/164)). Leave it empty and nothing breaks: every readable message is still answered in its own language, and each persona says in its log what will happen to the rest.
+
+There is no `HERMES_LLM_PARAMS` line here any more, and that is the point of [#162](https://github.com/linagora/twalk/issues/162). A model that reasons before it answers charges its thinking to the completion budget, and the `assistant` persona used to ask for 300 tokens: the model spent all of them thinking and answered `HTTP 200` with `finish_reason: "length"` and no content, which looked exactly like a model that had said nothing — and was retried. The persona now asks for 2000, that answer is now its own named outcome, and it is refused rather than retried, with a log line saying the budget went to reasoning and where a larger one is set. If your model needs more room than 2000 tokens, `HERMES_LLM_PARAMS={"max_tokens":4000}` is where you say so; it is merged last and wins.
 
 The cost of that namespace is that Hermes and every persona can reach anything bound to this host's loopback. If your endpoint is reachable at a routable address instead, ADR 0023's last section says what to change to put Hermes back on the stack's own network.
 
