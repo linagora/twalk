@@ -123,6 +123,56 @@ export class StubBridge {
 		await this.post('release-refusal', { status, errcode });
 	}
 
+	/**
+	 * Answers the **held blocking step** with another step: a question the
+	 * network interjects mid-scan.
+	 *
+	 * The Telegram shape #175 is about — a QR login by an account with
+	 * two-factor authentication on — and the one that used to leave an empty
+	 * seventeen-rem box on screen.
+	 */
+	async releaseStep(step: {
+		step_id: string;
+		type?: 'user_input' | 'cookies';
+		instructions?: string;
+		url?: string;
+		fields: readonly Record<string, unknown>[];
+	}) {
+		await this.post('release-step', step);
+	}
+
+	/**
+	 * Queues the step the **next submit** is answered with, instead of the
+	 * completion.
+	 *
+	 * The control the renderer's central case needs. Until it existed, every
+	 * submit that was not blocking or cookies completed the login, so a login of
+	 * more than one question — a phone number then a code then a two-factor
+	 * password, which is Telegram's own `phone` flow — could not be expressed by
+	 * any fixture (ADR 0030).
+	 */
+	async queueNextStep(step: {
+		step_id: string;
+		type?: 'user_input' | 'cookies';
+		instructions?: string;
+		url?: string;
+		fields: readonly Record<string, unknown>[];
+	}) {
+		await this.post('queue-next-step', step);
+	}
+
+	/**
+	 * Makes the next submit answer `400` with a network's own errcode — and drop
+	 * the login process with it, as the capture says a real bridge does.
+	 *
+	 * That last part is the whole point: there is no retrying a refused step, so
+	 * a screen that left the form up would be inviting a resubmit that can only
+	 * `404`.
+	 */
+	async refuseNextSubmit(errcode = 'FI.MAU.STUB.VALUE_REFUSED', status = 400) {
+		await this.post('refuse-next-submit', { status, errcode });
+	}
+
 	/** A bridge restart: every process forgotten, every held request 404ed. */
 	async restart() {
 		await this.post('restart', {});
@@ -158,7 +208,13 @@ export class StubBridge {
 		submits: {
 			step_id: string;
 			step_type: string;
-			body: { cookies?: Record<string, string> } | null;
+			/**
+			 * The whole relayed body: `{cookies: {…}}` for a jar, and one member
+			 * per field for an ordinary step. Loosely typed on purpose — the shape
+			 * is the bridge's own, and a spec asserting on it is asserting on what
+			 * a bridge really received.
+			 */
+			body: (Record<string, unknown> & { cookies?: Record<string, string> }) | null;
 		}[];
 		cancelled: string[];
 		/** The login ids the bridge was told to log out — the disconnect journey's proof. */

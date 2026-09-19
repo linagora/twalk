@@ -6,8 +6,8 @@
 	ban risk to disclose.
 -->
 <script lang="ts">
-	import QrLogin from '$lib/components/QrLogin.svelte';
+	import BridgeLogin from '$lib/components/login/BridgeLogin.svelte';
 	import { SIGNAL } from '$lib/networks/copy';
 </script>
 
-<QrLogin copy={SIGNAL} />
+<BridgeLogin copy={SIGNAL} />

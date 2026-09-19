@@ -1426,6 +1426,85 @@ async fn a_value_the_network_refuses_is_a_400_that_says_to_start_again() -> Resu
     Ok(())
 }
 
+/// A login of **more than one question**, which this suite could not express
+/// until #175 gave the stub a queue-the-next-step control.
+///
+/// Telegram's `phone` flow is three sequential `user_input` steps and a QR
+/// login on an account with two-factor authentication interjects a `password`
+/// one, so "the Gateway drives an arbitrary sequence" was a claim resting on a
+/// stub that completed the login on every submit. This is that claim, asserted:
+/// two answers, two steps, one login process, and the transaction id re-issued
+/// with each answer — which the stub validates exactly as a bridge does, and
+/// which is what #106 was about.
+#[tokio::test]
+async fn a_login_of_several_questions_advances_one_step_at_a_time() -> Result<()> {
+    let fixture = Fixture::start("bridges-sequence").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": PHONE_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    assert_eq!(started["step"]["step_id"], json!(PHONE_STEP), "{started}");
+
+    // The answer to the phone number is another question, not the completion.
+    const CODE_STEP: &str = "fi.mau.whatsapp.login.code";
+    fixture.stub.queue_input_step(
+        CODE_STEP,
+        json!([{ "type": "2fa_code", "id": "code", "name": "Code" }]),
+    );
+    let (status, asked) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit"),
+            Some(json!({ "step_id": PHONE_STEP, "data": { "phone_number": "+33600000000" } })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{asked}");
+    assert_eq!(asked["state"], json!("awaiting_input"), "{asked}");
+    assert_eq!(asked["step"]["step_id"], json!(CODE_STEP), "{asked}");
+    assert_eq!(asked["step"]["type"], json!("user_input"), "{asked}");
+    assert_eq!(
+        asked["step"]["payload"]["fields"][0]["type"],
+        json!("2fa_code"),
+        "the field list is the new step's, not the first one's: {asked}"
+    );
+
+    // And answering *that* one finishes the login.
+    let (status, done) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit"),
+            Some(json!({ "step_id": CODE_STEP, "data": { "code": "123456" } })),
+        )
+        .await?;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["state"], json!("complete"), "{done}");
+
+    // One login process throughout: a question is a step, not a new process.
+    assert_eq!(fixture.stub.starts().len(), 1);
+    let submits = fixture.stub.submits();
+    let answered: Vec<_> = submits
+        .iter()
+        .filter(|submit| submit.step_type == "user_input")
+        .collect();
+    assert_eq!(answered.len(), 2, "{submits:?}");
+    assert_eq!(answered[0].step_id, PHONE_STEP);
+    assert_eq!(answered[1].step_id, CODE_STEP);
+    // Both values passed through, under the ids the bridge's own fields named.
+    assert_eq!(answered[0].body["phone_number"], json!("+33600000000"));
+    assert_eq!(answered[1].body["code"], json!("123456"));
+    // The second call echoed the transaction id the *second* step carried: a
+    // bridge re-issues one with every answer, and the stub refuses a stale one.
+    assert_ne!(answered[0].txn_id, answered[1].txn_id, "{submits:?}");
+
+    fixture.stop().await;
+    Ok(())
+}
+
 /// The network refusing another linked device, enforced by the bridge rather
 /// than canned: bridgev2's `max_logins`. The one refusal in the stub that no
 /// capture confirms — the reference deployment sets no cap — so it is

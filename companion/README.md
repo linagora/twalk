@@ -46,11 +46,12 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `src/lib/session/` | Signing this browser in to the Gateway with a Matrix OpenID token (ADR 0011). |
 | `src/lib/tabs/` | The Web Lock that elects one tab. |
 | `src/lib/capabilities/` | The capability gate: `report.ts` decides (pure), `probe.ts` measures (browser-only). |
-| `src/lib/networks/` | Screen 3 and the network flows: the card catalogue, the polled login read as a screen state (`login-view.ts`, pure), the polling itself (`login-session.ts`), each QR screen's words (`copy.ts`) and the SMS path's cookie parsing (`cookies.ts`). |
+| `src/lib/networks/` | Screen 3 and the network flows: the card catalogue, the polled login read as a screen state (`login-view.ts`, pure), the polling itself (`login-session.ts`), what a step's fields become on screen and what the answer to them looks like on the wire (`step-fields.ts`, pure), this project's own words for a bridge's step and the drift that makes them stale (`step-copy.ts`, pure), the seam between the flow and the panels (`login-panels.ts`), each login screen's words (`copy.ts`) and the cookie parsing a jar is read with (`cookies.ts`). |
 | `src/lib/matrix/` | The user's own homeserver: discovery, sign-in (`login.ts`) and the room listing screen 3d selects from (`rooms.ts`). |
 | `src/lib/personas/` | Screen 4: the `assistant` card and its two locked abilities (`catalogue.ts`), the perimeter an activation is scoped to (`scope.ts`, pure) and the consent decision it writes (`activation.ts`). |
 | `src/lib/dashboard/` | Screen 5's judgements (`model.ts`, pure: the rows, the health roll-up, the feed and what may not be in it), the four reads it needs (`load.ts`) and its relative times (`format.ts`). |
 | `src/lib/portals/` | Which conversations a network is observed on (#143): the kind each one is, from the network's own identifier (`conversations.ts`, pure); what a tick costs in people, and when that has to be acknowledged (`selection.ts`, pure); and the two calls that read and write it (`register.ts`). |
+| `src/lib/components/login/` | One bridge login: `BridgeLogin.svelte` owns the flow, one panel per kind of step draws it, and `panels.ts` is the typed table that makes a kind nobody draws a compile error (ADR 0030). |
 | `src/lib/qr/` | The QR encoder. The only module that imports an encoding library. |
 | `src/lib/version/` | The version handshake against the Gateway's `/health`, and the reload it forces. |
 | `src/lib/i18n/` | French and English, ICU patterns, `<locale>.json` per the wireframes. |
@@ -753,6 +754,43 @@ read as and how many rooms that account is in (#171), and the screen renders a
 bridge with no token and a bridge whose asker is in no rooms as the two
 different things they are.
 
+### One component owns a login's flow, and a table owns its steps
+
+A bridge decides how many steps a login has, what each asks for and in what
+order, and it does not know in advance: a two-factor password step appears only
+for an account that has one. So `BridgeLogin.svelte` owns the **flow** — which
+bridge, the disclosure, the polling, the refusals about the deployment, the
+explicit abandon — and delegates each kind of step to a panel of its own
+(ADR 0030).
+
+The dispatch is a table typed over the view's own discriminant
+(`login-panels.ts`, `components/login/panels.ts`), so a kind added to `LoginView`
+and drawn by nobody is a **missing property**, which is a compile error. That
+sentence used to be a comment in `login-view.ts` claiming a guarantee the
+language does not give: a Svelte `{#if}` chain receives no exhaustiveness check,
+the QR screen had no `{:else}`, and an `input`, `cookies` or `emoji` step drew an
+empty seventeen-rem box that the session polled once a second for ever — which
+is where a Telegram QR login by an account with two-factor authentication ended
+up. One panel is the residual, for the case no type can remove: a Gateway newer
+than this app, answering a step type that did not exist when the app was built.
+
+Inside a step the renderer is driven by the **field type** (`step-fields.ts`).
+Ordinary fields get one control each; fields the bridge groups by type — a jar of
+`cookie` fields sharing a domain — are collected through one control and its
+parser, because people arrive at that step holding a whole `Cookie` header, not
+seven values to transcribe. A type this build does not know, **or one the bridge
+did not declare**, refuses that field and names it on screen: the alternative,
+and the previous behaviour, was a password field whose type a bridge had omitted
+drawn as a plain text input.
+
+A step is **named, never counted** — a bridge cannot say how many remain — and a
+**refused answer is its own outcome** rather than a banner over the step. The
+bridge destroys the login process when it declines a value, so the step is
+removed instead of inviting a resubmit that could only `404`, and the screen
+carries the Gateway's own sentence, which names the network's code. Before this,
+`invalid_request` was absent from the trouble table and a network refusing a
+phone number was reported as *"something went wrong on your Twalk server"*.
+
 ### Screen 3c asks the user to copy cookies, and says why
 
 Google switched off the QR sign-in for third-party Google Messages clients in
@@ -770,6 +808,16 @@ to this device's hardware key, so a copied cookie works nowhere else).
 `Cookie:` header, a JSON object, a cookie-extension export — and names the
 cookies that are missing rather than saying "invalid". The paste is cleared
 before the request goes out and is written to no browser store.
+
+Since ADR 0030 the screen is the shared one and the cookie step is drawn by the
+same field-driven panel every step goes through; what was bespoke about it was
+the **prose**, and the prose is `stepCopy` in `copy.ts`, keyed on the bridge's own
+step id and **replacing** the bridge's eleven words rather than sitting above
+them. That keying can rot — a bridge that renames a step takes its explanation
+with it — so the panel declares the shape it was written against and says so
+loudly, falling back to the bridge's own words, when the step stops matching. A
+cookie step nobody wrote about says that too: a credential handover explained
+only by its bridge is named as such rather than drawn quietly.
 
 ## What is not here yet
 

@@ -49,6 +49,17 @@
 //! queued, so a test never has to win a race against the Gateway's own
 //! request arriving.
 //!
+//! # A sequence of steps
+//!
+//! A submitted step used to answer the completion, always, which meant this
+//! stub could not serve two `user_input` steps in a row — so a
+//! password-then-code sequence, a step re-issued after a refusal and a field
+//! type nobody can draw had no coverage and no fixture able to express them
+//! (ADR 0030). [`StubBridge::queue_next_step`] and
+//! [`StubBridge::queue_input_step`] queue what the next submit is answered
+//! with, in order, and the completion is what happens once the queue is
+//! empty.
+//!
 //! The stub runs inside the test process — the control surface is method
 //! calls on [`StubBridge`], not a second HTTP API — and it serves on a port
 //! the kernel picked, so parallel tests and parallel worktrees never collide.
@@ -107,6 +118,11 @@ pub enum Release {
     /// does — a new `txn_id`. This is what a bridge answers every ~20 seconds
     /// while nobody has scanned yet.
     RefreshedQr { data: String },
+    /// Another **step**: a blocking step answered with a question rather than
+    /// a code. That is the shape a QR login takes when the account has
+    /// two-factor authentication on, and the body is the test's own for the
+    /// reason [`StubBridge::queue_next_step`]'s is.
+    Step { body: Value },
     /// The network accepted the login.
     Complete { login_id: String },
     /// A refusal, with mautrix's own error document.
@@ -174,6 +190,9 @@ struct Inner {
     misshape_whoami: VecDeque<Value>,
     /// Canned refusals for the next submitted (non-blocking) step calls.
     refuse_step: VecDeque<(u16, String)>,
+    /// Steps a test has queued for the next submits, in order — what makes a
+    /// login of more than one question expressible at all (ADR 0030).
+    next_steps: VecDeque<Value>,
     /// Processes the test has had the stub cancel from its own side.
     cancelled: Vec<String>,
     logged_out: Vec<String>,
@@ -271,6 +290,8 @@ impl StubBridge {
             let mut inner = self.state.inner.lock().expect("the stub is not poisoned");
             inner.processes.clear();
             inner.releases.clear();
+            inner.next_steps.clear();
+            inner.refuse_step.clear();
             inner.held
         };
         // One answer per held request, so nothing is left waiting on a
@@ -287,6 +308,13 @@ impl StubBridge {
         self.queue(Release::RefreshedQr {
             data: data.to_owned(),
         });
+    }
+
+    /// Answers the held blocking step with another **step**, which is what a
+    /// bridge does when the network interjects a question mid-scan — a QR login
+    /// by an account with two-factor authentication on.
+    pub fn release_step(&self, body: Value) {
+        self.queue(Release::Step { body });
     }
 
     /// Answers the held blocking step with the completion, as a bridge does
@@ -363,6 +391,40 @@ impl StubBridge {
             .expect("the stub is not poisoned")
             .misshape_whoami
             .push_back(body);
+    }
+
+    /// Makes the next submit answer with another **step** instead of the
+    /// completion, so a login of several questions can be driven.
+    ///
+    /// The document is the caller's, for the same reason
+    /// [`Self::answer_next_start_with`]'s is: a shape no capture covers
+    /// belongs in the test that needs it, where it is visible, rather than in
+    /// this file where it would read as a bridge's own. The process id and a
+    /// fresh transaction id are substituted here, because those are what a
+    /// live bridge invents per call — and the transaction id matters: a
+    /// bridge re-issues one with every answer and then validates it (#106).
+    /// [`Self::queue_input_step`] is the shorthand for the ordinary case.
+    pub fn queue_next_step(&self, body: Value) {
+        self.state
+            .inner
+            .lock()
+            .expect("the stub is not poisoned")
+            .next_steps
+            .push_back(body);
+    }
+
+    /// Queues a `user_input` step asking for the given fields.
+    ///
+    /// Built on mautrix-whatsapp's **captured** `user_input` answer — its
+    /// envelope, its `user_input.attachments: null`, its field shape — with
+    /// the step id and the field list replaced, so a sequence a test invents
+    /// is still made of a document a bridge really sent
+    /// (`fixtures/*/login-start.json`, answer `phone`).
+    pub fn queue_input_step(&self, step_id: &str, fields: Value) {
+        let mut body = bridge_fixtures::body(self.state.bridge, "login-start", "phone");
+        body["step_id"] = json!(step_id);
+        body["user_input"]["fields"] = fields;
+        self.queue_next_step(body);
     }
 
     /// Makes the next submitted (non-blocking) step answer this refusal.
@@ -871,8 +933,8 @@ async fn step(
         return held_step(state, &process_id, &process.flow_id).await;
     }
 
-    // A non-blocking step: a canned refusal if the test asked for one, and
-    // the completion otherwise.
+    // A non-blocking step: a canned refusal if the test asked for one, then
+    // the next step if the test queued one, and the completion otherwise.
     if let Some((status, errcode)) = state
         .inner
         .lock()
@@ -880,10 +942,41 @@ async fn step(
         .refuse_step
         .pop_front()
     {
+        // A `400` **destroys the login process**: the capture is explicit that
+        // every later call against it, the step cancel and the process cancel
+        // included, answered `404 M_NOT_FOUND` (`fixtures/*/login-step.json`,
+        // answer `rejected_user_input`). So there is no retrying a refused
+        // step, and a stub that let one be retried would be inviting the
+        // Companion to offer exactly that.
+        if status == 400 {
+            state
+                .inner
+                .lock()
+                .expect("the stub is not poisoned")
+                .processes
+                .remove(&process_id);
+        }
         return mautrix_error(
             StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
             &errcode,
         );
+    }
+    if let Some(mut queued) = state
+        .inner
+        .lock()
+        .expect("the stub is not poisoned")
+        .next_steps
+        .pop_front()
+    {
+        let txn_id = {
+            let mut inner = state.inner.lock().expect("the stub is not poisoned");
+            inner.next_txn += 1;
+            format!("bls_stub-txn-{}", inner.next_txn)
+        };
+        queued["login_id"] = json!(process_id);
+        queued["txn_id"] = json!(txn_id);
+        remember(&state, &process_id, &process.flow_id, &queued, &txn_id);
+        return Json(queued).into_response();
     }
     let login_id = format!("stub-login-{process_id}");
     complete(state, &process_id, &login_id)
@@ -925,6 +1018,19 @@ async fn held_step(state: Arc<StubState>, process_id: &str, flow_id: &str) -> Re
             let answer = qr_step(state.bridge, process_id, &txn_id, &data);
             remember(&state, process_id, flow_id, &answer, &txn_id);
             Json(answer).into_response()
+        }
+        Release::Step { mut body } => {
+            // A fresh transaction id, as every answer from a real bridge
+            // carries — so a Gateway echoing the previous one is refused.
+            let txn_id = {
+                let mut inner = state.inner.lock().expect("the stub is not poisoned");
+                inner.next_txn += 1;
+                format!("bls_stub-txn-{}", inner.next_txn)
+            };
+            body["login_id"] = json!(process_id);
+            body["txn_id"] = json!(txn_id);
+            remember(&state, process_id, flow_id, &body, &txn_id);
+            Json(body).into_response()
         }
         Release::Complete { login_id } => complete(state, process_id, &login_id),
         Release::Refusal { status, errcode } => mautrix_error(

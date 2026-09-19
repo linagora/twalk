@@ -51,6 +51,18 @@ function freshBridge() {
 		processes: new Map(),
 		/** Queued answers for the held blocking step. */
 		releases: [],
+		/**
+		 * Steps a test has queued for the next submits, in order.
+		 *
+		 * Without this the stub could not serve two `user_input` steps in a
+		 * row — every submit that was not blocking or cookies completed the
+		 * login — so a password-then-code sequence, a step re-issued after a
+		 * refusal and a field type the Companion cannot draw had no fixture
+		 * able to express them (ADR 0030).
+		 */
+		nextSteps: [],
+		/** Canned refusals for the next submitted (non-blocking) steps. */
+		refuseStep: [],
 		/** Resolvers of requests currently sitting in the blocking step. */
 		waiters: [],
 		/** The logins this bridge pretends to hold. */
@@ -89,6 +101,38 @@ function qrStep(processId, data) {
 		// The raw payload. A real bridge renders no image: the browser draws it.
 		display_and_wait: { type: 'qr', data, can_cancel: true }
 	};
+}
+
+/**
+ * A step a test queued, as the document a bridge answers a submit with.
+ *
+ * The caller says what the step asks for and the stub fills in what a live
+ * bridge invents per call — the process id — so a spec never hand-writes the
+ * envelope. The payload member is named after the step type, which is
+ * bridgev2's own shape: `user_input: {fields}`, `cookies: {url, fields}`,
+ * `display_and_wait: {type, data}`.
+ */
+function queuedStep(processId, spec) {
+	const type = spec.type ?? 'user_input';
+	const step = {
+		login_process_id: processId,
+		type,
+		step_id: spec.step_id ?? `fi.mau.stub.login.${type}`,
+		instructions: spec.instructions ?? ''
+	};
+	switch (type) {
+		case 'display_and_wait':
+			step.display_and_wait = { type: spec.payload_type ?? 'qr', data: spec.data ?? '' };
+			break;
+		case 'cookies':
+			step.cookies = { url: spec.url ?? null, fields: spec.fields ?? [] };
+			break;
+		default:
+			// `attachments: null` explicitly, as mautrix-whatsapp's captured
+			// `user_input` answer carries it.
+			step.user_input = { fields: spec.fields ?? [], attachments: null };
+	}
+	return step;
 }
 
 /**
@@ -195,6 +239,13 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 		switch (release.kind) {
 			case 'qr':
 				json(response, 200, qrStep(processId, release.data));
+				return;
+			case 'step':
+				// A blocking step answered with a **question**: the shape a
+				// Telegram QR login takes when the account has two-factor
+				// authentication on, which is the case #175 found dead-ending on
+				// a blank screen.
+				json(response, 200, queuedStep(processId, release.step));
 				return;
 			case 'complete':
 				json(response, 200, completion(bridge, processId, release.loginId));
@@ -353,6 +404,24 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 				await heldStep(bridge, processId, response);
 				return;
 			}
+			const refused = bridge.refuseStep.shift();
+			if (refused !== undefined) {
+				// A `400` destroys the login process on a real bridge — the
+				// capture is explicit that every later call against it, the
+				// cancels included, answered `404` — so there is no retrying a
+				// refused step (`fixtures/mautrix-whatsapp/login-step.json`,
+				// answer `rejected_user_input`).
+				if (refused.status === 400) {
+					bridge.processes.delete(processId);
+				}
+				mautrixError(response, refused.status, refused.errcode);
+				return;
+			}
+			const queued = bridge.nextSteps.shift();
+			if (queued !== undefined) {
+				json(response, 200, queuedStep(processId, queued));
+				return;
+			}
 			// The SMS preview path: cookies are answered with the emoji pairing
 			// step, which is the same blocking step with a different payload
 			// type, and mautrix-gmessages really does answer that way.
@@ -438,6 +507,12 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 				});
 				json(response, 200, { released: 'qr' });
 				return;
+			case 'release-step':
+				// The held blocking step answers with another step instead of a
+				// code or a completion — a QR flow that interjects a question.
+				queue(bridge, { kind: 'step', step: body });
+				json(response, 200, { released: 'step', step_id: body.step_id ?? null });
+				return;
 			case 'release-complete':
 				queue(bridge, { kind: 'complete', loginId: body.login_id ?? 'stub-login-complete' });
 				json(response, 200, { released: 'complete' });
@@ -449,6 +524,24 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 					errcode: body.errcode ?? 'M_UNKNOWN'
 				});
 				json(response, 200, { released: 'refusal' });
+				return;
+			case 'queue-next-step':
+				// The control the renderer's central case needs: the next
+				// submit is answered with another step instead of the
+				// completion, so a sequence — a phone number then a code then
+				// a two-factor password — can be driven from a browser test.
+				bridge.nextSteps.push(body);
+				json(response, 200, { queued: 'step', step_id: body.step_id ?? null });
+				return;
+			case 'refuse-next-submit':
+				// What a network refusing a value looks like: the bridge
+				// answers `400` with the connector's own errcode and drops the
+				// login process with it.
+				bridge.refuseStep.push({
+					status: body.status ?? 400,
+					errcode: body.errcode ?? 'FI.MAU.STUB.VALUE_REFUSED'
+				});
+				json(response, 200, { queued: 'refusal' });
 				return;
 			case 'refuse-next-start':
 				bridge.refuseStart.push({
@@ -464,6 +557,8 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 				const held = bridge.held;
 				bridge.processes.clear();
 				bridge.releases.length = 0;
+				bridge.nextSteps.length = 0;
+				bridge.refuseStep.length = 0;
 				for (let index = 0; index < Math.max(held, 1); index += 1) {
 					queue(bridge, { kind: 'refusal', status: 404, errcode: 'M_NOT_FOUND' });
 				}

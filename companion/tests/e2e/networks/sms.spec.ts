@@ -53,18 +53,28 @@ test('a whole cookie login: the cookies, the emoji, the connection', async ({ pa
 	await expect(names).toBeVisible();
 	await expect(names).toContainText('SID');
 
-	// The two settings that otherwise make the copy useless.
+	// #57's four requirements, all of them, after the migration onto the shared
+	// renderer (ADR 0030): which cookies (above), where to get them, why a
+	// private window, and that Device Bound Session Credentials must be off.
+	// Asserted as four because losing any one of them fails that ticket, and a
+	// migration is exactly where prose goes missing without anyone noticing.
 	const screen = page.getByTestId('screen-sms');
+	await expect(
+		screen.getByRole('link', { name: /messages\.google\.com/ }).first()
+	).toBeVisible();
 	await expect(screen).toContainText(/private window|fenêtre de navigation privée/);
 	await expect(screen).toContainText(/Device Bound Session Credentials/);
+	// And the sentence that lets someone decide not to: what holding the whole
+	// jar means.
+	await expect(screen).toContainText(/act as you on Google Messages Web|agir en votre nom/);
 
 	// A paste that is not cookies is named as such, and nothing is sent.
 	await page.getByTestId('cookie-paste').fill('I could not find them');
-	await page.getByTestId('submit-cookies').click();
+	await page.getByTestId('submit-step').click();
 	await expect(page.getByRole('alert')).toContainText(/could not be read|Impossible d’y lire|Impossible d'y lire/);
 
 	await page.getByTestId('cookie-paste').fill(PASTE);
-	await page.getByTestId('submit-cookies').click();
+	await page.getByTestId('submit-step').click();
 
 	// The emoji pairing step: the same blocking step the QR screens poll, with
 	// an emoji instead of a code, and nothing to submit.
