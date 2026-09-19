@@ -151,6 +151,13 @@ pub enum Observation {
     /// The Sensor is not in the room and has not been asked to be. The
     /// default for every portal a bridge builds.
     Absent,
+    /// The conversation's room was replaced (`m.room.tombstone`) while the
+    /// Sensor was in it, and the Sensor is not in the successor (ADR 0029,
+    /// issue #253). A decision is on record about this conversation and has
+    /// silently stopped meaning anything — which is why this is its own state
+    /// and not `absent`: the same argument ADR 0024 made for `invited`,
+    /// without it the symptom is a silence nothing accounts for.
+    Moved,
 }
 
 impl Observation {
@@ -160,7 +167,14 @@ impl Observation {
             Observation::Observing => "observing",
             Observation::Invited => "invited",
             Observation::Absent => "absent",
+            Observation::Moved => "moved",
         }
+    }
+
+    /// Whether the Sensor stands in the room at all — joined or invited —
+    /// which is what a replaced room hands on to its successor.
+    fn sensor_is_in_the_room(&self) -> bool {
+        matches!(self, Observation::Observing | Observation::Invited)
     }
 }
 
@@ -201,6 +215,129 @@ pub struct Portal {
     /// the user reads from changing when they decide to observe the room.
     pub members: u64,
     pub observation: Observation,
+    /// The room this conversation lived in before it was replaced, when it
+    /// was: the immediate predecessor's id, out of the successor's own
+    /// `m.room.create` or the predecessor's `m.room.tombstone`. The dead room
+    /// is not a row of its own — a moved conversation appears **once**, here
+    /// (ADR 0029).
+    pub moved_from: Option<String>,
+    /// `Some(why)` when this row stands for a successor the register could
+    /// not read — the bridge bot is not in it — and was built from the
+    /// tombstone that names it. A tombstone that points into the dark is a
+    /// fact, and not a reason to fold the conversation into nothing.
+    pub unreadable: Option<String>,
+    /// The successor this room's `m.room.tombstone` names, when the room is
+    /// dead. Read from the homeserver, consumed by [`fold_tombstones`], never
+    /// part of the answer: the answer is keyed on the room that is alive.
+    pub replaced_by: Option<String>,
+}
+
+/// Follows every `m.room.tombstone` to the room that is alive, so that a
+/// conversation whose room was replaced appears **once**, at its successor
+/// (ADR 0029, issue #253).
+///
+/// A dead room stops being a row. What it hands on to its successor is the
+/// one fact the successor cannot know by itself: whether the Sensor was in
+/// the conversation before it moved. A successor the Sensor is not in
+/// becomes [`Observation::Moved`] when the predecessor had the Sensor —
+/// a decision on record, silently voided — and stays what it is otherwise: a
+/// conversation nobody chose moves and is still `absent`. A chain of
+/// replacements resolves to its last room, each hop bounded so a cycle a
+/// misbehaving server produced cannot spin this for ever.
+///
+/// A successor that is not among the readable rooms — the bridge bot is not in
+/// it — is still answered: a row built from the tombstone, carrying the
+/// predecessor's name, network and bridge, marked `unreadable` and `moved`
+/// when the Sensor was in the predecessor. The alternative, folding the
+/// conversation into nothing, is exactly the silence this state exists to
+/// break.
+pub fn fold_tombstones(portals: Vec<Portal>) -> Vec<Portal> {
+    const MAX_HOPS: usize = 32;
+    let by_room: BTreeMap<String, Portal> = portals
+        .into_iter()
+        .map(|portal| (portal.room_id.clone(), portal))
+        .collect();
+    let mut folded: BTreeMap<String, Portal> = BTreeMap::new();
+    for (room_id, portal) in &by_room {
+        if portal.replaced_by.is_none() {
+            // Alive: a row, unless a dead room's fold already placed one here
+            // — in which case the dead room's contribution (moved_from, and
+            // the Sensor's former presence) is kept and the live reading wins
+            // for everything the live room knows better.
+            let row = folded.remove(room_id).map_or_else(
+                || portal.clone(),
+                |from_tombstone| Portal {
+                    moved_from: from_tombstone
+                        .moved_from
+                        .or_else(|| portal.moved_from.clone()),
+                    observation: if portal.observation.sensor_is_in_the_room() {
+                        portal.observation
+                    } else {
+                        from_tombstone.observation
+                    },
+                    unreadable: None,
+                    ..portal.clone()
+                },
+            );
+            folded.insert(room_id.clone(), row);
+            continue;
+        }
+        // Dead: walk to the last room the chain names.
+        let mut predecessor = portal;
+        let mut hops = 0;
+        let successor_id = loop {
+            let Some(next) = predecessor.replaced_by.as_deref() else {
+                break predecessor.room_id.clone();
+            };
+            hops += 1;
+            if hops > MAX_HOPS {
+                warn!(
+                    room = %portal.room_id,
+                    "a tombstone chain longer than {MAX_HOPS} hops; stopping at the last readable room"
+                );
+                break predecessor.room_id.clone();
+            }
+            match by_room.get(next) {
+                Some(further) => predecessor = further,
+                // The successor is not a room the bot is in: the chain ends
+                // in the dark, at a room we know only by name.
+                None => break next.to_owned(),
+            }
+        };
+        let sensor_was_in_it = portal.observation.sensor_is_in_the_room();
+        let readable_successor = by_room.get(&successor_id);
+        let row = folded
+            .entry(successor_id.clone())
+            .or_insert_with(|| match readable_successor {
+                Some(alive) => alive.clone(),
+                None => Portal {
+                    room_id: successor_id.clone(),
+                    bridge_id: predecessor.bridge_id.clone(),
+                    network: predecessor.network.clone(),
+                    name: predecessor.name.clone(),
+                    network_conversation_id: predecessor.network_conversation_id.clone(),
+                    members: predecessor.members,
+                    observation: Observation::Absent,
+                    moved_from: None,
+                    unreadable: Some(
+                        "this conversation's room was replaced, and the bridge bot is not in the \
+                     new room, so it cannot be read: what is known about it is what the old \
+                     room's tombstone says"
+                            .to_owned(),
+                    ),
+                    replaced_by: None,
+                },
+            });
+        // The immediate predecessor of the final room is the one to name;
+        // for the room in the dark that is whoever pointed at it.
+        if row.moved_from.is_none() {
+            row.moved_from = Some(predecessor.room_id.clone());
+        }
+        if sensor_was_in_it && !row.observation.sensor_is_in_the_room() {
+            row.observation = Observation::Moved;
+        }
+    }
+    folded.into_values().collect()
 }
 
 /// Whether one configured bridge could be read, and why not when it could
@@ -253,6 +390,7 @@ impl Register {
             (Observation::Observing, 0),
             (Observation::Invited, 0),
             (Observation::Absent, 0),
+            (Observation::Moved, 0),
         ]);
         for portal in &self.portals {
             *summary.entry(portal.observation).or_insert(0) += 1;
@@ -529,6 +667,7 @@ impl Portals {
                 }
             }
         }
+        register.portals = fold_tombstones(register.portals);
         // A stable order, so two reads of an unchanged deployment are the
         // same list: by bridge as configured, then by name, then by room id.
         let order: BTreeMap<&str, usize> = self
@@ -651,6 +790,8 @@ impl Portals {
         let mut name = None;
         let mut members = 0u64;
         let mut observation = Observation::Absent;
+        let mut replaced_by = None;
+        let mut moved_from = None;
         let bot = bot_user_id(&state);
         for event in &state {
             let Some(event_type) = event.get("type").and_then(serde_json::Value::as_str) else {
@@ -681,6 +822,24 @@ impl Portals {
                             .filter(|id| !id.is_empty())
                             .map(str::to_owned)
                     });
+                }
+                // ADR 0029: the tombstone names the successor, the successor's
+                // create event names the predecessor. Both are the homeserver's
+                // own facts about the chain, read here and folded afterwards.
+                "m.room.tombstone" => {
+                    replaced_by = content
+                        .and_then(|content| content.get("replacement_room"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|room| !room.is_empty())
+                        .map(str::to_owned);
+                }
+                "m.room.create" => {
+                    moved_from = content
+                        .and_then(|content| content.get("predecessor"))
+                        .and_then(|predecessor| predecessor.get("room_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|room| !room.is_empty())
+                        .map(str::to_owned);
                 }
                 "m.room.name" => {
                     name = content
@@ -744,6 +903,9 @@ impl Portals {
             network_conversation_id: conversation,
             members,
             observation,
+            moved_from,
+            unreadable: None,
+            replaced_by,
         }))
     }
 
@@ -1091,7 +1253,121 @@ mod tests {
             network_conversation_id: None,
             members: 2,
             observation,
+            moved_from: None,
+            unreadable: None,
+            replaced_by: None,
         }
+    }
+
+    fn replaced(room_id: &str, observation: Observation, by: &str) -> Portal {
+        Portal {
+            replaced_by: Some(by.to_owned()),
+            ..portal(room_id, observation)
+        }
+    }
+
+    fn successor_of(room_id: &str, observation: Observation, predecessor: &str) -> Portal {
+        Portal {
+            moved_from: Some(predecessor.to_owned()),
+            ..portal(room_id, observation)
+        }
+    }
+
+    fn row<'a>(rows: &'a [Portal], room_id: &str) -> &'a Portal {
+        rows.iter()
+            .find(|row| row.room_id == room_id)
+            .unwrap_or_else(|| panic!("no row for {room_id} in {rows:?}"))
+    }
+
+    #[test]
+    fn a_replaced_room_is_folded_onto_its_successor_once() {
+        // ADR 0029: the dead room is not a row; the successor says where it
+        // came from; and the Sensor's presence in the dead room is what makes
+        // the successor `moved` rather than `absent`.
+        let rows = fold_tombstones(vec![
+            replaced("!old:x", Observation::Observing, "!new:x"),
+            successor_of("!new:x", Observation::Absent, "!old:x"),
+            replaced("!ignored-old:x", Observation::Absent, "!ignored-new:x"),
+            successor_of("!ignored-new:x", Observation::Absent, "!ignored-old:x"),
+            portal("!untouched:x", Observation::Observing),
+        ]);
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(row(&rows, "!new:x").observation, Observation::Moved);
+        assert_eq!(row(&rows, "!new:x").moved_from.as_deref(), Some("!old:x"));
+        assert_eq!(
+            row(&rows, "!ignored-new:x").observation,
+            Observation::Absent,
+            "a conversation nobody chose moves and stays absent"
+        );
+        assert_eq!(
+            row(&rows, "!untouched:x").observation,
+            Observation::Observing
+        );
+        assert!(rows.iter().all(|row| row.unreadable.is_none()));
+    }
+
+    #[test]
+    fn a_successor_the_sensor_already_joined_is_observing_not_moved() {
+        // The register invited the Sensor to the successor (#255) and it
+        // joined: the live room knows better than the dead one.
+        let rows = fold_tombstones(vec![
+            replaced("!old:x", Observation::Observing, "!new:x"),
+            successor_of("!new:x", Observation::Observing, "!old:x"),
+        ]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].observation, Observation::Observing);
+        assert_eq!(rows[0].moved_from.as_deref(), Some("!old:x"));
+    }
+
+    #[test]
+    fn a_chain_ends_at_its_last_room_and_names_the_immediate_predecessor() {
+        let rows = fold_tombstones(vec![
+            replaced("!a:x", Observation::Observing, "!b:x"),
+            replaced("!b:x", Observation::Absent, "!c:x"),
+            successor_of("!c:x", Observation::Absent, "!b:x"),
+        ]);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].room_id, "!c:x");
+        assert_eq!(
+            rows[0].observation,
+            Observation::Moved,
+            "the Sensor was in !a"
+        );
+        assert_eq!(rows[0].moved_from.as_deref(), Some("!b:x"));
+    }
+
+    #[test]
+    fn a_successor_in_the_dark_is_a_row_built_from_the_tombstone() {
+        let mut dead = replaced("!old:x", Observation::Observing, "!dark:x");
+        dead.name = Some("Maria".to_owned());
+        let rows = fold_tombstones(vec![dead]);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let named = &rows[0];
+        assert_eq!(named.room_id, "!dark:x");
+        assert_eq!(named.observation, Observation::Moved);
+        assert_eq!(named.moved_from.as_deref(), Some("!old:x"));
+        assert_eq!(
+            named.name.as_deref(),
+            Some("Maria"),
+            "what the old room knew is kept"
+        );
+        assert!(
+            named.unreadable.is_some(),
+            "and the row says it could not be read"
+        );
+        assert!(
+            named.replaced_by.is_none(),
+            "the row is the live end of the chain"
+        );
+    }
+
+    #[test]
+    fn a_cycle_a_misbehaving_server_produced_does_not_spin_for_ever() {
+        let rows = fold_tombstones(vec![
+            replaced("!a:x", Observation::Observing, "!b:x"),
+            replaced("!b:x", Observation::Absent, "!a:x"),
+        ]);
+        assert!(!rows.is_empty(), "the chain ends somewhere: {rows:?}");
     }
 
     #[test]

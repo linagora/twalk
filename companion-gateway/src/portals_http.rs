@@ -130,6 +130,8 @@ fn register_json(register: &Register) -> serde_json::Value {
                 "network_conversation_id": portal.network_conversation_id,
                 "members": portal.members,
                 "observation": portal.observation.label(),
+                "moved_from": portal.moved_from,
+                "unreadable": portal.unreadable,
             }))
             .collect::<Vec<_>>(),
         "summary": {
@@ -137,6 +139,7 @@ fn register_json(register: &Register) -> serde_json::Value {
             "observing": summary.get(&Observation::Observing).copied().unwrap_or_default(),
             "invited": summary.get(&Observation::Invited).copied().unwrap_or_default(),
             "absent": summary.get(&Observation::Absent).copied().unwrap_or_default(),
+            "moved": summary.get(&Observation::Moved).copied().unwrap_or_default(),
         },
         // Every configured bridge, readable or not, so a total is never
         // mistaken for a count of the user's conversations.
@@ -193,6 +196,9 @@ mod tests {
             network_conversation_id: None,
             members,
             observation,
+            moved_from: None,
+            unreadable: None,
+            replaced_by: None,
         }
     }
 

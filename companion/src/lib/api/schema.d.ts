@@ -2599,6 +2599,14 @@ export interface components {
              */
             members: number;
             /**
+             * @description The room this conversation lived in before it was replaced —
+             *     the immediate predecessor, out of the homeserver's own tombstone
+             *     chain — or `null` for a room that was never replaced. Present
+             *     whatever the observation: a conversation nobody chose moves too,
+             *     and stays `absent`.
+             */
+            moved_from: string | null;
+            /**
              * @description The room's name — for a one-to-one portal the contact's, for a
              *     group the group's — or `null` where the bridge set none. Read
              *     through and stored nowhere.
@@ -2636,11 +2644,30 @@ export interface components {
              *     name this bridge's bot.
              *     `absent` — the Sensor is not in the room and has not been asked
              *     to be. The default for every portal a bridge builds.
+             *     `moved` — the conversation's room was replaced while the Sensor
+             *     was in it, and the Sensor is not in the successor (ADR 0029). A
+             *     decision is on record about this conversation and has silently
+             *     stopped meaning anything; this state is what makes it a sentence
+             *     instead of a zero. `moved_from` names the dead room.
              * @enum {string}
              */
-            observation: "observing" | "invited" | "absent";
-            /** @description The portal room on this deployment's homeserver. */
+            observation: "observing" | "invited" | "absent" | "moved";
+            /**
+             * @description The portal room on this deployment's homeserver — the room that
+             *     is **alive**. A room replaced by another (`m.room.tombstone`) is
+             *     never a row: its conversation appears once, at the successor,
+             *     with `moved_from` saying where it came from (ADR 0029).
+             */
             room_id: string;
+            /**
+             * @description `null` normally. A reason when this row stands for a successor
+             *     the register **could not read** — the bridge bot is not in it —
+             *     and was built from the tombstone that names it: the name, network
+             *     and count are the dead room's, the room id is the successor's. A
+             *     tombstone that points into the dark is a fact, not a reason to
+             *     fold the conversation into nothing.
+             */
+            unreadable: string | null;
         };
         /**
          * @description Whether one configured bridge could be read, **which account did the
@@ -2750,10 +2777,17 @@ export interface components {
         PortalSummary: {
             absent: number;
             invited: number;
+            /**
+             * @description Conversations that moved while the Sensor was in them and whose
+             *     successor it is not in — decisions on record that no longer
+             *     hold (ADR 0029, #253).
+             */
+            moved: number;
             observing: number;
             /**
-             * @description Portal rooms across every **readable** bridge. Read it together
-             *     with `bridges`.
+             * @description Conversations across every **readable** bridge, each counted
+             *     once whatever its history of rooms. Read it together with
+             *     `bridges`.
              */
             total: number;
         };

@@ -711,6 +711,20 @@ impl MatrixUser {
         Ok(())
     }
 
+    /// Leaves a room.
+    pub async fn leave(&self, room_id: &str) -> Result<()> {
+        self.http
+            .post(self.url(&format!("/_matrix/client/v3/rooms/{room_id}/leave")))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("failed to leave a room")?
+            .error_for_status()
+            .context("the homeserver refused the leave")?;
+        Ok(())
+    }
+
     /// Joins a room this account was invited to — what the Sensor does on its
     /// own, played here by a test account.
     pub async fn join(&self, room_id: &str) -> Result<()> {
@@ -771,6 +785,36 @@ impl MatrixUser {
         )
         .await?;
         Ok(room_id)
+    }
+
+    /// Replaces a room with a new one, as the homeserver does it: the old
+    /// room gets an `m.room.tombstone` naming the successor, the successor's
+    /// `m.room.create` names its predecessor. Returns the successor's id.
+    ///
+    /// This is a Matrix room upgrade and not a bridge's migration, on
+    /// purpose: `m.room.tombstone` predates every bridge, and ADR 0029 wants
+    /// what follows from it to hold for a native room exactly as for a
+    /// portal. The homeserver copies the room's name and power levels but
+    /// **not** its `m.bridge` marker and not its members — a bridge re-marks
+    /// and re-invites, so a test that wants a portal successor does the same.
+    pub async fn upgrade_room(&self, room_id: &str) -> Result<String> {
+        let body: serde_json::Value = self
+            .http
+            .post(self.url(&format!("/_matrix/client/v3/rooms/{room_id}/upgrade")))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "new_version": "10" }))
+            .send()
+            .await
+            .context("failed to upgrade a room")?
+            .error_for_status()
+            .context("the homeserver refused the room upgrade")?
+            .json()
+            .await
+            .context("the upgrade answer is not JSON")?;
+        body["replacement_room"]
+            .as_str()
+            .map(str::to_owned)
+            .context("the upgrade answer names no replacement_room")
     }
 
     /// The accounts joined to a room, as this account can read them.
