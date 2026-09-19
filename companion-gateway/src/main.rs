@@ -18,6 +18,7 @@ use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
 use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
+use twalk_companion_gateway::owner::Owner;
 use twalk_companion_gateway::portals::{refresh_until_shutdown, PortalBridge, Portals};
 use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::settings::Settings;
@@ -143,7 +144,7 @@ async fn main() -> Result<()> {
     // one (#54).
     let (consent, contacts, approvals, suggestions) = match &config.consent {
         Some(consent) => {
-            let (store, outbox) = open_consent(consent, &metrics)?;
+            let (store, outbox, owner) = open_consent(consent, &metrics)?;
             tokio::spawn(publish_until_shutdown(
                 outbox.clone(),
                 consent.nats_url.clone(),
@@ -170,7 +171,7 @@ async fn main() -> Result<()> {
             let projection = Arc::new(Contacts::new(
                 store.clone(),
                 metrics.clone(),
-                consent.owner.clone(),
+                owner,
                 consent.nats_url.clone(),
                 config.inbound_consumer.clone(),
             ));
@@ -522,16 +523,65 @@ async fn main() -> Result<()> {
 /// the image and nothing else. The outbox gauge is published here, before
 /// the origin binds: a restart that inherits unpublished decisions reports
 /// them from its first scrape, not from its first request.
-fn open_consent(consent: &Consent, metrics: &Arc<Metrics>) -> Result<(Arc<Store>, Arc<Outbox>)> {
-    let store = Store::open(&consent.state_dir).context("failed to open the consent store")?;
+fn open_consent(
+    consent: &Consent,
+    metrics: &Arc<Metrics>,
+) -> Result<(Arc<Store>, Arc<Outbox>, Arc<Owner>)> {
+    // Who this deployment's owner is, under every identity their own traffic
+    // arrives under (#149). The store holds it, so no read of the consent
+    // state can serve a row about them and no route added later can write one.
+    let owner = Arc::new(Owner::new(
+        consent.owner.clone(),
+        consent.owner_identities.clone(),
+    ));
+    let store = Store::open(&consent.state_dir, owner.clone())
+        .context("failed to open the consent store")?;
     info!(
         store = %store.path().display(),
         owner = %consent.owner,
+        owner_identities = %owner.identities().join(","),
         source = %format!("gateway://{}/consent", consent.matrix_domain),
         nats_url = %consent.nats_url,
         "consent store ready: this Gateway is the single writer of consent state"
     );
+    if consent.owner_identities.is_empty() {
+        // Not a failure: a deployment with no bridge has no ghost, and the
+        // owner's own Matrix ID is an identity anyway. Said out loud because on
+        // a deployment that *does* bridge a network, this is the variable
+        // standing between the user and a consent row about their own phone
+        // number — and the list cannot be discovered, so nothing else will
+        // notice it is missing.
+        info!(
+            "GATEWAY_OWNER_IDENTITIES is not set: only the owner's own Matrix ID is known to be \
+             theirs, so a consent decision about one of their network ghosts would be recorded \
+             like a contact's (the same list the Sensor reads as SENSOR_OWNER_IDENTITIES)"
+        );
+    }
     let store = Arc::new(store);
+    // The rows this journal holds about the owner: withheld from every read
+    // from here on, and counted so that withholding is not hiding (#149).
+    match store.owner_entries() {
+        Ok(rows) if rows.is_empty() => metrics.set_owner_consent_rows(0),
+        Ok(rows) => {
+            metrics.set_owner_consent_rows(rows.len() as u64);
+            warn!(
+                rows = rows.len(),
+                subjects = %rows
+                    .iter()
+                    .map(|row| row.subject.id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(","),
+                "this consent journal holds decisions about the owner: the owner is never a \
+                 contact and never has a consent state (ADR 0018, ADR 0021), so no read of this \
+                 Gateway serves them. They are kept, not deleted — the journal is append-only — \
+                 and most likely arrived before #109, when the user's own messages were \
+                 published as a contact's"
+            );
+        }
+        Err(error) => warn!(%error, "failed to read the consent rows held about the owner"),
+    }
     let pending = store
         .unpublished_count()
         .context("failed to count the consent outbox")?;
@@ -550,9 +600,10 @@ fn open_consent(consent: &Consent, metrics: &Arc<Metrics>) -> Result<(Arc<Store>
             store,
             metrics.clone(),
             consent.matrix_domain.clone(),
-            consent.owner.clone(),
+            owner.clone(),
             std::time::SystemTime::now,
         )),
+        owner,
     ))
 }
 

@@ -68,6 +68,7 @@ use tracing::{debug, info, warn};
 
 use crate::consent::{Network, STREAM_NAME};
 use crate::metrics::Metrics;
+use crate::owner::Owner;
 use crate::store::{SeenContact, Store};
 
 /// The contract type the projection consumes, and the bus subject it rides
@@ -144,20 +145,25 @@ impl Correspondent {
     ///
     /// Three reasons to refuse, all of them silent:
     ///
-    /// - **the sender is the owner.** The user's own messages travel through
-    ///   the same portal rooms and the Sensor publishes them like any other,
-    ///   but the user is not their own correspondent and must never appear in
-    ///   their own list of decisions to take. This is also the cheapest
-    ///   possible restraint: the owner's sightings are not filtered out on
-    ///   read, they are never stored.
+    /// - **the sender is the owner** — any of their identities, not only their
+    ///   Matrix ID (ticket #149). The user's own messages travel through the
+    ///   same portal rooms, and before ADR 0018 the Sensor published them as a
+    ///   contact's, so this is the projection that used to offer the user a
+    ///   decision about their own ghost. They are not their own correspondent
+    ///   and must never appear in their own list of decisions to take. This is
+    ///   the cheapest possible restraint: the owner's sightings are not
+    ///   filtered out on read, they are never stored — and the rows an older
+    ///   build already stored are excluded when the list is read
+    ///   ([`crate::store::Store::pending_contacts`]), because a row that exists
+    ///   has to be dealt with wherever it is met.
     /// - **the network is not one of the contract's.** A value this build
     ///   does not know is a contract it does not implement; guessing would
     ///   put a row in the store under a network nobody can decide about.
     /// - **the time is not RFC 3339.** The instant is the whole of what the
     ///   projection records besides the ID, so an unreadable one is not worth
     ///   inventing a substitute for.
-    pub fn read(header: &InboundHeader, owner: &str) -> Option<Self> {
-        if header.subject == owner {
+    pub fn read(header: &InboundHeader, owner: &Owner) -> Option<Self> {
+        if owner.is_owner(&header.subject) {
             return None;
         }
         if header.subject.is_empty() {
@@ -208,8 +214,9 @@ pub struct Contacts {
     /// arithmetic rather than a second projection to keep in step.
     store: Arc<Store>,
     metrics: Arc<Metrics>,
-    /// This deployment's owner: never a correspondent of their own.
-    owner: String,
+    /// This deployment's owner, and every identity their own traffic arrives
+    /// under (#149): never a correspondent of their own, under any of them.
+    owner: Arc<Owner>,
     nats_url: String,
     consumer_name: String,
     /// The bus connection, made on first need and shared by the projection
@@ -222,7 +229,7 @@ impl Contacts {
     pub fn new(
         store: Arc<Store>,
         metrics: Arc<Metrics>,
-        owner: String,
+        owner: Arc<Owner>,
         nats_url: String,
         consumer_name: String,
     ) -> Self {
@@ -244,7 +251,8 @@ impl Contacts {
         &self.consumer_name
     }
 
-    /// The contacts waiting for a decision.
+    /// The contacts waiting for a decision — never the owner, including a
+    /// sighting an older build recorded of them (#149).
     pub fn pending(&self) -> Result<Vec<SeenContact>> {
         self.store.pending_contacts()
     }
@@ -560,6 +568,14 @@ mod tests {
     use serde_json::json;
 
     const OWNER: &str = "@michel:example.com";
+    /// The ghost the owner's own WhatsApp messages actually arrived under on
+    /// the reference deployment (#109) — and the kind of subject a deployment
+    /// upgraded across it can hold a consent row about.
+    const OWNER_GHOST: &str = "@whatsapp_lid-115332874281144:example.com";
+
+    fn owner() -> Owner {
+        Owner::new(OWNER, [OWNER_GHOST.to_owned()])
+    }
 
     fn header(event: &Value) -> InboundHeader {
         serde_json::from_value(event.clone()).expect("the header reads")
@@ -604,7 +620,7 @@ mod tests {
         // network identifier from here: `InboundHeader` has no `data`
         // member, so this is a statement about the type and not about this
         // test's diligence.
-        let correspondent = Correspondent::read(&header, OWNER).expect("a correspondent");
+        let correspondent = Correspondent::read(&header, &owner()).expect("a correspondent");
         assert_eq!(
             correspondent,
             Correspondent {
@@ -625,15 +641,25 @@ mod tests {
     }
 
     #[test]
-    fn the_owner_is_not_their_own_correspondent() {
-        let mut event = full_event();
-        event["subject"] = json!(OWNER);
-        assert_eq!(
-            Correspondent::read(&header(&event), OWNER),
-            None,
-            "the user's own messages travel through the same rooms; they are not \
-             decisions the user has to take about themselves"
-        );
+    fn the_owner_is_not_their_own_correspondent_under_any_of_their_identities() {
+        // Their Matrix ID, and — the half #149 adds — the network ghost their
+        // own traffic actually arrives under, which is the identity a
+        // deployment upgraded across #109 holds a row about.
+        for identity in [OWNER, OWNER_GHOST] {
+            let mut event = full_event();
+            event["subject"] = json!(identity);
+            assert_eq!(
+                Correspondent::read(&header(&event), &owner()),
+                None,
+                "the user's own messages travel through the same rooms; they are not \
+                 decisions the user has to take about themselves ({identity})"
+            );
+        }
+        // And unknown is not the owner: a ghost one digit apart is a contact,
+        // and is still recorded as one.
+        let mut somebody_else = full_event();
+        somebody_else["subject"] = json!("@whatsapp_lid-115332874281145:example.com");
+        assert!(Correspondent::read(&header(&somebody_else), &owner()).is_some());
     }
 
     #[test]
@@ -642,18 +668,21 @@ mod tests {
         // not implement, not a row to guess at.
         let mut unknown_network = full_event();
         unknown_network["network"] = json!("gmessages");
-        assert_eq!(Correspondent::read(&header(&unknown_network), OWNER), None);
+        assert_eq!(
+            Correspondent::read(&header(&unknown_network), &owner()),
+            None
+        );
 
         // An instant that is not RFC 3339: the instant is half of what the
         // projection records, so there is nothing to substitute for it.
         let mut bad_time = full_event();
         bad_time["time"] = json!("last tuesday");
-        assert_eq!(Correspondent::read(&header(&bad_time), OWNER), None);
+        assert_eq!(Correspondent::read(&header(&bad_time), &owner()), None);
 
         // And an event with no sender at all.
         let mut no_subject = full_event();
         no_subject["subject"] = json!("");
-        assert_eq!(Correspondent::read(&header(&no_subject), OWNER), None);
+        assert_eq!(Correspondent::read(&header(&no_subject), &owner()), None);
     }
 
     #[test]

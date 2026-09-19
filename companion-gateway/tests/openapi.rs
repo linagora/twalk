@@ -2379,6 +2379,50 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     assert_eq!(undecided.body["state"].as_str(), Some("pending"));
     assert_eq!(undecided.body["decided_by"], Value::Null);
 
+    // And the owner (#149), on both consent operations that take a subject.
+    // No ghost has to be configured for this: the owner's own Matrix ID is
+    // always one of their identities, which is what makes the refusal
+    // reachable on every deployment. The behaviour — including the row an
+    // upgrade left behind — is `tests/consent_snapshot.rs`'s; what is driven
+    // here is the answer the description declares.
+    let refused_decision = call
+        .check(
+            Method::POST,
+            &consenting_base,
+            "/api/consent/decisions",
+            "/api/consent/decisions",
+            &deciding_cookie,
+            Some(json!({
+                "subject": { "type": "contact", "id": owner_id },
+                "new_state": "revoked",
+                "scope": { "networks": ["whatsapp"] }
+            })),
+            409,
+            Some("subject_is_the_owner"),
+        )
+        .await?;
+    assert!(
+        refused_decision.body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains(owner_id.as_str())),
+        "the refusal says which subject, and why: {}",
+        refused_decision.body
+    );
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/consent/effective",
+        &format!(
+            "/api/consent/effective?contact={}&network=whatsapp",
+            owner_id.replace('@', "%40").replace(':', "%3A")
+        ),
+        &deciding_cookie,
+        None,
+        409,
+        Some("subject_is_the_owner"),
+    )
+    .await?;
+
     // The snapshot (#50): the same entries, with the stream sequence they
     // reflect, to a caller presenting the service token instead of a device
     // cookie.
@@ -2401,6 +2445,16 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             .as_u64()
             .map(|sequence| sequence + 1),
         "the start sequence a consumer uses is the position plus one: {}",
+        snapshot.body
+    );
+    // Who has no consent state at all, served beside the state itself (#149):
+    // the set cannot be derived from a bridge, so the single writer of consent
+    // state is what hands it to the one consumer that needs it.
+    assert!(
+        snapshot.body["owner_identities"]
+            .as_array()
+            .is_some_and(|identities| identities.iter().any(|id| id == &json!(owner_id))),
+        "the snapshot names the owner's own identities: {}",
         snapshot.body
     );
 

@@ -424,6 +424,30 @@ pub struct Consent {
     /// the event's `data.actor`. One owner per deployment (ADR 0011), so the
     /// device that took the decision is the owner's by construction.
     pub owner: String,
+    /// Every *other* Matrix ID the owner's own traffic arrives under
+    /// (GATEWAY_OWNER_IDENTITIES, comma-separated): their network ghosts, as
+    /// the deployment confirmed them (ticket #149, ADR 0018, ADR 0021).
+    ///
+    /// The owner is never a contact and never has a consent state, so a
+    /// decision about one of these is refused and no read of the store serves
+    /// one. The set is **handed over, never derived**: the localpart template
+    /// belongs to each bridge, a bridge's `whoami` carries a login id and no
+    /// ghost Matrix ID at all, and the owner has several ghosts per network
+    /// (`@whatsapp_<phone>` *and* `@whatsapp_lid-<lid>`) — the same reason
+    /// `GATEWAY_BRIDGE_<ID>_BOT_USER_ID` is configuration (#171). An identity
+    /// that is not in this set stays a contact, because unknown is not the
+    /// owner.
+    ///
+    /// [`Self::owner`] is always one of them ([`crate::owner::Owner::new`]),
+    /// so a deployment that has confirmed no ghost still holds the invariant
+    /// for the one identity a browser can name.
+    ///
+    /// Empty is a supported state and the reference deployment's is not: this
+    /// is the list the Sensor already has as `SENSOR_OWNER_IDENTITIES`, which
+    /// `deploy/docker-compose/compose.yaml` now feeds to both services from
+    /// one value so that nobody maintains two copies of a list nobody can
+    /// derive.
+    pub owner_identities: Vec<String>,
 }
 
 /// What the consent snapshot needs (ticket #50): the credential that
@@ -501,12 +525,25 @@ impl Consent {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        let owner_identities = owner_identities_from_env();
+        // The one way this variable can be set and mean nothing: no owner to
+        // attribute it to. Loud rather than ignored, because an operator who
+        // listed their ghosts has said in as many words that they do not want
+        // consent rows about themselves, and a Gateway that silently dropped
+        // the list would keep serving exactly those rows (#149).
+        anyhow::ensure!(
+            owner_identities.is_empty() || sign_in.is_some(),
+            "GATEWAY_OWNER_IDENTITIES is set without GATEWAY_OWNER: those identities are \
+             the owner's own network ghosts, and without an owner this Gateway has nobody \
+             to hold them for — set GATEWAY_OWNER, or unset GATEWAY_OWNER_IDENTITIES"
+        );
         match (sign_in, nats_url) {
             (Some(sign_in), Some(nats_url)) => Ok(Some(Self {
                 nats_url,
                 state_dir: sign_in.state_dir.clone(),
                 matrix_domain: sign_in.homeserver_name.clone(),
                 owner: sign_in.owner.clone(),
+                owner_identities,
             })),
             // A bus but no owner: not fatal, and nothing extra to say — a
             // decision with no owner to attribute it to cannot be recorded,
@@ -630,6 +667,23 @@ impl SignIn {
 /// An environment variable, treating an empty value as unset: compose
 /// interpolates an unset `.env` entry to the empty string, so the two must
 /// mean the same thing throughout.
+/// The owner's confirmed network ghosts, as the deployment listed them
+/// (GATEWAY_OWNER_IDENTITIES, comma-separated). Order and duplicates are
+/// irrelevant — [`crate::owner::Owner`] holds a set — and blanks are dropped,
+/// so a trailing comma is not an identity that matches nothing.
+fn owner_identities_from_env() -> Vec<String> {
+    env("GATEWAY_OWNER_IDENTITIES")
+        .map(|listed| {
+            listed
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }

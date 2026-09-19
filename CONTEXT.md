@@ -90,7 +90,7 @@ The single human a deployment serves, named as a Matrix ID in the Companion Gate
 _Avoid_: "admin", or "the user's account" when the owner's identity is what is meant
 
 **Owner identity**:
-A Matrix ID the owner's own traffic — messages, reactions, presence — is observed to arrive under. Normally a *network ghost* the bridge materialised for the owner's own account (`@whatsapp_33612345678`, `@whatsapp_lid-115332874281144`, `@signal_<uuid>`) — several per network, indistinguishable in shape from a contact's ghost, and not derivable from a bridge login id. The set is confirmed by the deployment and handed to the Sensor; an identity that is not confirmed stays a contact, because unknown is not the owner.
+A Matrix ID the owner's own traffic — messages, reactions, presence — is observed to arrive under. Normally a *network ghost* the bridge materialised for the owner's own account (`@whatsapp_33612345678`, `@whatsapp_lid-115332874281144`, `@signal_<uuid>`) — several per network, indistinguishable in shape from a contact's ghost, and not derivable from a bridge login id. The set is confirmed by the deployment and handed to the two components that need it — the Sensor, which publishes that traffic as the owner's own, and the Companion Gateway, which refuses a consent decision about one of them and serves none of them in its consent state or its snapshot (#149). One list, read twice: it grows after the fact, so two components maintaining their own copies would drift. An identity that is not confirmed stays a contact, because unknown is not the owner.
 _Avoid_: calling one "the owner's Matrix ID", which is the account and never a ghost
 
 **Device token**:

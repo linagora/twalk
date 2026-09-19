@@ -24,8 +24,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use harness::{
     companion_build, ensure_stack, gateway_env_with, gateway_env_with_consent, nats_url,
-    poll_until, signed_in_device_token, Bus, GatewayProc, StoredMessage, CONSENT_STREAM,
-    CONSENT_SUBJECT, SERVER_NAME, SERVICE_TOKEN,
+    owner_user_id, poll_until, signed_in_device_token, Bus, GatewayProc, StoredMessage,
+    CONSENT_STREAM, CONSENT_SUBJECT, SERVER_NAME, SERVICE_TOKEN,
 };
 use serde_json::{json, Value};
 
@@ -36,6 +36,11 @@ struct Fixture {
     base: String,
     device_token: String,
     bus: Bus,
+    /// The environment this Gateway was started with, and the static
+    /// directory its state directory is derived from — so that
+    /// [`Fixture::restart_with`] can bring another Gateway up **on the same
+    /// store**, which is how the upgrade #149 is about is reproduced.
+    env: Vec<(String, String)>,
 }
 
 impl Fixture {
@@ -44,7 +49,8 @@ impl Fixture {
     }
 
     /// Starts a Gateway with the consent configuration plus per-test
-    /// overrides — the cap, for the test that exceeds it.
+    /// overrides — the cap, for the test that exceeds it; the owner's
+    /// confirmed ghosts, for the test that upgrades across #149.
     async fn start_with(test_name: &str, overrides: &[(&str, &str)]) -> Result<Self> {
         ensure_stack().await?;
         let bus = Bus::connect().await?;
@@ -52,7 +58,15 @@ impl Fixture {
         bus.ensure_stream(CONSENT_STREAM, &["twalk.>"]).await?;
 
         let static_dir = companion_build(test_name)?;
-        let mut env = gateway_env_with_consent(&static_dir, &nats_url());
+        let env = gateway_env_with_consent(&static_dir, &nats_url());
+        Self::start_from(env, overrides, bus).await
+    }
+
+    async fn start_from(
+        mut env: Vec<(String, String)>,
+        overrides: &[(&str, &str)],
+        bus: Bus,
+    ) -> Result<Self> {
         for (key, value) in overrides {
             match env.iter_mut().find(|(existing, _)| existing == key) {
                 Some(entry) => entry.1 = (*value).to_owned(),
@@ -67,7 +81,50 @@ impl Fixture {
             base,
             device_token,
             bus,
+            env,
         })
+    }
+
+    /// Stops this Gateway and starts another one on the same state directory
+    /// and the same bus, with these variables added or changed.
+    ///
+    /// This is an **upgrade**, not a second deployment: the consent journal,
+    /// the seen contacts and the session store are the ones the first Gateway
+    /// wrote. It is the only way to build the store #149 is about — a row
+    /// keyed on an identity the Gateway did not then know was the owner's —
+    /// without reaching inside the binary to write one.
+    async fn restart_with(self, overrides: &[(&str, &str)]) -> Result<Self> {
+        let env = self.env.clone();
+        self.gateway.stop().await;
+        // A connection of its own rather than the stopped fixture's: the bus
+        // is the test stack's, and reconnecting to it is cheaper than making
+        // the harness's `Bus` cloneable for one test.
+        Self::start_from(env, overrides, Bus::connect().await?).await
+    }
+
+    /// The write API's own answer, whatever it is: the status and the body,
+    /// for a test asserting a refusal rather than a decision.
+    async fn decide_attempt(&self, body: Value) -> Result<(reqwest::StatusCode, Value)> {
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/consent/decisions", self.base))
+            .header("cookie", format!("twalk_device={}", self.device_token))
+            .json(&body)
+            .send()
+            .await
+            .context("the write API did not answer")?;
+        let status = response.status();
+        Ok((status, response.json().await.unwrap_or(Value::Null)))
+    }
+
+    /// The contacts the Companion would be told are waiting for a decision.
+    async fn pending_contacts(&self) -> Result<Value> {
+        let response = reqwest::Client::new()
+            .get(format!("{}/api/contacts/pending", self.base))
+            .header("cookie", format!("twalk_device={}", self.device_token))
+            .send()
+            .await
+            .context("the pending-contact endpoint did not answer")?;
+        Ok(response.json().await?)
     }
 
     /// Records one decision through the write API and returns the event id
@@ -680,5 +737,219 @@ async fn a_service_token_too_short_to_be_a_secret_stops_the_gateway() -> Result<
         logs.contains("GATEWAY_SERVICE_TOKEN"),
         "the failure names the variable at fault:\n{logs}"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Ticket #149: the owner is never a subject of the snapshot
+// ---------------------------------------------------------------------------
+
+/// The test the ticket asks for, and it asserts the **snapshot's contents**
+/// rather than the handler's behaviour: ask for the snapshot, and the owner is
+/// absent from it. A test of the write path alone would leave the read path —
+/// the one every consumer uses — unproven, and the read path is where the
+/// defect is: #109 and #147 stopped the Sensor *producing* events about the
+/// owner, and neither could stop this Gateway *serving* a row about them.
+///
+/// The row is built the way a real deployment built its own: by a Gateway for
+/// which that ghost was an ordinary contact, which is what every Gateway before
+/// this ticket was. Then the Gateway is upgraded — the same store, the same bus,
+/// one new variable — and asked the same question.
+#[tokio::test]
+async fn the_snapshot_never_serves_an_owner_identity_as_a_subject() -> Result<()> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    // The shape the reference deployment actually produced (#109): a LID ghost
+    // of the owner's own WhatsApp account, indistinguishable from a contact's.
+    let owner_ghost = format!("@whatsapp_lid-g149a{unique}:{SERVER_NAME}");
+    // A second one the operator has *not* confirmed yet — the honest half of a
+    // read-time exclusion: it is still served, because unknown is not the owner.
+    let unconfirmed_ghost = format!("@whatsapp_lid-g149b{unique}:{SERVER_NAME}");
+    let real_contact = format!("@whatsapp_g149c{unique}:{SERVER_NAME}");
+
+    // --- before: a Gateway that has not been told whose ghost that is.
+    let before = Fixture::start("snapshot-owner").await?;
+    let owners_row = before.decide(grant(&owner_ghost, "whatsapp")).await?;
+    let unconfirmed_row = before.decide(grant(&unconfirmed_ghost, "whatsapp")).await?;
+    let contacts_row = before.decide(grant(&real_contact, "whatsapp")).await?;
+    // Published, so all three are inside the snapshot's horizon: otherwise the
+    // owner's absence below would hold for the wrong reason.
+    before
+        .wait_for_published(&[
+            owners_row.as_str(),
+            unconfirmed_row.as_str(),
+            contacts_row.as_str(),
+        ])
+        .await?;
+    let served = before.snapshot().await?;
+    assert!(
+        served["entries"].as_array().is_some_and(|entries| entries
+            .iter()
+            .any(|entry| entry["subject"]["id"] == json!(owner_ghost))),
+        "the deployment this ticket is about: the snapshot serves the owner's own \
+         ghost as a subject with a consent state — {served}"
+    );
+
+    // --- the upgrade: the same store, the same bus, and the one thing the
+    // Gateway did not know.
+    let after = before
+        .restart_with(&[("GATEWAY_OWNER_IDENTITIES", owner_ghost.as_str())])
+        .await?;
+    let snapshot = after.snapshot().await?;
+
+    // The assertion the ticket names. Not "the handler refuses a write": the
+    // snapshot's own contents.
+    let subjects: Vec<&str> = snapshot["entries"]
+        .as_array()
+        .context("the snapshot lists entries")?
+        .iter()
+        .filter_map(|entry| entry["subject"]["id"].as_str())
+        .collect();
+    assert!(
+        !subjects.contains(&owner_ghost.as_str()),
+        "the owner is not a subject of the consent snapshot: {snapshot}"
+    );
+    // Said once more over the entries' own bytes, because "absent from the
+    // field I looked in" is a weaker claim than "absent". Over `entries` and
+    // not the whole document, deliberately: the ghost *is* named in
+    // `owner_identities`, which is the point — the snapshot says who has no
+    // consent state, and then holds no consent state for them.
+    assert!(
+        !serde_json::to_string(&snapshot["entries"])?.contains(&owner_ghost),
+        "and appears nowhere in the state at all: {snapshot}"
+    );
+    // A real contact's row is untouched: this is an exclusion, not a switch.
+    assert!(
+        subjects.contains(&real_contact.as_str()),
+        "the contacts the user did decide about are still served: {snapshot}"
+    );
+    // And the row about a ghost nobody has confirmed is still served — the
+    // exclusion is exactly the set the deployment handed over, and unknown is
+    // not the owner. This is what an operator has to know: a row about an
+    // identity that *was* theirs stays visible until they add it to the
+    // variable, and then it disappears with no migration.
+    assert!(
+        subjects.contains(&unconfirmed_ghost.as_str()),
+        "an unconfirmed ghost is a contact like any other: {snapshot}"
+    );
+
+    // The set itself, served beside the state: it cannot be derived from a
+    // bridge, so the single writer of consent state hands it over.
+    let identities = snapshot["owner_identities"]
+        .as_array()
+        .context("the snapshot names the owner's identities")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        identities.contains(&owner_ghost.as_str()),
+        "the confirmed ghost is one of them: {snapshot}"
+    );
+    let owner = owner_user_id();
+    assert!(
+        identities.contains(&owner.as_str()),
+        "and so is the owner's own Matrix ID, always: {snapshot}"
+    );
+    assert!(
+        !identities.contains(&unconfirmed_ghost.as_str()),
+        "and nothing the deployment did not confirm: {snapshot}"
+    );
+
+    // The owner's own read of the state agrees with the snapshot — one fact,
+    // not two — and the pending list never proposes the owner as a contact
+    // awaiting a decision.
+    let state = after.recorded_state().await?;
+    assert!(
+        !serde_json::to_string(&state)?.contains(&owner_ghost),
+        "GET /api/consent/state serves no row about the owner either: {state}"
+    );
+    let pending = after.pending_contacts().await?;
+    assert!(
+        !serde_json::to_string(&pending)?.contains(&owner_ghost),
+        "and the user is never offered a decision about their own ghost: {pending}"
+    );
+
+    // Writing one now is refused, with a code and a sentence — and the code is
+    // not one a client could read as "no such subject".
+    let (status, refusal) = after
+        .decide_attempt(revoke(&owner_ghost, "whatsapp"))
+        .await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a decision about the owner is refused, not accepted and not a 404: {refusal}"
+    );
+    assert_eq!(
+        refusal["error"].as_str(),
+        Some("subject_is_the_owner"),
+        "{refusal}"
+    );
+    let detail = refusal["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(&owner_ghost) && detail.contains("consent state"),
+        "the refusal says which subject and why: {refusal}"
+    );
+    // The same refusal on the read that resolves the precedence: `pending`
+    // with `decided_by: null` would say "nobody has decided yet", which about
+    // the owner is an invitation to decide something that cannot be decided.
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/api/consent/effective?contact={}&network=whatsapp",
+            after.base,
+            owner_ghost.replace('@', "%40").replace(':', "%3A")
+        ))
+        .header("cookie", format!("twalk_device={}", after.device_token))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = response.json().await?;
+    assert_eq!(
+        body["error"].as_str(),
+        Some("subject_is_the_owner"),
+        "{body}"
+    );
+
+    // And `consent.state.changed` was never emitted about the owner by the
+    // upgraded Gateway: the refusal is at the writer, so nothing reached the
+    // journal the outbox drains. The one event about that ghost on the bus is
+    // the grant the *old* Gateway published, which is the history this ticket
+    // deliberately does not rewrite.
+    let events: Vec<Value> = after
+        .stored()
+        .await?
+        .into_iter()
+        .filter(|message| message.payload["subject"] == json!(owner_ghost))
+        .map(|message| message.payload)
+        .collect();
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly the one the pre-#149 Gateway published, and no revocation: {events:?}"
+    );
+    assert_eq!(events[0]["id"].as_str(), Some(owners_row.as_str()));
+
+    // The rows are still there, and the operator is told so rather than left
+    // to find out: the journal is append-only, so withholding is the honest
+    // treatment and hiding is not.
+    let metrics = reqwest::get(format!("{}/metrics", after.base))
+        .await?
+        .text()
+        .await?;
+    assert!(
+        metrics.contains("twalk_companion_gateway_owner_consent_rows 1"),
+        "the withheld row is counted where an operator scrapes: {metrics}"
+    );
+    assert!(
+        metrics.contains("twalk_companion_gateway_owner_decision_refusals_total 1"),
+        "and so is the refusal: {metrics}"
+    );
+    let logs = after.gateway.logs().await.join("\n");
+    assert!(
+        logs.contains("holds decisions about the owner"),
+        "and it is said at startup, where an operator reading a log will meet it:\n{logs}"
+    );
+
+    after.stop().await;
     Ok(())
 }

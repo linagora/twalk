@@ -40,6 +40,26 @@
 //! this module compares it without leaking its length
 //! (`docs/architecture/security-model.md`).
 //!
+//! # Who is not in it at all
+//!
+//! The owner (ticket #149, ADR 0018, ADR 0021). Not as a subject, not as a
+//! state, not as a row the query reads: the owner is never a contact and never
+//! has a consent state, and this is the document every consumer builds its
+//! whole cold cache from — a row about the owner here is the defect, because a
+//! consumer without the Sensor's own filter (#147) applies it, and a `revoked`
+//! on an owner ghost silences the user's own traffic with nothing to say why.
+//! The exclusion is in [`crate::store::Store::snapshot`]'s SQL, beside the
+//! `persona` one, and it covers a row recorded before this was enforced — a
+//! deployment upgraded across #109 can hold one, since the user's own messages
+//! used to be published as a contact's. Such a row is withheld and *counted*,
+//! never deleted: the journal is append-only, so the honest treatment is to
+//! serve nobody and tell the operator (a `warn` here, and
+//! `twalk_companion_gateway_owner_consent_rows` on `/metrics`).
+//!
+//! And because the set of the owner's identities cannot be derived from a
+//! bridge, the answer **carries** it: `owner_identities`, so that a consumer
+//! applying the same rule reads it from the single writer of consent state.
+//!
 //! # What the answer deliberately does not carry
 //!
 //! No timestamp, no version, no entry count. The stream sequence is the only
@@ -181,13 +201,41 @@ async fn consent_snapshot(State(gateway): State<Gateway>, headers: HeaderMap) ->
     };
     match consent.store().snapshot(snapshots.max_entries()) {
         Ok(snapshot) => {
+            // The rows this snapshot withheld, counted from the store rather
+            // than from what the read dropped — because it dropped nothing: the
+            // exclusion is in the query (ticket #149). Reported here because
+            // this is the read that used to hand a consumer the owner as a
+            // subject, so it is where an operator should be told that their
+            // journal still holds such a row.
+            let withheld = match consent.store().owner_entries() {
+                Ok(rows) => {
+                    gateway.metrics().set_owner_consent_rows(rows.len() as u64);
+                    rows.len()
+                }
+                Err(error) => {
+                    warn!(%error, "failed to count the consent rows held about the owner");
+                    0
+                }
+            };
+            if withheld > 0 {
+                warn!(
+                    withheld,
+                    identities = %consent.owner().identities().join(","),
+                    "this consent journal holds rows about the owner and served none of them: \
+                     the owner is never a contact and has no consent state (ADR 0018, ADR 0021), \
+                     so a row about them is a row that should not exist — most likely left by a \
+                     deployment upgraded across #109"
+                );
+            }
             info!(
                 entries = snapshot.entries.len(),
                 decision_sequence = snapshot.decision_sequence,
                 stream_sequence = snapshot.stream_sequence,
+                owner_identities = consent.owner().identities().len(),
+                withheld,
                 "served a consent snapshot"
             );
-            Json(snapshot_json(&snapshot)).into_response()
+            Json(snapshot_json(&snapshot, consent.owner())).into_response()
         }
         Err(SnapshotRefusal::TooLarge { max_entries }) => {
             // Loudly, and with nothing in the body a consumer could mistake
@@ -218,13 +266,30 @@ async fn consent_snapshot(State(gateway): State<Gateway>, headers: HeaderMap) ->
     }
 }
 
-fn snapshot_json(snapshot: &Snapshot) -> Value {
+/// The snapshot document, plus the one thing about consent state that is not a
+/// decision: who has none at all.
+///
+/// `owner_identities` is ticket #149's, and it is here rather than on a route
+/// of its own because this is already the one read a consumer makes of the
+/// single writer of consent state, and because the two facts belong together:
+/// these are exactly the subjects the entries above will never contain. A
+/// consumer that must apply the same rule — the Sensor does, and says so at
+/// `warn` (ADR 0021) — reads the list from the Gateway instead of keeping a
+/// second copy of a list nobody can derive from a bridge. Two components
+/// reading one list is tolerable; two maintaining their own is not.
+///
+/// It is always present and never empty: `GATEWAY_OWNER` is itself an identity,
+/// so an absent member would mean "this Gateway is older than #149" and an
+/// empty array would mean "this deployment has no owner", which cannot happen
+/// on a Gateway that serves a snapshot at all.
+fn snapshot_json(snapshot: &Snapshot, owner: &crate::owner::Owner) -> Value {
     json!({
         "stream": STREAM_NAME,
         "subject": consent::bus_subject(CONSENT_CHANGED_TYPE),
         "stream_sequence": snapshot.stream_sequence,
         "next_stream_sequence": snapshot.stream_sequence + 1,
         "decision_sequence": snapshot.decision_sequence,
+        "owner_identities": owner.identities(),
         "entries": snapshot.entries.iter().map(entry_json).collect::<Vec<_>>(),
     })
 }
@@ -311,6 +376,13 @@ mod tests {
         assert!(!snapshots.authenticates(&cookie));
     }
 
+    fn owner() -> crate::owner::Owner {
+        crate::owner::Owner::new(
+            "@michel:example.com",
+            ["@whatsapp_lid-115332874281144:example.com".to_owned()],
+        )
+    }
+
     #[test]
     fn the_document_names_the_stream_position_a_consumer_starts_after() {
         let snapshot = Snapshot {
@@ -328,13 +400,17 @@ mod tests {
             stream_sequence: 41,
         };
         assert_eq!(
-            snapshot_json(&snapshot),
+            snapshot_json(&snapshot, &owner()),
             json!({
                 "stream": "twalk",
                 "subject": "twalk.consent.state.changed.v1",
                 "stream_sequence": 41,
                 "next_stream_sequence": 42,
                 "decision_sequence": 7,
+                "owner_identities": [
+                    "@michel:example.com",
+                    "@whatsapp_lid-115332874281144:example.com"
+                ],
                 "entries": [{
                     "subject": { "type": "network", "id": "whatsapp" },
                     "network": "whatsapp",
@@ -353,7 +429,7 @@ mod tests {
             decision_sequence: 0,
             stream_sequence: 0,
         };
-        let document = snapshot_json(&empty);
+        let document = snapshot_json(&empty, &owner());
         assert_eq!(document["stream_sequence"], json!(0));
         assert_eq!(
             document["next_stream_sequence"],
@@ -362,5 +438,31 @@ mod tests {
              an empty state is not the same claim as a revoked one"
         );
         assert_eq!(document["entries"], json!([]));
+        // Nothing decided is not nobody exempt: who has no consent state at
+        // all is configuration, and it is served whether or not a decision was
+        // ever taken (#149).
+        assert_eq!(
+            document["owner_identities"],
+            json!([
+                "@michel:example.com",
+                "@whatsapp_lid-115332874281144:example.com"
+            ])
+        );
+    }
+
+    #[test]
+    fn the_owners_own_matrix_id_is_served_even_with_no_ghost_configured() {
+        // A deployment that has confirmed no ghost still says who its owner is,
+        // so `owner_identities` is never absent and never empty on a Gateway
+        // that serves a snapshot at all.
+        let document = snapshot_json(
+            &Snapshot {
+                entries: Vec::new(),
+                decision_sequence: 0,
+                stream_sequence: 0,
+            },
+            &crate::owner::Owner::new("@michel:example.com", []),
+        );
+        assert_eq!(document["owner_identities"], json!(["@michel:example.com"]));
     }
 }

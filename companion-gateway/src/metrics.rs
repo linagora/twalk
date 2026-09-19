@@ -42,6 +42,18 @@ pub struct Metrics {
     /// writes no consent exposes no consent series at all.
     consent_published: Mutex<u64>,
     consent_outbox_pending: Mutex<Option<u64>>,
+    /// Decisions refused because their subject was one of the owner's own
+    /// identities, and consent rows this store holds about the owner and
+    /// serves to nobody (#149).
+    ///
+    /// Both exist because a refusal that is correct and silent is how a
+    /// deployment ends up wrong without saying so. The gauge is the one an
+    /// operator should read: it is the number of rows an upgrade across #109
+    /// left behind, it is not zero on the reference deployment, and nothing
+    /// else in the product can say it out loud now that no read serves them.
+    /// `None` until consent is configured, like the outbox gauge above.
+    owner_decision_refusals: Mutex<u64>,
+    owner_consent_rows: Mutex<Option<u64>>,
     /// Bridge states observed (#56), by the channel they arrived on
     /// (`webhook`, `startup`) and what they said: one of the contract's five
     /// states, `unchanged` when the bridge reported the state it was already
@@ -157,6 +169,8 @@ impl Metrics {
             consent_decisions: Mutex::new(BTreeMap::new()),
             consent_published: Mutex::new(0),
             consent_outbox_pending: Mutex::new(None),
+            owner_decision_refusals: Mutex::new(0),
+            owner_consent_rows: Mutex::new(None),
             bridge_statuses: Mutex::new(BTreeMap::new()),
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
@@ -253,6 +267,25 @@ impl Metrics {
             .consent_published
             .lock()
             .expect("the metrics mutex is never poisoned") += 1;
+    }
+
+    /// One decision refused because its subject was the owner (#149).
+    pub fn record_owner_decision_refused(&self) {
+        *self
+            .owner_decision_refusals
+            .lock()
+            .expect("the metrics mutex is never poisoned") += 1;
+    }
+
+    /// How many consent rows this Gateway holds about the owner and serves to
+    /// nobody (#149). Set at startup and on every snapshot read, so the number
+    /// is the store's own and not a count of what happened while this process
+    /// was up.
+    pub fn set_owner_consent_rows(&self, rows: u64) {
+        *self
+            .owner_consent_rows
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(rows);
     }
 
     /// How many committed decisions are waiting for the bus, as the store
@@ -416,6 +449,32 @@ impl Metrics {
             out.push_str(&format!(
                 "twalk_companion_gateway_consent_outbox_pending {pending}\n"
             ));
+            // The owner series (#149), inside the same guard for the same
+            // reason. The counter is decisions refused because their subject
+            // was the owner; the gauge is the rows this journal holds about
+            // them and no read serves. The gauge is the interesting one: it is
+            // what an upgrade across #109 left behind, and with every read
+            // withholding those rows it is the only place the product can say
+            // so.
+            out.push_str("# HELP twalk_companion_gateway_owner_decision_refusals_total Consent decisions refused because their subject is one of the owner's own identities.\n");
+            out.push_str("# TYPE twalk_companion_gateway_owner_decision_refusals_total counter\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_owner_decision_refusals_total {}\n",
+                self.owner_decision_refusals
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            let owner_rows = *self
+                .owner_consent_rows
+                .lock()
+                .expect("the metrics mutex is never poisoned");
+            if let Some(owner_rows) = owner_rows {
+                out.push_str("# HELP twalk_companion_gateway_owner_consent_rows Consent rows this Gateway holds about an owner identity and serves to nobody.\n");
+                out.push_str("# TYPE twalk_companion_gateway_owner_consent_rows gauge\n");
+                out.push_str(&format!(
+                    "twalk_companion_gateway_owner_consent_rows {owner_rows}\n"
+                ));
+            }
             // The approval series (#24), inside the same guard: approvals
             // are configured exactly when consent is — they read the same
             // store and publish on the same bus — so a Gateway that writes

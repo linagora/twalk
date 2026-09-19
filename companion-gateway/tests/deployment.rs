@@ -212,6 +212,7 @@ fn write_env_file() -> Result<PathBuf> {
          SENSOR_USER_ID=@sensor:{SERVER_NAME}\n\
          SENSOR_PASSWORD=deploy-test-only-password-sensor\n\
          SENSOR_ALLOWED_INVITERS={owner}\n\
+         SENSOR_OWNER_IDENTITIES={OWNER_GHOST}\n\
          SENSOR_STATE_DIR=/data\n\
          SENSOR_LOG_LEVEL=info\n\
          NATS_PORT={nats_port}\n\
@@ -345,6 +346,43 @@ async fn compose_ps(env_file: &Path) -> Result<Vec<serde_json::Value>> {
         .lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .collect())
+}
+
+/// A network ghost of the owner's own account, as the deployment lists it
+/// (ticket #109, #149). Nothing sends a message as it in these tests — what it
+/// is here for is the wiring: one list in `.env`, read by the Sensor and by the
+/// Gateway.
+const OWNER_GHOST: &str = "@whatsapp_lid-115332874281144:test.twalk";
+
+/// Ticket #149's deployment half: the owner's confirmed identities are listed
+/// **once** and reach both components that need them.
+///
+/// The Gateway needs the set because the owner has no consent state and the
+/// Gateway is the single writer of it; the Sensor needs it because the owner is
+/// not a contact on any event. Neither can derive it — a bridge's provisioning
+/// API exposes no ghost Matrix ID at all — so the risk this test exists for is
+/// two variables drifting apart on a live deployment, which is the outcome the
+/// ticket names. Asserted against compose's own interpolation, which is the
+/// thing that would be wrong.
+#[tokio::test]
+async fn one_list_of_the_owners_identities_reaches_both_components() -> Result<()> {
+    let env_file = write_env_file()?;
+    let resolved = compose(&env_file, &["config"], "config").await?;
+    let configured: Vec<&str> = resolved
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("OWNER_IDENTITIES:"))
+        .collect();
+    assert_eq!(
+        configured,
+        vec![
+            // compose quotes a value starting with `@`; the value is the point.
+            format!("GATEWAY_OWNER_IDENTITIES: '{OWNER_GHOST}'"),
+            format!("SENSOR_OWNER_IDENTITIES: '{OWNER_GHOST}'"),
+        ],
+        "one value in .env reaches both services; an operator who set only the          Sensor's variable — every existing deployment — needs to change nothing:\n{resolved}"
+    );
+    Ok(())
 }
 
 #[tokio::test]

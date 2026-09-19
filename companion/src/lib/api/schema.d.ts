@@ -515,6 +515,11 @@ export interface paths {
          *     between the commit and the publication republishes rather than
          *     loses, deduplicated on the bus by the event's own deterministic id.
          *
+         *     A decision about the **owner** is refused with `409
+         *     subject_is_the_owner`: the owner is never a contact and never has a
+         *     consent state (ADR 0018, ADR 0021), so there is nothing to record and
+         *     saying so beats dropping it silently.
+         *
          *     `subject.type` is `contact`, `network` or `persona`. A persona is on
          *     this path and not on a control API of its own, because activating or
          *     pausing one *is* a consent decision (ADR 0013): `scope.networks` on a
@@ -545,6 +550,13 @@ export interface paths {
          *     with `decided_by` naming the decision that answered, or `null` when
          *     none did. That `null` is how a caller tells "never decided" from
          *     "decided pending"; an absent decision is never a revocation.
+         *
+         *     Asked about an **owner identity**, this endpoint refuses rather than
+         *     answers (`409 subject_is_the_owner`). `pending` with `decided_by:
+         *     null` means "no decision was ever recorded", which is a contact's
+         *     state; about the owner it would read as an invitation to go and take
+         *     the decision, and there is none to take (ticket #149, ADR 0018,
+         *     ADR 0021).
          */
         get: operations["getEffectiveConsent"];
         put?: never;
@@ -595,6 +607,17 @@ export interface paths {
          *     is a consent decision (ADR 0013), but it is not state a consumer
          *     labels senders by.
          *
+         *     **The owner is not in `entries`, and is named in
+         *     `owner_identities`.** The owner is never a contact and never has a
+         *     consent state (ADR 0018, ADR 0021), so this document serves none —
+         *     including a row recorded before the Gateway knew whose identity it
+         *     was, since the exclusion is at read time and nothing is deleted from
+         *     an append-only journal (ticket #149). That matters most here: this is
+         *     the document a consumer builds its whole cold cache from, and a
+         *     consumer without a filter of its own would apply a `revoked` on an
+         *     owner ghost and silence the user's own traffic with nothing to say
+         *     why.
+         *
          *     **Not paginated.** A cursor would be a second ordering to get wrong,
          *     and a half-applied snapshot is worse than none. Instead there is a
          *     cap (`GATEWAY_CONSENT_SNAPSHOT_MAX_ENTRIES`, 100000 by default) and a
@@ -637,6 +660,13 @@ export interface paths {
          *     `/api/consent/effective` applies the precedence. Revocations are as
          *     explicit as grants, and an absent subject means "never decided",
          *     never "revoked".
+         *
+         *     The **owner** is not in it: not their Matrix ID and not one of their
+         *     network ghosts (`GATEWAY_OWNER_IDENTITIES`), including one a decision
+         *     was recorded about before this Gateway knew whose identity it was
+         *     (ticket #149, ADR 0018, ADR 0021). Such a row is not deleted — the
+         *     journal is append-only — it is served to nobody, and counted on
+         *     `/metrics` as `twalk_companion_gateway_owner_consent_rows`.
          *
          *     This endpoint is the owner's own read, behind a device token, and it
          *     names no stream position. It **includes** `persona` subjects, which is
@@ -728,8 +758,14 @@ export interface paths {
          *     granting or revoking a whole network empties this list of every
          *     contact on it at once, and a contact the owner deliberately left
          *     `pending` is *not* in it - they answered, and the answer was "not
-         *     yet". The owner's own Matrix ID is never in it either: their messages
-         *     travel through the same rooms, and nobody is their own correspondent.
+         *     yet". The **owner** is never in it either, under any of their
+         *     identities - their Matrix ID and the network ghosts of
+         *     `GATEWAY_OWNER_IDENTITIES`: their own messages travel through the same
+         *     rooms, and nobody is their own correspondent. A sighting of one of them
+         *     is not recorded at all; one an older build recorded - before #109 the
+         *     user's own messages were published as a contact's - is excluded when
+         *     this list is read, so an upgraded deployment stops offering the user a
+         *     decision about their own ghost (ticket #149, ADR 0018, ADR 0021).
          *
          *     **The numbers.** `total` and `networks` always count the whole list,
          *     whatever `?network=` narrows `contacts` to, so a badge and the list
@@ -1866,7 +1902,9 @@ export interface components {
             /**
              * @description One entry per (subject, network), ordered by subject type,
              *     subject and network. Revocations are explicit; `persona`
-             *     subjects are excluded.
+             *     subjects are excluded, and so is every subject named in
+             *     `owner_identities` — including one a decision was recorded about
+             *     before this Gateway knew whose identity it was.
              */
             entries: components["schemas"]["ConsentStateEntry"][];
             /**
@@ -1876,6 +1914,32 @@ export interface components {
              *     skip or re-apply one decision.
              */
             next_stream_sequence: number;
+            /**
+             * @description Every Matrix ID this deployment has confirmed as the owner's own
+             *     — their account and their network ghosts — and therefore the
+             *     subjects `entries` will never contain (ticket #149, ADR 0018,
+             *     ADR 0021). Sorted, and never empty: `GATEWAY_OWNER` is itself one
+             *     of them.
+             *
+             *     It is here because the set **cannot be derived**. A bridge
+             *     materialises a ghost of the user's own account that is
+             *     indistinguishable in shape from a contact's, there is more than
+             *     one per network (`@whatsapp_<phone>` *and*
+             *     `@whatsapp_lid-<lid>`, and the messages arrived under the LID
+             *     one), a bridge's `whoami` carries a login id and no ghost Matrix
+             *     ID at all, and the set grows when a network starts using a new
+             *     addressing scheme. So the deployment confirms it
+             *     (`GATEWAY_OWNER_IDENTITIES`) and the Gateway — the single writer
+             *     of consent state — serves it, so that a consumer which must apply
+             *     the same rule reads this list instead of maintaining a second
+             *     copy of it. An identity that is not in it is a contact, because
+             *     unknown is not the owner.
+             * @example [
+             *       "@you:matrix.example.com",
+             *       "@whatsapp_lid-115332874281144:matrix.example.com"
+             *     ]
+             */
+            owner_identities: string[];
             /**
              * @description The JetStream stream `stream_sequence` is a sequence of — the
              *     deployment's one stream, `twalk`. Named here so a consumer does
@@ -4290,6 +4354,36 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `subject_is_the_owner` — the subject is one of this deployment's
+             *     own owner identities, and the owner is never a contact and never
+             *     has a consent state, on any event (ADR 0018, ADR 0021). There is
+             *     nothing to decide, so nothing is recorded and no
+             *     `consent.state.changed` is published.
+             *
+             *     The identities are the owner's Matrix ID (`GATEWAY_OWNER`) and the
+             *     network ghosts the deployment confirmed as theirs
+             *     (`GATEWAY_OWNER_IDENTITIES`); `GET /api/consent/snapshot` serves
+             *     the list as `owner_identities`.
+             *
+             *     A status and a code of its own, deliberately. It is not a `400`:
+             *     the request is well formed and its subject is a perfectly good
+             *     Matrix ID. And it is emphatically not a `404`: "there is no such
+             *     subject" and "that subject is you" are two different facts, and a
+             *     client that read them as one signal would offer the user the
+             *     decision again.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "subject_is_the_owner";
+                    };
+                };
+            };
             500: components["responses"]["ConsentStoreUnavailable"];
             503: components["responses"]["ConsentNotConfigured"];
         };
@@ -4337,6 +4431,22 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `subject_is_the_owner` — `contact` names one of this deployment's
+             *     owner identities, which have no consent state to resolve. Never a
+             *     `404`: the identity is known, and it is the user's own.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "subject_is_the_owner";
+                    };
+                };
+            };
             500: components["responses"]["ConsentStoreUnavailable"];
             503: components["responses"]["ConsentNotConfigured"];
         };

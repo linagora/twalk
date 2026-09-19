@@ -173,6 +173,11 @@ services:
       # see the .env.example entry, which explains how to read them off the
       # rooms. Both empty: the user's own messages keep going out as a
       # contact's, which is the behaviour #109 is about.
+      #
+      # Since #149 the Companion Gateway needs the same set — the owner has no
+      # consent state either, and the Gateway is the single writer of it — and
+      # takes it from this same value (GATEWAY_OWNER_IDENTITIES below), so this
+      # stays the one place a deployment lists them.
       SENSOR_OWNER: ${SENSOR_OWNER:-${GATEWAY_OWNER:-}}
       SENSOR_OWNER_IDENTITIES: ${SENSOR_OWNER_IDENTITIES:-}
       # The bridges' own bots (issue #152, ADR 0026): the accounts that are
@@ -242,6 +247,19 @@ services:
       # endpoint answers 503 — deliberately, so that an operator who has not
       # set it yet keeps the page that can say so.
       GATEWAY_OWNER: ${GATEWAY_OWNER:-}
+      # The network ghosts that same human's own traffic arrives under
+      # (ticket #149, ADR 0018, ADR 0021): the Gateway refuses a consent
+      # decision about one of them, serves none of them from any read of its
+      # consent state, and publishes the list on GET /api/consent/snapshot.
+      #
+      # It is **the same list the Sensor reads** as SENSOR_OWNER_IDENTITIES
+      # above, and it is fed from the same value on purpose: the set cannot be
+      # derived from a bridge and it grows after the fact, so two components
+      # reading one list is tolerable and two maintaining their own is not. An
+      # operator who already set SENSOR_OWNER_IDENTITIES needs to change
+      # nothing — it is picked up here — and GATEWAY_OWNER_IDENTITIES is there
+      # for a deployment that wants to say it explicitly.
+      GATEWAY_OWNER_IDENTITIES: ${GATEWAY_OWNER_IDENTITIES:-${SENSOR_OWNER_IDENTITIES:-}}
       # Where the Gateway verifies an OpenID token: the homeserver's own
       # federation API, on this compose network. Pinned rather than resolved
       # from the server name — one deployment, one homeserver.

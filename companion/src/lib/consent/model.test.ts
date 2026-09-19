@@ -310,9 +310,12 @@ describe('the bulk control', () => {
 
 describe('the owner, who is not a contact', () => {
 	it('is flagged rather than hidden', () => {
-		// ADR 0018 and ADR 0021: the owner has no consent state. A row about
-		// them is #149's Gateway half showing through, and filtering it in the
-		// screen would hide the only symptom a user can see.
+		// ADR 0018 and ADR 0021: the owner has no consent state. Since #149 a
+		// current Gateway serves no such row, so this synthetic one is the only
+		// thing that can still exercise the label — and the label stays,
+		// because an older Gateway behind this Companion does serve one and
+		// filtering it in the screen would hide the only symptom a user can
+		// see.
 		const list = rows([sighting(OWNER), sighting('@whatsapp_1:test.twalk')], []);
 		expect(list).toHaveLength(2);
 		expect(ownerRows(list).map((row) => row.contact)).toEqual([OWNER]);
