@@ -459,8 +459,15 @@ impl Call<'_> {
             .send()
             .await
             .with_context(|| format!("failed to call {method} {target}"))?;
-        self.verify(method, template, target, expected_status, expected_error, response)
-            .await
+        self.verify(
+            method,
+            template,
+            target,
+            expected_status,
+            expected_error,
+            response,
+        )
+        .await
     }
 
     /// The same check, with a bearer credential: the consent snapshot's
@@ -502,8 +509,15 @@ impl Call<'_> {
             .send()
             .await
             .with_context(|| format!("failed to call {method} {target}"))?;
-        self.verify(method, template, target, expected_status, expected_error, response)
-            .await
+        self.verify(
+            method,
+            template,
+            target,
+            expected_status,
+            expected_error,
+            response,
+        )
+        .await
     }
 
     /// Everything both entry points do to an answer: the status, the media
@@ -1415,6 +1429,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             absent_suggestion.as_str(),
         ),
         (Method::GET, "/api/portals", "/api/portals"),
+        (Method::GET, "/api/portals/moves", "/api/portals/moves"),
         (
             Method::POST,
             "/api/portals/observation",
@@ -1587,6 +1602,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // Gateway cannot see them" are very different claims (#105).
     for (method, template, body) in [
         (Method::GET, "/api/portals", None),
+        (Method::GET, "/api/portals/moves", None),
         (
             Method::POST,
             "/api/portals/observation",
@@ -3718,6 +3734,22 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         "and no total pretends to cover it: {}",
         register.body
     );
+    // The journal of moves (#255): this Gateway has a store, so the answer is
+    // a list — empty, since nothing it can read has moved. A move against real
+    // rooms is `tests/portals.rs`'s.
+    let moves = call
+        .check(
+            Method::GET,
+            &bridged_base,
+            "/api/portals/moves",
+            "/api/portals/moves",
+            &bridge_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(moves.body["moves"], json!([]), "{}", moves.body);
     // A room id that is not a portal of any readable bridge: an outcome, not
     // a status code, and nothing is attempted with the appservice credential.
     let refused = call
@@ -3771,11 +3803,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
 
     // No signature at all. One answer for every way the credential can be
     // missing or wrong.
-    let unsigned = harness::hermes_push(&harness::hermes_answer(
-        &good_reference,
-        "ok",
-        Some("en"),
-    ));
+    let unsigned = harness::hermes_push(&harness::hermes_answer(&good_reference, "ok", Some("en")));
     call.check_raw(
         Method::POST,
         &hermes_base,
@@ -3848,12 +3876,9 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // with a `200` and a reason, because a run that was never a Twalk wake is
     // not a failure — and an endpoint that answered `4xx` to it would teach an
     // operator to ignore its errors.
-    let other_hook = harness::hermes_push(&harness::hermes_answer(
-        &good_reference,
-        "ok",
-        Some("en"),
-    ))
-    .replace("\"transform_llm_output\"", "\"on_session_end\"");
+    let other_hook =
+        harness::hermes_push(&harness::hermes_answer(&good_reference, "ok", Some("en")))
+            .replace("\"transform_llm_output\"", "\"on_session_end\"");
     let ignored = call
         .check_raw(
             Method::POST,
@@ -3881,8 +3906,11 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // exists to satisfy loudly. Refused, and deliberately not defaulted: a
     // reply's disclosure is written in the language of the reply and not the
     // user's (ADR 0031).
-    let languageless =
-        harness::hermes_push(&harness::hermes_answer(&good_reference, "See you at 8", None));
+    let languageless = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        "See you at 8",
+        None,
+    ));
     let refused = call
         .check_raw(
             Method::POST,
@@ -3959,11 +3987,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     let seamless_gateway = GatewayProc::start(&gateway_env(&seamless_static))?;
     let seamless_base = seamless_gateway.base_url().await?;
     wait_until_answering(&seamless_base).await?;
-    let seamless = harness::hermes_push(&harness::hermes_answer(
-        &good_reference,
-        "ok",
-        Some("en"),
-    ));
+    let seamless = harness::hermes_push(&harness::hermes_answer(&good_reference, "ok", Some("en")));
     call.check_raw(
         Method::POST,
         &seamless_base,

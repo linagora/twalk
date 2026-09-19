@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
     // and one bus: the outbox that publishes decisions (#49) and the
     // projection that consumes the inbound stream to know who is waiting for
     // one (#54).
-    let (consent, contacts, approvals, suggestions, answers) = match &config.consent {
+    let (consent, contacts, approvals, suggestions, answers, store) = match &config.consent {
         Some(consent) => {
             let (store, outbox, owner) = open_consent(consent, &metrics)?;
             tokio::spawn(publish_until_shutdown(
@@ -189,7 +189,7 @@ async fn main() -> Result<()> {
             // its own bus connection, because a screen that cannot draw and
             // a reply that did not go out must not queue behind each other.
             let suggestions = Arc::new(Suggestions::new(
-                store,
+                store.clone(),
                 consent.nats_url.clone(),
                 config.approval_lookup_window,
                 std::time::SystemTime::now,
@@ -230,6 +230,7 @@ async fn main() -> Result<()> {
                 Some(approvals),
                 Some(suggestions),
                 answers,
+                Some(store),
             )
         }
         None => {
@@ -242,7 +243,7 @@ async fn main() -> Result<()> {
                      is read from the bus and the reply is published on it"
                 );
             }
-            (None, None, None, None, None)
+            (None, None, None, None, None, None)
         }
     };
 
@@ -418,6 +419,9 @@ async fn main() -> Result<()> {
             })
             .collect(),
         config.crowd_threshold,
+        // The register journals the moves it decides on in the Gateway's
+        // store (#255); without one they are decided and logged all the same.
+        store.clone(),
         metrics.clone(),
     )
     .context("failed to build the portal register")?

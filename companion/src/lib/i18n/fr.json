@@ -600,6 +600,8 @@
 	"dashboard.feed.title": "Activité récente",
 	"dashboard.feed.empty": "Il ne s’est encore rien passé.",
 	"dashboard.feed.privacy": "Événements techniques uniquement : passerelles, consentement et agents, plus un décompte. Twalk ne garde pas la liste de qui vous écrit : cet écran ne peut donc pas l’afficher.",
+	"dashboard.feed.move.followed": "Une conversation que vous observez a changé de salon ({members} personnes) ; votre décision l’a suivie",
+	"dashboard.feed.move.returned": "Une conversation que vous observez a changé de salon ({members} personnes) — à partir de {threshold}, elle revient dans le choix des conversations pour que vous décidiez à nouveau",
 	"dashboard.feed.bridge.connected": "{network} a été connecté",
 	"dashboard.feed.bridge.connecting": "{network} est en cours de connexion",
 	"dashboard.feed.bridge.expired": "La session {network} a expiré",

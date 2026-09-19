@@ -518,6 +518,10 @@ pub struct Portals {
     bridges: Vec<PortalBridge>,
     /// `GATEWAY_CROWD_THRESHOLD`, or [`DEFAULT_CROWD_THRESHOLD`].
     crowd_threshold: u64,
+    /// Where a conversation's move is journaled (issue #255). `None` when
+    /// this deployment has no store — no consent configured — in which case
+    /// a move is still decided and logged, and only the journal is missing.
+    moves: Option<Arc<crate::store::Store>>,
     metrics: Arc<Metrics>,
     http: reqwest::Client,
 }
@@ -549,6 +553,7 @@ impl Portals {
         sensor_user_id: Option<&str>,
         bridges: Vec<PortalBridge>,
         crowd_threshold: u64,
+        moves: Option<Arc<crate::store::Store>>,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<Option<Self>> {
         let (Some(homeserver_url), Some(sensor_user_id)) = (homeserver_url, sensor_user_id) else {
@@ -566,9 +571,27 @@ impl Portals {
             sensor_user_id: sensor_user_id.to_owned(),
             bridges,
             crowd_threshold,
+            moves,
             metrics,
             http,
         }))
+    }
+
+    /// The register's journal of moves, newest first; empty when this
+    /// deployment keeps none.
+    pub fn moves(&self, limit: usize) -> Vec<crate::store::PortalMove> {
+        let Some(store) = &self.moves else {
+            return Vec::new();
+        };
+        store.portal_moves(limit).unwrap_or_else(|error| {
+            warn!(%error, "could not read the portal moves journal");
+            Vec::new()
+        })
+    }
+
+    /// Whether this deployment journals moves at all.
+    pub fn journals_moves(&self) -> bool {
+        self.moves.is_some()
     }
 
     /// The crowd threshold this deployment applies — see
@@ -718,6 +741,7 @@ impl Portals {
             }
         }
         register.portals = fold_tombstones(register.portals, &bot_rooms);
+        self.decide_moves(&mut register.portals).await;
         // A stable order, so two reads of an unchanged deployment are the
         // same list: by bridge as configured, then by name, then by room id.
         let order: BTreeMap<&str, usize> = self
@@ -735,6 +759,98 @@ impl Portals {
         });
         self.metrics.set_portal_rooms(&register);
         register
+    }
+
+    /// Decides what the user's decision now means for every conversation
+    /// whose room was replaced while the Sensor was in it (ADR 0029, issue
+    /// #255) — the register decides, because "should this successor be
+    /// followed?" is a consent question and consent has one writer.
+    ///
+    /// Under the crowd threshold the decision **follows the conversation**:
+    /// the Sensor is invited into the successor as it would be on a tick,
+    /// because the user decided about the conversation and not the room. At
+    /// or above it the conversation stays `moved` and returns to the chooser
+    /// as a crowd the user has to acknowledge again — a threshold that applied
+    /// only at the moment of ticking would be one it suffices to wait out.
+    /// **Either way the move is said**: journaled once, keyed on the
+    /// successor, with the numbers it was decided on. A deployment that
+    /// changed rooms under the user without being able to say so is one
+    /// whose history they cannot check.
+    ///
+    /// A successor the register could not read is not decided: its count is
+    /// the dead room's and would be the wrong number to hold a threshold
+    /// against. It stays `moved`, which is already a sentence.
+    async fn decide_moves(&self, portals: &mut [Portal]) {
+        for portal in portals.iter_mut() {
+            if portal.observation != Observation::Moved || portal.unreadable.is_some() {
+                continue;
+            }
+            let Some(predecessor) = portal.moved_from.clone() else {
+                continue;
+            };
+            let follow = portal.members < self.crowd_threshold;
+            let first_decision = match &self.moves {
+                Some(store) => match store.record_portal_move(&crate::store::PortalMove {
+                    successor: portal.room_id.clone(),
+                    predecessor: predecessor.clone(),
+                    bridge_id: portal.bridge_id.clone(),
+                    members: portal.members,
+                    crowd_threshold: self.crowd_threshold,
+                    followed: follow,
+                    decided_at: crate::consent::rfc3339_millis(std::time::SystemTime::now()),
+                }) {
+                    Ok(recorded) => recorded,
+                    Err(error) => {
+                        warn!(%error, successor = %portal.room_id, "could not journal a move");
+                        true
+                    }
+                },
+                None => true,
+            };
+            if !follow {
+                if first_decision {
+                    warn!(
+                        successor = %portal.room_id,
+                        %predecessor,
+                        members = portal.members,
+                        crowd_threshold = self.crowd_threshold,
+                        "a conversation the user observed moved to a room whose audience crosses \
+                         the crowd threshold: not followed, returned to the chooser (ADR 0029)"
+                    );
+                }
+                continue;
+            }
+            let Some(bridge) = self
+                .bridges
+                .iter()
+                .find(|bridge| bridge.bridge_id == portal.bridge_id)
+            else {
+                continue;
+            };
+            let Some(as_token) = &bridge.as_token else {
+                continue;
+            };
+            match self.invite(as_token, Self::asking_as(bridge), portal).await {
+                OutcomeStatus::Invited | OutcomeStatus::AlreadyObserved => {
+                    portal.observation = Observation::Invited;
+                    info!(
+                        successor = %portal.room_id,
+                        %predecessor,
+                        members = portal.members,
+                        crowd_threshold = self.crowd_threshold,
+                        "a conversation the user observed moved: the decision followed it, the \
+                         Sensor is invited into the new room (ADR 0029)"
+                    );
+                }
+                other => warn!(
+                    successor = %portal.room_id,
+                    %predecessor,
+                    outcome = other.label(),
+                    "a conversation the user observed moved and the Sensor could not be invited \
+                     into the new room; it stays reported as moved"
+                ),
+            }
+        }
     }
 
     /// One bridge's portal rooms, read as its own bot.

@@ -280,6 +280,46 @@ describe('activityFeed', () => {
 		expect(feed[0].messageKey).toBe('dashboard.feed.consent.contact');
 	});
 
+	it('says a conversation moved, followed or returned, with numbers and no room', () => {
+		// #255, ADR 0029: a deployment that changed rooms under the user
+		// without being able to say so is one whose history they cannot check.
+		// The room ids and the room's name never reach the feed — a one-to-one
+		// portal is named after the contact.
+		const feed = activityFeed({
+			bridges: [],
+			consent: [],
+			devices: [],
+			moves: [
+				{
+					successor: '!new:example.com',
+					predecessor: '!old:example.com',
+					bridge_id: 'mautrix-whatsapp',
+					members: 3,
+					crowd_threshold: 20,
+					followed: true,
+					decided_at: '2026-09-19T10:00:00.000Z'
+				},
+				{
+					successor: '!bigger:example.com',
+					predecessor: '!small:example.com',
+					bridge_id: 'mautrix-whatsapp',
+					members: 24,
+					crowd_threshold: 20,
+					followed: false,
+					decided_at: '2026-09-19T11:00:00.000Z'
+				}
+			]
+		});
+		expect(feed.map((row) => row.messageKey)).toEqual([
+			'dashboard.feed.move.returned',
+			'dashboard.feed.move.followed'
+		]);
+		expect(feed[0].values).toEqual({ members: '24', threshold: '20' });
+		expect(feed[0].tone).toBe('idle');
+		expect(feed[1].tone).toBe('ok');
+		expect(JSON.stringify(feed.map((row) => row.values))).not.toContain('example.com');
+	});
+
 	it('carries bridge state, persona activity and device events, newest first', () => {
 		const feed = activityFeed({
 			bridges: [
