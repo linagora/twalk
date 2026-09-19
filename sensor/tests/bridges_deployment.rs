@@ -1,16 +1,35 @@
-//! Ticket #73, the mautrix bridges in the reference deployment: the two-step
-//! procedure `deploy/docker-compose` documents — `provision-bridges.sh`, then
-//! `docker compose --profile bridges up` — brings `mautrix-whatsapp` and
-//! `mautrix-signal` up against the stack's own Synapse, with Synapse
-//! accepting each appservice, each bridge process live, and each bridge's
-//! provisioning API answering for the shared secret in the environment file.
+//! Ticket #73, extended by #172: the mautrix bridges in the reference
+//! deployment. The two-step procedure `deploy/docker-compose` documents —
+//! `provision-bridges.sh`, then `docker compose --profile bridges up` —
+//! brings `mautrix-whatsapp`, `mautrix-signal` and `mautrix-gmessages` up
+//! against the stack's own Synapse, with Synapse accepting each appservice,
+//! each bridge process live, and each bridge's provisioning API answering for
+//! the shared secret in the environment file.
+//!
+//! A bridge is identified by its `bridge_id` and is never a network value
+//! (ADR 0005). `gmessages` appears throughout this file as mautrix's own name
+//! for that bridge — its binary, its appservice id, its registration file,
+//! its compose service and the variables carrying its secrets — and nowhere
+//! as a network: the network it serves is `sms`, which is the Companion
+//! Gateway's `GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK` and not this test's
+//! business. `Bridge::mautrix_id` is named for exactly that reason.
 //!
 //! **No network login is attempted.** Logging a bridge in needs a real
-//! WhatsApp or Signal account and a phone to scan a QR code with; that is the
-//! Companion's job (#68) and a human's. What this test proves is the
-//! deployment: the registration Synapse reads, the process that answers, and
-//! the provisioning API the Companion Gateway will drive (#55). Each bridge
-//! reports `logins: []` here, and that is the expected state.
+//! account and a human: a phone to scan a QR code with for WhatsApp and
+//! Signal, and for Google Messages seven Google session cookies copied out of
+//! a private browsing window followed by an emoji match on the phone (#57).
+//! That is the Companion's job (#68) and a human's, and no automation may do
+//! it. What this test proves is the deployment: the registration Synapse
+//! reads, the process that answers, and the provisioning API the Companion
+//! Gateway will drive (#55). Each bridge reports `logins: []` here, and that
+//! is the expected state.
+//!
+//! The second test is the other half of #172's acceptance: a stack with **no**
+//! bridges comes up, and is never asked for a bridge token. Compose
+//! interpolates the whole file whatever the active profiles are, so every
+//! bridge variable in `compose.yaml` has an empty default — the day one of
+//! them grows a `:?` guard, a deployment that runs no bridge at all stops
+//! starting, and that is a defect this file can catch cheaply.
 //!
 //! It lives in the Sensor's suite because the Sensor's crate is where the
 //! reference deployment's tests already live (`deployment.rs`), and because
@@ -26,21 +45,33 @@
 //! TWALK_BRIDGES_TEST_SYNAPSE_PORT (default 18568),
 //! TWALK_BRIDGES_TEST_NATS_PORT (default 14778),
 //! TWALK_BRIDGES_TEST_GATEWAY_PORT (default 18578),
-//! TWALK_BRIDGES_TEST_WHATSAPP_PORT (default 18588) and
-//! TWALK_BRIDGES_TEST_SIGNAL_PORT (default 18598) — all distinct from the
+//! TWALK_BRIDGES_TEST_WHATSAPP_PORT (default 18588),
+//! TWALK_BRIDGES_TEST_SIGNAL_PORT (default 18598) and
+//! TWALK_BRIDGES_TEST_GMESSAGES_PORT (default 17736) — all distinct from the
 //! defaults of `deployment.rs` (18218 / 14418 / 18328) and of
 //! `companion-gateway/tests/deployment.rs` (18318), so several
-//! default-configured deploy stacks can sit on one Docker daemon. They sit at
-//! the top of their ranges on purpose: an ad-hoc stack in another worktree
-//! took 18548 while this test was being written, and a default that loses a
-//! race to a neighbour is a default worth moving. Every one of them is
-//! overridable for exactly that reason. The bridge images are upstream and
-//! pinned by tag in `compose.yaml`, so unlike the Sensor's and the Gateway's
-//! there is no per-stack image tag to keep apart.
+//! default-configured deploy stacks can sit on one Docker daemon. The first
+//! five sit at the top of their ranges on purpose: an ad-hoc stack in another
+//! worktree took 18548 while this test was being written, and a default that
+//! loses a race to a neighbour is a default worth moving. The two defaults
+//! #172 added are in the 17700–17899 block that ticket was given, which is
+//! also why the existing five did not move: an operator's `.env` and a warm
+//! stack both keep working. Every one of them is overridable. The bridge
+//! images are upstream and pinned by tag in `compose.yaml`, so unlike the
+//! Sensor's and the Gateway's there is no per-stack image tag to keep apart.
 //!
-//! The stack stays up between runs: that is what makes a warm run fast. Set
-//! TWALK_BRIDGES_TEST_TEARDOWN=1 to drop it at the end of a passing run
-//! instead — by hand, `docker compose -p <stack> --profile bridges down -v`.
+//! The no-bridge test has a project and ports of its own —
+//! TWALK_NO_BRIDGES_TEST_STACK (default twalk-no-bridges-test),
+//! TWALK_NO_BRIDGES_TEST_SYNAPSE_PORT (default 17708) and
+//! TWALK_NO_BRIDGES_TEST_NATS_PORT (default 17718) — because it must not
+//! share a project with a stack that *has* bridges: the property it asserts
+//! is about a deployment where no bridge variable is set at all.
+//!
+//! The three-bridge stack stays up between runs: that is what makes a warm
+//! run fast. Set TWALK_BRIDGES_TEST_TEARDOWN=1 to drop it at the end of a
+//! passing run instead — by hand, `docker compose -p <stack> --profile
+//! bridges down -v`. The no-bridge stack always tears itself down, passing or
+//! failing: it is two containers and there is nothing to keep warm.
 //!
 //! The credentials below are throwaway constants for the local, ephemeral
 //! test stack (same category as the test-bot passwords) — the env file they
@@ -49,21 +80,28 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use tokio::process::Command;
 use tokio::time::sleep;
 
 const SERVER_NAME: &str = "deploy.twalk";
 const OWNER_USER_ID: &str = "@owner:deploy.twalk";
 
-/// The two bridges, with everything that differs between them: the compose
+/// The three bridges, with everything that differs between them: the compose
 /// service names, the appservice id Synapse knows them by, the bot the
 /// Sensor's allowed inviters must name, and the throwaway secrets this test
 /// configures them with. The provisioning secrets are deliberately longer
 /// than 16 characters — mautrix answers M_FORBIDDEN to the whole provisioning
 /// API below that length.
+///
+/// `mautrix_id` is mautrix's own name for the bridge and is deliberately not
+/// called a network: it selects the binary, the appservice id, the compose
+/// service, the registration's filename and the `.env` prefix carrying that
+/// bridge's secrets, and for the third bridge its value is `gmessages` —
+/// a bridge id, never a network (ADR 0005). The network each one serves is
+/// the Companion Gateway's configuration and appears nowhere in this file.
 struct Bridge {
-    network: &'static str,
+    mautrix_id: &'static str,
     appservice_id: &'static str,
     bot_user_id: &'static str,
     as_token: &'static str,
@@ -74,9 +112,9 @@ struct Bridge {
     default_port: &'static str,
 }
 
-const BRIDGES: [Bridge; 2] = [
+const BRIDGES: [Bridge; 3] = [
     Bridge {
-        network: "whatsapp",
+        mautrix_id: "whatsapp",
         appservice_id: "whatsapp",
         bot_user_id: "@whatsappbot:deploy.twalk",
         as_token: "bridges-test-only-whatsapp-as-token",
@@ -87,7 +125,7 @@ const BRIDGES: [Bridge; 2] = [
         default_port: "18588",
     },
     Bridge {
-        network: "signal",
+        mautrix_id: "signal",
         appservice_id: "signal",
         bot_user_id: "@signalbot:deploy.twalk",
         as_token: "bridges-test-only-signal-as-token",
@@ -96,6 +134,20 @@ const BRIDGES: [Bridge; 2] = [
         status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-signal/status",
         port_var: "TWALK_BRIDGES_TEST_SIGNAL_PORT",
         default_port: "18598",
+    },
+    // SMS, through Google Messages (#172). The bridge is `mautrix-gmessages`
+    // and the network it serves is `sms`; the id below is the bridge's, and
+    // `bridge-gmessages` is the `bridge_id` its status pushes carry.
+    Bridge {
+        mautrix_id: "gmessages",
+        appservice_id: "gmessages",
+        bot_user_id: "@gmessagesbot:deploy.twalk",
+        as_token: "bridges-test-only-gmessages-as-token",
+        hs_token: "bridges-test-only-gmessages-hs-token",
+        provisioning_secret: "bridges-test-only-gmessages-provisioning-secret",
+        status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-gmessages/status",
+        port_var: "TWALK_BRIDGES_TEST_GMESSAGES_PORT",
+        default_port: "17736",
     },
 ];
 
@@ -109,11 +161,11 @@ impl Bridge {
     }
 
     fn service(&self) -> String {
-        format!("bridge-{}", self.network)
+        format!("bridge-{}", self.mautrix_id)
     }
 
     fn registration_service(&self) -> String {
-        format!("bridge-{}-registration", self.network)
+        format!("bridge-{}-registration", self.mautrix_id)
     }
 }
 
@@ -136,8 +188,8 @@ fn deploy_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../deploy/docker-compose")
 }
 
-/// Writes the environment file the stack is configured through, with
-/// throwaway test values and this test's own host ports.
+/// Writes the environment file the three-bridge stack is configured through,
+/// with throwaway test values and this test's own host ports.
 ///
 /// It carries what the services this test starts read, plus every variable
 /// `compose.yaml` guards with `:?` — compose interpolates the whole file
@@ -160,7 +212,7 @@ fn write_env_file() -> Result<PathBuf> {
     let gateway_port = env_port("TWALK_BRIDGES_TEST_GATEWAY_PORT", "18578");
     let registrations = BRIDGES
         .iter()
-        .map(|bridge| format!("/registrations/{}.yaml", bridge.network))
+        .map(|bridge| format!("/registrations/{}.yaml", bridge.mautrix_id))
         .collect::<Vec<_>>()
         .join(",");
     // The bridge bots, as an operator has to name them for portal rooms to be
@@ -187,7 +239,7 @@ fn write_env_file() -> Result<PathBuf> {
          GATEWAY_HTTP_PORT={gateway_port}\n"
     );
     for bridge in &BRIDGES {
-        let prefix = bridge.network.to_uppercase();
+        let prefix = bridge.mautrix_id.to_uppercase();
         contents.push_str(&format!(
             "{prefix}_APPSERVICE_PORT={}\n\
              {prefix}_AS_TOKEN={}\n\
@@ -337,29 +389,20 @@ where
 }
 
 #[tokio::test]
-async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() -> Result<()> {
+async fn the_bridge_profile_brings_up_all_three_bridges_against_the_stack() -> Result<()> {
     let env_file = write_env_file()?;
 
-    // Step one of the documented procedure. It generates each registration
-    // (which needs no homeserver), installs both in Synapse's configuration,
+    // Step one of the documented procedure. It generates every registration
+    // (which needs no homeserver), installs them in Synapse's configuration,
     // and restarts Synapse if it is already running.
     provision_bridges(&env_file).await?;
 
-    // Step two. Only Synapse and the two bridges: this test needs neither the
+    // Step two. Only Synapse and the bridges: this test needs neither the
     // Sensor nor the bus, and naming them keeps it from building Rust images.
-    compose(
-        &env_file,
-        &[
-            "up",
-            "-d",
-            "--wait",
-            "synapse",
-            "bridge-whatsapp",
-            "bridge-signal",
-        ],
-        "up",
-    )
-    .await?;
+    let mut up = vec!["up", "-d", "--wait", "synapse"];
+    let services: Vec<String> = BRIDGES.iter().map(Bridge::service).collect();
+    up.extend(services.iter().map(String::as_str));
+    compose(&env_file, &up, "up").await?;
 
     let entries = compose_ps(&env_file).await?;
     let client = reqwest::Client::new();
@@ -372,7 +415,7 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             registration["ExitCode"].as_i64(),
             Some(0),
             "the {} registration one-shot must have succeeded: {registration}",
-            bridge.network
+            bridge.mautrix_id
         );
 
         // The bridge process is up, and compose agrees: the healthcheck is
@@ -382,7 +425,7 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             service["Health"].as_str(),
             Some("healthy"),
             "compose must report the {} bridge healthy: {service}",
-            bridge.network
+            bridge.mautrix_id
         );
 
         // Synapse accepted the appservice — and can reach it. MSC2659's ping
@@ -401,24 +444,24 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             .json(&serde_json::json!({}))
             .send()
             .await
-            .with_context(|| format!("failed to ping the {} appservice", bridge.network))?;
+            .with_context(|| format!("failed to ping the {} appservice", bridge.mautrix_id))?;
         let status = ping.status();
         let body: serde_json::Value = ping.json().await.unwrap_or(serde_json::Value::Null);
         assert_eq!(
             status,
             reqwest::StatusCode::OK,
             "Synapse must accept and reach the {} appservice: {body}",
-            bridge.network
+            bridge.mautrix_id
         );
         assert!(
             body["duration_ms"].is_number(),
             "the {} appservice ping must report a round trip: {body}",
-            bridge.network
+            bridge.mautrix_id
         );
 
         // Process liveness, straight from the host, unauthenticated.
         let live = poll_response(
-            &format!("the {} bridge's liveness endpoint", bridge.network),
+            &format!("the {} bridge's liveness endpoint", bridge.mautrix_id),
             || {
                 let client = client.clone();
                 let url = format!("{}/_matrix/mau/live", bridge.base_url());
@@ -430,7 +473,7 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             live.status(),
             reqwest::StatusCode::OK,
             "the {} bridge must answer /_matrix/mau/live",
-            bridge.network
+            bridge.mautrix_id
         );
 
         // The provisioning API the Companion Gateway will drive (#55),
@@ -446,20 +489,26 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             .bearer_auth(bridge.provisioning_secret)
             .send()
             .await
-            .with_context(|| format!("failed to call the {} bridge's whoami", bridge.network))?;
+            .with_context(|| format!("failed to call the {} bridge's whoami", bridge.mautrix_id))?;
         let status = whoami.status();
         let body: serde_json::Value = whoami.json().await.unwrap_or(serde_json::Value::Null);
         assert_eq!(
             status,
             reqwest::StatusCode::OK,
             "the {} bridge's provisioning API must answer whoami for its shared secret: {body}",
-            bridge.network
+            bridge.mautrix_id
         );
+        // mautrix's own `network_id`, which is its name for the bridge and
+        // not the contract's `network`: this is where `gmessages` is a
+        // legitimate value and `sms` would be wrong (ADR 0005). The Sensor
+        // folds these ids into networks in `network::Network::from_bridge_id`
+        // and refuses `gmessages` as a network value; the mapping from this
+        // bridge to `sms` lives in the Companion Gateway's configuration.
         assert_eq!(
             body["network"]["network_id"].as_str(),
-            Some(bridge.network),
-            "the {} bridge must identify its own network: {body}",
-            bridge.network
+            Some(bridge.mautrix_id),
+            "the {} bridge must identify itself by its own mautrix id: {body}",
+            bridge.mautrix_id
         );
         // The bot the Sensor's allowed inviters have to name, as the bridge
         // itself spells it — the env file above configured exactly this.
@@ -467,7 +516,7 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             body["bridge_bot"].as_str(),
             Some(bridge.bot_user_id),
             "the {} bridge's bot must be the one SENSOR_ALLOWED_INVITERS names: {body}",
-            bridge.network
+            bridge.mautrix_id
         );
         // No login, and none attempted: that needs a phone.
         assert_eq!(
@@ -490,7 +539,7 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             unauthenticated.status(),
             reqwest::StatusCode::UNAUTHORIZED,
             "the {} bridge's provisioning API must refuse an unauthenticated call",
-            bridge.network
+            bridge.mautrix_id
         );
 
         // The status webhook is wired at the Companion Gateway's path (#56's
@@ -501,13 +550,13 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             rendered_config_value(&env_file, bridge, ".homeserver.status_endpoint").await?,
             bridge.status_endpoint,
             "the {} bridge must push its status to the Companion Gateway",
-            bridge.network
+            bridge.mautrix_id
         );
         assert_eq!(
             rendered_config_value(&env_file, bridge, ".bridge.bridge_status_notices").await?,
             "errors",
             "the {} bridge's bridge_status_notices must stay at its upstream default",
-            bridge.network
+            bridge.mautrix_id
         );
         // And the single owner is the only account allowed to drive it.
         assert_eq!(
@@ -519,7 +568,7 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
             .await?,
             OWNER_USER_ID,
             "the {} bridge must grant only this deployment's owner",
-            bridge.network
+            bridge.mautrix_id
         );
     }
 
@@ -528,5 +577,213 @@ async fn the_bridge_profile_brings_up_whatsapp_and_signal_against_the_stack() ->
     if teardown_requested() {
         teardown(&env_file).await?;
     }
+    Ok(())
+}
+
+// --- A deployment with no bridges at all ------------------------------------
+
+fn no_bridges_stack() -> String {
+    std::env::var("TWALK_NO_BRIDGES_TEST_STACK")
+        .unwrap_or_else(|_| "twalk-no-bridges-test".to_owned())
+}
+
+/// Runs `docker compose` against the no-bridge stack and returns its stdout
+/// on success, or its stderr on failure. A failure is a value here rather
+/// than an error: whether interpolation succeeds is what the first assertion
+/// below is about, and compose's own message is the evidence worth printing.
+///
+/// `profile` is normally `false` — no profile is the whole point. One
+/// assertion turns it on deliberately, to *render* the bridge services of an
+/// environment that configures none of them: `config` applies the active
+/// profiles, so a service behind an inactive one is not in the output at all
+/// and could not be inspected.
+async fn compose_no_bridges(
+    env_file: &Path,
+    profile: bool,
+    args: &[&str],
+    what: &str,
+) -> Result<std::result::Result<String, String>> {
+    let mut command = Command::new("docker");
+    command
+        .arg("compose")
+        .arg("-p")
+        .arg(no_bridges_stack())
+        .arg("--env-file")
+        .arg(env_file)
+        .arg("-f")
+        .arg(deploy_dir().join("compose.yaml"));
+    if profile {
+        command.arg("--profile").arg("bridges");
+    }
+    let output = command
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to run docker compose {what}"))?;
+    if output.status.success() {
+        Ok(Ok(String::from_utf8_lossy(&output.stdout).into_owned()))
+    } else {
+        Ok(Err(String::from_utf8_lossy(&output.stderr).into_owned()))
+    }
+}
+
+/// The environment file of a deployment that runs no bridge: exactly the
+/// variables `compose.yaml` guards with `:?` plus the two host ports this
+/// stack publishes, and **not one bridge variable**. That absence is the
+/// fixture — the file is the `.env` of an operator who never enabled the
+/// profile.
+fn write_no_bridges_env_file() -> Result<PathBuf> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "twalk-no-bridges-deploy-test-{}-{unique}.env",
+        std::process::id()
+    ));
+    let synapse_port = env_port("TWALK_NO_BRIDGES_TEST_SYNAPSE_PORT", "17708");
+    let nats_port = env_port("TWALK_NO_BRIDGES_TEST_NATS_PORT", "17718");
+    std::fs::write(
+        &path,
+        format!(
+            "MATRIX_DOMAIN={SERVER_NAME}\n\
+             MATRIX_HTTP_PORT={synapse_port}\n\
+             MATRIX_REGISTRATION_SHARED_SECRET=no-bridges-test-only-registration-shared-secret\n\
+             MATRIX_MACAROON_SECRET=no-bridges-test-only-macaroon-secret\n\
+             MATRIX_FORM_SECRET=no-bridges-test-only-form-secret\n\
+             MATRIX_OWNER_USER_ID={OWNER_USER_ID}\n\
+             MATRIX_APPSERVICE_REGISTRATIONS=\n\
+             SENSOR_USER_ID=@sensor:{SERVER_NAME}\n\
+             SENSOR_PASSWORD=no-bridges-test-only-password-sensor\n\
+             SENSOR_ALLOWED_INVITERS={OWNER_USER_ID}\n\
+             SENSOR_STATE_DIR=/data\n\
+             SENSOR_LOG_LEVEL=info\n\
+             NATS_PORT={nats_port}\n"
+        ),
+    )
+    .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+/// The assertions, as a fallible function rather than a body full of
+/// `assert!`: the caller tears the stack down whether this succeeds or fails,
+/// and a panic here would skip that.
+async fn check_a_bridgeless_stack(env_file: &Path) -> Result<()> {
+    // 1. The file interpolates at all with no bridge variable set. This is
+    //    the assertion #172 is really about: compose interpolates the whole
+    //    file whatever the active profiles are, so a `:?` guard on a bridge
+    //    token — or a `gmessages` one demanded where WhatsApp's and Signal's
+    //    are optional — would stop a bridgeless deployment dead, with an
+    //    error about a network its operator does not use.
+    if let Err(stderr) = compose_no_bridges(env_file, false, &["config"], "config").await? {
+        bail!(
+            "a deployment with no bridge variable set must still interpolate; \
+             compose refused it:\n{stderr}"
+        );
+    }
+
+    // 2. No bridge service is planned. `config --services` applies the active
+    //    profiles, and none is active here.
+    let services = compose_no_bridges(
+        env_file,
+        false,
+        &["config", "--services"],
+        "config --services",
+    )
+    .await?
+    .map_err(|stderr| anyhow::anyhow!("docker compose config --services failed:\n{stderr}"))?;
+    let planned: Vec<&str> = services
+        .lines()
+        .map(str::trim)
+        .filter(|service| service.starts_with("bridge-"))
+        .collect();
+    ensure!(
+        planned.is_empty(),
+        "a default `up` must plan no bridge service, got {planned:?}"
+    );
+
+    // 3. And every bridge secret renders EMPTY rather than failing — even
+    //    with the profile turned on, which is the stronger statement and the
+    //    one that says where the missing-value error is supposed to come
+    //    from. An operator who enables the profile without setting a token
+    //    gets a one-shot that stops with a sentence naming the variable
+    //    (`bridges/generate-registration.sh`), never an interpolation error
+    //    about a network they may not even be trying to run.
+    let rendered = compose_no_bridges(
+        env_file,
+        true,
+        &["config", "--format", "json"],
+        "config --format json",
+    )
+    .await?
+    .map_err(|stderr| {
+        anyhow::anyhow!(
+            "the bridge profile must interpolate even when no bridge token is set:\n{stderr}"
+        )
+    })?;
+    let rendered: serde_json::Value =
+        serde_json::from_str(&rendered).context("docker compose config --format json")?;
+    let rendered_services = rendered["services"]
+        .as_object()
+        .context("the rendered configuration has no services")?;
+    for bridge in &BRIDGES {
+        let service = format!("bridge-{}-registration", bridge.mautrix_id);
+        let environment = rendered_services
+            .get(&service)
+            .and_then(|service| service["environment"].as_object())
+            .with_context(|| format!("{service} is missing from the rendered configuration"))?;
+        for variable in [
+            "BRIDGE_AS_TOKEN",
+            "BRIDGE_HS_TOKEN",
+            "BRIDGE_PROVISIONING_SECRET",
+            "BRIDGE_STATUS_ENDPOINT",
+        ] {
+            let value = environment
+                .get(variable)
+                .with_context(|| format!("{service} does not set {variable}"))?;
+            ensure!(
+                value.as_str() == Some(""),
+                "{service}'s {variable} must render empty on a stack that sets no bridge \
+                 variable, got {value}"
+            );
+        }
+    }
+
+    // 4. And the stack comes up. Synapse is where an appservice registration
+    //    is installed, so it is the service that would refuse to start on a
+    //    registration path left behind by a bridge this stack does not run.
+    //    The Sensor and the Gateway are deliberately not started: building
+    //    their images proves nothing this test is about.
+    compose_no_bridges(
+        env_file,
+        false,
+        &["up", "-d", "--wait", "synapse", "nats"],
+        "up",
+    )
+    .await?
+    .map_err(|stderr| anyhow::anyhow!("a stack with no bridges must come up:\n{stderr}"))?;
+    Ok(())
+}
+
+/// #172's other half: adding a third bridge must not make a deployment that
+/// runs none of them harder to start.
+///
+/// A stack with no bridges must never be asked for a gmessages token. Every
+/// bridge variable in `compose.yaml` therefore has an empty default, and the
+/// missing-value errors come from `bridges/generate-registration.sh`, which
+/// can say what is missing and why.
+///
+/// It tears its stack down at the end of every run, passing or failing: two
+/// containers, nothing worth keeping warm, and a stack that outlived the test
+/// would hold this project's name and ports against the next one.
+#[tokio::test]
+async fn a_stack_with_no_bridges_comes_up_and_is_asked_for_no_bridge_token() -> Result<()> {
+    let env_file = write_no_bridges_env_file()?;
+    let outcome = check_a_bridgeless_stack(&env_file).await;
+    let teardown = compose_no_bridges(&env_file, false, &["down", "-v"], "down").await;
+    let _ = std::fs::remove_file(&env_file);
+
+    outcome?;
+    teardown?
+        .map_err(|stderr| anyhow::anyhow!("failed to tear the no-bridge stack down:\n{stderr}"))?;
     Ok(())
 }

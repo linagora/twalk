@@ -1,0 +1,82 @@
+# mautrix-gmessages base configuration for the Twalk reference deployment.
+#
+# Same shape and the same rules as ../mautrix-whatsapp/config.yaml, which
+# carries the full commentary: decisions only, no secrets, partial config
+# merged onto the pinned version's upstream defaults, and the
+# environment-dependent fields rendered on top at provisioning time by
+# ../generate-registration.sh.
+#
+# This bridge's network is `sms` and its bridge id is `mautrix-gmessages`
+# (ADR 0005). `gmessages` appears below only where it is mautrix's own name
+# for this bridge — the appservice id, the bot's localpart, the ghost prefix —
+# and never as a network value. SMS stays `sms` whether it transits Google
+# Messages Web or, in v0.2, the sovereign SMS Companion.
+#
+# What this path costs, stated here as it is stated in the Companion: SMS
+# transits Google Messages Web, it needs a Google account, it is unavailable
+# to an iOS-only user, and mautrix documents no lifetime for the session
+# cookies it signs in with — so no re-login cadence is promised anywhere.
+
+network:
+    device_meta:
+        # What the user sees in Google Messages' "Device pairing" list on
+        # their phone. It is how they recognise this bridge there, so it
+        # names the product rather than the software (upstream's default is
+        # `mautrix-gmessages`).
+        os: Twalk
+        # `browser` and `type` are deliberately left at upstream's defaults
+        # (OTHER, TABLET). `type` decides how many of these sessions Google
+        # allows at once and we have no opinion worth freezing.
+
+bridge:
+    # `bridge_status_notices` deliberately left at the upstream default
+    # (errors) — see the WhatsApp config for why.
+
+    # Overwritten at provisioning time with MATRIX_OWNER_USER_ID.
+    permissions: {}
+
+database:
+    type: sqlite3-fk-wal
+    uri: file:/data/mautrix-gmessages.db?_txlock=immediate
+
+homeserver:
+    # Rendered at provisioning time (MATRIX_INTERNAL_URL, MATRIX_DOMAIN).
+    address: http://synapse:8008
+    domain: localhost
+    software: standard
+    # Rendered from GMESSAGES_STATUS_ENDPOINT: the Companion Gateway's
+    # bridge-status webhook.
+    status_endpoint:
+
+appservice:
+    address: http://bridge-gmessages:29336
+    hostname: 0.0.0.0
+    port: 29336
+
+    id: gmessages
+    bot:
+        username: gmessagesbot
+        displayname: Google Messages bridge bot
+
+    # Rendered at provisioning time (GMESSAGES_AS_TOKEN, GMESSAGES_HS_TOKEN).
+    as_token: ""
+    hs_token: ""
+
+matrix:
+    federate_rooms: false
+
+provisioning:
+    # Rendered from GMESSAGES_PROVISIONING_SECRET (at least 16 characters).
+    shared_secret: disable
+    allow_matrix_auth: false
+
+encryption:
+    allow: true
+    default: true
+    require: false
+
+logging:
+    min_level: info
+    writers:
+        - type: stdout
+          format: json
