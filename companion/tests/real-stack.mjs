@@ -251,6 +251,11 @@ export async function startBridgeStack() {
 			GATEWAY_BRIDGES: BRIDGES.map((bridge) => bridge.bridgeId).join(','),
 			...bridgeEnvironment,
 			GATEWAY_PORTAL_REFRESH_SECONDS: '0',
+			// Not the default, on purpose: the chooser holds no threshold of its
+			// own (#252), so the value it draws its crowds from has to be the
+			// one this Gateway serves — and a screen asserting the served number
+			// only proves it if the number is one it could not have guessed.
+			GATEWAY_CROWD_THRESHOLD: String(CROWD_THRESHOLD),
 			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'
 		},
 		stdio: ['ignore', 'inherit', 'inherit']
@@ -519,13 +524,19 @@ const PORTAL_BOT_LOCALPART = 'portalbot_wa';
  *  its messages to WhatsApp exactly as it would in production. */
 const PORTAL_GHOST_LOCALPART = 'portalbot_ghost_wa';
 /**
+ * The crowd threshold the portals Gateway is started with (`GATEWAY_CROWD_THRESHOLD`,
+ * #252). Deliberately not the default 20, so a screen that shows it proves it
+ * read the served value.
+ */
+const CROWD_THRESHOLD = 21;
+/**
  * How many people the crowded group has.
  *
- * Above `$lib/portals/selection.ts`'s `CROWD`, because the criterion the ticket
- * cares most about is that a conversation covering a crowd cannot be ticked
- * without the number being read — and a browser test of that needs a room that
- * really does hold that many people. Twenty-two real accounts, joined for real:
- * the count on screen is the homeserver's own.
+ * At or above the served threshold, because the criterion the ticket cares
+ * most about is that a conversation covering a crowd cannot be ticked without
+ * the number being read — and a browser test of that needs a room that really
+ * does hold that many people. Twenty-two real accounts, joined for real: the
+ * count on screen is the homeserver's own.
  */
 const CROWDED_MEMBERS = 22;
 /**

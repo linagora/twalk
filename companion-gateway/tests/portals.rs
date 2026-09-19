@@ -461,6 +461,66 @@ async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_
     Ok(())
 }
 
+/// Issue #252 / ADR 0029: the crowd threshold — the count at or above which
+/// a conversation is a crowd the user must acknowledge before observing it
+/// (#143) — has **one owner**, and it is the Gateway. The register serves it,
+/// so the chooser draws its crowds section from the served value and a
+/// threshold changed here moves the frontier on screen with no rebuild; and
+/// the register will apply the same number when a conversation's room is
+/// replaced (#255), which a number that lived only on screen could not.
+#[tokio::test]
+async fn the_register_serves_the_crowd_threshold_it_is_configured_with() -> Result<()> {
+    let running = Running::start("portals-threshold").await?;
+    let register = running.register().await?;
+    assert_eq!(
+        register["crowd_threshold"],
+        json!(20),
+        "the default is the number #143 measured: {register}"
+    );
+    running.stop().await;
+
+    let static_dir = companion_build("portals-threshold-7")?;
+    let bridge_bot = MatrixUser::as_fresh_appservice("portalbot").await?;
+    let mut env = gateway_env_with_portals(&static_dir, &bridge_bot);
+    env.push(("GATEWAY_CROWD_THRESHOLD".to_owned(), "7".to_owned()));
+    let gateway = GatewayProc::start(&env)?;
+    let base = gateway.base_url().await?;
+    let cookie = signed_in_device_token(&base).await?;
+    let register: Value = reqwest::Client::new()
+        .get(format!("{base}/api/portals"))
+        .header(reqwest::header::COOKIE, format!("twalk_device={cookie}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(register["crowd_threshold"], json!(7), "{register}");
+    gateway.stop().await;
+
+    // A threshold under which every two-person conversation is a crowd is
+    // not a threshold: refused at startup, naming the variable.
+    for unusable in ["0", "1", "twenty"] {
+        let static_dir = companion_build("portals-threshold-unusable")?;
+        let mut env = gateway_env_with_portals(&static_dir, &bridge_bot);
+        env.push(("GATEWAY_CROWD_THRESHOLD".to_owned(), unusable.to_owned()));
+        let mut refused = GatewayProc::start(&env)?;
+        let status = refused.wait_for_exit().await?;
+        assert_ne!(
+            status.code(),
+            Some(0),
+            "GATEWAY_CROWD_THRESHOLD={unusable} must be refused"
+        );
+        let logs = refused.logs().await;
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("GATEWAY_CROWD_THRESHOLD")),
+            "the refusal names the variable:\n{}",
+            logs.join("\n")
+        );
+    }
+    Ok(())
+}
+
 /// The register acts as the **bridge bot**, and a register that did not could
 /// not see a single conversation (ticket #171).
 ///

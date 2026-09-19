@@ -134,6 +134,23 @@ const ROOM_READ_CONCURRENCY: usize = 6;
 /// number of invitations.
 pub const MAX_ROOMS_PER_REQUEST: usize = 256;
 
+/// Where a member count stops being a list and becomes a **crowd** — a
+/// conversation the user must acknowledge the size of before observing it
+/// (#143) — when the operator sets no threshold.
+///
+/// Measured, not tasted: on the reference account the largest group whose
+/// members a user could name is eleven (`Échecs en Yvelines`, the
+/// announcement group), and the smallest that is unmistakably a crowd is
+/// seventy-three (`RAG I Infos`). Twenty sits between them, on the side of
+/// asking too often rather than too rarely.
+///
+/// It lives here and not on screen because the register applies it too: a
+/// replaced room's successor is followed under it and returned to the
+/// chooser above it (ADR 0029, #255), and a threshold that applied only at
+/// the moment of ticking would be one it suffices to wait out. The Companion
+/// reads the served value (`crowd_threshold`) and holds no number of its own.
+pub const DEFAULT_CROWD_THRESHOLD: u64 = 20;
+
 /// How often the background refresher re-reads the register to keep the
 /// gauges honest, when the operator sets no interval. The API's own read is
 /// always live; this only decides how stale `/metrics` may be, so it is
@@ -499,6 +516,8 @@ pub struct Portals {
     /// Every bridge in `GATEWAY_BRIDGES`, in that order, with the appservice
     /// token that reads it or the reason there is none.
     bridges: Vec<PortalBridge>,
+    /// `GATEWAY_CROWD_THRESHOLD`, or [`DEFAULT_CROWD_THRESHOLD`].
+    crowd_threshold: u64,
     metrics: Arc<Metrics>,
     http: reqwest::Client,
 }
@@ -529,6 +548,7 @@ impl Portals {
         homeserver_url: Option<&str>,
         sensor_user_id: Option<&str>,
         bridges: Vec<PortalBridge>,
+        crowd_threshold: u64,
         metrics: Arc<Metrics>,
     ) -> anyhow::Result<Option<Self>> {
         let (Some(homeserver_url), Some(sensor_user_id)) = (homeserver_url, sensor_user_id) else {
@@ -545,9 +565,16 @@ impl Portals {
             homeserver_url: homeserver_url.trim_end_matches('/').to_owned(),
             sensor_user_id: sensor_user_id.to_owned(),
             bridges,
+            crowd_threshold,
             metrics,
             http,
         }))
+    }
+
+    /// The crowd threshold this deployment applies — see
+    /// [`DEFAULT_CROWD_THRESHOLD`] for what it is and why it lives here.
+    pub fn crowd_threshold(&self) -> u64 {
+        self.crowd_threshold
     }
 
     pub fn sensor_user_id(&self) -> &str {

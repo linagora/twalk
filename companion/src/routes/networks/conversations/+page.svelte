@@ -73,6 +73,8 @@
 	/** Every conversation the register offered, of every network. */
 	let all = $state<ConversationRow[]>([]);
 	let bridges = $state<BridgeReading[]>([]);
+	/** The Gateway's crowd threshold, served with the register (#252). */
+	let crowdThreshold = $state(Number.POSITIVE_INFINITY);
 	let loaded = $state(false);
 	let failure = $state<ReadFailure | null>(null);
 	let query = $state('');
@@ -112,6 +114,7 @@
 		}
 		failure = null;
 		bridges = [...answer.register.bridges];
+		crowdThreshold = answer.register.crowdThreshold;
 		all = answer.register.rows.filter(
 			(row) => network === null || row.network === network
 		);
@@ -128,7 +131,7 @@
 	/** Scoped to the filter, counted, named. Never "all". */
 	const bulk = $derived(scopedBulkControl(shown.map((row) => row.roomId), selected));
 	/** Costed against every conversation, not only the ones on screen. */
-	const cost = $derived(consequence(all, selected));
+	const cost = $derived(consequence(all, selected, crowdThreshold));
 	const observing = $derived(all.filter((row) => row.observation === 'observing').length);
 	const blocked = $derived(cost.empty || (cost.acknowledgementNeeded && !acknowledged));
 
@@ -236,6 +239,7 @@
 	data-testid="screen-conversations"
 	data-network={network ?? 'all'}
 	data-loaded={loaded ? 'yes' : 'no'}
+	data-crowd-threshold={loaded && failure === null ? crowdThreshold : undefined}
 >
 	<header class="stack">
 		<p class="small">

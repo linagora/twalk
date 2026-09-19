@@ -110,6 +110,13 @@ pub struct Config {
     /// list. Lower it on a deployment that watches the gauge; the cost is one
     /// homeserver call per portal room per interval.
     pub portal_refresh_seconds: u64,
+    /// Where a member count becomes a crowd the user must acknowledge
+    /// (`GATEWAY_CROWD_THRESHOLD`, default
+    /// [`crate::portals::DEFAULT_CROWD_THRESHOLD`], #252). Served in the
+    /// register's answer and applied when a conversation's room is replaced;
+    /// the Companion holds no number of its own. Below 2 it is refused: a
+    /// threshold every two-person conversation crosses is not one.
+    pub crowd_threshold: u64,
     /// Where the model configuration and the language preference live, and
     /// the operator's credential file if there is one (ticket #98). `None`
     /// on the same terms as [`Self::sign_in`], because the settings store is
@@ -677,6 +684,19 @@ impl Config {
                 "GATEWAY_PORTAL_REFRESH_SECONDS",
                 &crate::portals::DEFAULT_REFRESH_SECONDS.to_string(),
             )?,
+            crowd_threshold: {
+                let threshold: u64 = optional(
+                    "GATEWAY_CROWD_THRESHOLD",
+                    &crate::portals::DEFAULT_CROWD_THRESHOLD.to_string(),
+                )?;
+                anyhow::ensure!(
+                    threshold >= 2,
+                    "environment variable GATEWAY_CROWD_THRESHOLD must be at least 2: it is the \
+                     member count at or above which a conversation is a crowd the user has to \
+                     acknowledge, and a threshold every two-person conversation crosses is not one"
+                );
+                threshold
+            },
             // The settings store (ticket #98) needs what sign-in already
             // names — the state directory — plus, optionally, the
             // operator's credential file.

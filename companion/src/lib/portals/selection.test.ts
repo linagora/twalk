@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { rows, type Portal } from './conversations';
-import { batched, consequence, CROWD, observedNow, requests } from './selection';
+import { batched, consequence, observedNow, requests } from './selection';
 
 function portal(
 	name: string,
@@ -26,6 +26,9 @@ function portal(
 }
 
 /** maria, already observed; a team; and the 246-member association. */
+/** The default the Gateway serves, as the reference deployment measured it (#143). */
+const CROWD_THRESHOLD = 20;
+
 const ACCOUNT = rows([
 	portal('maria (WA)', '33612345678@s.whatsapp.net', 2, 'observing'),
 	portal('Linagora : Team Clean', '120363123412341234@g.us', 7),
@@ -52,14 +55,14 @@ describe('observedNow', () => {
 
 describe('consequence', () => {
 	it('is empty when nothing would change', () => {
-		const nothing = consequence(ACCOUNT, observedNow(ACCOUNT));
+		const nothing = consequence(ACCOUNT, observedNow(ACCOUNT), CROWD_THRESHOLD);
 		expect(nothing.empty).toBe(true);
 		expect(nothing.people).toBe(0);
 		expect(nothing.acknowledgementNeeded).toBe(false);
 	});
 
 	it('states how many people a tick covers, before it is applied', () => {
-		const one = consequence(ACCOUNT, new Set([id('maria (WA)'), id('Échecs en Yvelines')]));
+		const one = consequence(ACCOUNT, new Set([id('maria (WA)'), id('Échecs en Yvelines')]), CROWD_THRESHOLD);
 		expect(one.starting).toBe(1);
 		expect(one.people).toBe(246);
 		expect(one.largest).toEqual({ label: 'Échecs en Yvelines', members: 246 });
@@ -70,7 +73,8 @@ describe('consequence', () => {
 		// Yvelines with 246" reads as a decision about an association.
 		const family = consequence(
 			ACCOUNT,
-			new Set([id('maria (WA)'), id('Échecs en Yvelines'), id('Communauté CKCP')])
+			new Set([id('maria (WA)'), id('Échecs en Yvelines'), id('Communauté CKCP')]),
+			CROWD_THRESHOLD
 		);
 		expect(family.people).toBe(355);
 		expect(family.largest?.members).toBe(246);
@@ -78,18 +82,18 @@ describe('consequence', () => {
 	});
 
 	it('asks to be acknowledged once any conversation is a crowd', () => {
-		const team = consequence(ACCOUNT, new Set([id('maria (WA)'), id('Linagora : Team Clean')]));
+		const team = consequence(ACCOUNT, new Set([id('maria (WA)'), id('Linagora : Team Clean')]), CROWD_THRESHOLD);
 		expect(team.people).toBe(7);
 		expect(team.acknowledgementNeeded).toBe(false);
 
-		const association = consequence(ACCOUNT, new Set([id('Échecs en Yvelines')]));
+		const association = consequence(ACCOUNT, new Set([id('Échecs en Yvelines')]), CROWD_THRESHOLD);
 		expect(association.acknowledgementNeeded).toBe(true);
 	});
 
 	it('does not gate removals, because removing is always safe', () => {
 		// Untick the only observed conversation: two people stop being read,
 		// and nothing has to be acknowledged to stop reading them.
-		const stopping = consequence(ACCOUNT, new Set());
+		const stopping = consequence(ACCOUNT, new Set(), CROWD_THRESHOLD);
 		expect(stopping.stopping).toBe(1);
 		expect(stopping.starting).toBe(0);
 		expect(stopping.people).toBe(0);
@@ -103,21 +107,29 @@ describe('consequence', () => {
 		const shown = ACCOUNT.filter((row) => row.label === 'Linagora : Team Clean');
 		const wholeAccount = consequence(
 			ACCOUNT,
-			new Set([id('Linagora : Team Clean'), id('Échecs en Yvelines')])
+			new Set([id('Linagora : Team Clean'), id('Échecs en Yvelines')]),
+			CROWD_THRESHOLD
 		);
 		const filteredOnly = consequence(
 			shown,
-			new Set([id('Linagora : Team Clean'), id('Échecs en Yvelines')])
+			new Set([id('Linagora : Team Clean'), id('Échecs en Yvelines')]),
+			CROWD_THRESHOLD
 		);
 		expect(wholeAccount.people).toBe(253);
 		expect(filteredOnly.people).toBe(7);
 	});
 
-	it('puts the threshold between a group and a crowd', () => {
-		// Not a taste: the largest of those eighteen conversations whose
-		// members a user could name is eleven, and the smallest crowd is 73.
-		expect(CROWD).toBeGreaterThan(11);
-		expect(CROWD).toBeLessThan(73);
+	it('draws the crowds from the served threshold, not from a number of its own', () => {
+		// The Gateway owns the threshold (#252): the same selection is a crowd
+		// under one served value and a list under another, and this screen
+		// has nothing to say about which.
+		const selection = new Set([id('Échecs en Yvelines')]);
+		expect(consequence(ACCOUNT, selection, 20).crowds.map((row) => row.label)).toEqual([
+			'Échecs en Yvelines'
+		]);
+		expect(consequence(ACCOUNT, selection, 20).acknowledgementNeeded).toBe(true);
+		expect(consequence(ACCOUNT, selection, 300).crowds).toEqual([]);
+		expect(consequence(ACCOUNT, selection, 300).acknowledgementNeeded).toBe(false);
 	});
 });
 
