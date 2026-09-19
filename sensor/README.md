@@ -20,6 +20,28 @@ What is withheld is the quotation and never the event: the reaction keeps its em
 
 So an operator can answer the two questions a revocation raises: the user keeps the evidence that a message arrived (a silent contact still looks different from a broken bridge), and nothing the contact sends is collected any more. Revocation applies to the future only — events already on the bus stay until retention expires, and erasing history is a separate, explicit action.
 
+## Two identities: one observes, one acts
+
+The Sensor holds **two** Matrix clients, and confusing them would undo most of what the rest of this document promises.
+
+`@sensor:` is the one that **observes**. It syncs portal rooms, decrypts their events and publishes them, on the terms above. Its membership of a room is what the portal register reads as `observing` ([ADR 0024](../docs/architecture/adr/0024-a-portal-room-is-observed-by-invitation-per-conversation.md)), and nothing on this page changes for it.
+
+The second is a device of the **owner's own account** (`SENSOR_OWNER_DEVICE_ACCESS_TOKEN` and `SENSOR_OWNER_DEVICE_ID`, [ADR 0025](../docs/architecture/adr/0025-twalk-acts-as-the-user-through-a-device-of-their-account.md), [#123](https://github.com/linagora/twalk/issues/123)), and it is the one that **acts**. It exists because a mautrix bridge relays to its network only what the logged-in user's own Matrix account sends: a reply from `@sensor:` is ignored, without a log line, so the outbound half of this product used to return an event id and deliver nothing. It is write-only — it joins portal rooms and posts approved replies, it registers no event handler, it publishes nothing on the bus, and it reads no history, which is why it needs neither cross-signing nor a recovery key. Its stores live in their own subdirectory of `SENSOR_STATE_DIR`, because a crypto store belongs to one device.
+
+It joins **only** a room a bridge bot named in `SENSOR_BRIDGE_BOTS` invited it to. The inviter is the one authenticated fact in an invitation — the room id, the room's name and its `m.bridge` marker are all chosen by whoever sent it — and this device posts messages, so nothing else is enough.
+
+Both halves are unset-by-default, and the degradation is stated rather than implied. With no owner device the Sensor says so once at startup, naming #123, and then says per reply what the reply reached:
+
+| Posted by | Into | What the Sensor reports |
+| --- | --- | --- |
+| the owner's device | a portal room it has joined | `reach: contact` — the bridge relays it, because it really is the user's |
+| `@sensor:` | a portal room | `reach: nobody` — the bridge ignores it and the contact receives nothing ([#216](https://github.com/linagora/twalk/issues/216)) |
+| `@sensor:` | a room no bridge marked | `reach: contact` — native Matrix traffic ([ADR 0009](../docs/architecture/adr/0009-matrix-is-a-network.md)) has no bridge to ignore it |
+
+The report is the approval event, unchanged, republished on `twalk.persona.reply.approved.v1.posted` with `reach` and `posted-as` headers — a sibling of the dead-letter subject, so no contract schema had to grow a field for it. It is published on every successful post and not only on the failures, because a signal that exists only in the bad case makes the good case a silence. The same answer is counted as `twalk_sensor_outbound_replies_total{reach}`.
+
+When an owner device is configured and a reply targets a **portal** room it has not joined, nothing is posted: the send fails transiently, is retried, and ends on the dead-letter subject if the device never joins. Posting as `@sensor:` there would produce an event id and total silence, which is the outcome all of this exists to remove.
+
 ## Tests
 
 The integration tests (ticket 01) live in `tests/`. They boot a real Synapse and a real NATS JetStream via docker compose and verify behaviour at the process boundary; bots play the role of bridges over the Matrix client-server API.
