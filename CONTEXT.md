@@ -1,6 +1,6 @@
 # Twalk
 
-Twalk is a sovereign, self-hosted event hub that turns fragmented personal messaging (WhatsApp, Signal, SMS, Telegram, Discord) into a single auditable stream of typed CloudEvents that agents observe, reason about, and respond to under human control.
+Twalk is a sovereign, self-hosted event hub that perceives **what happens between the user and other people, across the accounts they hold** — messaging first (WhatsApp, Signal, SMS, Telegram, Discord, Matrix), then email, calendars and contacts — and turns it into a single auditable stream of typed CloudEvents that agents observe, reason about, and respond to under human control. That frontier is the point: an event naming nobody but the user needs none of these rules, so a build or a feed belongs straight to an agent and Twalk would add only a translation layer with nothing behind it (ADR 0033).
 
 ## Language
 
@@ -76,11 +76,22 @@ The versioned CloudEvents 1.0 envelope shared by every component, with type name
 _Avoid_: API, spec
 
 **Network**:
-A messaging service a conversation comes from, as the user experiences it: WhatsApp, Signal, Telegram, Discord, SMS, or Matrix itself for native rooms (the bring-your-own-account channel, ADR 0009). A network outlives its transports: SMS is `sms` whether it transits through mautrix-gmessages or the SMS Companion. On every event but one it is the network of the room the traffic arrived in; on `inbound.presence.updated` it is the network **the subject is on**, because presence is not room-scoped and a room's answer would be somebody else's (ADR 0027).
+The **kind** of a connection, as the user experiences it — what an icon and a card say. It is not what a consent decision is scoped to; that is the **connection** (ADR 0033). A messaging service a conversation comes from: WhatsApp, Signal, Telegram, Discord, SMS, or Matrix itself for native rooms (the bring-your-own-account channel, ADR 0009). A network outlives its transports: SMS is `sms` whether it transits through mautrix-gmessages or the SMS Companion. On every event but one it is the network of the room the traffic arrived in; on `inbound.presence.updated` it is the network **the subject is on**, because presence is not room-scoped and a room's answer would be somebody else's (ADR 0027).
 _Avoid_: channel (user-facing copy only), gmessages (a bridge, not a network)
 
+**Connection**:
+One configured account, mailbox or calendar — *this* WhatsApp login, *this* work inbox. It is the **perimeter** a consent decision is scoped to, because a person may reach the user through two of them and a decision about one is not a decision about the other. A network is its kind, not its identity: collapsing the two would grant an employer's workspace and a personal one in a single gesture (ADR 0033).
+_Avoid_: using "network" when an instance is meant
+
+**Perimeter**:
+What a consent decision is scoped to — always a connection. It is half of what consent *means*: the state is read by subject **and** perimeter, so an event attributed to the wrong one makes the model read the wrong row (ADR 0027).
+
+**Collector**:
+A component that turns one source into contract events. The Sensor is the Matrix collector — the role it always had, with one sense. A collector observes by **subscription and not by filtering**: it receives only what it subscribed to rather than receiving everything and discarding, which is as close to a structural property as a source without Matrix membership allows (ADR 0033).
+_Avoid_: calling one a bridge, which connects a network to Matrix rather than a source to the bus
+
 **Consent**:
-**The user's** decision about whether a contact's messages, or a whole network's, may be processed: `granted`, `pending`, or `revoked`. A network-level decision is the default for that network; a per-contact decision always overrides it. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
+**The user's** decision about whether a contact's messages, or a whole network's, may be processed: `granted`, `pending`, or `revoked`. A decision is scoped to a **connection** and not to a network, since a person may reach the user through two of them (ADR 0033). A connection-level decision is the default there; a per-contact decision always overrides it. A person reached through two sources is **two subjects the user may declare linked**, never merged by inference — ADR 0018's rule about the owner's own identities, applied to a third party, where a wrong merge grants somebody else's consent. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
 
 The name is a term of art and it is **not the contact's own consent**: the contact is neither asked nor told, and `granted` records that the user decided, not that anyone agreed. Writing "the contact's agreement" here for months is how the gap went unnoticed, so the distinction stays in the glossary rather than in a comment somewhere. Whether and how a contact should be informed is open (issue #122); a persona's own disclosure to the contact is a separate mechanism (ADR 0019).
 
