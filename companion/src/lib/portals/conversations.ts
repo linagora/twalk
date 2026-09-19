@@ -190,6 +190,11 @@ export interface ConversationRow {
  *   makes searching "on a participant's display name" work at all here.
  * - `encrypted` is true: a portal room is end-to-end encrypted by
  *   construction (`CONTEXT.md`), so this is a fact and not a default.
+ * - `type` is `null`: a portal is an ordinary room a bridge marked with
+ *   `m.bridge`, not a room Matrix types as something other than a
+ *   conversation. Every portal the register hands over *is* a conversation —
+ *   that is what the register's `m.bridge` check already decided — so this is
+ *   a fact about portals and not a default either.
  */
 export function asRoom(portal: Portal): RoomSummary {
 	return {
@@ -198,7 +203,8 @@ export function asRoom(portal: Portal): RoomSummary {
 		alias: portal.network_conversation_id,
 		encrypted: true,
 		heroes: [],
-		joinedMembers: portal.members
+		joinedMembers: portal.members,
+		type: null
 	};
 }
 

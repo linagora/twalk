@@ -4811,7 +4811,7 @@ components:
     Session:
       type: object
       description: Who is signed in, on which device.
-      required: [owner, homeserver, device]
+      required: [owner, homeserver, device, sensor]
       additionalProperties: false
       properties:
         owner:
@@ -4824,6 +4824,8 @@ components:
           description: The homeserver name that identity belongs to.
         device:
           $ref: "#/components/schemas/Device"
+        sensor:
+          $ref: "#/components/schemas/SensorUserId"
 
     IssuedSession:
       type: object
@@ -4836,7 +4838,7 @@ components:
         (`additionalProperties: false`) is what makes the conformance test
         catch a response member nobody described, and that keyword cannot
         see through an `allOf`.
-      required: [owner, homeserver, device, expires_in]
+      required: [owner, homeserver, device, sensor, expires_in]
       additionalProperties: false
       properties:
         owner:
@@ -4849,6 +4851,8 @@ components:
           description: The homeserver name that identity belongs to.
         device:
           $ref: "#/components/schemas/Device"
+        sensor:
+          $ref: "#/components/schemas/SensorUserId"
         expires_in:
           type: integer
           minimum: 1
@@ -4856,6 +4860,31 @@ components:
             Seconds the device token stays valid from now. The refresh
             token lives longer; its lifetime is not reported, because
             the client's only move when it expires is to sign in again.
+
+    SensorUserId:
+      type: [string, "null"]
+      description: |
+        The Matrix ID of the Sensor this deployment runs
+        (`GATEWAY_SENSOR_USER_ID`), and `null` when the operator configured
+        none.
+
+        Here because the Companion has to **create a room with it** during
+        onboarding (ticket #226, ADR 0034): the browser hands the Sensor a
+        device credential as an Olm-encrypted to-device message, and that
+        send is a silent no-op unless the two accounts already share an
+        encrypted room. A browser that has to name the Sensor cannot derive
+        it — `@sensor:<server>` is a deployment's convention and not a fact,
+        which is the refusal ADR 0018 made about the owner's network ghosts
+        and ADR 0024 about a bridge bot's localpart.
+
+        Said in the session document rather than in a new operation, and only
+        to a signed-in device: it is a fact about the deployment the owner
+        already knows, and `GET /api/deployment` deliberately names no
+        identity to an unauthenticated caller. The alternative on offer was
+        `POST /api/bootstrap/rooms` with an empty room list, which answers
+        `sensor` today — and which would mean handing the Gateway the user's
+        own Matrix access token to read a configured string, for no other
+        reason.
 
     Device:
       type: object

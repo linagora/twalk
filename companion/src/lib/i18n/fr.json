@@ -119,6 +119,7 @@
 	"screen2.step.recovery-key": "Génération de votre clé de récupération…",
 	"screen2.step.secret-storage": "Mise en sécurité de votre sauvegarde de clés…",
 	"screen2.step.signing-in": "Connexion de cet appareil…",
+	"screen2.step.handover": "Connexion du Sensor Twalk à votre compte…",
 	"screen2.error.closed.title": "Cette installation Twalk n'autorise pas de nouveaux comptes",
 	"screen2.error.closed.body": "Son compte a été créé par son administrateur. Demandez-lui les identifiants, ou l'ouverture de la création de compte.",
 	"screen2.error.exists.title": "Cette installation a déjà son compte",
@@ -158,6 +159,15 @@
 	"done.next.title": "Ensuite : connecter un réseau",
 	"done.next.body": "Connectez WhatsApp, Signal, les SMS ou un compte Matrix existant, puis activez votre assistant dessus. Si votre serveur Twalk n’a aucune passerelle configurée, c’est la carte Matrix qui fonctionnera — les autres le disent à l’écran.",
 	"done.diagnostics": "Ouvrir les diagnostics",
+
+	"handover.roomName": "Twalk — interne",
+	"handover.ready": "Twalk peut joindre son Sensor avec le chiffrement de votre compte.",
+	"handover.problem.title": "Twalk ne peut pas encore joindre son Sensor",
+	"handover.problem.noSensor": "Ce serveur Twalk ne fait tourner aucun Sensor : il n’y a donc rien à relier à votre compte. C’est votre administrateur qui renseigne GATEWAY_SENSOR_USER_ID.",
+	"handover.problem.didNotJoin": "Le Sensor de Twalk a été invité et n’a pas accepté. Il accepte les invitations des comptes que nomme SENSOR_ALLOWED_INVITERS : votre administrateur peut vérifier que le vôtre en fait partie — et que le Sensor tourne.",
+	"handover.problem.untracked": "Le Sensor de Twalk est bien là, et ce navigateur ne connaît pas encore ses clés de chiffrement : un message qui lui serait envoyé maintenant arriverait vide. Recharger cette page plus tard réessaiera.",
+	"handover.problem.failed": "Votre serveur a refusé : {detail}",
+	"handover.problem.after": "Tout le reste fonctionne. Ce que cela empêche, c’est que Twalk réponde en votre nom, ce que rien ne fait encore dans cette version.",
 
 	"recover.title": "Vos clés ne sont plus sur cet appareil",
 	"recover.intro": "C'est normal, ce n'est pas une panne. Twalk conserve vos clés de chiffrement dans ce navigateur uniquement, et un navigateur peut les jeter : iOS les supprime après sept jours sans ouvrir l'application, et effacer vos données de navigation le fait aussi.",

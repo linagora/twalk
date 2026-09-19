@@ -2392,6 +2392,7 @@ export interface components {
              *     (`GATEWAY_OWNER`).
              */
             owner: string;
+            sensor: components["schemas"]["SensorUserId"];
         };
         /** @description The user's native language, and the choices. */
         LanguagePreference: {
@@ -2912,6 +2913,30 @@ export interface components {
              */
             sensor: string | null;
         };
+        /**
+         * @description The Matrix ID of the Sensor this deployment runs
+         *     (`GATEWAY_SENSOR_USER_ID`), and `null` when the operator configured
+         *     none.
+         *
+         *     Here because the Companion has to **create a room with it** during
+         *     onboarding (ticket #226, ADR 0034): the browser hands the Sensor a
+         *     device credential as an Olm-encrypted to-device message, and that
+         *     send is a silent no-op unless the two accounts already share an
+         *     encrypted room. A browser that has to name the Sensor cannot derive
+         *     it — `@sensor:<server>` is a deployment's convention and not a fact,
+         *     which is the refusal ADR 0018 made about the owner's network ghosts
+         *     and ADR 0024 about a bridge bot's localpart.
+         *
+         *     Said in the session document rather than in a new operation, and only
+         *     to a signed-in device: it is a fact about the deployment the owner
+         *     already knows, and `GET /api/deployment` deliberately names no
+         *     identity to an unauthenticated caller. The alternative on offer was
+         *     `POST /api/bootstrap/rooms` with an empty room list, which answers
+         *     `sensor` today — and which would mean handing the Gateway the user's
+         *     own Matrix access token to read a configured string, for no other
+         *     reason.
+         */
+        SensorUserId: string | null;
         /** @description Who is signed in, on which device. */
         Session: {
             device: components["schemas"]["Device"];
@@ -2922,6 +2947,7 @@ export interface components {
              *     (`GATEWAY_OWNER`).
              */
             owner: string;
+            sensor: components["schemas"]["SensorUserId"];
         };
         SignInRequest: {
             /**

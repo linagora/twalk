@@ -28,6 +28,11 @@ import { expect, test, type BrowserContext, type Page, type Request } from '@pla
 
 import { decodeRecoveryKey } from '../../src/lib/recovery/key';
 import { CRYPTO_STORE_NAME } from '../../src/lib/crypto/store';
+import {
+	handoverAlias,
+	HANDOVER_ROOM_TYPE,
+	SEND_LEVEL_NOBODY_HAS
+} from '../../src/lib/matrix/handover';
 import { NO_STACK, realStack } from './stack';
 
 const stack = realStack();
@@ -197,12 +202,8 @@ test.describe.serial('the bootstrap journey', () => {
 		await assertKeyNeverLeft(recoveryKey);
 	});
 
-	/**
-	 * A room for the owner, created from the test process. Screen 3d lists the
-	 * user's rooms in the browser and invites the Sensor into the ones ticked,
-	 * so the journey needs at least one to tick.
-	 */
-	async function createOwnerRoom(name: string): Promise<string> {
+	/** The owner's own Matrix session, from the test process. */
+	async function ownerToken(): Promise<string> {
 		const login = await fetch(`${stack!.synapseUrl}/_matrix/client/v3/login`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
@@ -212,7 +213,96 @@ test.describe.serial('the bootstrap journey', () => {
 				password
 			})
 		});
-		const session = (await login.json()) as { access_token: string };
+		return ((await login.json()) as { access_token: string }).access_token;
+	}
+
+	/** The room id the handover alias points at, or `null`. */
+	async function handoverRoom(): Promise<string | null> {
+		const alias = encodeURIComponent(handoverAlias(stack!.serverName));
+		const answer = await fetch(
+			`${stack!.synapseUrl}/_matrix/client/v3/directory/room/${alias}`,
+			{ headers: { authorization: `Bearer ${await ownerToken()}` } }
+		);
+		return answer.ok ? ((await answer.json()) as { room_id: string }).room_id : null;
+	}
+
+	/** One state event of a room, as the owner's own session can read it. */
+	async function state(roomId: string, type: string): Promise<Record<string, unknown> | null> {
+		const answer = await fetch(
+			`${stack!.synapseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${type}/`,
+			{ headers: { authorization: `Bearer ${await ownerToken()}` } }
+		);
+		return answer.ok ? ((await answer.json()) as Record<string, unknown>) : null;
+	}
+
+	/**
+	 * The room the account shares with the Sensor (#226), asserted against the
+	 * homeserver rather than against the screen.
+	 *
+	 * The three properties that keep it from ever becoming a conversation are
+	 * the ones checked here, because each is enforced by the homeserver and not
+	 * by Twalk remembering to check: the immutable `m.room.create` type, the
+	 * encryption that is the room's whole purpose, and an `events_default` above
+	 * any power level a member can hold.
+	 */
+	test('onboarding creates one encrypted room shared with the Sensor, and it is not a conversation', async () => {
+		if (stack === null) {
+			return;
+		}
+		const roomId = await handoverRoom();
+		expect(roomId, 'the handover alias resolves').not.toBeNull();
+
+		expect((await state(roomId!, 'm.room.create'))?.['type']).toBe(HANDOVER_ROOM_TYPE);
+		expect((await state(roomId!, 'm.room.encryption'))?.['algorithm']).toBe(
+			'm.megolm.v1.aes-sha2'
+		);
+		expect((await state(roomId!, 'm.room.power_levels'))?.['events_default']).toBe(
+			SEND_LEVEL_NOBODY_HAS
+		);
+
+		// The Sensor was asked, and the invitation came from the user's own
+		// session — nothing relayed it.
+		const member = await state(
+			roomId!,
+			`m.room.member/${encodeURIComponent(`@sensor:${stack.serverName}`)}`
+		);
+		expect(['invite', 'join']).toContain(member?.['membership']);
+
+		// And nobody can put an event in it, the room's own creator included.
+		// This is what makes "nothing is ever published on the bus from it" a
+		// fact about the deployment: the Sensor publishes what it reads in the
+		// rooms it is in, and there is nothing here that can be read.
+		const refused = await fetch(
+			`${stack.synapseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId!)}/send/m.room.message/twalk-e2e-226`,
+			{
+				method: 'PUT',
+				headers: {
+					'content-type': 'application/json',
+					authorization: `Bearer ${await ownerToken()}`
+				},
+				body: JSON.stringify({ msgtype: 'm.text', body: 'this must not be possible' })
+			}
+		);
+		expect(refused.status, await refused.text()).toBe(403);
+
+		// The Companion says what is true about it, which on this stack is that
+		// the Sensor has not joined: no Sensor process runs here, so nobody
+		// accepts the invitation. `ready` is unreachable, and the assertion is
+		// that the screen says so rather than claiming a handover it does not
+		// have — the send that would follow resolves successfully having sent
+		// nothing (ADR 0034).
+		const reported = page.getByTestId('handover');
+		await expect(reported).toHaveAttribute('data-kind', 'sensor-did-not-join');
+		await expect(page.getByTestId('handover-problem')).toBeVisible();
+	});
+
+	/**
+	 * A room for the owner, created from the test process. Screen 3d lists the
+	 * user's rooms in the browser and invites the Sensor into the ones ticked,
+	 * so the journey needs at least one to tick.
+	 */
+	async function createOwnerRoom(name: string): Promise<string> {
+		const session = { access_token: await ownerToken() };
 		const created = await fetch(`${stack!.synapseUrl}/_matrix/client/v3/createRoom`, {
 			method: 'POST',
 			headers: {
@@ -263,6 +353,16 @@ test.describe.serial('the bootstrap journey', () => {
 		await page.getByTestId('card-matrix').getByRole('link').click();
 		await expect(page.getByTestId('screen-matrix')).toHaveAttribute('data-stage', 'rooms');
 		await expect(page.getByTestId('matrix-rooms')).toBeVisible();
+
+		// The handover room is a room this account is joined to, and it is **not**
+		// offered here (#226). Consent in Twalk is a membership fact (ADR 0024),
+		// so a row for a room the Sensor is in would be consent nobody granted —
+		// for a conversation that does not exist. Asserted on the live list, not
+		// only in the unit test of the rule.
+		const handover = await handoverRoom();
+		expect(handover, 'the handover room exists, so its absence here means something').not.toBeNull();
+		await expect(page.getByTestId(`room-${handover}`)).toHaveCount(0);
+
 		await page.getByTestId(`room-${room}`).check();
 		await page.getByTestId('invite-sensor').click();
 		await expect(page.getByTestId(`outcome-${room}`)).toHaveAttribute('data-status', 'invited');

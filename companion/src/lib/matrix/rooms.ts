@@ -47,6 +47,25 @@
 // concurrency and a deadline, and `roomLabel` takes what it found. A
 // homeserver that will not answer, or answers too slowly, degrades to exactly
 // the behaviour above: ids, labelled as ids. The list never waits on it.
+//
+// # A room that is not a conversation is not listed
+//
+// Since #226 the user's account is joined to a room that is **not** a
+// conversation: the handover room it shares with the Sensor
+// (`$lib/matrix/handover.ts`). Offering it here would be the worst defect this
+// screen can have — consent in Twalk is a membership fact (ADR 0024), so a
+// room the Sensor is joined to that something counts as a conversation is
+// consent nobody granted.
+//
+// It is left out by [`isConversation`], which reads `m.room.create`'s `type`:
+// a room with any type at all is not an ordinary conversation, which is
+// Matrix's own rule — it is how every client keeps a space out of its room
+// list. So the exclusion is not a list of Twalk's own room ids that a later
+// room could be forgotten from; it is the same one sentence for a space, for
+// the handover room, and for whatever carries a type next.
+//
+// And it is applied **inside** [`roomsFromSync`], which is the only way a room
+// reaches this app from a sync, rather than left for each caller to remember.
 
 /** One joined room, reduced to what the selection screen needs. */
 export interface RoomSummary {
@@ -61,6 +80,14 @@ export interface RoomSummary {
 	readonly heroes: readonly string[];
 	/** Joined members, when the summary carries the count. */
 	readonly joinedMembers: number | null;
+	/**
+	 * `m.room.create`'s `type`, and `null` for an ordinary room.
+	 *
+	 * Immutable: `m.room.create` is the one state event Matrix forbids
+	 * replacing or redacting, so a room that says it is not a conversation
+	 * cannot later stop saying it.
+	 */
+	readonly type: string | null;
 }
 
 /** How a room's label was arrived at, so the screen can say so. */
@@ -250,12 +277,39 @@ export const ROOM_LIST_FILTER = {
 		ephemeral: { types: [] as string[] },
 		state: {
 			lazy_load_members: true,
-			types: ['m.room.name', 'm.room.canonical_alias', 'm.room.encryption']
+			// `m.room.create` is asked for so that a room which says it is not
+			// a conversation can be left out of the list — see the module docs
+			// and [`isConversation`].
+			types: [
+				'm.room.name',
+				'm.room.canonical_alias',
+				'm.room.encryption',
+				'm.room.create'
+			]
 		}
 	}
 };
 
-/** Reads the rooms out of a `/sync` answer. Pure, so it is unit tested. */
+/**
+ * Whether a room is a conversation at all.
+ *
+ * One rule: a room whose `m.room.create` carries a `type` is something else —
+ * a space (`m.space`), Twalk's own handover room
+ * (`$lib/matrix/handover.ts`), whatever comes next. Matrix's own distinction,
+ * so nothing Twalk-specific decides what the user is offered.
+ */
+export function isConversation(room: RoomSummary): boolean {
+	return room.type === null;
+}
+
+/**
+ * Reads the **conversations** out of a `/sync` answer. Pure, so it is unit
+ * tested.
+ *
+ * Rooms that are not conversations never come out of here, which is what makes
+ * that a property of the listing rather than a filter each screen has to
+ * remember (see the module docs).
+ */
 export function roomsFromSync(sync: unknown): RoomSummary[] {
 	const joined = pathOf(sync, ['rooms', 'join']);
 	if (joined === null || typeof joined !== 'object') {
@@ -263,6 +317,7 @@ export function roomsFromSync(sync: unknown): RoomSummary[] {
 	}
 	return Object.entries(joined as Record<string, unknown>)
 		.map(([roomId, room]) => summarise(roomId, room))
+		.filter(isConversation)
 		.sort((left, right) => roomLabel(left).text.localeCompare(roomLabel(right).text));
 }
 
@@ -286,7 +341,8 @@ function summarise(roomId: string, room: unknown): RoomSummary {
 			(event) => typeof event === 'object' && event !== null && (event as Record<string, unknown>)['type'] === 'm.room.encryption'
 		),
 		heroes: Array.isArray(heroes) ? heroes.filter((hero): hero is string => typeof hero === 'string') : [],
-		joinedMembers: typeof joined === 'number' ? joined : null
+		joinedMembers: typeof joined === 'number' ? joined : null,
+		type: contentString(state, 'm.room.create', 'type')
 	};
 }
 
@@ -321,10 +377,14 @@ function pathOf(value: unknown, path: readonly string[]): unknown {
 }
 
 /**
- * Lists the rooms this session has joined.
+ * Lists the **conversations** this session has joined.
  *
  * `timeout=0` so the homeserver answers with what it has rather than holding
  * the request open: this is a listing, not a live sync.
+ *
+ * A joined room that is not a conversation — a space, the handover room of
+ * `$lib/matrix/handover.ts` — is not in the answer, because it is not in
+ * [`roomsFromSync`]'s.
  */
 export async function listRooms(
 	baseUrl: string,
