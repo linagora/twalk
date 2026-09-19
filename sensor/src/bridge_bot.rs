@@ -2,7 +2,7 @@
 //!
 //! A bridge materialises two kinds of Matrix account. A **ghost** stands in
 //! for a person on the other network, and everything the consent model says
-//! applies to it. The **bot** — mautrix's `sender_localpart`,
+//! applies to it. The **bot** — each bridge's `appservice.bot.username`,
 //! `@whatsappbot:…`, `@signalbot:…` — is the appservice's own service
 //! identity: it creates portals, puppets ghosts, invites the user, and is a
 //! member of every portal room of its network. It is not a person.
@@ -29,7 +29,9 @@
 //!
 //! # The set is handed over, never derived
 //!
-//! Each configured bridge has a `sender_localpart`, and the deployment
+//! Each configured bridge names its bot in `appservice.bot.username` —
+//! which is NOT the appservice's `sender_localpart`, a different account
+//! that is joined to no rooms (ADR 0026, issue #171) — and the deployment
 //! already names those accounts once, in `SENSOR_ALLOWED_INVITERS` — that is
 //! how the Sensor accepts a portal invitation at all. This set is a second,
 //! separate list ([`Config::bridge_bots`](crate::config::Config)), for the
