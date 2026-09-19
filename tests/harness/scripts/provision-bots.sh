@@ -32,7 +32,14 @@ COMPOSE="docker compose -p ${TWALK_TEST_STACK:-twalk-sensor-test} -f $COMPOSE_FI
 # rooms it is in. All three are separate accounts from bot_beta and from
 # whatsapp_33612345678, because the presence suites depend on exactly which
 # rooms a subject is joined to and must not have to share one.
-for bot in bot_alpha bot_beta bot_gamma bot_delta sensor whatsapp_33612345678 \
+# owner plays the deployment's one owner as a **real account with a real
+# device** (#123, ADR 0025): the identity Twalk acts through when it posts an
+# approved reply, which a mautrix bridge relays because it really is the user.
+# Every other suite names an owner the Sensor only ever publishes
+# (@michel:test.twalk, an account that does not exist); this one has to log in,
+# hand its device token to the Sensor and join portal rooms, so it is its own
+# account and is deliberately in none of the presence suites' rooms.
+for bot in bot_alpha bot_beta bot_gamma bot_delta sensor owner whatsapp_33612345678 \
            whatsapp_33660469852 whatsapp_lid-115332874281144 \
            whatsapp_33698765432 whatsappbot signalbot; do
   output=$($COMPOSE exec -T synapse register_new_matrix_user \
