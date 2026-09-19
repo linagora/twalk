@@ -10,15 +10,13 @@
 
 mod harness;
 
-use std::time::Duration;
-
 use anyhow::Result;
 use harness::{
     ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sha256_hex,
-    validate_against_contract, Bot, Bus, SensorProc, SENSOR_USER_ID,
+    toggle_presence_one_account_at_a_time, validate_against_contract, Bot, Bus, SensorProc,
+    SENSOR_USER_ID,
 };
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::time::sleep;
 
 const PRESENCE_SUBJECT: &str = "twalk.inbound.presence.updated.v1";
 const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
@@ -56,12 +54,16 @@ async fn puppet_presence_becomes_a_schema_valid_cloud_event() -> Result<()> {
     // round so a fresh online transition is always emitted, and so a
     // transition racing the presence-routing update after the join is
     // simply retried.
+    //
+    // One account, which is why this suite is the control that never flaked
+    // where #197's did — it goes through the shared helper anyway, so the
+    // interval a presence transition needs has one definition rather than
+    // four.
     let stored = poll_until(
         || async {
-            puppet.set_presence("offline").await.ok()?;
-            sleep(Duration::from_millis(250)).await;
-            puppet.set_presence("online").await.ok()?;
-            sleep(Duration::from_millis(250)).await;
+            toggle_presence_one_account_at_a_time(&[&puppet])
+                .await
+                .ok()?;
             bus.fetch_room_messages(STREAM, PRESENCE_SUBJECT, &room_id)
                 .await
                 .ok()?
