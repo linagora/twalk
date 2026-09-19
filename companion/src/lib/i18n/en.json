@@ -577,7 +577,8 @@
 	"done.next.cta": "Connect a network",
 	"done.next.after": "After that: activate your assistant on the networks you connected, and land on your dashboard.",
 	"done.dashboard": "Go to my dashboard",
-	"dashboard.chip.noInbox": "Deciding about them one by one is not in this version. Granting or revoking a whole network decides for everyone on it at once.",
+	"dashboard.chip.inbox": "They are people who have written to you and whom you have never decided about. Deciding is one person at a time.",
+	"dashboard.chip.inboxLink": "Decide about them",
 
 	"approvals.title": "Replies waiting for you",
 	"approvals.step": "Your assistant proposes; you decide. Nothing is sent until you say so.",
@@ -670,6 +671,96 @@
 	"dashboard.chip.suggestionsLink": "Read them and decide",
 	"dashboard.chip.suggestionsPrivate": "What your assistant wrote is not shown here. This screen gets unlocked on a train.",
 
+
+	"consent.title": "Your decisions about your contacts",
+	"consent.step": "You decide, one person at a time, whose messages Twalk may process.",
+	"consent.back": "Back to the dashboard",
+	"consent.refresh": "Refresh",
+	"consent.refreshing": "Refreshing…",
+
+	"consent.intro.title": "What this screen decides",
+	"consent.intro.body": "Your assistant may only read the messages of a contact you have granted. This is where you grant one, revoke one, or say “not yet”.",
+	"consent.intro.notTheirs": "This is your decision, not theirs. Your contacts are neither asked nor told, and “granted” records that you decided — never that anybody agreed.",
+
+	"consent.legend.title": "The three answers, and what each one does",
+	"consent.legend.granted": "Your assistant may read what this person writes, and may propose replies to them.",
+	"consent.legend.pending": "The message still arrives on your server, in full, and your assistant is expected to leave it alone. This answer hides nothing from your own server.",
+	"consent.legend.revoked": "The message still arrives, as a record that it did, but without what was written: no text, no quoted message, no attachment. This is the only answer that withholds content.",
+	"consent.legend.neverDecided": "A contact you have never decided about is its own thing, and not the same as one you answered “not yet” about. It is where everybody starts, and it will be most of this list.",
+	"consent.legend.notRetroactive": "None of this reaches the past. The answer is stamped on each message as it arrives, so a decision you take now applies to what comes next and changes nothing already on your server. If you grant somebody and nothing seems to happen, wait for their next message: that is how it is meant to work.",
+
+	"consent.state.granted": "Granted",
+	"consent.state.pending": "Not yet",
+	"consent.state.revoked": "Revoked",
+
+	"consent.count.awaiting": "{count, plural, =0 {nobody is waiting for a first answer} one {1 person is waiting for a first answer} other {# people are waiting for a first answer}}",
+	"consent.count.granted": "{count, plural, one {# granted} other {# granted}}",
+	"consent.count.revoked": "{count, plural, one {# revoked} other {# revoked}}",
+	"consent.count.gateway": "Your server counts {count, plural, one {# contact} other {# contacts}} waiting for a first answer. Where that differs from the number above, some of them wrote on a network this version of the app does not know about.",
+
+	"consent.empty.title": "Nobody to decide about",
+	"consent.empty.body": "Nobody has written yet, and nobody has been decided about. Connect a network and this list fills itself as people write to you.",
+
+	"consent.search.label": "Search your contacts",
+	"consent.search.placeholder": "A name, a number, a Matrix ID",
+	"consent.search.showing": "Showing {shown} of {total}.",
+	"consent.search.none": "Nothing matches what you typed.",
+
+	"consent.bulk.title": "Answer for everyone shown",
+	"consent.bulk.scope": "This acts on the {shown, plural, one {# contact} other {# contacts}} the search is showing right now, and on nobody else. Narrow the search first if that is not the group you mean.",
+	"consent.bulk.grant": "{count, plural, one {Grant the one shown} other {Grant all # shown}}",
+	"consent.bulk.revoke": "{count, plural, one {Revoke the one shown} other {Revoke all # shown}}",
+	"consent.bulk.confirmGrant": "{count, plural, one {Grant # contact?} other {Grant # contacts?}} Your assistant will be able to read everything they write from now on.",
+	"consent.bulk.confirmRevoke": "{count, plural, one {Revoke # contact?} other {Revoke # contacts?}} What they write from now on arrives without its content.",
+	"consent.bulk.confirm": "Yes, do it",
+	"consent.bulk.cancel": "No, leave them",
+	"consent.bulk.applying": "Recording…",
+	"consent.bulk.done": "{count, plural, one {# decision recorded} other {# decisions recorded}}: {state}.",
+	"consent.bulk.partial": "Whatever was recorded before this failure is recorded. Refresh to see what.",
+
+	"consent.row.byId": "Your server no longer holds a name for this person, so this is the identity their network gave them.",
+	"consent.row.neverDecided": "Nobody has decided about this person yet.",
+	"consent.row.inForce": "In force: {state}",
+	"consent.row.fromNetwork": "This comes from your answer for {network} as a whole, which is “{state}”. Answering for this person below overrides it.",
+	"consent.row.overrides": "Your answer for {network} as a whole is “{state}”, and this person’s own answer wins over it.",
+	"consent.row.lastWrote": "Last wrote {when}",
+	"consent.row.isOwner": "This is you, and you are not one of your own contacts. There is nothing to decide here — see the note above.",
+
+	"consent.action.grant": "Grant",
+	"consent.action.revoke": "Revoke",
+	"consent.action.undecide": "Not yet",
+	"consent.action.undecideMeaning": "“Not yet” is an answer, not an undo: it is recorded like the other two, and this person stops being counted as waiting for a first one. Nothing in this version can unsay a decision — the record only ever grows.",
+
+	"consent.decided.recorded": "Recorded: {state}.",
+	"consent.decided.replayed": "Already recorded: {state}. Nothing changed.",
+	"consent.decided.notRetroactive": "It applies to their next message, not to the ones already on your server.",
+
+	"consent.waiting.missing": "Everything you have already decided is below and is up to date. What is missing is the people who have written to you and whom you have never decided about: that list comes from a different read, and it is the one that failed.",
+	"consent.names.unreadable": "Your server could not read back what these contacts are called, so they are shown by the identity their network gave them. The list itself is complete: names are looked up separately and never stored.",
+
+	"consent.owner.title": "You are listed as one of your own contacts",
+	"consent.owner.body": "{id} is this deployment’s own account, and it should never appear here: you are not somebody you decide about. It is a record left over from before your server learned to recognise you, and a known defect rather than something you did.",
+	"consent.owner.remedy": "It is shown rather than hidden so that you know it is there, and no decision is offered on it: answering it would silence your own messages for anything reading that record. Nothing on this screen can remove it.",
+
+	"consent.networks.note": "Answering for a whole network at once decides for everybody on it, including people who have not written yet. That is deliberately not offered here: this screen decides about people one at a time.",
+
+	"consent.refusal.malformed_request": "Your server refused this decision as malformed. This app built the request, so this is a defect in the app rather than anything you did.",
+	"consent.refusal.unknown_value": "Your server did not recognise a value this app sent — a network, or an answer. This app built the request, so this is a defect in the app.",
+	"consent.refusal.unsupported_subject_type": "Your server does not accept a decision about this kind of subject. This app built the request, so this is a defect in the app.",
+	"consent.refusal.scope_contradicts_subject": "Your server refused the perimeter this app asked for. This app built the request, so this is a defect in the app.",
+	"consent.refusal.unauthenticated": "Your server answered, and would not accept this session. Nothing is wrong with your deployment.",
+	"consent.refusal.store_unavailable": "Your server could not read or write its record of decisions. Nothing was recorded and nothing was announced — which is why you are being shown a failure instead of being told it worked.",
+	"consent.refusal.consent_not_configured": "This deployment records no decisions at all: it has no event bus, so it refuses to record one it could not announce. Your session and the rest of the app are unaffected.",
+	"consent.refusal.contacts_not_configured": "This deployment is not watching incoming messages, so it has no list of people waiting for an answer. That is not the same statement as nobody having written to you.",
+	"consent.refusal.bus_unreachable": "Your server could not read back what these contacts are called. Only the names are affected; the list is complete.",
+	"consent.refusal.unknown": "Your server refused this with a reason this version of the app has no words for. Your server’s own logs name it.",
+
+	"consent.remedy.retry": "Try again.",
+	"consent.remedy.reload": "Refresh this screen: what it is showing is out of date.",
+	"consent.remedy.signIn": "Sign in again to carry on.",
+	"consent.remedy.signInLink": "Sign in again",
+	"consent.remedy.diagnostics": "Open the diagnostics and report what it says: this should not happen.",
+	"consent.remedy.none": "There is nothing to do from here.",
 
 	"session.expired.title": "Your session has expired",
 	"session.expired.body": "Twalk signs each browser in for a short while at a time, and this one's turn is over. Sign in again to carry on.",

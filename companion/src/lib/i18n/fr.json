@@ -576,7 +576,8 @@
 	"done.next.cta": "Connecter un réseau",
 	"done.next.after": "Ensuite : activez votre assistant sur les réseaux que vous avez connectés, et arrivez sur votre tableau de bord.",
 	"done.dashboard": "Aller à mon tableau de bord",
-	"dashboard.chip.noInbox": "Décider à leur sujet un par un n’existe pas dans cette version. Accorder ou révoquer un réseau entier décide pour tous ceux qui y écrivent, d’un coup.",
+	"dashboard.chip.inbox": "Ce sont des personnes qui vous ont écrit et sur lesquelles vous n’avez jamais décidé. On décide personne par personne.",
+	"dashboard.chip.inboxLink": "Décider à leur sujet",
 
 	"approvals.title": "Réponses en attente",
 	"approvals.step": "Votre assistant propose ; vous décidez. Rien n’est envoyé tant que vous ne l’avez pas dit.",
@@ -669,6 +670,96 @@
 	"dashboard.chip.suggestionsLink": "Les lire et décider",
 	"dashboard.chip.suggestionsPrivate": "Ce que votre assistant a écrit n’est pas montré ici. Cet écran se déverrouille dans le train.",
 
+
+	"consent.title": "Vos décisions sur vos contacts",
+	"consent.step": "Vous décidez, personne par personne, quels messages Twalk peut traiter.",
+	"consent.back": "Retour au tableau de bord",
+	"consent.refresh": "Actualiser",
+	"consent.refreshing": "Actualisation…",
+
+	"consent.intro.title": "Ce qui se décide ici",
+	"consent.intro.body": "Votre assistant ne peut lire que les messages d’un contact que vous avez autorisé. C’est ici que vous autorisez, que vous révoquez, ou que vous répondez « pas encore ».",
+	"consent.intro.notTheirs": "C’est votre décision, pas la leur. Vos contacts ne sont ni consultés ni informés, et « autorisé » enregistre que vous avez décidé — jamais que quelqu’un a donné son accord.",
+
+	"consent.legend.title": "Les trois réponses, et ce que chacune fait",
+	"consent.legend.granted": "Votre assistant peut lire ce que cette personne écrit, et peut vous proposer des réponses.",
+	"consent.legend.pending": "Le message arrive quand même sur votre serveur, en entier, et votre assistant est censé ne pas y toucher. Cette réponse ne cache rien à votre propre serveur.",
+	"consent.legend.revoked": "Le message arrive quand même, comme trace de son arrivée, mais sans ce qui a été écrit : ni texte, ni message cité, ni pièce jointe. C’est la seule réponse qui retient le contenu.",
+	"consent.legend.neverDecided": "Un contact sur lequel vous n’avez jamais décidé est un état à part entière, différent d’un contact auquel vous avez répondu « pas encore ». C’est le point de départ de tout le monde, et ce sera la plus grande partie de cette liste.",
+	"consent.legend.notRetroactive": "Rien de tout cela ne touche au passé. La réponse est apposée sur chaque message à son arrivée : une décision prise maintenant vaut pour la suite et ne change rien de ce qui est déjà sur votre serveur. Si vous autorisez quelqu’un et que rien ne semble se produire, attendez son prochain message : c’est le fonctionnement prévu.",
+
+	"consent.state.granted": "Autorisé",
+	"consent.state.pending": "Pas encore",
+	"consent.state.revoked": "Révoqué",
+
+	"consent.count.awaiting": "{count, plural, =0 {personne n’attend une première réponse} one {1 personne attend une première réponse} other {# personnes attendent une première réponse}}",
+	"consent.count.granted": "{count, plural, one {# autorisé} other {# autorisés}}",
+	"consent.count.revoked": "{count, plural, one {# révoqué} other {# révoqués}}",
+	"consent.count.gateway": "Votre serveur compte {count, plural, one {# contact} other {# contacts}} en attente d’une première réponse. Si ce nombre diffère de celui ci-dessus, certains ont écrit sur un réseau que cette version de l’application ne connaît pas.",
+
+	"consent.empty.title": "Personne sur qui décider",
+	"consent.empty.body": "Personne n’a encore écrit, et personne n’a fait l’objet d’une décision. Connectez un réseau et cette liste se remplira au fur et à mesure.",
+
+	"consent.search.label": "Rechercher dans vos contacts",
+	"consent.search.placeholder": "Un nom, un numéro, un identifiant Matrix",
+	"consent.search.showing": "{shown} sur {total} affichés.",
+	"consent.search.none": "Rien ne correspond à ce que vous avez saisi.",
+
+	"consent.bulk.title": "Répondre pour tous les contacts affichés",
+	"consent.bulk.scope": "Cela agit sur {shown, plural, one {le # contact} other {les # contacts}} que la recherche affiche en ce moment, et sur personne d’autre. Affinez la recherche d’abord si ce n’est pas le groupe que vous visez.",
+	"consent.bulk.grant": "{count, plural, one {Autoriser le contact affiché} other {Autoriser les # contacts affichés}}",
+	"consent.bulk.revoke": "{count, plural, one {Révoquer le contact affiché} other {Révoquer les # contacts affichés}}",
+	"consent.bulk.confirmGrant": "{count, plural, one {Autoriser # contact ?} other {Autoriser # contacts ?}} Votre assistant pourra lire tout ce qu’ils écriront désormais.",
+	"consent.bulk.confirmRevoke": "{count, plural, one {Révoquer # contact ?} other {Révoquer # contacts ?}} Ce qu’ils écriront désormais arrivera sans son contenu.",
+	"consent.bulk.confirm": "Oui, faites-le",
+	"consent.bulk.cancel": "Non, laissez-les",
+	"consent.bulk.applying": "Enregistrement…",
+	"consent.bulk.done": "{count, plural, one {# décision enregistrée} other {# décisions enregistrées}} : {state}.",
+	"consent.bulk.partial": "Ce qui a été enregistré avant cet échec est enregistré. Actualisez pour voir quoi.",
+
+	"consent.row.byId": "Votre serveur ne garde plus de nom pour cette personne : voici l’identité que son réseau lui a donnée.",
+	"consent.row.neverDecided": "Personne n’a encore décidé sur ce contact.",
+	"consent.row.inForce": "En vigueur : {state}",
+	"consent.row.fromNetwork": "Cela vient de votre réponse pour {network} dans son ensemble, qui est « {state} ». Répondre pour cette personne ci-dessous l’emportera.",
+	"consent.row.overrides": "Votre réponse pour {network} dans son ensemble est « {state} », et la réponse propre à cette personne l’emporte.",
+	"consent.row.lastWrote": "Dernier message {when}",
+	"consent.row.isOwner": "C’est vous, et vous n’êtes pas l’un de vos propres contacts. Il n’y a rien à décider ici — voyez la note ci-dessus.",
+
+	"consent.action.grant": "Autoriser",
+	"consent.action.revoke": "Révoquer",
+	"consent.action.undecide": "Pas encore",
+	"consent.action.undecideMeaning": "« Pas encore » est une réponse, pas une annulation : elle est enregistrée comme les deux autres, et cette personne cesse d’être comptée comme en attente d’une première réponse. Rien dans cette version ne permet de dédire une décision — le registre ne fait que grandir.",
+
+	"consent.decided.recorded": "Enregistré : {state}.",
+	"consent.decided.replayed": "Déjà enregistré : {state}. Rien n’a changé.",
+	"consent.decided.notRetroactive": "Cela vaut pour leur prochain message, pas pour ceux qui sont déjà sur votre serveur.",
+
+	"consent.waiting.missing": "Tout ce sur quoi vous avez déjà décidé est ci-dessous et à jour. Ce qui manque, ce sont les personnes qui vous ont écrit et sur lesquelles vous n’avez jamais décidé : cette liste vient d’une autre lecture, et c’est celle qui a échoué.",
+	"consent.names.unreadable": "Votre serveur n’a pas pu relire comment ces contacts s’appellent : ils sont affichés avec l’identité que leur réseau leur a donnée. La liste, elle, est complète : les noms sont cherchés à part et ne sont jamais stockés.",
+
+	"consent.owner.title": "Vous figurez parmi vos propres contacts",
+	"consent.owner.body": "{id} est le compte de ce déploiement, et il ne devrait jamais apparaître ici : vous n’êtes pas quelqu’un sur qui vous décidez. C’est une trace d’avant que votre serveur n’apprenne à vous reconnaître, et un défaut connu plutôt qu’une erreur de votre part.",
+	"consent.owner.remedy": "Elle est montrée plutôt que cachée pour que vous sachiez qu’elle existe, et aucune décision n’est proposée dessus : y répondre ferait taire vos propres messages pour tout ce qui lit ce registre. Rien sur cet écran ne peut la supprimer.",
+
+	"consent.networks.note": "Répondre pour tout un réseau d’un coup décide pour tout le monde sur ce réseau, y compris pour ceux qui n’ont pas encore écrit. Ce n’est délibérément pas proposé ici : cet écran décide personne par personne.",
+
+	"consent.refusal.malformed_request": "Votre serveur a refusé cette décision comme mal formée. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application, pas de quelque chose que vous auriez fait.",
+	"consent.refusal.unknown_value": "Votre serveur n’a pas reconnu une valeur envoyée par cette application — un réseau, ou une réponse. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
+	"consent.refusal.unsupported_subject_type": "Votre serveur n’accepte pas de décision sur ce type de sujet. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
+	"consent.refusal.scope_contradicts_subject": "Votre serveur a refusé le périmètre demandé par cette application. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
+	"consent.refusal.unauthenticated": "Votre serveur a répondu, et n’a pas accepté cette session. Votre déploiement n’a rien d’anormal.",
+	"consent.refusal.store_unavailable": "Votre serveur n’a pas pu lire ou écrire son registre de décisions. Rien n’a été enregistré et rien n’a été annoncé — c’est pourquoi on vous montre un échec au lieu de vous dire que c’est fait.",
+	"consent.refusal.consent_not_configured": "Ce déploiement n’enregistre aucune décision : il n’a pas de bus d’événements, et refuse d’enregistrer une décision qu’il ne pourrait pas annoncer. Votre session et le reste de l’application ne sont pas affectés.",
+	"consent.refusal.contacts_not_configured": "Ce déploiement ne surveille pas les messages entrants : il n’a donc aucune liste de personnes en attente d’une réponse. Ce n’est pas la même affirmation que « personne ne vous a écrit ».",
+	"consent.refusal.bus_unreachable": "Votre serveur n’a pas pu relire comment ces contacts s’appellent. Seuls les noms sont touchés ; la liste est complète.",
+	"consent.refusal.unknown": "Votre serveur a refusé avec une raison dont cette version de l’application n’a pas la formulation. Les journaux de votre serveur la nomment.",
+
+	"consent.remedy.retry": "Réessayez.",
+	"consent.remedy.reload": "Actualisez cet écran : ce qu’il affiche n’est plus à jour.",
+	"consent.remedy.signIn": "Reconnectez-vous pour continuer.",
+	"consent.remedy.signInLink": "Se reconnecter",
+	"consent.remedy.diagnostics": "Ouvrez le diagnostic et signalez ce qu’il indique : cela ne devrait pas arriver.",
+	"consent.remedy.none": "Il n’y a rien à faire depuis ici.",
 
 	"session.expired.title": "Votre session a expiré",
 	"session.expired.body": "Twalk connecte chaque navigateur pour une durée courte à la fois, et celle-ci est écoulée. Reconnectez-vous pour continuer.",
