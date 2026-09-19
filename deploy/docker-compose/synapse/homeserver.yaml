@@ -52,6 +52,35 @@ registration_shared_secret: "{{ MATRIX_REGISTRATION_SHARED_SECRET }}"
 # with register_new_matrix_user, which authenticates with the registration
 # shared secret above — see ../provision.sh.
 
+# Login rate limiting, sized for a personal hub rather than a public server.
+#
+# Synapse's defaults — 0.17/s with a burst of 3 on each of three limiters —
+# are calibrated for a homeserver with thousands of accounts reachable from
+# the open internet. This one listens on a localhost-bound port behind the
+# operator's own reverse proxy or tunnel, and has exactly one human account.
+# There, the default is not protection, it is a wall the owner walks into:
+# every attempt made while limited *extends* the wait, so a person who retries
+# is a person who stays locked out, and the screen that says "try again" is
+# telling them to do the one thing that prolongs it.
+#
+# The split is deliberate. `address` and `account` govern login attempts as
+# such, and throttling a *correct* password defends against nothing here, so
+# they are loosened to a rate a human and a diagnosing operator cannot
+# realistically exhaust. `failed_attempts` is the limiter that actually
+# carries the brute-force argument, and it is loosened the least: 0.2/s with
+# a burst of 10 against Synapse's 0.17/s and 3 — a burst a person mistyping a
+# password reaches, and a fraction of what a machine guessing one needs.
+rc_login:
+  address:
+    per_second: 1
+    burst_count: 30
+  account:
+    per_second: 1
+    burst_count: 30
+  failed_attempts:
+    per_second: 0.2
+    burst_count: 10
+
 # Appservice registrations: the bridges, when the operator enabled them.
 # MATRIX_APPSERVICE_REGISTRATIONS is a comma-separated list of paths inside
 # the bridge-registrations volume (../compose.yaml mounts it at
