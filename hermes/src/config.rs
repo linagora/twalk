@@ -11,12 +11,21 @@
 //! An argv, not a shell string: there is no quoting to get wrong and no
 //! shell between the runtime and the persona.
 //!
-//! **There is no default model.** `HERMES_LLM_BASE_URL` and
-//! `HERMES_LLM_MODEL` are required and the runtime refuses to start
-//! without them — the same refusal the SDK makes, one level up, because
-//! the runtime is what hands them over (ADR 0015). A runtime that started
-//! with no model configured would spawn personas that all die on their
-//! first line, which is a worse way to say the same thing.
+//! **There is no default model.** A model has to be named, and the runtime
+//! refuses to start when nobody has named one and nobody can — the same
+//! refusal the SDK makes, one level up, because the runtime is what hands it
+//! over (ADR 0015). A runtime that started with no model configured would
+//! spawn personas that all die on their first line, which is a worse way to
+//! say the same thing.
+//!
+//! What this module holds is only the **operator's** half of that: what was
+//! typed on the host, in `.env` or in a file. The other half is the user's,
+//! held by the Companion Gateway and read by [`crate::settings`], which is
+//! why `HERMES_LLM_BASE_URL` and `HERMES_LLM_MODEL` are no longer required
+//! *here*: a deployment that names `HERMES_GATEWAY_URL` has somewhere to
+//! read them from. The refusal moved rather than went away — with neither a
+//! model nor a Gateway, this module still refuses to start, and says both
+//! ways out.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -74,7 +83,8 @@ impl PersonaSpec {
 }
 
 /// Where the personas this runtime hosts reason, with which model, and with
-/// what credentials.
+/// what credentials — **complete**, whichever of the two sources each field
+/// came from ([`crate::settings::resolve`]).
 ///
 /// Held by the runtime, injected into each persona's environment — never
 /// fetched by a persona, because the credential that would open the
@@ -93,6 +103,24 @@ pub struct LlmConfig {
     /// in the proxy's own configuration, where they belong. Nothing here
     /// may depend on it being set.
     pub params: Option<String>,
+    pub timeout_seconds: Option<String>,
+}
+
+/// The model configuration **as the operator typed it on the host** — every
+/// field optional, because on the reference deployment every one of them is
+/// empty and the answer comes from the Companion Gateway instead.
+///
+/// It is not an [`LlmConfig`] that happens to be half-filled: it is the
+/// higher-precedence half of one (`crate::settings`). Keeping the two types
+/// apart is what makes "a persona is handed a complete configuration" a fact
+/// the compiler enforces rather than a habit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OperatorLlm {
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub params: Option<String>,
+    /// Host-side only: the Gateway keeps no timeout, so nothing overlays this.
     pub timeout_seconds: Option<String>,
 }
 
@@ -207,7 +235,22 @@ pub struct Config {
     pub nats_url: String,
     pub stream: String,
     pub subject_prefix: String,
-    pub llm: LlmConfig,
+    /// What the **operator** named, on this host. The user's own choices come
+    /// from the Companion Gateway and are overlaid underneath this by
+    /// [`crate::settings::resolve`].
+    pub llm: OperatorLlm,
+    /// The Companion Gateway's origin, e.g. `http://companion-gateway:8080`,
+    /// and the service token that reads it. Both or neither: a URL without a
+    /// token is a read that would only ever answer `401`, and it is refused
+    /// at startup rather than reported once a minute.
+    ///
+    /// The token is the same secret that opens the **consent snapshot** — the
+    /// list of every contact (ADR 0010, ADR 0015) — which is the whole reason
+    /// the runtime reads the settings and injects them rather than letting
+    /// each persona fetch them. It is never logged and never injected; see
+    /// [`crate::environment`].
+    pub gateway_url: Option<String>,
+    pub gateway_service_token: Option<String>,
     pub log_level: String,
     /// The log level the personas are started with. Separate from the
     /// runtime's: an operator debugging their own persona should not have
@@ -224,12 +267,15 @@ pub struct Config {
     /// A user preference rather than an operator's setting, which is why it
     /// is held by the Gateway and travels the injection channel the model
     /// configuration travels: a persona runs in a container and has no
-    /// browser to read it from. `None` is a supported state — the personas
-    /// then answer in each message's own language and say in their logs what
-    /// happens to a message whose language they cannot tell. The runtime does
-    /// not refuse to start over it: the fallback is the ambiguous case, and a
-    /// deployment that suggests replies correctly for every readable message
-    /// is not an outage.
+    /// browser to read it from. This field is the **operator's override** of
+    /// it — `HERMES_USER_LANGUAGE`, empty in the reference deployment's
+    /// `.env`; the Gateway's stored preference is what fills it in
+    /// ([`crate::settings::resolve`]). `None` on both sides is a supported
+    /// state — the personas then answer in each message's own language and
+    /// say in their logs what happens to a message whose language they cannot
+    /// tell. The runtime does not refuse to start over it: the fallback is
+    /// the ambiguous case, and a deployment that suggests replies correctly
+    /// for every readable message is not an outage.
     pub user_language: Option<String>,
     pub restart: RestartPolicy,
     /// How long a persona is given to exit after SIGTERM before it is
@@ -252,13 +298,15 @@ impl Config {
             stream: optional("HERMES_BUS_STREAM").unwrap_or_else(|| DEFAULT_STREAM.to_owned()),
             subject_prefix: optional("HERMES_BUS_SUBJECT_PREFIX")
                 .unwrap_or_else(|| DEFAULT_SUBJECT_PREFIX.to_owned()),
-            llm: LlmConfig {
-                base_url: required("HERMES_LLM_BASE_URL")?,
-                model: required("HERMES_LLM_MODEL")?,
+            llm: OperatorLlm {
+                base_url: optional("HERMES_LLM_BASE_URL"),
+                model: optional("HERMES_LLM_MODEL"),
                 api_key: llm_api_key()?,
                 params: optional("HERMES_LLM_PARAMS"),
                 timeout_seconds: optional("HERMES_LLM_TIMEOUT_SECONDS"),
             },
+            gateway_url: optional("HERMES_GATEWAY_URL"),
+            gateway_service_token: optional("HERMES_GATEWAY_SERVICE_TOKEN"),
             log_level: optional("HERMES_LOG_LEVEL").unwrap_or_else(|| "info".to_owned()),
             persona_log_level: optional("HERMES_PERSONA_LOG_LEVEL")
                 .unwrap_or_else(|| "info".to_owned()),
@@ -346,7 +394,51 @@ impl Config {
                 bail!("HERMES_LLM_PARAMS must be a JSON object, got {parsed}");
             }
         }
+        // A URL with no token is refused: that read could only ever answer
+        // `401`, once a minute, for the life of the deployment. The mirror
+        // case — a token with no URL — is *not* an error, for the same reason
+        // it is not one in the Sensor: the URL is what says "read the
+        // Gateway", and a credential naming no endpoint simply opens nothing.
+        // The runtime says so at startup instead ([`crate::settings`]), which
+        // is what keeps it from being a silent trap.
+        if self.gateway_url.is_some() && self.gateway_service_token.is_none() {
+            bail!(
+                "HERMES_GATEWAY_URL names {} but HERMES_GATEWAY_SERVICE_TOKEN is unset: the \
+                 runtime settings take this deployment's service token as an Authorization: \
+                 Bearer credential, so that read could only ever answer 401",
+                self.gateway_url.as_deref().unwrap_or_default()
+            );
+        }
+        // The ADR 0015 refusal, in the one place it still belongs: nobody has
+        // named a model and there is nowhere to read one from. A Gateway is
+        // enough — what it answers is its business, and a Gateway that is down
+        // or that holds no model yet is `settings`'s to report, loudly, rather
+        // than a reason to take the deployment down (ticket #184).
+        if !self.gateway_configured() && !self.llm.is_complete() {
+            bail!(
+                "no model is configured and no Companion Gateway to read one from: Twalk ships \
+                 no LLM and there is no default endpoint (ADR 0015). Either set \
+                 HERMES_LLM_BASE_URL and HERMES_LLM_MODEL, or point HERMES_GATEWAY_URL and \
+                 HERMES_GATEWAY_SERVICE_TOKEN at this deployment's Companion Gateway, which \
+                 holds the model the user chose in the Companion"
+            );
+        }
         Ok(())
+    }
+
+    /// Whether this runtime has a Companion Gateway to read the user's
+    /// settings from. A URL without a token is refused when the configuration
+    /// is validated; a token without a URL simply configures no Gateway.
+    pub fn gateway_configured(&self) -> bool {
+        self.gateway_url.is_some() && self.gateway_service_token.is_some()
+    }
+}
+
+impl OperatorLlm {
+    /// Whether the operator named a whole model configuration on the host, so
+    /// nothing has to be read from the Gateway for the personas to start.
+    pub fn is_complete(&self) -> bool {
+        self.base_url.is_some() && self.model.is_some()
     }
 }
 
@@ -498,13 +590,13 @@ mod tests {
             nats_url: DEFAULT_NATS_URL.to_owned(),
             stream: DEFAULT_STREAM.to_owned(),
             subject_prefix: DEFAULT_SUBJECT_PREFIX.to_owned(),
-            llm: LlmConfig {
-                base_url: "http://localhost:8000/v1".to_owned(),
-                model: "a-model-the-operator-named".to_owned(),
-                api_key: None,
-                params: None,
-                timeout_seconds: None,
+            llm: OperatorLlm {
+                base_url: Some("http://localhost:8000/v1".to_owned()),
+                model: Some("a-model-the-operator-named".to_owned()),
+                ..Default::default()
             },
+            gateway_url: None,
+            gateway_service_token: None,
             log_level: "info".to_owned(),
             persona_log_level: "info".to_owned(),
             suggestion_ttl_seconds: None,
@@ -632,9 +724,18 @@ mod tests {
     /// loopback, which a persona in a container of its own network namespace
     /// would dial as itself. The runtime holds the URL, so it is the one
     /// component that can say so before a message ever arrives.
+    fn llm(base_url: &str) -> LlmConfig {
+        LlmConfig {
+            base_url: base_url.to_owned(),
+            model: "a-model-the-operator-named".to_owned(),
+            api_key: None,
+            params: None,
+            timeout_seconds: None,
+        }
+    }
+
     #[test]
     fn a_loopback_endpoint_is_recognised_as_one() {
-        let mut config = config_with(vec![spec("assistant")]);
         for loopback in [
             "http://127.0.0.1:4000/v1",
             "http://localhost:4000/v1",
@@ -642,9 +743,8 @@ mod tests {
             "http://[::1]:4000/v1",
             "https://LOCALHOST/v1",
         ] {
-            config.llm.base_url = loopback.to_owned();
             assert!(
-                config.llm.endpoint_is_loopback(),
+                llm(loopback).endpoint_is_loopback(),
                 "{loopback} is on this host's loopback"
             );
         }
@@ -654,9 +754,8 @@ mod tests {
             "https://api.example.org/v1",
             "http://user:pass@endpoint.example.org:4000/v1",
         ] {
-            config.llm.base_url = reachable.to_owned();
             assert!(
-                !config.llm.endpoint_is_loopback(),
+                !llm(reachable).endpoint_is_loopback(),
                 "{reachable} is reachable from another network namespace"
             );
         }
@@ -664,7 +763,6 @@ mod tests {
 
     #[test]
     fn the_endpoints_host_is_read_out_of_the_url() {
-        let mut config = config_with(vec![spec("assistant")]);
         for (url, expected) in [
             ("http://127.0.0.1:4000/v1", "127.0.0.1"),
             ("https://api.example.org/v1/", "api.example.org"),
@@ -674,9 +772,69 @@ mod tests {
             ),
             ("http://[2001:db8::1]:4000/v1", "2001:db8::1"),
         ] {
-            config.llm.base_url = url.to_owned();
-            assert_eq!(config.llm.endpoint_host().as_deref(), Some(expected));
+            assert_eq!(llm(url).endpoint_host().as_deref(), Some(expected));
         }
+    }
+
+    /// ADR 0015's refusal, in the one place it still belongs. The runtime used
+    /// to require the endpoint and the model outright; since ticket #184 a
+    /// Gateway to read them from is the other way to satisfy it, and the
+    /// refusal names both.
+    #[test]
+    fn a_runtime_with_neither_a_model_nor_a_gateway_refuses_to_start() {
+        let mut config = config_with(vec![spec("assistant")]);
+        config.llm = OperatorLlm::default();
+        let error = config
+            .validate()
+            .expect_err("nobody named a model and there is nowhere to read one from")
+            .to_string();
+        assert!(error.contains("HERMES_LLM_BASE_URL"), "got {error:?}");
+        assert!(error.contains("HERMES_GATEWAY_URL"), "got {error:?}");
+
+        // Either way out is enough on its own.
+        config.gateway_url = Some("http://companion-gateway:8080".to_owned());
+        config.gateway_service_token = Some("a-service-token-no-persona-may-hold".to_owned());
+        config
+            .validate()
+            .expect("a Gateway to read the model from is the other half of ADR 0015");
+        config.gateway_url = None;
+        config.gateway_service_token = None;
+        config.llm.base_url = Some("https://endpoint.example.org/v1".to_owned());
+        config.llm.model = Some("a-model-the-operator-named".to_owned());
+        config
+            .validate()
+            .expect("an operator who named a model needs no Gateway");
+    }
+
+    /// A Gateway URL with no token is a read that could only ever answer
+    /// `401`, once a minute, for the life of the deployment: refused once,
+    /// here. The mirror case is deliberately **not** an error, on the same
+    /// terms as the Sensor's: the URL is what says "read the Gateway", a
+    /// credential naming no endpoint opens nothing, and the runtime holding a
+    /// secret it does not use is exactly the state
+    /// `hermes/tests/harness/runtime.rs` puts it in so that the absence
+    /// assertion ADR 0015 asks for has something to be about.
+    #[test]
+    fn a_gateway_url_with_no_token_is_refused_and_a_token_with_no_url_is_not() {
+        let mut config = config_with(vec![spec("assistant")]);
+        config.gateway_url = Some("http://companion-gateway:8080".to_owned());
+        let error = config
+            .validate()
+            .expect_err("a URL without a token must not start")
+            .to_string();
+        assert!(
+            error.contains("HERMES_GATEWAY_SERVICE_TOKEN"),
+            "got {error:?}"
+        );
+        config.gateway_url = None;
+        config.gateway_service_token = Some("a-service-token-no-persona-may-hold".to_owned());
+        config
+            .validate()
+            .expect("a credential that names no endpoint is not a reason to refuse to start");
+        assert!(
+            !config.gateway_configured(),
+            "and it configures no Gateway: the settings are this host's own"
+        );
     }
 
     #[test]

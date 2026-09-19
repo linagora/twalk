@@ -20,6 +20,16 @@ futures = "0.3"
 # does — SIGTERM, then SIGKILL — and tokio's `Child::kill` only sends the
 # second one.
 libc = "0.2"
+# The Companion Gateway's runtime settings — the model the user chose and
+# their native language — are read over HTTP with the deployment's service
+# token (ADR 0015, ADR 0016, ticket #184). The version and the feature set the
+# Sensor pins for its own read of the consent snapshot, so the workspace-less
+# repository still resolves one; rustls only, so a Gateway behind the
+# operator's TLS proxy needs no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

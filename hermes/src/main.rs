@@ -5,7 +5,13 @@
 //! does, in order:
 //!
 //! 1. reads the configuration ([`twalk_hermes::config`]) — and refuses to
-//!    start without a model, because there is no default one (ADR 0015);
+//!    start when nobody has named a model and there is nowhere to read one
+//!    from, because there is no default one (ADR 0015);
+//! 1b. reads the Companion Gateway's runtime settings once
+//!    ([`twalk_hermes::settings`], ticket #184) and says which value came from
+//!    where — so the model and the language the user set in the Companion are
+//!    what the personas run with, and a Gateway that does not answer is an
+//!    `ERROR` naming the URL rather than a deployment that will not start;
 //! 2. ensures the stream the deployment publishes on;
 //! 3. replays `consent.state.changed` from the beginning of the stream to
 //!    learn which personas the user activated (ADR 0013), and keeps
@@ -37,6 +43,9 @@ use twalk_hermes::activation::{
 };
 use twalk_hermes::config::{Config, PersonaSpec};
 use twalk_hermes::environment::{passthrough, persona_environment};
+use twalk_hermes::settings::{
+    self, GatewayRuntimeSettings, GatewaySettings, PersonaSettings, Resolution,
+};
 use twalk_hermes::supervisor::Restarts;
 
 /// How many redeliveries a persona's durable consumer allows, and how long
@@ -66,28 +75,27 @@ async fn main() -> Result<()> {
         stream = %config.stream,
         subject_prefix = %config.subject_prefix,
         personas = config.personas.len(),
-        model = %config.llm.model,
-        endpoint = %config.llm.base_url,
+        gateway = config.gateway_url.as_deref().unwrap_or("none"),
         "hermes starting"
     );
-    // Three causes, three messages. "No model configured" is the refusal
-    // above, before this line is reached. "The model refused the request"
-    // and "the endpoint is unreachable" are told apart by the SDK's client
-    // (`sdk/python/twalk_sdk/llm.py`), in the persona's own logs. What
-    // neither of them can say early is this one: an endpoint on this host's
-    // loopback is reachable from *here* and not from a persona in a
-    // container of its own network namespace, which would dial itself. The
-    // runtime holds the URL, so it says so at startup rather than letting
-    // the first message arrive and time out.
-    if config.llm.endpoint_is_loopback() {
+
+    // What the personas will actually run with (ticket #184). One read, before
+    // any persona is started, so a healthy deployment has no window in which a
+    // persona reasons with the wrong model or falls back to the wrong language.
+    let gateway = GatewaySettings::from_config(&config)?;
+    if gateway.is_none() && config.gateway_service_token.is_some() {
+        // A credential that names no endpoint. Not a refusal to start — the
+        // URL is what says "read the Gateway" — but not silent either, because
+        // this is precisely the shape of "I set it up and nothing happened".
         warn!(
-            endpoint = %config.llm.base_url,
-            "the configured endpoint is on this host's loopback: a persona that does not share \
-             this host's network namespace will reach itself, not the model. Give the persona's \
-             command host networking, or point HERMES_LLM_BASE_URL at an address its container \
-             can resolve (a host-gateway mapping, or the bridge network's gateway)"
+            "HERMES_GATEWAY_SERVICE_TOKEN is set and HERMES_GATEWAY_URL is not: this runtime \
+             holds the deployment's service token and reads nothing with it, so the model and \
+             the language set in the Companion are not in force"
         );
     }
+    let read = read_gateway(gateway.as_ref()).await;
+    let resolution = settings::resolve(&config, read.answered());
+    announce(&resolution, &read, gateway.as_ref());
 
     let client = async_nats::connect(&config.nats_url)
         .await
@@ -126,6 +134,13 @@ async fn main() -> Result<()> {
 
     let inbound_subject = config.subject(MESSAGE_RECEIVED_TYPE);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // The resolved settings, handed to each supervisor as they become
+    // available. A persona is started when there is a model to start it with
+    // and not before: with none, the runtime runs and hosts nothing, which is
+    // the shape the platform already uses for "allowed to exist, handed
+    // nothing" (ADR 0013's paused persona) and the shape the Sensor uses for a
+    // Gateway that is not answering yet.
+    let (settings_tx, settings_rx) = watch::channel(resolution.settings.clone().map(Arc::new));
     let mut supervisors = Vec::with_capacity(config.personas.len());
     for persona in &config.personas {
         let (active, networks) = {
@@ -143,17 +158,42 @@ async fn main() -> Result<()> {
             consumer = %persona.consumer_name(),
             "persona activation"
         );
-        let mut environment = passthrough(&config);
-        // The persona's own variables last: what the runtime computed wins
-        // over anything an operator put in the passthrough list.
-        environment.extend(persona_environment(&config, persona));
         supervisors.push(tokio::spawn(supervise(
             persona.clone(),
-            environment,
             Arc::clone(&config),
+            settings_rx.clone(),
             shutdown_rx.clone(),
         )));
     }
+
+    // The one continuation of the startup read, and deliberately not a
+    // re-read: **the retry exists to end an outage, never to apply a
+    // preference.** With no model there is nothing to host, and the way out is
+    // in the browser — the user names one in the Companion, or the Gateway
+    // comes back — so the runtime keeps asking until it has one and then
+    // starts the personas. Once they are running it never asks again; a
+    // preference changed after that takes effect at the next restart, which
+    // `announce` says at startup.
+    let settings_retry = match (&resolution.settings, gateway) {
+        (Some(_), _) => None,
+        (None, Some(gateway)) => Some(tokio::spawn(retry_settings(
+            Arc::clone(&config),
+            gateway,
+            settings_tx,
+            shutdown_rx.clone(),
+        ))),
+        (None, None) => {
+            // `Config::validate` refuses this combination at startup: with no
+            // Gateway, a complete model configuration is required. Said rather
+            // than assumed, because a persona waiting for settings that can
+            // never arrive would otherwise be silent.
+            error!(
+                "no model is configured and no Companion Gateway to read one from: this runtime \
+                 hosts nothing"
+            );
+            None
+        }
+    };
 
     // Keep following: a decision taken while Hermes runs moves the
     // persona's consumer, and never its process (ADR 0013).
@@ -175,6 +215,9 @@ async fn main() -> Result<()> {
     info!("shutdown signal received, stopping personas");
     let _ = shutdown_tx.send(true);
     follower.abort();
+    if let Some(retry) = settings_retry {
+        retry.abort();
+    }
     // The grace period is per persona and they stop in parallel; the extra
     // second is for the runtime's own bookkeeping, not for a straggler.
     let deadline = config.shutdown_grace + Duration::from_secs(1);
@@ -185,6 +228,170 @@ async fn main() -> Result<()> {
     }
     info!("hermes stopped");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The Companion Gateway's runtime settings (ticket #184)
+// ---------------------------------------------------------------------------
+
+/// What one read of the Gateway produced. Three outcomes, three log lines and
+/// three different next actions for an operator — which is the whole reason
+/// this is not an `Option`: a Gateway that answered `llm: null` has been told
+/// nothing by its user, and one that did not answer at all is a deployment
+/// problem at a URL that can be named.
+enum GatewayRead {
+    /// No `HERMES_GATEWAY_URL`: this runtime has only the host's own
+    /// configuration, and nothing set in the Companion will ever reach a
+    /// persona.
+    NotConfigured,
+    Answered(GatewayRuntimeSettings),
+    Failed(String),
+}
+
+impl GatewayRead {
+    fn answered(&self) -> Option<&GatewayRuntimeSettings> {
+        match self {
+            Self::Answered(settings) => Some(settings),
+            _ => None,
+        }
+    }
+}
+
+/// Reads the Gateway once. Never fails: an unreachable settings endpoint is a
+/// degradation to report, not a reason to take a whole deployment down for a
+/// preference (`sensor/src/main.rs` answers the same question the same way).
+async fn read_gateway(gateway: Option<&GatewaySettings>) -> GatewayRead {
+    let Some(gateway) = gateway else {
+        return GatewayRead::NotConfigured;
+    };
+    match gateway.fetch().await {
+        Ok(settings) => {
+            info!(
+                url = gateway.url(),
+                model_configured = settings.llm.is_some(),
+                credential_source = settings
+                    .llm
+                    .as_ref()
+                    .and_then(|llm| llm.credential_source.as_deref())
+                    .unwrap_or("none"),
+                "read the Companion Gateway's runtime settings"
+            );
+            GatewayRead::Answered(settings)
+        }
+        Err(error) => GatewayRead::Failed(format!("{error:#}")),
+    }
+}
+
+/// Says, at startup, what the personas will run with and where each value came
+/// from — and, when something is missing, which of the three causes it is.
+///
+/// This function is the answer to the defect the ticket is about. A user
+/// changed their language, the Companion confirmed it, nothing happened, and
+/// nothing anywhere said why. The value in force, its source, and the fact
+/// that a change made from now on needs a restart are all in one line an
+/// operator already reads.
+fn announce(resolution: &Resolution, read: &GatewayRead, gateway: Option<&GatewaySettings>) {
+    // A value the Gateway served that a persona would have refused.
+    for dropped in &resolution.dropped {
+        warn!("{dropped}");
+    }
+    match read {
+        GatewayRead::NotConfigured => info!(
+            "no Companion Gateway configured (HERMES_GATEWAY_URL): the model and the language \
+             are this host's own, and a preference set in the Companion will not reach a persona \
+             until this runtime is pointed at the Gateway"
+        ),
+        GatewayRead::Answered(_) => {}
+        GatewayRead::Failed(error) => error!(
+            url = gateway.map(GatewaySettings::url).unwrap_or("none"),
+            %error,
+            fell_back_to = if resolution.settings.is_some() { "this host's own configuration" } else { "nothing" },
+            "could not read the Companion Gateway's runtime settings: the model and the language \
+             the user set in the Companion are not in force"
+        ),
+    }
+
+    match &resolution.settings {
+        Some(settings) => {
+            info!(
+                model = %settings.llm.model,
+                endpoint = %settings.llm.base_url,
+                language = settings.user_language.as_deref().unwrap_or("none"),
+                sources = %resolution.origins_line(),
+                "the personas' model and language are resolved: what the operator set on this \
+                 host wins, and the Companion Gateway fills in the rest (ADR 0015). Read once, \
+                 at startup — a value changed in the Companion after this line takes effect when \
+                 this runtime is restarted"
+            );
+            // Three causes, three messages. "No model configured" is the
+            // refusal below and the one in `config`. "The model refused the
+            // request" and "the endpoint is unreachable" are told apart by the
+            // SDK's client (`sdk/python/twalk_sdk/llm.py`), in the persona's
+            // own logs. What neither of them can say early is this one: an
+            // endpoint on this host's loopback is reachable from *here* and not
+            // from a persona in a container of its own network namespace, which
+            // would dial itself. The runtime holds the URL, so it says so at
+            // startup rather than letting the first message arrive and time out.
+            if settings.llm.endpoint_is_loopback() {
+                warn!(
+                    endpoint = %settings.llm.base_url,
+                    "the configured endpoint is on this host's loopback: a persona that does not \
+                     share this host's network namespace will reach itself, not the model. Give \
+                     the persona's command host networking, or configure an address its container \
+                     can resolve (a host-gateway mapping, or the bridge network's gateway)"
+                );
+            }
+        }
+        None => error!(
+            "no model is configured: Twalk ships no LLM and there is no default endpoint \
+             (ADR 0015). This runtime is up and hosts nothing — name a model in the Companion, \
+             or set HERMES_LLM_BASE_URL and HERMES_LLM_MODEL — and it starts the personas as \
+             soon as there is one, with no restart"
+        ),
+    }
+}
+
+/// Keeps asking the Gateway until there is a model to host a persona with,
+/// then hands the resolved settings over and stops.
+///
+/// Never gives up while the runtime runs: giving up would leave a deployment
+/// hosting nothing with nothing left to say so — the same reasoning as the
+/// Sensor's consent-snapshot retry, which never gives up either.
+async fn retry_settings(
+    config: Arc<Config>,
+    gateway: GatewaySettings,
+    settings: watch::Sender<Option<Arc<PersonaSettings>>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut delay = settings::RETRY_BASE;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = shutdown_requested(&mut shutdown) => return,
+        }
+        delay = (delay * 2).min(settings::RETRY_MAX);
+        let read = read_gateway(Some(&gateway)).await;
+        let resolution = settings::resolve(&config, read.answered());
+        if let Some(resolved) = resolution.settings.clone() {
+            announce(&resolution, &read, Some(&gateway));
+            info!(
+                personas = config.personas.len(),
+                "there is a model to reason with now: starting the personas"
+            );
+            let _ = settings.send(Some(Arc::new(resolved)));
+            return;
+        }
+        let reason = match &read {
+            GatewayRead::Failed(error) => error.clone(),
+            _ => "the Companion Gateway holds no model configuration yet".to_owned(),
+        };
+        warn!(
+            url = gateway.url(),
+            retry_in_seconds = delay.as_secs(),
+            reason = %reason,
+            "still no model to host a persona with; asking the Companion Gateway again"
+        );
+    }
 }
 
 /// Creates — or moves — one persona's durable consumer.
@@ -344,12 +551,38 @@ async fn apply_message(payload: &[u8], activation: &Mutex<Activation>) -> Option
 /// This function cannot see the activation state, and that is deliberate:
 /// activation is not a process switch (ADR 0013), so there must be no path
 /// from a consent decision to a kill.
+///
+/// What it *does* wait for is a model to reason with. There is no default one
+/// (ADR 0015), so a runtime with none has nothing to start: this supervisor
+/// simply waits, and starts the persona the moment the settings arrive —
+/// whether that is at startup or after the Companion Gateway came back
+/// (ticket #184). The environment is built once, from the settings in force
+/// then; a value that changes afterwards is the next start's business, which
+/// is what `announce` tells the operator at startup.
 async fn supervise(
     persona: PersonaSpec,
-    environment: Vec<(String, String)>,
     config: Arc<Config>,
+    mut settings: watch::Receiver<Option<Arc<PersonaSettings>>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let resolved = tokio::select! {
+        resolved = wait_for_settings(&mut settings) => resolved,
+        _ = shutdown_requested(&mut shutdown) => {
+            info!(persona = %persona.id, "persona stopped");
+            return;
+        }
+    };
+    let Some(resolved) = resolved else {
+        // The sender went away without ever naming a model. Nothing to host,
+        // and `announce` has already said why.
+        info!(persona = %persona.id, "persona stopped");
+        return;
+    };
+    let mut environment = passthrough(&config);
+    // The persona's own variables last: what the runtime computed wins
+    // over anything an operator put in the passthrough list.
+    environment.extend(persona_environment(&config, &resolved, &persona));
+
     let mut restarts = Restarts::new(config.restart);
     while !*shutdown.borrow() {
         let started = Instant::now();
@@ -488,6 +721,18 @@ async fn terminate(persona: &PersonaSpec, child: &mut tokio::process::Child, gra
             let _ = child.wait().await;
         }
     }
+}
+
+/// Resolves once there is a model configuration to start a persona with.
+/// `None` when the sender was dropped before one ever arrived.
+async fn wait_for_settings(
+    settings: &mut watch::Receiver<Option<Arc<PersonaSettings>>>,
+) -> Option<Arc<PersonaSettings>> {
+    settings
+        .wait_for(Option::is_some)
+        .await
+        .ok()
+        .and_then(|resolved| resolved.clone())
 }
 
 /// Resolves once shutdown has been requested, and immediately on every call

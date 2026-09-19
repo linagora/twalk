@@ -32,6 +32,13 @@
 //!    A persona whose image will not run is announced as failed after a
 //!    bounded number of attempts, rather than restarting quietly forever
 //!    and looking like a runtime that is still starting up.
+//! 4. **What a persona runs with is the user's choice, read once, and
+//!    attributed** ([`settings`], ticket #184). The model and the language
+//!    live in the Companion Gateway; the runtime reads them with the service
+//!    token, merges them underneath whatever the operator pinned on the host,
+//!    and says at startup which value came from where. A Gateway that does
+//!    not answer does not stop the runtime — the Sensor's answer to the same
+//!    question, copied rather than reinvented.
 //!
 //! The approval API (#24) and the rest of the platform land in the tickets
 //! that follow.
@@ -39,4 +46,5 @@
 pub mod activation;
 pub mod config;
 pub mod environment;
+pub mod settings;
 pub mod supervisor;
