@@ -19,7 +19,7 @@ Last reviewed: 2026-09-17.
 
 | Lot | Milestone | Spec | Status |
 | --- | --- | --- | --- |
-| Contract — CloudEvents v1 | v0.1 | — (landed with the docs seed) | done — 8 schemas, one validated fixture each |
+| Contract — CloudEvents v1 | v0.1 | — (landed with the docs seed) | done — 10 schemas, one validated fixture each ([ADR 0018](adr/0018-the-users-own-messages-are-their-own-event-type.md) and [ADR 0021](adr/0021-the-owner-is-never-a-contact-on-any-event.md) added the two `outbound.*` types after this table first said eight) |
 | Sensor | v0.1 | [#1](https://github.com/linagora/twalk/issues/1) | done — tickets 01–11 merged, reviewed 2026-09-17 |
 | Reference deployment (Compose) | v0.1 | part of the Sensor lot (ticket 11) | done for Synapse + NATS + Sensor; grows with each component |
 | Hermes | v0.1 | [#19](https://github.com/linagora/twalk/issues/19) | in progress — H1 [#20](https://github.com/linagora/twalk/issues/20) and H2 [#21](https://github.com/linagora/twalk/issues/21) merged (the SDK with its consent gate, and the `assistant` skeleton), H3 [#22](https://github.com/linagora/twalk/issues/22) and H4 [#23](https://github.com/linagora/twalk/issues/23) the frontier; H4 absorbed the persona consent gate, H5 gained a current-state re-check |
@@ -40,7 +40,7 @@ Last reviewed: 2026-09-17.
 | Contract freeze and public schemas | v1.0 | — | planned |
 | Consent policies, audit export, guided recovery | v1.0 | — | planned |
 
-Only two lots are specced today: the Sensor and Hermes. Every lot marked *planned* needs its spec issue written before any ticket can be picked up — that is the deliberate gate, not an oversight.
+Every lot marked *planned* needs its spec issue written before any ticket can be picked up — that is the deliberate gate, not an oversight. Several lots this table calls *specced* have since shipped tickets, and a few have shipped all of them; the tracker is where to read that, per the note above.
 
 ---
 
@@ -50,7 +50,7 @@ The milestone: four networks live (WhatsApp, Signal, SMS through mautrix-gmessag
 
 ### Contract — CloudEvents v1 · done
 
-The 8 event types in [`contracts/cloudevents/v1/`](../../contracts/cloudevents/v1/) with one validated fixture each, plus the `network`, `consent` and `traceparent` extensions ([ADR 0007](adr/0007-cloudevents-envelope-conventions.md)). It is the source of truth every other lot codes against, which is why it landed first. The contract stays open to additions until v1.0 freezes it.
+The 10 event types in [`contracts/cloudevents/v1/`](../../contracts/cloudevents/v1/) with one validated fixture each, plus the `network`, `consent` and `traceparent` extensions ([ADR 0007](adr/0007-cloudevents-envelope-conventions.md)). It is the source of truth every other lot codes against, which is why it landed first. The contract stays open to additions until v1.0 freezes it.
 
 ### Sensor · done
 
@@ -101,12 +101,12 @@ It stays a thin facade: no container control, and no appservice registration gen
 
 ### Companion (PWA) · specced
 
-The user-facing configuration surface, a SvelteKit static export — the part of v0.1 a non-technical user actually touches. The screens are already designed and reviewed in [`docs/wireframes/companion-v0.1.md`](../wireframes/companion-v0.1.md), so the lot's spec starts from settled UX rather than a blank page:
+The user-facing configuration surface, a SvelteKit static export — the part of v0.1 a non-technical user actually touches. The screens are designed in [`docs/wireframes/companion-v0.1.md`](../wireframes/companion-v0.1.md) — reviewed before implementation, and corrected since where the ADRs and the shipped screens overruled them ([#74](https://github.com/linagora/twalk/issues/74)), so the document says what the product does rather than what was first drawn:
 
 1. **Bootstrap** — welcome and homeserver (screen 1), account creation and recovery key (screen 2).
-2. **Channel onboarding** — picker (screen 3) plus one screen per network, because login mechanism, failure modes and trust story differ: WhatsApp QR (3a), Signal secondary-device QR (3b), SMS through Google Messages (3c), existing Matrix account (3d).
-3. **Persona activation** — `assistant` with safe defaults: reading on, suggestions on, auto-send off (screen 4).
-4. **Home dashboard** — system health and Messagr pairing (screen 5).
+2. **Network onboarding** — picker (screen 3) plus one screen per network, because login mechanism, failure modes and trust story differ: WhatsApp QR (3a), Signal secondary-device QR (3b), SMS through Google Messages (3c), existing Matrix account (3d).
+3. **Persona activation** — `assistant` with safe defaults: reading on, suggestions on, and **no auto-send at all** — the toggle was struck rather than defaulted off (screen 4, [#74](https://github.com/linagora/twalk/issues/74)).
+4. **Home dashboard** — system health, the device list, and an operational-only activity feed (screen 5). Messagr pairing is a card that says it is unavailable in this version.
 
 Explicitly out of v0.1: Telegram and Discord screens, multi-persona management, the searchable consent inbox, consent policies with time windows, bridge diagnostic deep-dive, product tour, native mobile shell. Design tokens follow the Messagr design system; screens are mobile-first (375–428 px), accessible and localized.
 
@@ -114,7 +114,7 @@ Spec [#65](https://github.com/linagora/twalk/issues/65), tickets #66–#70: **C1
 
 [ADR 0014](adr/0014-companion-crypto-runs-in-the-browser.md) settles the cryptographic shape: the recovery key is generated in the browser because it cannot be generated anywhere else — matrix-js-sdk removed its non-WebAssembly backend — and the crypto store is unencrypted, losable and recoverable, with iOS's seven-day eviction of a Safari tab treated as a normal event rather than an error. C5 exists because none of that is verifiable by automation.
 
-Four decisions of that review overrule the reviewed wireframes (no auto-send toggle, no active hours, no address-book consent default, an operational-only activity feed); [#74](https://github.com/linagora/twalk/issues/74) corrects the design document so the change is visible rather than silent.
+Four decisions of that review overrule the reviewed wireframes (no auto-send toggle, no active hours, no address-book consent default, an operational-only activity feed). [#74](https://github.com/linagora/twalk/issues/74) carried them into the design document, along with everything else the ADRs and the shipped screens had overruled since: [`docs/wireframes/companion-v0.1.md`](../wireframes/companion-v0.1.md) now marks each change with the decision behind it rather than quietly dropping the screen it replaced, and says so at the top — the wireframes are not the authority, the ADRs and the code are.
 
 ### Buzz Control Room integration · planned
 
@@ -133,7 +133,7 @@ Oversight for what the personas do: suggestions surfaced for approval, approvals
 
 ## v1.0 — a contract others can build on (target: Q2 2027)
 
-- **Contract freeze.** The 8 v1 types frozen, JSON Schemas published at a stable URL, a hosted validator for third-party persona authors.
+- **Contract freeze.** The 10 v1 types frozen, JSON Schemas published at a stable URL, a hosted validator for third-party persona authors.
 - **Companion.** Consent policies with time windows, audit log export, guided bridge recovery flows.
 - **Erasing history.** Deleting a contact's past events, an explicit action distinct from revoking consent ([ADR 0012](adr/0012-revoked-consent-reduces-publication.md)), alongside the audit export and the import that has to come with it.
 

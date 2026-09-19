@@ -278,7 +278,10 @@ services:
       # This is deliberately not tied to the `bridges` compose profile:
       # compose has no way to vary a variable by profile, so an operator who
       # runs no bridge leaves GATEWAY_BRIDGES empty and GET /api/bridges
-      # answers an empty list. Set it when you enable the profile.
+      # answers an empty list. Set it when you enable the profile. All three
+      # bridges of the reference deployment:
+      #
+      #   GATEWAY_BRIDGES=mautrix-whatsapp,mautrix-signal,mautrix-gmessages
       GATEWAY_BRIDGES: ${GATEWAY_BRIDGES:-}
       # Where the bridge's provisioning API is: its own appservice listener
       # on this compose network, not the homeserver. No published port is
@@ -305,13 +308,24 @@ services:
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_NETWORK: signal
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_AS_TOKEN: ${SIGNAL_AS_TOKEN:-}
+      GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_URL: ${GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_URL:-http://bridge-gmessages:29336}
+      GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_PROVISIONING_SECRET: ${GMESSAGES_PROVISIONING_SECRET:-}
+      # `sms`, and this is the line where that matters most. The bridge is
+      # `mautrix-gmessages`, the network the user experiences is SMS, and the
+      # two are not the same word (ADR 0005): `gmessages` is not in the
+      # contract's network enum and the Gateway refuses to start if it is
+      # named here. A v0.2 deployment running the sovereign SMS Companion
+      # instead sets the same value for a different bridge.
+      GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK: sms
+      GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_AS_TOKEN: ${GMESSAGES_AS_TOKEN:-}
       # The bridge_id each one's events carry, and the segment of its status
       # webhook's URL. Left to the Gateway's own default here — the instance
       # id with `mautrix-` stripped under a `bridge-` prefix — which is
-      # exactly what WHATSAPP_STATUS_ENDPOINT and SIGNAL_STATUS_ENDPOINT in
-      # .env.example already point at. Set GATEWAY_BRIDGE_<ID>_STATUS_ID only
-      # to name one yourself, and change the endpoint with it: it is the
-      # identity third parties read off the bus, so it must not move.
+      # exactly what WHATSAPP_STATUS_ENDPOINT, SIGNAL_STATUS_ENDPOINT and
+      # GMESSAGES_STATUS_ENDPOINT in .env.example already point at. Set
+      # GATEWAY_BRIDGE_<ID>_STATUS_ID only to name one yourself, and change
+      # the endpoint with it: it is the identity third parties read off the
+      # bus, so it must not move.
       # The consent snapshot (ticket #50): the token a consumer reads
       # GET /api/consent/snapshot with — the whole consent state and the bus
       # sequence it reflects, which is how a component with a cold cache
@@ -515,6 +529,13 @@ services:
       # How long a suggestion stays approvable (#22). Empty leaves the SDK's
       # own default of an hour; the Gateway refuses an expired one.
       HERMES_SUGGESTION_TTL_SECONDS: ${HERMES_SUGGESTION_TTL_SECONDS:-}
+      # The user's own language, injected into each persona as
+      # TWALK_USER_LANGUAGE (#164): what a persona falls back to when it
+      # cannot tell what language the message it is answering was written in,
+      # and nothing else (ADR 0016). Empty means the user has set none — the
+      # personas then answer in each message's own language and say so in
+      # their logs.
+      HERMES_USER_LANGUAGE: ${HERMES_USER_LANGUAGE:-}
       HERMES_LOG_LEVEL: ${HERMES_LOG_LEVEL:-info}
       # The personas' own level: debugging a persona should not make the
       # supervisor noisy too.
@@ -544,13 +565,14 @@ services:
     # reach at startup; compose brings it back, as it does the Sensor.
     restart: unless-stopped
 
-  # --- Bridges: mautrix-whatsapp and mautrix-signal ------------------------
+  # --- Bridges: mautrix-whatsapp, mautrix-signal and mautrix-gmessages -----
   #
-  # All four services below carry `profiles: [bridges]`, so a plain
+  # All six services below carry `profiles: [bridges]`, so a plain
   # `docker compose up` ignores them entirely. Their variables all have empty
   # defaults for the same reason: compose interpolates the whole file whatever
   # the active profiles are, and a stack without bridges must not be asked for
-  # a bridge token. The missing-value errors therefore come from
+  # a bridge token — not a WhatsApp one, not a Signal one, not a gmessages
+  # one. The missing-value errors therefore come from
   # ../../bridges/generate-registration.sh, which can say what is missing and
   # why, rather than from interpolation.
   #
@@ -558,6 +580,12 @@ services:
   # external network (docs/architecture/security-model.md): its version is not
   # something a `docker compose pull` should change underneath a working
   # login.
+  #
+  # `BRIDGE_MAUTRIX_ID` below is mautrix's own name for each bridge, which
+  # selects its binary, its appservice id and its registration's filename.
+  # `gmessages` is one of those names and is never a network value (ADR 0005):
+  # the network that bridge serves is `sms`, which appears once, as
+  # GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK above.
 
   # One-shot: renders the bridge's configuration from ../../bridges/
   # mautrix-whatsapp/config.yaml plus the environment, and generates the
@@ -573,7 +601,7 @@ services:
     image: dock.mau.dev/mautrix/whatsapp:v26.09
     user: "0:0"
     environment:
-      BRIDGE_NETWORK: whatsapp
+      BRIDGE_MAUTRIX_ID: whatsapp
       MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
       MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
       # The single owner whose login this bridge accepts. Defaults to
@@ -638,7 +666,7 @@ services:
     image: dock.mau.dev/mautrix/signal:v26.09
     user: "0:0"
     environment:
-      BRIDGE_NETWORK: signal
+      BRIDGE_MAUTRIX_ID: signal
       MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
       MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
       # The single owner whose login this bridge accepts. Defaults to
@@ -678,6 +706,76 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # As above, for SMS through Google Messages. See the WhatsApp pair for the
+  # commentary; two things are particular to this one.
+  #
+  # Its bridge id is `mautrix-gmessages` and its network is `sms` (ADR 0005).
+  # `gmessages` below is only ever mautrix's own name for the bridge — the
+  # binary, the appservice id, the registration file, the compose service and
+  # the variables that carry this bridge's secrets. Nothing here makes it a
+  # network: SMS is `sms` whether it transits Google Messages Web or, in v0.2,
+  # the sovereign SMS Companion.
+  #
+  # And its login is a Google account's: seven session cookies the user copies
+  # out of a private browsing window, then an emoji match on the phone
+  # (#57, the Companion's screen 3c). No script does that, and this deployment
+  # does not try — the stack's job ends at a bridge that is up, healthy and
+  # waiting for a human. And what this path costs is not softened by being
+  # deployed: SMS transits Google Messages Web, it needs a Google account, it
+  # is unavailable to an iOS-only user, and mautrix documents no lifetime for
+  # those cookies, so nothing here promises a re-login cadence.
+  bridge-gmessages-registration:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/gmessages:v26.09
+    user: "0:0"
+    environment:
+      BRIDGE_MAUTRIX_ID: gmessages
+      MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
+      MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
+      # The single owner whose login this bridge accepts. Defaults to
+      # GATEWAY_OWNER: it is the same human, and one deployment has one
+      # (ADR 0011).
+      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-${GATEWAY_OWNER:-}}
+      BRIDGE_AS_TOKEN: ${GMESSAGES_AS_TOKEN:-}
+      BRIDGE_HS_TOKEN: ${GMESSAGES_HS_TOKEN:-}
+      BRIDGE_PROVISIONING_SECRET: ${GMESSAGES_PROVISIONING_SECRET:-}
+      BRIDGE_STATUS_ENDPOINT: ${GMESSAGES_STATUS_ENDPOINT:-}
+      BRIDGE_UID: "1337"
+      BRIDGE_GID: "1337"
+    volumes:
+      - ../../bridges/generate-registration.sh:/opt/twalk/generate-registration.sh:ro
+      - ../../bridges/mautrix-gmessages/config.yaml:/opt/twalk/config.yaml:ro
+      - gmessages-data:/data
+      - bridge-registrations:/registrations
+    entrypoint: ["/usr/bin/env", "bash", "/opt/twalk/generate-registration.sh"]
+
+  bridge-gmessages:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/gmessages:v26.09
+    depends_on:
+      synapse:
+        condition: service_healthy
+      bridge-gmessages-registration:
+        condition: service_completed_successfully
+    volumes:
+      - gmessages-data:/data
+    ports:
+      # 29336 is mautrix-gmessages' own default appservice port, as 29318 and
+      # 29328 are WhatsApp's and Signal's. Localhost only, for the same
+      # reason: this port carries the provisioning API.
+      - "127.0.0.1:${GMESSAGES_APPSERVICE_PORT:-29336}:29336"
+    healthcheck:
+      # Liveness, not readiness — and here the distinction is at its
+      # sharpest: readiness waits for the Google Messages connection, which
+      # cannot exist until a human has pasted their cookies, so a
+      # ready-probing bridge would never be healthy on a fresh deployment.
+      test: ["CMD", "curl", "-fsS", "http://localhost:29336/_matrix/mau/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   synapse-data:
   nats-data:
@@ -687,8 +785,11 @@ volumes:
   # on purpose: it is the one piece of state a bridge and the homeserver must
   # agree on, and it is created empty whether or not the profile is on.
   bridge-registrations:
-  # Each bridge's config, database and — after a human has scanned the QR
-  # code — its session on the external network. Deleting one of these is
-  # logging that account out.
+  # Each bridge's config, database and — once a human has finished its login,
+  # by scanning a QR code or by pasting their Google cookies — its session on
+  # the external network. Deleting one of these is logging that account out.
   whatsapp-data:
   signal-data:
+  # The Google Messages session lives here once a human has pasted their
+  # cookies. Deleting this volume is unpairing this bridge from their phone.
+  gmessages-data:

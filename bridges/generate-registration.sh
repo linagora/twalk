@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # Render a mautrix bridge's configuration and generate its appservice
 # registration. Runs inside the bridge's own image (which ships bash and yq),
-# as the `bridge-<network>-registration` one-shot of
+# as the `bridge-<id>-registration` one-shot of
 # deploy/docker-compose/compose.yaml.
+#
+# BRIDGE_MAUTRIX_ID is mautrix's own name for the bridge — `whatsapp`,
+# `signal`, `gmessages` — which is what selects the binary, the appservice id
+# and the registration's filename. It is deliberately NOT called a network:
+# `gmessages` is a bridge and never a network value (ADR 0005), and the
+# network this bridge serves (`sms`) is the Companion Gateway's business, not
+# this script's.
 #
 # Why this is provisioning and not a runtime concern: a registration is
 # installed by listing its path in the homeserver's `app_service_config_files`
@@ -12,11 +19,11 @@
 # this reason.
 #
 # What it does, in order:
-#   1. copies the committed base config (bridges/mautrix-<network>/config.yaml)
+#   1. copies the committed base config (bridges/mautrix-<id>/config.yaml)
 #      over /data/config.yaml, so the operator's .env and this repository are
 #      the only sources of the bridge's configuration;
 #   2. renders the environment-dependent fields onto it with yq;
-#   3. runs `mautrix-<network> -g`, which is what builds a valid registration
+#   3. runs `mautrix-<id> -g`, which is what builds a valid registration
 #      (its id, url, namespaces and the MSC2409 flags);
 #   4. pins the two appservice tokens and the sender localpart back to the
 #      values the operator chose, because `-g` regenerates all three on every
@@ -44,7 +51,7 @@ require() {
   [ -n "${!name:-}" ] || die "$name must be set (see deploy/docker-compose/.env.example)"
 }
 
-require BRIDGE_NETWORK
+require BRIDGE_MAUTRIX_ID
 require MATRIX_DOMAIN
 require MATRIX_INTERNAL_URL
 require MATRIX_OWNER_USER_ID
@@ -52,8 +59,8 @@ require BRIDGE_AS_TOKEN
 require BRIDGE_HS_TOKEN
 require BRIDGE_PROVISIONING_SECRET
 
-binary="/usr/bin/mautrix-${BRIDGE_NETWORK}"
-[ -x "$binary" ] || die "$binary not found: BRIDGE_NETWORK=$BRIDGE_NETWORK does not match this image"
+binary="/usr/bin/mautrix-${BRIDGE_MAUTRIX_ID}"
+[ -x "$binary" ] || die "$binary not found: BRIDGE_MAUTRIX_ID=$BRIDGE_MAUTRIX_ID does not match this image"
 [ -f "$BASE_CONFIG" ] || die "base config $BASE_CONFIG not mounted"
 
 # mautrix answers M_FORBIDDEN to the entire provisioning API when the shared
@@ -65,7 +72,7 @@ fi
 
 config="$DATA_DIR/config.yaml"
 registration="$DATA_DIR/registration.yaml"
-installed="$REGISTRATION_DIR/${BRIDGE_NETWORK}.yaml"
+installed="$REGISTRATION_DIR/${BRIDGE_MAUTRIX_ID}.yaml"
 
 mkdir -p "$DATA_DIR" "$REGISTRATION_DIR"
 

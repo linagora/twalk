@@ -12,6 +12,13 @@
 //! hand-rolled over tokio, like the Sensor's metrics endpoint: the stub
 //! serves one route and a hand-rolled response is smaller than any
 //! dependency.
+//!
+//! A canned completion is not the only thing a real endpoint answers, and
+//! the ones that are not completions are where personas went wrong: a model
+//! that spends its whole budget reasoning answers `200` with no content at
+//! all (issue #162). So the stub scripts [`StubAnswer`]s rather than strings,
+//! and a test can put that shape — the one a Qwen behind LiteLLM really
+//! answered — in front of a persona.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -60,12 +67,71 @@ impl StubRequest {
     }
 }
 
-#[derive(Default)]
+/// What the stub answers one request with: a completion, or one of the two
+/// ways an OpenAI-compatible endpoint answers `200` with no usable text.
+///
+/// The distinction is the point. A persona must not treat them alike — one
+/// may pass on a retry, the other is the model behaving exactly as
+/// configured and will not (issue #162) — so a harness that could only serve
+/// text could not put that difference under test.
+#[derive(Clone, Debug)]
+pub enum StubAnswer {
+    /// A completion: this text, `finish_reason: "stop"`.
+    Completion(String),
+    /// A reasoning model that spent the whole budget thinking: the exact
+    /// shape the reference deployment saw — `finish_reason: "length"`,
+    /// `content: null`, and the budget in `reasoning_content`.
+    BudgetSpentReasoning { reasoning: String },
+    /// A model that stopped on its own having said nothing: an empty
+    /// completion, `finish_reason: "stop"`, no reasoning.
+    NoContent,
+}
+
+impl StubAnswer {
+    /// A reasoning answer of a plausible size, which is all a test needs of
+    /// the text: nothing asserts what a model was thinking.
+    pub fn budget_spent_reasoning() -> Self {
+        Self::BudgetSpentReasoning {
+            reasoning: "The user wrote a short message. I should consider what \
+                 they mean before answering. "
+                .repeat(20),
+        }
+    }
+
+    /// The `message` object and `finish_reason` of this answer.
+    fn body(&self) -> (Value, &'static str) {
+        match self {
+            Self::Completion(text) => (json!({ "role": "assistant", "content": text }), "stop"),
+            Self::BudgetSpentReasoning { reasoning } => (
+                json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "reasoning_content": reasoning,
+                }),
+                // Not "stop": the model ran out of budget, which is the one
+                // fact that tells a persona the budget was the problem.
+                "length",
+            ),
+            Self::NoContent => (json!({ "role": "assistant", "content": "" }), "stop"),
+        }
+    }
+}
+
 struct State {
-    reply: String,
-    /// Replies scripted one at a time, consumed in order before `reply`.
-    scripted: VecDeque<String>,
+    answer: StubAnswer,
+    /// Answers scripted one at a time, consumed in order before `answer`.
+    scripted: VecDeque<StubAnswer>,
     requests: Vec<StubRequest>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            answer: StubAnswer::Completion(DEFAULT_REPLY.to_owned()),
+            scripted: VecDeque::new(),
+            requests: Vec::new(),
+        }
+    }
 }
 
 /// A running stub LLM. Dropping it stops the server.
@@ -98,7 +164,7 @@ impl StubLlm {
             .local_addr()
             .context("the stub LLM listener has no local address")?;
         let state = Arc::new(Mutex::new(State {
-            reply: reply.to_owned(),
+            answer: StubAnswer::Completion(reply.to_owned()),
             ..Default::default()
         }));
         let accept_task = tokio::spawn(accept_loop(listener, state.clone()));
@@ -122,13 +188,25 @@ impl StubLlm {
 
     /// Replaces the canned reply used once the scripted ones run out.
     pub fn set_reply(&self, reply: &str) {
-        self.lock().reply = reply.to_owned();
+        self.set_answer(StubAnswer::Completion(reply.to_owned()));
     }
 
     /// Queues one reply, served (in order) before the canned one: a
     /// multi-turn test scripts the answers it needs.
     pub fn push_reply(&self, reply: &str) {
-        self.lock().scripted.push_back(reply.to_owned());
+        self.push_answer(StubAnswer::Completion(reply.to_owned()));
+    }
+
+    /// [`set_reply`](Self::set_reply) for an answer that is not a completion:
+    /// what the endpoint serves from now on, once the scripted answers run
+    /// out.
+    pub fn set_answer(&self, answer: StubAnswer) {
+        self.lock().answer = answer;
+    }
+
+    /// Queues one answer, served (in order) before the standing one.
+    pub fn push_answer(&self, answer: StubAnswer) {
+        self.lock().scripted.push_back(answer);
     }
 
     /// Every request received so far, oldest first.
@@ -295,7 +373,7 @@ fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> (&'static str, Va
         );
     }
 
-    let content = {
+    let answer = {
         let mut state = state.lock().expect("the stub LLM mutex is never poisoned");
         state.requests.push(StubRequest {
             path: path.to_owned(),
@@ -305,8 +383,9 @@ fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> (&'static str, Va
         state
             .scripted
             .pop_front()
-            .unwrap_or_else(|| state.reply.clone())
+            .unwrap_or_else(|| state.answer.clone())
     };
+    let (message, finish_reason) = answer.body();
 
     let model = body
         .get("model")
@@ -327,8 +406,8 @@ fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> (&'static str, Va
             "model": model,
             "choices": [{
                 "index": 0,
-                "message": { "role": "assistant", "content": content },
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": finish_reason,
             }],
             "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 },
         }),
@@ -341,7 +420,7 @@ fn error_body(message: impl Into<String>, kind: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{StubLlm, DEFAULT_REPLY};
+    use super::{StubAnswer, StubLlm, DEFAULT_REPLY};
     use anyhow::Result;
     use serde_json::{json, Value};
 
@@ -439,6 +518,56 @@ mod tests {
             served,
             vec!["first", "second", "canned"],
             "scripted replies come first, in order, then the canned one"
+        );
+        Ok(())
+    }
+
+    /// The shape that broke the reference deployment (issue #162): `200`,
+    /// `finish_reason: "length"`, no content, the budget in
+    /// `reasoning_content`. Asserted here so that a persona test asserting
+    /// what a persona *does* with it is not also asserting what the stub
+    /// serves.
+    #[tokio::test]
+    async fn serves_the_answer_a_reasoning_model_gives_when_its_budget_is_gone() -> Result<()> {
+        let stub = StubLlm::start().await?;
+        stub.push_answer(StubAnswer::budget_spent_reasoning());
+        stub.push_answer(StubAnswer::NoContent);
+
+        let url = stub.chat_completions_url();
+        let (status, spent) = post(&url, &chat_request()).await?;
+        assert_eq!(status, 200, "the endpoint is healthy; that is the problem");
+        assert_eq!(
+            spent.pointer("/choices/0/finish_reason"),
+            Some(&json!("length"))
+        );
+        assert_eq!(
+            spent.pointer("/choices/0/message/content"),
+            Some(&Value::Null),
+            "the whole budget went to reasoning, so there is no content at all"
+        );
+        assert!(spent
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|reasoning| !reasoning.is_empty()));
+
+        let (_, nothing) = post(&url, &chat_request()).await?;
+        assert_eq!(
+            nothing.pointer("/choices/0/message/content"),
+            Some(&json!("")),
+            "a model that stopped on its own is a different answer"
+        );
+        assert_eq!(
+            nothing.pointer("/choices/0/finish_reason"),
+            Some(&json!("stop"))
+        );
+
+        let (_, canned) = post(&url, &chat_request()).await?;
+        assert_eq!(
+            canned
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str),
+            Some(DEFAULT_REPLY),
+            "the scripted answers run out and the canned completion resumes"
         );
         Ok(())
     }
