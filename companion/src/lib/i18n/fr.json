@@ -657,6 +657,8 @@
 	"approvals.dismiss.meaning": "Refuser masque cette réponse sur ce navigateur. Votre assistant n’en est pas averti, rien n’est enregistré sur votre serveur, et la suggestion périme d’elle-même.",
 	"approvals.dismissed.restore": "Remontrer celles que j’ai refusées",
 
+	"approvals.approvedText.label": "Ce que vous avez envoyé",
+	"approvals.approvedText.original": "Ce que votre assistant proposait",
 	"approvals.sent.title": "Envoyée",
 	"approvals.sent.body": "Approuvée en tant que {owner} et publiée sur votre flux d’événements à la position {sequence}. Votre Sensor la poste dans la conversation depuis là.",
 	"approvals.sent.edited": "Vous l’avez modifiée avant l’envoi.",

@@ -658,6 +658,8 @@
 	"approvals.dismiss.meaning": "Refusing hides this reply on this browser. Your assistant is not told, nothing is recorded on your server, and the suggestion goes stale on its own.",
 	"approvals.dismissed.restore": "Show the refused ones again",
 
+	"approvals.approvedText.label": "What you sent",
+	"approvals.approvedText.original": "What your assistant had proposed",
 	"approvals.sent.title": "Sent",
 	"approvals.sent.body": "Approved as {owner} and published on your event stream at position {sequence}. Your Sensor posts it into the conversation from there.",
 	"approvals.sent.edited": "You edited it before sending.",

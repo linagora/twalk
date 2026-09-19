@@ -93,7 +93,7 @@
 
 	/** What became of one row's own action, rendered against that row. */
 	type Outcome =
-		| { kind: 'sent'; sequence: number | null; edited: boolean; by: string }
+		| { kind: 'sent'; sequence: number | null; edited: boolean; by: string; text: string }
 		| { kind: 'refused'; problem: Explained };
 
 	let listing = $state<Listing | null>(null);
@@ -202,7 +202,11 @@
 					kind: 'sent',
 					sequence: answer.approval.stream_sequence ?? null,
 					edited: answer.approval.edited,
-					by: answer.approval.approved_by
+					by: answer.approval.approved_by,
+					// What went out, remembered here and nowhere else: the Gateway
+					// holds no text (ADR 0022), so after an edit this screen is the
+					// only place the user's own words can be read back (#217).
+					text
 				}
 			};
 			closeEditor();
@@ -334,9 +338,23 @@
 				{/if}
 			</p>
 
-			<!-- The thing being approved: the persona's own words, and the only
-			     text on this screen. -->
-			<blockquote class="proposed" data-testid="proposed">{row.body}</blockquote>
+			{#if outcome !== undefined && outcome.kind === 'sent' && outcome.edited}
+				<!-- Once an edited reply has gone out, what matters is what went
+				     out, and that is the user's text — which this screen has in
+				     hand because it just submitted it. The persona's words stay
+				     reachable: "how often do I correct my assistant" is a question
+				     a user may want answered (#217). -->
+				<p class="small muted" data-testid="approved-label">{$t('approvals.approvedText.label')}</p>
+				<blockquote class="proposed" data-testid="approved-text">{outcome.text}</blockquote>
+				<details class="small" data-testid="original">
+					<summary>{$t('approvals.approvedText.original')}</summary>
+					<blockquote class="proposed muted" data-testid="proposed">{row.body}</blockquote>
+				</details>
+			{:else}
+				<!-- The thing being approved: the persona's own words, and the only
+				     text on this screen. -->
+				<blockquote class="proposed" data-testid="proposed">{row.body}</blockquote>
+			{/if}
 
 			<p class="small muted" data-testid="timing">
 				{$t('approvals.row.produced', { when: when(row.producedAt) })}
