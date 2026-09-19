@@ -473,6 +473,23 @@ impl Bot {
         extract_str(&response, "membership", "get membership")
     }
 
+    /// Replaces a room with a new one, as the homeserver does it: the old
+    /// room gets an `m.room.tombstone` naming the successor, whose
+    /// `m.room.create` names its predecessor. Returns the successor's id.
+    /// Members are not carried over — a bridge re-invites — and neither is
+    /// custom state such as `m.bridge`.
+    pub async fn upgrade_room(&self, room_id: &str) -> Result<String> {
+        let response = self
+            .send_json(
+                reqwest::Method::POST,
+                &format!("/_matrix/client/v3/rooms/{}/upgrade", esc(room_id)),
+                Some(&serde_json::json!({ "new_version": "10" })),
+                "upgrade",
+            )
+            .await?;
+        extract_str(&response, "replacement_room", "upgrade")
+    }
+
     /// Kicks a user out of a room (requires power, like a bridge admin has).
     pub async fn kick(&self, room_id: &str, user_id: &str) -> Result<()> {
         self.send_json(
