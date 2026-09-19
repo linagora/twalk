@@ -79,6 +79,10 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		await expect(row.getByTestId('sent')).toBeVisible();
 		// It says where the reply landed, and under whose name.
 		await expect(row.getByTestId('sent')).toContainText(it.ownerId);
+		// Sent as written: the persona's words stay the text on screen, and
+		// nothing claims the user wrote something else (#217).
+		await expect(row.getByTestId('proposed')).toContainText('MARKER-REPLY-approve');
+		await expect(row.getByTestId('approved-text')).toHaveCount(0);
 
 		// And it actually left the deployment.
 		const event = await bus.waitFor(
@@ -158,6 +162,12 @@ test('nothing is approved by a keystroke, and nothing approves a list', async ({
 	await row.getByTestId('approve').click();
 	await expect(row.getByTestId('sent')).toBeVisible();
 	expect(approvals.length).toBe(1);
+	// #217: what the screen now shows is what went out — the user's words —
+	// with the persona's original still reachable, not the other way round.
+	// The Gateway holds no text (ADR 0022), so this is the screen's own memory.
+	await expect(row.getByTestId('approved-text')).toContainText('Une autre formulation');
+	await expect(row.getByTestId('proposed')).toContainText('MARKER-REPLY-keystroke');
+	await expect(row.getByTestId('proposed')).not.toContainText('Une autre formulation');
 	const answer = await request.get(`/api/suggestions/${published.suggestionId}`, {
 		headers: { cookie: `twalk_device=${token}` }
 	});
