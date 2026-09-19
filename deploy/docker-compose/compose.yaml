@@ -278,10 +278,10 @@ services:
       # This is deliberately not tied to the `bridges` compose profile:
       # compose has no way to vary a variable by profile, so an operator who
       # runs no bridge leaves GATEWAY_BRIDGES empty and GET /api/bridges
-      # answers an empty list. Set it when you enable the profile. All three
+      # answers an empty list. Set it when you enable the profile. All four
       # bridges of the reference deployment:
       #
-      #   GATEWAY_BRIDGES=mautrix-whatsapp,mautrix-signal,mautrix-gmessages
+      #   GATEWAY_BRIDGES=mautrix-whatsapp,mautrix-signal,mautrix-gmessages,mautrix-telegram
       GATEWAY_BRIDGES: ${GATEWAY_BRIDGES:-}
       # Where the bridge's provisioning API is: its own appservice listener
       # on this compose network, not the homeserver. No published port is
@@ -331,11 +331,22 @@ services:
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK: sms
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_AS_TOKEN: ${GMESSAGES_AS_TOKEN:-}
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_BOT_USER_ID: ${GMESSAGES_BOT_USER_ID:-@gmessagesbot:${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}}
+      GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_URL: ${GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_URL:-http://bridge-telegram:29317}
+      GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_PROVISIONING_SECRET: ${TELEGRAM_PROVISIONING_SECRET:-}
+      # `telegram`, where the bridge id and the network value coincide — which
+      # they do not for the line above, and the coincidence is not a rule
+      # (ADR 0005). The bridge is `mautrix-telegram`; this is still the one
+      # place that says which network it serves, and it is still read from
+      # configuration rather than derived from the bridge's name.
+      GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_NETWORK: telegram
+      GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_AS_TOKEN: ${TELEGRAM_AS_TOKEN:-}
+      GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_BOT_USER_ID: ${TELEGRAM_BOT_USER_ID:-@telegrambot:${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}}
       # The bridge_id each one's events carry, and the segment of its status
       # webhook's URL. Left to the Gateway's own default here — the instance
       # id with `mautrix-` stripped under a `bridge-` prefix — which is
-      # exactly what WHATSAPP_STATUS_ENDPOINT, SIGNAL_STATUS_ENDPOINT and
-      # GMESSAGES_STATUS_ENDPOINT in .env.example already point at. Set
+      # exactly what WHATSAPP_STATUS_ENDPOINT, SIGNAL_STATUS_ENDPOINT,
+      # GMESSAGES_STATUS_ENDPOINT and TELEGRAM_STATUS_ENDPOINT in .env.example
+      # already point at. Set
       # GATEWAY_BRIDGE_<ID>_STATUS_ID only to name one yourself, and change
       # the endpoint with it: it is the identity third parties read off the
       # bus, so it must not move.
@@ -578,16 +589,17 @@ services:
     # reach at startup; compose brings it back, as it does the Sensor.
     restart: unless-stopped
 
-  # --- Bridges: mautrix-whatsapp, mautrix-signal and mautrix-gmessages -----
+  # --- Bridges: mautrix-whatsapp, -signal, -gmessages and -telegram --------
   #
-  # All six services below carry `profiles: [bridges]`, so a plain
+  # All eight services below carry `profiles: [bridges]`, so a plain
   # `docker compose up` ignores them entirely. Their variables all have empty
   # defaults for the same reason: compose interpolates the whole file whatever
   # the active profiles are, and a stack without bridges must not be asked for
   # a bridge token — not a WhatsApp one, not a Signal one, not a gmessages
-  # one. The missing-value errors therefore come from
+  # one, and not a Telegram API credential either, which is not even a Matrix
+  # credential. The missing-value errors therefore come from
   # ../../bridges/generate-registration.sh, which can say what is missing and
-  # why, rather than from interpolation.
+  # why — and, for Telegram, where to get it — rather than from interpolation.
   #
   # Image versions are pinned. A bridge holds the user's account on an
   # external network (docs/architecture/security-model.md): its version is not
@@ -598,7 +610,9 @@ services:
   # selects its binary, its appservice id and its registration's filename.
   # `gmessages` is one of those names and is never a network value (ADR 0005):
   # the network that bridge serves is `sms`, which appears once, as
-  # GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK above.
+  # GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK above. For `telegram` the bridge
+  # id and the network value happen to coincide; the coincidence is not a rule
+  # and nothing here derives one from the other.
 
   # One-shot: renders the bridge's configuration from ../../bridges/
   # mautrix-whatsapp/config.yaml plus the environment, and generates the
@@ -789,6 +803,84 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # As above, for Telegram. See the WhatsApp pair for the commentary; two
+  # things are particular to this one.
+  #
+  # It is the only bridge here that needs a credential belonging to the
+  # external network rather than to Matrix: `network.api_id` and
+  # `network.api_hash`, which the OPERATOR registers at
+  # https://my.telegram.org/apps against their own phone number. That adds an
+  # onboarding step no other network has — before the user can press Connect,
+  # the operator must already have registered an application with Telegram —
+  # and it is why TELEGRAM_API_ID/TELEGRAM_API_HASH reach the one-shot below
+  # with empty defaults, like every bridge token: the error that names them
+  # and says where to get one comes from
+  # ../../bridges/generate-registration.sh. Never put a value here or in
+  # ../../bridges/mautrix-telegram/config.yaml: a shared or published api_id
+  # draws API_ID_PUBLISHED_FLOOD from Telegram and then works for nobody, so
+  # an empty value is safer than a plausible one.
+  #
+  # And its login is not a QR scan alone. Telegram's `phone` flow is three
+  # sequential server-side prompts (phone number, code, and a password for a
+  # two-factor account) and its `qr` flow interjects the same password step,
+  # so the stack's job ends at a bridge that is up, healthy and waiting for a
+  # human — and the Companion half of #175 is what lets that human answer.
+  bridge-telegram-registration:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/telegram:v26.09
+    user: "0:0"
+    environment:
+      BRIDGE_MAUTRIX_ID: telegram
+      MATRIX_DOMAIN: ${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}
+      MATRIX_INTERNAL_URL: ${MATRIX_INTERNAL_URL:-http://synapse:8008}
+      # The single owner whose login this bridge accepts. Defaults to
+      # GATEWAY_OWNER: it is the same human, and one deployment has one
+      # (ADR 0011).
+      MATRIX_OWNER_USER_ID: ${MATRIX_OWNER_USER_ID:-${GATEWAY_OWNER:-}}
+      BRIDGE_AS_TOKEN: ${TELEGRAM_AS_TOKEN:-}
+      BRIDGE_HS_TOKEN: ${TELEGRAM_HS_TOKEN:-}
+      BRIDGE_PROVISIONING_SECRET: ${TELEGRAM_PROVISIONING_SECRET:-}
+      BRIDGE_STATUS_ENDPOINT: ${TELEGRAM_STATUS_ENDPOINT:-}
+      # The operator's own Telegram application, and the only pair of
+      # variables in this file that is not a Matrix credential. Empty
+      # defaults, for the reason stated at the top of this section.
+      BRIDGE_TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      BRIDGE_TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      BRIDGE_UID: "1337"
+      BRIDGE_GID: "1337"
+    volumes:
+      - ../../bridges/generate-registration.sh:/opt/twalk/generate-registration.sh:ro
+      - ../../bridges/mautrix-telegram/config.yaml:/opt/twalk/config.yaml:ro
+      - telegram-data:/data
+      - bridge-registrations:/registrations
+    entrypoint: ["/usr/bin/env", "bash", "/opt/twalk/generate-registration.sh"]
+
+  bridge-telegram:
+    profiles: [bridges]
+    image: dock.mau.dev/mautrix/telegram:v26.09
+    depends_on:
+      synapse:
+        condition: service_healthy
+      bridge-telegram-registration:
+        condition: service_completed_successfully
+    volumes:
+      - telegram-data:/data
+    ports:
+      # 29317 is mautrix-telegram's own default appservice port, as 29318,
+      # 29328 and 29336 are WhatsApp's, Signal's and Google Messages'.
+      # Localhost only, for the same reason: this port carries the
+      # provisioning API.
+      - "127.0.0.1:${TELEGRAM_APPSERVICE_PORT:-29317}:29317"
+    healthcheck:
+      # Liveness, not readiness: readiness waits for the Telegram connection,
+      # which cannot exist until a human has completed a login.
+      test: ["CMD", "curl", "-fsS", "http://localhost:29317/_matrix/mau/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   synapse-data:
   nats-data:
@@ -806,3 +898,7 @@ volumes:
   # The Google Messages session lives here once a human has pasted their
   # cookies. Deleting this volume is unpairing this bridge from their phone.
   gmessages-data:
+  # The Telegram session lives here once a human has completed a login, and a
+  # Telegram login is a full account session with the same authority as their
+  # own app. Deleting this volume ends that session.
+  telegram-data:

@@ -1,10 +1,10 @@
-//! Ticket #73, extended by #172: the mautrix bridges in the reference
+//! Ticket #73, extended by #172 and #175: the mautrix bridges in the reference
 //! deployment. The two-step procedure `deploy/docker-compose` documents —
 //! `provision-bridges.sh`, then `docker compose --profile bridges up` —
-//! brings `mautrix-whatsapp`, `mautrix-signal` and `mautrix-gmessages` up
-//! against the stack's own Synapse, with Synapse accepting each appservice,
-//! each bridge process live, and each bridge's provisioning API answering for
-//! the shared secret in the environment file.
+//! brings `mautrix-whatsapp`, `mautrix-signal`, `mautrix-gmessages` and
+//! `mautrix-telegram` up against the stack's own Synapse, with Synapse
+//! accepting each appservice, each bridge process live, and each bridge's
+//! provisioning API answering for the shared secret in the environment file.
 //!
 //! A bridge is identified by its `bridge_id` and is never a network value
 //! (ADR 0005). `gmessages` appears throughout this file as mautrix's own name
@@ -12,17 +12,40 @@
 //! its compose service and the variables carrying its secrets — and nowhere
 //! as a network: the network it serves is `sms`, which is the Companion
 //! Gateway's `GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK` and not this test's
-//! business. `Bridge::mautrix_id` is named for exactly that reason.
+//! business. `Bridge::mautrix_id` is named for exactly that reason. `telegram`
+//! is the bridge whose id and network value happen to coincide, and it is read
+//! here only as the bridge id; nothing in this file derives one from the other.
+//!
+//! #175 adds the fourth bridge, and with it the first credential in this
+//! deployment that is not a Matrix credential: `network.api_id` and
+//! `network.api_hash`, an application the OPERATOR registers at
+//! <https://my.telegram.org/apps>. Three things about it are asserted here
+//! because they are the deployment's, not the Companion's: that the generator
+//! refuses to run without it and says where to get one, that a stack with no
+//! bridges is never asked for it, and that `api_id` reaches the bridge as a
+//! YAML **integer** — mautrix's config upgrader copies that key with an int
+//! type and silently skips a node of any other type, so a quoted value would
+//! leave upstream's sample credential in place instead of failing, and the
+//! failure would be a flood ban from Telegram rather than a config error.
 //!
 //! **No network login is attempted.** Logging a bridge in needs a real
 //! account and a human: a phone to scan a QR code with for WhatsApp and
-//! Signal, and for Google Messages seven Google session cookies copied out of
-//! a private browsing window followed by an emoji match on the phone (#57).
-//! That is the Companion's job (#68) and a human's, and no automation may do
-//! it. What this test proves is the deployment: the registration Synapse
-//! reads, the process that answers, and the provisioning API the Companion
-//! Gateway will drive (#55). Each bridge reports `logins: []` here, and that
-//! is the expected state.
+//! Signal, for Google Messages seven Google session cookies copied out of a
+//! private browsing window followed by an emoji match on the phone (#57), and
+//! for Telegram a phone number, the code Telegram sends and a password if the
+//! account has two-factor authentication on. That is the Companion's job (#68)
+//! and a human's, and no automation may do it. What this test proves is the
+//! deployment: the registration Synapse reads, the process that answers, and
+//! the provisioning API the Companion Gateway will drive (#55). Each bridge
+//! reports `logins: []` here, and that is the expected state.
+//!
+//! Which is also why the Telegram API credential this test configures is
+//! harmless. A bridge contacts Telegram only when a login starts, and no login
+//! starts here, so the synthetic pair below never leaves this machine — and
+//! neither value could be mistaken for a real one (`1` is not a shape Telegram
+//! issues, and the hash is a sentence). A real `api_id` must never be shared or
+//! published: Telegram answers `API_ID_PUBLISHED_FLOOD` to one that has been,
+//! and then it works for nobody.
 //!
 //! The second test is the other half of #172's acceptance: a stack with **no**
 //! bridges comes up, and is never asked for a bridge token. Compose
@@ -46,17 +69,19 @@
 //! TWALK_BRIDGES_TEST_NATS_PORT (default 14778),
 //! TWALK_BRIDGES_TEST_GATEWAY_PORT (default 18578),
 //! TWALK_BRIDGES_TEST_WHATSAPP_PORT (default 18588),
-//! TWALK_BRIDGES_TEST_SIGNAL_PORT (default 18598) and
-//! TWALK_BRIDGES_TEST_GMESSAGES_PORT (default 17736) — all distinct from the
+//! TWALK_BRIDGES_TEST_SIGNAL_PORT (default 18598),
+//! TWALK_BRIDGES_TEST_GMESSAGES_PORT (default 17736) and
+//! TWALK_BRIDGES_TEST_TELEGRAM_PORT (default 17906) — all distinct from the
 //! defaults of `deployment.rs` (18218 / 14418 / 18328) and of
 //! `companion-gateway/tests/deployment.rs` (18318), so several
 //! default-configured deploy stacks can sit on one Docker daemon. The first
 //! five sit at the top of their ranges on purpose: an ad-hoc stack in another
 //! worktree took 18548 while this test was being written, and a default that
 //! loses a race to a neighbour is a default worth moving. The two defaults
-//! #172 added are in the 17700–17899 block that ticket was given, which is
-//! also why the existing five did not move: an operator's `.env` and a warm
-//! stack both keep working. Every one of them is overridable. The bridge
+//! #172 added are in the 17700–17899 block that ticket was given, and #175's
+//! is in the 17900–18099 block this one was given — which is also why none of
+//! the earlier defaults moved: an operator's `.env` and a warm stack both keep
+//! working. Every one of them is overridable. The bridge
 //! images are upstream and pinned by tag in `compose.yaml`, so unlike the
 //! Sensor's and the Gateway's there is no per-stack image tag to keep apart.
 //!
@@ -67,7 +92,7 @@
 //! share a project with a stack that *has* bridges: the property it asserts
 //! is about a deployment where no bridge variable is set at all.
 //!
-//! The three-bridge stack stays up between runs: that is what makes a warm
+//! The four-bridge stack stays up between runs: that is what makes a warm
 //! run fast. Set TWALK_BRIDGES_TEST_TEARDOWN=1 to drop it at the end of a
 //! passing run instead — by hand, `docker compose -p <stack> --profile
 //! bridges down -v`. The no-bridge stack always tears itself down, passing or
@@ -87,7 +112,7 @@ use tokio::time::sleep;
 const SERVER_NAME: &str = "deploy.twalk";
 const OWNER_USER_ID: &str = "@owner:deploy.twalk";
 
-/// The three bridges, with everything that differs between them: the compose
+/// The four bridges, with everything that differs between them: the compose
 /// service names, the appservice id Synapse knows them by, the bot the
 /// Sensor's allowed inviters must name, and the throwaway secrets this test
 /// configures them with. The provisioning secrets are deliberately longer
@@ -100,6 +125,10 @@ const OWNER_USER_ID: &str = "@owner:deploy.twalk";
 /// bridge's secrets, and for the third bridge its value is `gmessages` —
 /// a bridge id, never a network (ADR 0005). The network each one serves is
 /// the Companion Gateway's configuration and appears nowhere in this file.
+///
+/// `extra_env` carries what one bridge needs and the others do not, spelled in
+/// full rather than under the `{PREFIX}_` scheme: today that is Telegram's
+/// network API credential, which is not a Matrix credential at all.
 struct Bridge {
     mautrix_id: &'static str,
     appservice_id: &'static str,
@@ -110,9 +139,10 @@ struct Bridge {
     status_endpoint: &'static str,
     port_var: &'static str,
     default_port: &'static str,
+    extra_env: &'static [(&'static str, &'static str)],
 }
 
-const BRIDGES: [Bridge; 3] = [
+const BRIDGES: [Bridge; 4] = [
     Bridge {
         mautrix_id: "whatsapp",
         appservice_id: "whatsapp",
@@ -123,6 +153,7 @@ const BRIDGES: [Bridge; 3] = [
         status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-whatsapp/status",
         port_var: "TWALK_BRIDGES_TEST_WHATSAPP_PORT",
         default_port: "18588",
+        extra_env: &[],
     },
     Bridge {
         mautrix_id: "signal",
@@ -134,6 +165,7 @@ const BRIDGES: [Bridge; 3] = [
         status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-signal/status",
         port_var: "TWALK_BRIDGES_TEST_SIGNAL_PORT",
         default_port: "18598",
+        extra_env: &[],
     },
     // SMS, through Google Messages (#172). The bridge is `mautrix-gmessages`
     // and the network it serves is `sms`; the id below is the bridge's, and
@@ -148,8 +180,43 @@ const BRIDGES: [Bridge; 3] = [
         status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-gmessages/status",
         port_var: "TWALK_BRIDGES_TEST_GMESSAGES_PORT",
         default_port: "17736",
+        extra_env: &[],
+    },
+    // Telegram (#175). The bridge is `mautrix-telegram` and the network it
+    // serves is `telegram`: the same word, by coincidence rather than by rule,
+    // and the id below is the bridge's. `bridge-telegram` is the `bridge_id`
+    // its status pushes carry.
+    //
+    // The last two are the first credential in this deployment that belongs to
+    // the external network rather than to Matrix, and they are synthetic in a
+    // way no real pair could be: Telegram issues six- to eight-digit ids, and
+    // an api_hash is 32 hex characters. Nothing sends them anywhere — a bridge
+    // contacts Telegram only when a login starts, and this test starts none —
+    // but a value that could be mistaken for a real credential has no business
+    // in a repository at all, because Telegram flood-bans a published api_id.
+    Bridge {
+        mautrix_id: "telegram",
+        appservice_id: "telegram",
+        bot_user_id: "@telegrambot:deploy.twalk",
+        as_token: "bridges-test-only-telegram-as-token",
+        hs_token: "bridges-test-only-telegram-hs-token",
+        provisioning_secret: "bridges-test-only-telegram-provisioning-secret",
+        status_endpoint: "http://companion-gateway:8080/_twalk/bridges/bridge-telegram/status",
+        port_var: "TWALK_BRIDGES_TEST_TELEGRAM_PORT",
+        default_port: "17906",
+        extra_env: &[
+            ("TELEGRAM_API_ID", TELEGRAM_TEST_API_ID),
+            ("TELEGRAM_API_HASH", TELEGRAM_TEST_API_HASH),
+        ],
     },
 ];
+
+/// The synthetic Telegram API credential above, named so that the assertions
+/// about how it is rendered can read the same constants the environment file
+/// was written from. `api_id` is the value whose YAML **type** matters: it must
+/// reach the bridge as an integer.
+const TELEGRAM_TEST_API_ID: &str = "1";
+const TELEGRAM_TEST_API_HASH: &str = "bridges-test-only-telegram-api-hash";
 
 impl Bridge {
     fn host_port(&self) -> String {
@@ -252,6 +319,9 @@ fn write_env_file() -> Result<PathBuf> {
             bridge.provisioning_secret,
             bridge.status_endpoint,
         ));
+        for (name, value) in bridge.extra_env {
+            contents.push_str(&format!("{name}={value}\n"));
+        }
     }
     std::fs::write(&path, contents)
         .with_context(|| format!("failed to write {}", path.display()))?;
@@ -283,6 +353,42 @@ async fn compose(env_file: &Path, args: &[&str], what: &str) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Runs `docker compose` against this test's stack and returns its stdout on
+/// success or its stderr on failure, rather than treating failure as an error.
+/// One assertion is about a one-shot that is *supposed* to stop, and its
+/// message is the evidence worth reading.
+async fn compose_allowing_failure(
+    env_file: &Path,
+    args: &[&str],
+    what: &str,
+) -> Result<std::result::Result<String, String>> {
+    let output = Command::new("docker")
+        .arg("compose")
+        .arg("-p")
+        .arg(bridges_stack())
+        .arg("--env-file")
+        .arg(env_file)
+        .arg("-f")
+        .arg(deploy_dir().join("compose.yaml"))
+        .arg("--profile")
+        .arg("bridges")
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("failed to run docker compose {what}"))?;
+    if output.status.success() {
+        Ok(Ok(String::from_utf8_lossy(&output.stdout).into_owned()))
+    } else {
+        // The generator writes its refusal to stderr; a compose one-shot's own
+        // failure lands there too, so both are in the same string.
+        Ok(Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
 }
 
 /// The stack's containers as `docker compose ps --format json` reports them:
@@ -389,7 +495,7 @@ where
 }
 
 #[tokio::test]
-async fn the_bridge_profile_brings_up_all_three_bridges_against_the_stack() -> Result<()> {
+async fn the_bridge_profile_brings_up_all_four_bridges_against_the_stack() -> Result<()> {
     let env_file = write_env_file()?;
 
     // Step one of the documented procedure. It generates every registration
@@ -570,13 +676,193 @@ async fn the_bridge_profile_brings_up_all_three_bridges_against_the_stack() -> R
             "the {} bridge must grant only this deployment's owner",
             bridge.mautrix_id
         );
+        // SQLite, for every bridge in the reference stack. mau.fi's Go setup
+        // page says PostgreSQL 16 or higher; `sqlite3-fk-wal` is supported on
+        // identical terms and is what this deployment runs, which is why the
+        // claim is asserted against the running bridge's own configuration
+        // rather than believed. It is also #175's fourth open question: adding
+        // Telegram did NOT add a database service, and this is what says so.
+        assert_eq!(
+            rendered_config_value(&env_file, bridge, ".database.type").await?,
+            "sqlite3-fk-wal",
+            "the {} bridge must run on SQLite like the rest of the stack",
+            bridge.mautrix_id
+        );
     }
+
+    check_the_telegram_bridges_own_decisions(&env_file).await?;
 
     // Deliberately after the assertions, so a failure leaves the stack and
     // its logs in place to inspect.
     if teardown_requested() {
         teardown(&env_file).await?;
     }
+    Ok(())
+}
+
+/// What the Telegram bridge decides that the other three have no equivalent
+/// for (#175). Everything above is uniform across the four bridges; this is
+/// the part that is Telegram's alone, and every value here is read back from
+/// the configuration the running bridge was rendered with.
+async fn check_the_telegram_bridges_own_decisions(env_file: &Path) -> Result<()> {
+    let telegram = BRIDGES
+        .iter()
+        .find(|bridge| bridge.mautrix_id == "telegram")
+        .context("the telegram bridge is missing from BRIDGES")?;
+
+    // 1. The network API credential arrived, and arrived as an INTEGER.
+    //
+    //    This is the assertion that earns its place. `network.api_id` is an
+    //    int in the bridge's configuration, and mautrix's config upgrader
+    //    copies that key with an int type and silently SKIPS a node of any
+    //    other type. A generator that rendered it as a quoted string would
+    //    therefore leave upstream's sample credential in place, the bridge
+    //    would start, and the first login would be answered by Telegram with
+    //    a flood ban rather than by the bridge with a configuration error.
+    //    The value and the type are two different claims, so both are made.
+    assert_eq!(
+        rendered_config_value(env_file, telegram, ".network.api_id").await?,
+        TELEGRAM_TEST_API_ID,
+        "the telegram bridge must be configured with the api_id from the environment"
+    );
+    assert_eq!(
+        rendered_config_value(env_file, telegram, ".network.api_id | tag").await?,
+        "!!int",
+        "network.api_id must reach the bridge as a YAML integer: mautrix's config \
+         upgrader copies that key with an int type and silently skips a node of any \
+         other type, so a quoted value would leave upstream's SAMPLE credential in \
+         place and Telegram would answer API_ID_PUBLISHED_FLOOD"
+    );
+    assert_eq!(
+        rendered_config_value(env_file, telegram, ".network.api_hash").await?,
+        TELEGRAM_TEST_API_HASH,
+        "the telegram bridge must be configured with the api_hash from the environment"
+    );
+    // And the committed base config carries no credential at all — which is a
+    // claim about this repository rather than about the running bridge, and the
+    // reason the two assertions above had to come from the environment. A
+    // plausible-looking placeholder here would be worse than an empty value:
+    // Telegram answers API_ID_PUBLISHED_FLOOD to a published or shared api_id,
+    // so a committed sample is a credential that works for nobody rather than
+    // a configuration error somebody notices.
+    let base_config = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bridges/mautrix-telegram/config.yaml"),
+    )
+    .context("failed to read the committed telegram base config")?;
+    for forbidden in ["api_id:", "api_hash:", "tjyd5yge35lbodk1xwzw2jstp90k55qz"] {
+        ensure!(
+            !base_config.contains(forbidden),
+            "bridges/mautrix-telegram/config.yaml must commit no Telegram API credential, \
+             but it contains {forbidden:?}: the operator's own api_id is rendered from the \
+             environment, and a shared or published one draws API_ID_PUBLISHED_FLOOD"
+        );
+    }
+
+    // 2. How big the register's jump is at login. Unlike WhatsApp, which
+    //    builds portals lazily as conversations become active, this bridge
+    //    syncs the chat list at login: these three values are what decide how
+    //    many portal rooms exist the moment a human finishes logging in, and
+    //    therefore how long the conversation chooser's list is (#143) the
+    //    first time the user sees it. They are pinned rather than inherited
+    //    precisely so that an upstream change cannot move that number under a
+    //    working deployment, which is what this assertion protects.
+    for (expression, expected, why) in [
+        (
+            ".network.sync.create_limit",
+            "15",
+            "portals created when the chat list is synced: reviewable in one sitting,              and not 0 (the deafness #105 was about) or -1 (a chooser nobody reads)",
+        ),
+        (
+            ".network.sync.login_sync_limit",
+            "15",
+            "kept equal to create_limit, so the list the chooser holds is the list that              appeared at login rather than one that grows while it is read",
+        ),
+        (
+            ".network.sync.direct_chats",
+            "true",
+            "a DM is the conversation Twalk is most about; off, the commonest kind is              invisible until somebody writes",
+        ),
+        (
+            ".network.member_list.max_initial_sync",
+            "100",
+            "what makes the chooser's member count real rather than decorative, and a              floor and not a count above it",
+        ),
+        (
+            ".network.member_list.sync_broadcast_channels",
+            "false",
+            "a channel's subscribers are not the user's correspondents, and syncing them              manufactures ghosts wholesale",
+        ),
+        (
+            ".network.max_member_count",
+            "-1",
+            "a decision AGAINST a cap: a capped portal is never created, so the              conversation never appears in the register at all and nothing says why              (ADR 0024 refuses silent omission)",
+        ),
+        (
+            ".network.bridge_communities",
+            "false",
+            "a bridged community is itself a portal and carries m.bridge, so the register              would offer a space as a conversation; nothing here reads              com.beeper.room_type_v2 yet",
+        ),
+        (
+            ".network.always_tombstone_on_supergroup_migration",
+            "false",
+            "true would replace a promoted group's portal with a room the Sensor is not              in, so a conversation the user chose to observe would go deaf silently,              AFTER they decided about it — the register and the Sensor's membership are              both keyed on room id",
+        ),
+        (
+            ".network.device_info.device_model",
+            "Twalk",
+            "what the user sees in Telegram's own device list: the product, not the              software",
+        ),
+    ] {
+        assert_eq!(
+            rendered_config_value(env_file, telegram, expression).await?,
+            expected,
+            "the telegram bridge's {expression} must be {expected} — {why}"
+        );
+    }
+
+    // 3. And the generator refuses to run without the credential, with a
+    //    message that names it and says where to get one.
+    //
+    //    This is the other half of the empty-default discipline that
+    //    `compose.yaml` states for the bridge tokens and the no-bridge test
+    //    below asserts: a stack that runs no bridge must never be asked for a
+    //    Telegram credential, so the variable has an empty default and THIS is
+    //    where the error has to come from. A one-off `run --rm --no-deps`
+    //    disturbs nothing: the refusal happens before the generator copies the
+    //    base config, so the rendered configuration the running bridge is
+    //    using is not touched.
+    let refusal = compose_allowing_failure(
+        env_file,
+        &[
+            "run",
+            "--rm",
+            "--no-deps",
+            "-T",
+            "-e",
+            "BRIDGE_TELEGRAM_API_ID=",
+            &telegram.registration_service(),
+        ],
+        "run bridge-telegram-registration with no api_id",
+    )
+    .await?;
+    let message = match refusal {
+        Ok(stdout) => bail!(
+            "the telegram registration one-shot must refuse to run with no api_id,              but it succeeded:\n{stdout}"
+        ),
+        Err(message) => message,
+    };
+    assert!(
+        message.contains("https://my.telegram.org/apps"),
+        "the refusal must say where the operator gets an api_id, because nothing else          in the deployment can tell them: {message}"
+    );
+    assert!(
+        message.contains("TELEGRAM_API_ID"),
+        "the refusal must name the variable that is missing: {message}"
+    );
+    assert!(
+        message.contains("NOT a Matrix credential"),
+        "the refusal must say what KIND of credential this is: every other secret in          this deployment is a Matrix credential, and an operator who reads 'api_id' as          one will look for it on their homeserver: {message}"
+    );
     Ok(())
 }
 
@@ -672,8 +958,9 @@ async fn check_a_bridgeless_stack(env_file: &Path) -> Result<()> {
     //    the assertion #172 is really about: compose interpolates the whole
     //    file whatever the active profiles are, so a `:?` guard on a bridge
     //    token — or a `gmessages` one demanded where WhatsApp's and Signal's
-    //    are optional — would stop a bridgeless deployment dead, with an
-    //    error about a network its operator does not use.
+    //    are optional, or a Telegram api_id demanded of everybody — would stop
+    //    a bridgeless deployment dead, with an error about a network its
+    //    operator does not use.
     if let Err(stderr) = compose_no_bridges(env_file, false, &["config"], "config").await? {
         bail!(
             "a deployment with no bridge variable set must still interpolate; \
@@ -746,6 +1033,25 @@ async fn check_a_bridgeless_stack(env_file: &Path) -> Result<()> {
                  variable, got {value}"
             );
         }
+        // And the same for whatever that bridge needs on its own. Today this is
+        // Telegram's network API credential, and it is the strongest case for
+        // the rule: an operator who runs only WhatsApp must never be asked for
+        // an application they would have to register with Telegram, and the
+        // variable is not even a Matrix credential they could produce from
+        // their own homeserver. The error belongs to
+        // `bridges/generate-registration.sh`, which knows what it is and where
+        // to get one.
+        for (variable, _) in bridge.extra_env {
+            let variable = format!("BRIDGE_{variable}");
+            let value = environment
+                .get(&variable)
+                .with_context(|| format!("{service} does not set {variable}"))?;
+            ensure!(
+                value.as_str() == Some(""),
+                "{service}'s {variable} must render empty on a stack that sets no bridge \
+                 variable, got {value}"
+            );
+        }
     }
 
     // 4. And the stack comes up. Synapse is where an appservice registration
@@ -764,13 +1070,17 @@ async fn check_a_bridgeless_stack(env_file: &Path) -> Result<()> {
     Ok(())
 }
 
-/// #172's other half: adding a third bridge must not make a deployment that
-/// runs none of them harder to start.
+/// #172's other half, which #175 inherits: adding a bridge must not make a
+/// deployment that runs none of them harder to start.
 ///
-/// A stack with no bridges must never be asked for a gmessages token. Every
-/// bridge variable in `compose.yaml` therefore has an empty default, and the
-/// missing-value errors come from `bridges/generate-registration.sh`, which
-/// can say what is missing and why.
+/// A stack with no bridges must never be asked for a gmessages token, and
+/// #175 raises the stakes — it must not be asked for a Telegram API
+/// credential either, which is not a Matrix credential at all and which an
+/// operator could not produce from their own infrastructure if they wanted
+/// to. Every bridge variable in `compose.yaml` therefore has an empty default,
+/// and the missing-value errors come from
+/// `bridges/generate-registration.sh`, which can say what is missing and
+/// why — and, for Telegram, where to get it.
 ///
 /// It tears its stack down at the end of every run, passing or failing: two
 /// containers, nothing worth keeping warm, and a stack that outlived the test
