@@ -195,6 +195,96 @@ impl Observation {
     }
 }
 
+/// Where the **owner's own account** stands in one portal room — the fact
+/// that decides whether an approved reply can reach the contact at all
+/// (issue #216, ADR 0025).
+///
+/// A mautrix bridge relays to its network only what the logged-in user's own
+/// Matrix account sends. So a reply posted into a portal the owner is not a
+/// joined member of is accepted by the homeserver, given an event id, and
+/// relayed to nobody — the outcome #216 was opened on. The Sensor acts through
+/// a device of the owner's account (#123), and that device joins the portal on
+/// the bridge bot's invitation; until it has, the reply cannot be delivered,
+/// and this is the register's way of saying so *before* the approval rather
+/// than after.
+///
+/// Read off the same `m.room.member` state as [`Observation`], as the bridge
+/// bot. It is the account's membership and not the device's: a room the
+/// account is joined to is one the bridge relays from, whichever device posts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OwnerMembership {
+    /// The owner's account is a joined member: a reply posted by their device
+    /// is relayed.
+    Joined,
+    /// Invited and not joined — the bridge asked, and no device of the
+    /// owner's has accepted. On a deployment with no owner device configured
+    /// this is every portal; on one whose device refused or could not join
+    /// (#237) it is that room.
+    Invited,
+    /// Not in the room and not asked to be.
+    Absent,
+}
+
+impl OwnerMembership {
+    /// The stable label, in the API.
+    pub fn label(&self) -> &'static str {
+        match self {
+            OwnerMembership::Joined => "join",
+            OwnerMembership::Invited => "invite",
+            OwnerMembership::Absent => "absent",
+        }
+    }
+
+    fn of(membership: &str) -> Self {
+        match membership {
+            "join" => OwnerMembership::Joined,
+            "invite" => OwnerMembership::Invited,
+            _ => OwnerMembership::Absent,
+        }
+    }
+}
+
+/// Whether an approved reply into one room could reach the contact, as far
+/// as this Gateway can tell **before** it is sent (issue #216).
+///
+/// Three answers and the third is honest rather than optimistic. `CannotReach`
+/// is a certainty — the room is a portal of a configured bridge and the
+/// owner's account is not joined to it, so no bridge will relay anything
+/// posted there. `CanReach` is the register's best reading: the owner is
+/// joined, which is what a bridge relays from. `Unknown` is a room no bridge
+/// bot of this deployment can read — native Matrix traffic (ADR 0009), which
+/// reaches its reader with no bridge in the way, or a portal of a bridge with
+/// no token — and the Sensor's own report after the fact is the answer there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    CanReach,
+    CannotReach { owner: OwnerMembership },
+    Unknown { why: &'static str },
+}
+
+impl Delivery {
+    /// The stable label, in the API.
+    pub fn reach(&self) -> &'static str {
+        match self {
+            Delivery::CanReach => "can_reach",
+            Delivery::CannotReach { .. } => "cannot_reach",
+            Delivery::Unknown { .. } => "unknown",
+        }
+    }
+
+    /// The one-word reason beside the label.
+    pub fn detail(&self) -> &'static str {
+        match self {
+            Delivery::CanReach => "owner_joined",
+            Delivery::CannotReach { owner } => match owner {
+                OwnerMembership::Invited => "owner_invited",
+                _ => "owner_absent",
+            },
+            Delivery::Unknown { why } => why,
+        }
+    }
+}
+
 /// One portal room, as the homeserver answers about it right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Portal {
@@ -232,6 +322,10 @@ pub struct Portal {
     /// the user reads from changing when they decide to observe the room.
     pub members: u64,
     pub observation: Observation,
+    /// Where the owner's own account stands here — the fact that decides
+    /// whether an approved reply can be delivered (#216). `None` when this
+    /// register was built with no owner to ask about.
+    pub owner: Option<OwnerMembership>,
     /// The room this conversation lived in before it was replaced, when it
     /// was: the immediate predecessor's id, out of the successor's own
     /// `m.room.create` or the predecessor's `m.room.tombstone`. The dead room
@@ -348,6 +442,10 @@ pub fn fold_tombstones(portals: Vec<Portal>, bot_rooms: &BTreeSet<String>) -> Ve
                     network_conversation_id: predecessor.network_conversation_id.clone(),
                     members: predecessor.members,
                     observation: Observation::Absent,
+                    // An unreadable successor's memberships are unread: the
+                    // owner's is not the predecessor's, since a room upgrade
+                    // carries no member over.
+                    owner: None,
                     moved_from: None,
                     unreadable: Some(if bot_rooms.contains(&successor_id) {
                         "this conversation's room was replaced, and the bridge is in the new \
@@ -513,6 +611,9 @@ pub struct Portals {
     /// The Matrix ID whose membership decides [`Observation`]
     /// (`GATEWAY_SENSOR_USER_ID`).
     sensor_user_id: String,
+    /// The Matrix ID whose membership decides [`OwnerMembership`]
+    /// (`GATEWAY_OWNER`), when the deployment names one.
+    owner_user_id: Option<String>,
     /// Every bridge in `GATEWAY_BRIDGES`, in that order, with the appservice
     /// token that reads it or the reason there is none.
     bridges: Vec<PortalBridge>,
@@ -551,6 +652,7 @@ impl Portals {
     pub fn new(
         homeserver_url: Option<&str>,
         sensor_user_id: Option<&str>,
+        owner_user_id: Option<&str>,
         bridges: Vec<PortalBridge>,
         crowd_threshold: u64,
         moves: Option<Arc<crate::store::Store>>,
@@ -569,6 +671,10 @@ impl Portals {
         Ok(Some(Self {
             homeserver_url: homeserver_url.trim_end_matches('/').to_owned(),
             sensor_user_id: sensor_user_id.to_owned(),
+            owner_user_id: owner_user_id
+                .map(str::trim)
+                .filter(|owner| !owner.is_empty())
+                .map(str::to_owned),
             bridges,
             crowd_threshold,
             moves,
@@ -957,6 +1063,7 @@ impl Portals {
         let mut name = None;
         let mut members = 0u64;
         let mut observation = Observation::Absent;
+        let mut owner = self.owner_user_id.as_ref().map(|_| OwnerMembership::Absent);
         let mut replaced_by = None;
         let mut moved_from = None;
         let bot = bot_user_id(&state);
@@ -1032,6 +1139,12 @@ impl Portals {
                         };
                         continue;
                     }
+                    if Some(who) == self.owner_user_id.as_deref() {
+                        owner = Some(OwnerMembership::of(membership));
+                        // The owner is a member of the conversation and is
+                        // counted as one: the number the user reads is who
+                        // they are talking to, and they are in it.
+                    }
                     if membership != "join" {
                         continue;
                     }
@@ -1070,10 +1183,117 @@ impl Portals {
             network_conversation_id: conversation,
             members,
             observation,
+            owner,
             moved_from,
             unreadable: None,
             replaced_by,
         }))
+    }
+
+    /// Whether a reply into `room_id` could reach the contact, read live for
+    /// that one room and no other (issue #216).
+    ///
+    /// The register's whole read costs one call per portal; a suggestion
+    /// listing asks about a handful of rooms and is polled by an open screen,
+    /// so this asks two small questions instead. Each configured bridge is
+    /// tried in turn, **as its bot**: does the room carry an `m.bridge`
+    /// marker the bot can read — which is the bot being in the room — and
+    /// where does the owner's account stand in it. The appservice credential's
+    /// reach is the bot's own rooms, so a room no bot is in is simply not
+    /// answered, and that is [`Delivery::Unknown`] rather than a guess.
+    pub async fn delivery_of(&self, room_id: &str) -> Delivery {
+        let Some(owner) = self.owner_user_id.as_deref() else {
+            return Delivery::Unknown {
+                why: "no_owner_configured",
+            };
+        };
+        let mut a_bridge_could_not_answer = false;
+        for bridge in &self.bridges {
+            let Some(as_token) = &bridge.as_token else {
+                a_bridge_could_not_answer = true;
+                continue;
+            };
+            let state = match self.room_state(bridge, as_token, room_id).await {
+                Ok(Some(state)) => state,
+                // The bot is not in this room: the homeserver refuses, and
+                // the next bridge is asked.
+                Ok(None) => continue,
+                Err(detail) => {
+                    debug!(bridge = %bridge.bridge_id, room = %room_id, %detail, "could not ask a bridge about a room");
+                    a_bridge_could_not_answer = true;
+                    continue;
+                }
+            };
+            let mut bridged = false;
+            let mut membership = OwnerMembership::Absent;
+            for event in &state {
+                let event_type = event.get("type").and_then(serde_json::Value::as_str);
+                match event_type {
+                    Some("m.bridge") => bridged = true,
+                    Some("m.room.member")
+                        if event.get("state_key").and_then(serde_json::Value::as_str)
+                            == Some(owner) =>
+                    {
+                        membership = OwnerMembership::of(
+                            event
+                                .get("content")
+                                .and_then(|content| content.get("membership"))
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if !bridged {
+                // The bot is in it and it is not a conversation — a
+                // management room, say. Not a portal, so not this bridge's
+                // answer to give.
+                continue;
+            }
+            return match membership {
+                OwnerMembership::Joined => Delivery::CanReach,
+                owner => Delivery::CannotReach { owner },
+            };
+        }
+        Delivery::Unknown {
+            why: if a_bridge_could_not_answer {
+                "portal_unreadable"
+            } else {
+                "not_a_known_portal"
+            },
+        }
+    }
+
+    /// The whole state of one room, as the bridge's bot. `Ok(None)` is the
+    /// homeserver refusing — the bot is not in the room — and `Err` is
+    /// everything the question could not be asked through.
+    async fn room_state(
+        &self,
+        bridge: &PortalBridge,
+        as_token: &str,
+        room_id: &str,
+    ) -> Result<Option<Vec<serde_json::Value>>, String> {
+        let url = self.url(
+            &["_matrix", "client", "v3", "rooms", room_id, "state"],
+            Self::asking_as(bridge),
+        )?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(as_token)
+            .send()
+            .await
+            .map_err(|error| error.without_url().to_string())?;
+        match response.status() {
+            status if status.is_success() => response
+                .json()
+                .await
+                .map(Some)
+                .map_err(|error| error.without_url().to_string()),
+            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND => Ok(None),
+            _ => Err(matrix_error(response).await),
+        }
     }
 
     /// Puts the Sensor into the named portal rooms, or takes it out of them.
@@ -1427,6 +1647,7 @@ mod tests {
             network_conversation_id: None,
             members: 2,
             observation,
+            owner: Some(OwnerMembership::Invited),
             moved_from: None,
             unreadable: None,
             replaced_by: None,

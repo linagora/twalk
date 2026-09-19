@@ -409,6 +409,10 @@ async fn main() -> Result<()> {
         config.bootstrap.homeserver_url.as_deref(),
         config.bootstrap.sensor_user_id.as_deref(),
         config
+            .sign_in
+            .as_ref()
+            .map(|sign_in| sign_in.owner.as_str()),
+        config
             .bridges
             .iter()
             .map(|bridge| PortalBridge {
@@ -427,6 +431,15 @@ async fn main() -> Result<()> {
     .context("failed to build the portal register")?
     {
         Some(portals) => {
+            // The listing asks the register where the owner's account stands
+            // in a suggestion's room (#216). The register is built after the
+            // store the listing already holds, because it journals its own
+            // moves there (#255), so the two are linked here rather than at
+            // either one's construction.
+            let portals = Arc::new(portals);
+            if let Some(suggestions) = &suggestions {
+                suggestions.attach_portals(portals.clone());
+            }
             info!(
                 sensor = %portals.sensor_user_id(),
                 refresh_seconds = config.portal_refresh_seconds,
@@ -450,7 +463,7 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            Some(Arc::new(portals))
+            Some(portals)
         }
         None => {
             if !config.bridges.is_empty() {

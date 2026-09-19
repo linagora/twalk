@@ -4102,6 +4102,19 @@ components:
         ]
       additionalProperties: false
       properties:
+        posted:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/PostedReport"
+          description: |
+            The Sensor's own report of what the reply reached once it posted
+            it, or `null` while there is none (issue #216). Present on
+            `GET /api/approvals/{id}` and on a suggestion's `approval`; never
+            on the `POST` answer, because at that moment the reply has been
+            published and not yet posted — which is the whole distinction:
+            `publication` says the reply reached the bus, `posted` says what
+            it reached from there. A client must never render one as the
+            other.
         event_id:
           type: string
           pattern: "^[a-f0-9]{64}$"
@@ -4160,6 +4173,87 @@ components:
           description: |
             When the bus acknowledged it. `null` on the same terms.
 
+    PostedReport:
+      type: object
+      description: |
+        What the Sensor said one approved reply reached, once it posted it
+        (issue #216, ADR 0025). The Sensor republishes the approval unchanged
+        on `twalk.persona.reply.approved.v1.posted` with two headers, and this
+        is those headers. Published on the good case as well as the bad one:
+        a report that existed only when something failed would make success a
+        silence.
+      required: [reach, posted_as, stream_sequence]
+      additionalProperties: false
+      properties:
+        reach:
+          type: string
+          enum: [contact, nobody]
+          description: |
+            `contact` — the reply was posted by a device of the owner's own
+            account into a room the owner is a joined member of, which is what
+            a bridge relays; or the room is native Matrix (ADR 0009) with no
+            bridge in the way.
+            `nobody` — the reply was posted as `@sensor:` into a portal room.
+            Synapse accepted it and the bridge ignored it, because a bridge
+            relays only the logged-in user's own account (#123): the message
+            exists in a room the contact cannot see.
+        posted_as:
+          type: string
+          description: The Matrix ID the reply was posted by.
+        stream_sequence:
+          type: integer
+          description: Where on the bus the report landed.
+
+    Delivery:
+      type: object
+      description: |
+        Whether an approved reply could reach the contact, as far as this
+        Gateway can tell **before** it is sent (issue #216). Read from the
+        room the trigger arrived in — its *envelope*, never its body — and
+        from where the owner's own account stands in that room, asked of the
+        homeserver as the bridge's bot.
+
+        Three answers, and the third is honest rather than optimistic.
+        `cannot_reach` is a certainty: the room is a portal of a configured
+        bridge and the owner's account is not joined to it, so nothing posted
+        there is relayed, whatever else is true — the mechanism that changes
+        it is #123 (a device of the owner's account, joined on the bridge
+        bot's invitation). `can_reach` is the register's best reading: the
+        owner is joined, which is what a bridge relays from. `unknown` is a
+        room no bridge bot of this deployment can read — native Matrix
+        (ADR 0009), which reaches its reader with no bridge in the way, or a
+        portal of a bridge with no token — and the Sensor's own report
+        (`posted`) is the answer there, after the fact.
+      required: [reach, detail]
+      additionalProperties: false
+      properties:
+        reach:
+          type: string
+          enum: [can_reach, cannot_reach, unknown]
+        detail:
+          type: string
+          enum:
+            [
+              owner_joined,
+              owner_invited,
+              owner_absent,
+              not_a_known_portal,
+              portal_unreadable,
+              no_portal_register,
+              no_owner_configured,
+              trigger_out_of_reach,
+              lookup_failed,
+            ]
+          description: |
+            The one word behind the answer. `owner_invited` is the common
+            `cannot_reach`: the bridge invited the owner into the
+            conversation and no device of theirs has accepted — every portal,
+            on a deployment with no owner device configured; that room, on one
+            whose device could not join it (#237). `trigger_out_of_reach` is
+            the message this suggestion answers lying beyond the read window,
+            so its room could not be read; `lookup_failed` is the bus not
+            answering that second read.
+
     SuggestionTrigger:
       type: object
       description: |
@@ -4206,9 +4300,23 @@ components:
           suggestion,
           stream_sequence,
           approval,
+          delivery,
+          posted,
         ]
       additionalProperties: false
       properties:
+        delivery:
+          $ref: "#/components/schemas/Delivery"
+        posted:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/PostedReport"
+          description: |
+            The Sensor's report of what the approved reply reached, once it
+            posted it, or `null` while there is none — before the approval,
+            while the Sensor has not posted it yet, or when the report lies
+            beyond the read window. Never the same fact as
+            `approval.publication` (#216).
         event_id:
           type: string
           pattern: "^[a-f0-9]{64}$"
@@ -4527,6 +4635,7 @@ components:
           network_conversation_id,
           members,
           observation,
+          owner_membership,
           moved_from,
           unreadable,
         ]
@@ -4599,6 +4708,20 @@ components:
             decision is on record about this conversation and has silently
             stopped meaning anything; this state is what makes it a sentence
             instead of a zero. `moved_from` names the dead room.
+        owner_membership:
+          type: [string, "null"]
+          enum: [join, invite, absent, null]
+          description: |
+            Where the **owner's own account** stands in this room — the fact
+            that decides whether an approved reply into this conversation can
+            be delivered at all (issue #216, ADR 0025). A bridge relays only
+            what the logged-in user's own account sends, so `join` is what a
+            reply needs; `invite` is the bridge having asked and no device of
+            the owner's having accepted — every portal on a deployment with
+            no owner device (#123), or a room that device could not join
+            (#237); `absent` is not in the room and not asked. `null` when
+            this register was built with no owner to ask about, or for a
+            successor it could not read.
         moved_from:
           type: [string, "null"]
           description: |

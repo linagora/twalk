@@ -43,9 +43,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use harness::{
-    companion_build, ensure_stack, gateway_env_with, gateway_env_with_consent, nats_url,
-    owner_user_id, poll_until, unreachable_nats_url, validate_against_contract, Bus, GatewayProc,
-    SERVER_NAME,
+    companion_build, ensure_stack, gateway_env_with, gateway_env_with_consent,
+    gateway_env_with_portals, nats_url, owner_user_id, poll_until, unreachable_nats_url,
+    validate_against_contract, Bus, GatewayProc, MatrixUser, SERVER_NAME,
 };
 use serde_json::{json, Value};
 
@@ -948,5 +948,176 @@ async fn a_suggestion_this_build_cannot_read_is_counted_rather_than_blanking_the
             .is_some_and(|detail| detail.contains("carrierpigeon")),
         "the refusal names what it could not read: {answer}"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 9. Published on your bus and delivered to the contact are two facts (#216)
+// ---------------------------------------------------------------------------
+
+/// A reply into a portal the owner's account is not a joined member of is
+/// accepted by the homeserver, given an event id, and relayed to nobody — a
+/// bridge relays only the logged-in user's own account. The approval screen
+/// used to say "sent" on the strength of the event id. So each suggestion now
+/// carries `delivery`, decided **before** the approval from where the owner's
+/// account stands in the trigger's room — read from the trigger's envelope and
+/// asked of the homeserver as the bridge's bot — and, once approved, `posted`,
+/// the Sensor's own report of what the reply reached.
+///
+/// Both directions, on real portal rooms of the test stack's appservice: one
+/// the owner joined, one they were only invited into. A screen that is right
+/// only on the machine it was written on is how #177 happened.
+#[tokio::test]
+async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let bridge_bot = MatrixUser::as_fresh_appservice("portalbot").await?;
+    let owner = MatrixUser::login(harness::OWNER_LOCALPART).await?;
+    let static_dir = companion_build("suggestions-delivery")?;
+    // The bus and the portal register, on one Gateway: the listing is the
+    // bus's, the delivery fact is the homeserver's.
+    let mut env = gateway_env_with_portals(&static_dir, &bridge_bot);
+    env.push(("GATEWAY_NATS_URL".to_owned(), nats_url()));
+    let running = Running::start_with(static_dir, env).await?;
+
+    // One conversation the owner is in — their device accepted the bridge's
+    // invitation — and one they were only invited into.
+    let joined = bridge_bot
+        .make_portal("delivery-joined", "whatsapp")
+        .await?;
+    bridge_bot.invite(&joined, &owner.user_id).await?;
+    owner.join(&joined).await?;
+    let invited = bridge_bot
+        .make_portal("delivery-invited", "whatsapp")
+        .await?;
+    bridge_bot.invite(&invited, &owner.user_id).await?;
+
+    let mut talks = Vec::new();
+    for (label, room) in [("joined", &joined), ("invited", &invited)] {
+        let contact = ghost(label);
+        running.decide(&contact, "granted").await?;
+        let trigger = inbound_event(&contact, room, "granted");
+        bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+        let suggestion = suggest_event(&trigger, "Oui, à 20h !", Some(&in_seconds(3600)));
+        bus.publish_event(SUGGEST_SUBJECT, &suggestion).await?;
+        talks.push((label, suggestion["id"].as_str().unwrap().to_owned()));
+    }
+    // And one whose room no bridge bot of this deployment is in: the
+    // register cannot say, and says so, rather than guessing either way.
+    // This Gateway also has a bridge with no token (`mautrix-tokenless`),
+    // so the honest word is that a portal of *that* bridge could not have
+    // been read — not that the room is known to be no portal.
+    let elsewhere = conversation(
+        &running,
+        &bus,
+        "elsewhere",
+        "granted",
+        Some(&in_seconds(3600)),
+    )
+    .await?;
+
+    let (_text, can, _) = running.listed(&talks[0].1).await?;
+    assert_eq!(
+        can["delivery"],
+        json!({ "reach": "can_reach", "detail": "owner_joined" }),
+        "the owner's account is in the room, so a bridge relays what their device posts: {can}"
+    );
+    let (_text, cannot, _) = running.listed(&talks[1].1).await?;
+    assert_eq!(
+        cannot["delivery"],
+        json!({ "reach": "cannot_reach", "detail": "owner_invited" }),
+        "the owner's account is not in the room, so nothing posted there is relayed — a fact \
+         the screen states before the button, not after: {cannot}"
+    );
+    let (_text, unknown, _) = running.listed(&elsewhere.suggestion_id).await?;
+    assert_eq!(
+        unknown["delivery"],
+        json!({ "reach": "unknown", "detail": "portal_unreadable" }),
+        "a room no bridge bot can read is not answered either way: {unknown}"
+    );
+    for entry in [&can, &cannot, &unknown] {
+        assert_eq!(
+            entry["posted"],
+            Value::Null,
+            "nothing has been posted yet: {entry}"
+        );
+    }
+    // The single read is the same document.
+    let (status, single) = running
+        .get(&format!("/api/suggestions/{}", talks[1].1))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{single}");
+    assert_eq!(single["delivery"], cannot["delivery"]);
+
+    // Approving the deliverable one publishes the reply; that is all the
+    // Gateway can say by itself, and its answer says exactly that.
+    let (status, approved) = running
+        .post(
+            "/api/approvals",
+            &json!({ "suggestion_event_id": talks[0].1 }),
+        )
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{approved}");
+    assert_eq!(approved["publication"], json!("published"));
+    assert!(
+        approved.get("posted").is_none() || approved["posted"].is_null(),
+        "at the moment of the approval nothing has been posted, and the answer does not \
+         pretend otherwise: {approved}"
+    );
+    let (status, record) = running
+        .get(&format!("/api/approvals/{}", talks[0].1))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{record}");
+    assert_eq!(record["publication"], json!("published"));
+    assert_eq!(
+        record["posted"],
+        Value::Null,
+        "published is not posted: {record}"
+    );
+
+    // The Sensor posts it and reports what it reached, as `sensor/src/main.rs`
+    // does: the approval republished unchanged on the `.posted` sibling
+    // subject, with `reach` and `posted-as` as headers. Played here by the
+    // test, since this suite runs no Sensor.
+    let reply: Value = bus
+        .fetch_all(STREAM, "twalk.persona.reply.approved.v1")
+        .await?
+        .into_iter()
+        .find(|event| event["id"] == approved["event_id"])
+        .context("the approved reply is on the bus")?;
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("reach", "contact");
+    headers.insert("posted-as", owner.user_id.as_str());
+    bus.publish_event_with_headers(
+        "twalk.persona.reply.approved.v1.posted",
+        "posted",
+        headers,
+        &reply,
+    )
+    .await?;
+
+    let posted = poll_until(
+        || async {
+            let (status, record) = running
+                .get(&format!("/api/approvals/{}", talks[0].1))
+                .await
+                .ok()?;
+            (status == reqwest::StatusCode::OK && !record["posted"].is_null())
+                .then_some(record["posted"].clone())
+        },
+        "the Sensor's report on the approval record",
+    )
+    .await?;
+    assert_eq!(posted["reach"], json!("contact"));
+    assert_eq!(posted["posted_as"], json!(owner.user_id));
+    assert!(
+        posted["stream_sequence"].as_u64().unwrap_or_default()
+            > approved["stream_sequence"].as_u64().unwrap_or_default(),
+        "the report follows the reply on the bus: {posted}"
+    );
+    // And the listing says the same thing about the same suggestion.
+    let (_text, listed, _) = running.listed(&talks[0].1).await?;
+    assert_eq!(listed["standing"], json!("approved"));
+    assert_eq!(listed["posted"], posted);
     Ok(())
 }
