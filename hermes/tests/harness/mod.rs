@@ -85,6 +85,12 @@ pub const LLM_PARAMS: &str = r#"{"top_p": 0.9, "temperature": null}"#;
 /// would agree with it whatever it became.
 pub const DEFAULT_SUGGESTION_TTL_SECONDS: i64 = 3600;
 
+/// The user's own language the runtime suite configures: the one thing a
+/// persona falls back to when it cannot tell what language it is answering
+/// (ADR 0016). French, because a French user handed an English draft for a
+/// French-speaking contact is the failure that was found live (ticket #164).
+pub const USER_LANGUAGE: &str = "fr";
+
 pub const INBOUND_TYPE: &str = "fr.linagora.twalk.inbound.message.received.v1";
 pub const OUTBOUND_TYPE: &str = "fr.linagora.twalk.outbound.message.sent.v1";
 pub const THINKING_TYPE: &str = "fr.linagora.twalk.persona.thinking.emitted.v1";
@@ -203,6 +209,9 @@ pub struct PersonaRun {
     pub stream: String,
     /// The bus subject prefix this run owns (`twalk` in a deployment).
     pub prefix: String,
+    /// The durable consumer this run's persona reads through. Kept so a test
+    /// can ask the bus what the persona still owes it.
+    pub consumer: String,
     compose: Compose,
     stopped: bool,
 }
@@ -216,7 +225,18 @@ impl PersonaRun {
     /// policy's own default — which is what a deployment that configured
     /// nothing gets.
     pub async fn start(test_name: &str, canned_reply: &str) -> Result<Self> {
-        Self::start_with(test_name, canned_reply, None).await
+        Self::start_with(test_name, canned_reply, None, None).await
+    }
+
+    /// [`start`](Self::start) with the user's own language configured, as the
+    /// Companion Gateway holds it and the runtime injects it (ADR 0016,
+    /// ticket #164): the value ADR 0016's fallback needs to exist at all.
+    pub async fn start_with_user_language(
+        test_name: &str,
+        canned_reply: &str,
+        user_language: &str,
+    ) -> Result<Self> {
+        Self::start_with(test_name, canned_reply, None, Some(user_language)).await
     }
 
     /// [`start`](Self::start) with the operator's suggestion window named
@@ -227,13 +247,14 @@ impl PersonaRun {
         canned_reply: &str,
         ttl_seconds: i64,
     ) -> Result<Self> {
-        Self::start_with(test_name, canned_reply, Some(ttl_seconds)).await
+        Self::start_with(test_name, canned_reply, Some(ttl_seconds), None).await
     }
 
     async fn start_with(
         test_name: &str,
         canned_reply: &str,
         ttl_seconds: Option<i64>,
+        user_language: Option<&str>,
     ) -> Result<Self> {
         ensure_stack().await?;
         ensure_image().await?;
@@ -266,13 +287,21 @@ impl PersonaRun {
                     // window", which is the case the default has to cover.
                     ttl_seconds.map(|ttl| ttl.to_string()).unwrap_or_default(),
                 ),
+                (
+                    "TWALK_TEST_PERSONA_USER_LANGUAGE",
+                    // Empty the same way: a deployment whose user has set no
+                    // language preference is the state ADR 0016's fallback
+                    // does not exist in, and it has to be runnable.
+                    user_language.unwrap_or_default().to_owned(),
+                ),
             ],
         );
         let run = PersonaRun {
             bus,
             llm,
             stream: id.clone(),
-            prefix: id,
+            prefix: id.clone(),
+            consumer: format!("persona-{id}"),
             compose,
             stopped: false,
         };
@@ -405,6 +434,16 @@ impl PersonaRun {
             &format!("{event_type} about {trigger_event_id}"),
         )
         .await
+    }
+
+    /// What the bus says this persona's consumer still owes: whether the
+    /// trigger is in flight, will come back, or is done with.
+    ///
+    /// Asked of the bus rather than of the persona, because "the persona says
+    /// it gave up" and "the bus will hand it over again" are two different
+    /// facts and only the second one costs money.
+    pub async fn consumer_state(&self) -> Result<ConsumerState> {
+        self.bus.consumer_state(&self.stream, &self.consumer).await
     }
 
     /// The chat-completions requests the persona sent whose prompt mentions

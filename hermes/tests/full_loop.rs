@@ -242,6 +242,20 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
         Some(asked.as_str()),
         "the message the contact wrote is what the persona asked the model about"
     );
+    // And ADR 0016's fallback crossed the whole deployment to get there
+    // (ticket #164): `HERMES_USER_LANGUAGE` in this stack's own `.env`, read
+    // by the runtime, injected into the persona's container, in the prompt the
+    // model was sent. Asserted here because every other test of it configures
+    // the runtime directly, and the compose file is the one link they skip.
+    let prompt = asked_about[0].body["messages"][0]["content"]
+        .as_str()
+        .expect("the persona frames the request with a system prompt");
+    assert!(
+        prompt.contains("write in French"),
+        "the user's own language must reach the persona through the deployment's \
+         own configuration, as the fallback for a message whose language cannot \
+         be told: {prompt}"
+    );
 
     // --- 3. A second message, and the one approval ------------------------
     //

@@ -52,7 +52,12 @@ import Send from '@lucide/svelte/icons/send';
 import Settings from '@lucide/svelte/icons/settings';
 import ShieldCheck from '@lucide/svelte/icons/shield-check';
 import Smartphone from '@lucide/svelte/icons/smartphone';
+import CircleQuestionMark from '@lucide/svelte/icons/circle-question-mark';
+import Eye from '@lucide/svelte/icons/eye';
+import Megaphone from '@lucide/svelte/icons/megaphone';
 import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+import Users from '@lucide/svelte/icons/users';
+import UsersRound from '@lucide/svelte/icons/users-round';
 
 /**
  * Every symbol the Companion draws, named by what it means. The values are the
@@ -113,7 +118,17 @@ export const icons = {
 	matrix: Hash,
 	telegram: Send,
 	discord: Gamepad2,
-	account: AtSign
+	account: AtSign,
+
+	// The conversation chooser of #143, one per kind of conversation the
+	// network's own identifier names — plus the eye, which is what "the Sensor
+	// is reading this one" looks like.
+	'one-to-one': AtSign,
+	group: Users,
+	community: UsersRound,
+	broadcast: Megaphone,
+	'kind-unstated': CircleQuestionMark,
+	observing: Eye
 } as const;
 
 /** A name the app may ask [`Icon`](./Icon.svelte) to draw. */

@@ -385,6 +385,7 @@ async fn main() -> Result<()> {
                 bridge_id: bridge.bridge_id.clone(),
                 network: bridge.network.clone(),
                 as_token: bridge.as_token.clone(),
+                bot_user_id: bridge.bot_user_id.clone(),
             })
             .collect(),
         metrics.clone(),

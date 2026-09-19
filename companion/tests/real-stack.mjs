@@ -201,6 +201,19 @@ export async function startBridgeStack() {
 		}
 	);
 
+	// The portal register's own accounts, created through the appservice the
+	// way a bridge creates its bot and its ghosts. Registering them is not
+	// optional: Synapse refuses to let an appservice act as a user it has not
+	// registered, even one its namespace covers.
+	await withLock('portal-appservice', async () => {
+		await registerAppserviceUser(synapseUrl, PORTAL_BOT_LOCALPART);
+		await registerAppserviceUser(synapseUrl, PORTAL_GHOST_LOCALPART);
+		for (let at = 0; at < CROWDED_MEMBERS; at += 1) {
+			await registerAppserviceUser(synapseUrl, `${PORTAL_GHOST_LOCALPART}_${at}`);
+		}
+	});
+	const portalBot = `@${PORTAL_BOT_LOCALPART}:${SERVER_NAME}`;
+
 	const bridgeEnvironment = {};
 	for (const { bridgeId, network } of BRIDGES) {
 		const slug = bridgeId.toUpperCase().replace(/[^A-Z0-9]/gu, '_');
@@ -208,6 +221,12 @@ export async function startBridgeStack() {
 		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_PROVISIONING_SECRET`] = STUB_PROVISIONING_SECRET;
 		bridgeEnvironment[`GATEWAY_BRIDGE_${slug}_NETWORK`] = network;
 	}
+	// One bridge gets a portal register (#143, #171): the appservice token to
+	// read with, and the bot to read **as**. The other two are left without,
+	// which is the case the screen has to report rather than hide.
+	const whatsappSlug = 'MAUTRIX_WHATSAPP';
+	bridgeEnvironment[`GATEWAY_BRIDGE_${whatsappSlug}_AS_TOKEN`] = PORTALS_AS_TOKEN;
+	bridgeEnvironment[`GATEWAY_BRIDGE_${whatsappSlug}_BOT_USER_ID`] = portalBot;
 
 	const stateDir = await mkdtemp(join(tmpdir(), 'twalk-companion-bridges-'));
 	const gatewayPort = await freePort();
@@ -231,6 +250,7 @@ export async function startBridgeStack() {
 			GATEWAY_INBOUND_CONSUMER: inboundConsumer('bridges'),
 			GATEWAY_BRIDGES: BRIDGES.map((bridge) => bridge.bridgeId).join(','),
 			...bridgeEnvironment,
+			GATEWAY_PORTAL_REFRESH_SECONDS: '0',
 			GATEWAY_LOG_LEVEL: process.env.GATEWAY_LOG_LEVEL ?? 'info'
 		},
 		stdio: ['ignore', 'inherit', 'inherit']
@@ -253,7 +273,18 @@ export async function startBridgeStack() {
 		gatewayOrigin,
 		stubOrigin: stub.origin,
 		bridges: BRIDGES,
-		natsPort: NATS_PORT
+		natsPort: NATS_PORT,
+		/** What the portal journey needs to build real conversations (#143). */
+		portals: {
+			appserviceToken: PORTALS_AS_TOKEN,
+			bot: portalBot,
+			ghost: `@${PORTAL_GHOST_LOCALPART}:${SERVER_NAME}`,
+			crowd: Array.from(
+				{ length: CROWDED_MEMBERS },
+				(_, at) => `@${PORTAL_GHOST_LOCALPART}_${at}:${SERVER_NAME}`
+			),
+			sensorId: `@${SENSOR_LOCALPART}:${SERVER_NAME}`
+		}
 	};
 	await writeFile(BRIDGE_STACK_FILE, `${JSON.stringify(info, null, '\t')}\n`);
 
@@ -268,6 +299,39 @@ export async function startBridgeStack() {
 		}
 	};
 }
+
+/**
+ * Registers one user through the appservice token, as a bridge does for its bot
+ * and for each ghost. Idempotent: `M_USER_IN_USE` means a previous run did it,
+ * and the stack outlives a run.
+ */
+async function registerAppserviceUser(synapseUrl, localpart) {
+	const answer = await fetch(`${synapseUrl}/_matrix/client/v3/register`, {
+		method: 'POST',
+		headers: {
+			'content-type': 'application/json',
+			authorization: `Bearer ${PORTALS_AS_TOKEN}`
+		},
+		body: JSON.stringify({ type: 'm.login.application_service', username: localpart })
+	});
+	if (answer.ok) {
+		return;
+	}
+	const body = await answer.text();
+	if (body.includes('M_USER_IN_USE')) {
+		return;
+	}
+	// Loud, and naming the cause: an unregistered appservice makes every portal
+	// assertion fail as though the Gateway were asking the wrong account, which
+	// is the defect under test wearing the harness's clothes.
+	throw new Error(
+		`the test Synapse would not register the appservice user @${localpart}: ${answer.status} ${body}\n` +
+			'The registration is tests/harness/synapse/appservice-portals.yaml. If Synapse has ' +
+			'never loaded it, recreate the container: docker compose -p ' +
+			`${PROJECT} -f tests/harness/compose.test.yaml up -d --force-recreate synapse`
+	);
+}
+
 
 /**
  * A third Gateway, for the **session** journeys of ticket #111: the refresh,
@@ -412,6 +476,46 @@ const BRIDGES = [
 
 /** The shared stack's owner bot for the bridge journeys, and its password scheme. */
 const OWNER_LOCALPART = 'bot_alpha';
+
+/**
+ * The test stack's appservice, and the bridge bot the portal register acts as
+ * (ticket #171, and #143's chooser is what needs it).
+ *
+ * The registration is `tests/harness/synapse/appservice-portals.yaml`, and the
+ * part of it that matters here is that its `sender_localpart` is an account in
+ * **no rooms** — the shape a generated mautrix registration has. The account in
+ * every portal room is this bot, and the Gateway reaches it by naming it in
+ * `?user_id=`, which Synapse honours only for an appservice token. An ordinary
+ * access token would make the whole mechanism untestable: the asker would be
+ * the token's own user either way.
+ */
+const PORTALS_AS_TOKEN = 'test-only-portals-appservice-as-token';
+/** In the registration's namespace (`@portalbot…`), and not its sender. */
+const PORTAL_BOT_LOCALPART = 'portalbot_wa';
+/** A network ghost, named the way mautrix names one, so the Sensor attributes
+ *  its messages to WhatsApp exactly as it would in production. */
+const PORTAL_GHOST_LOCALPART = 'portalbot_ghost_wa';
+/**
+ * How many people the crowded group has.
+ *
+ * Above `$lib/portals/selection.ts`'s `CROWD`, because the criterion the ticket
+ * cares most about is that a conversation covering a crowd cannot be ticked
+ * without the number being read — and a browser test of that needs a room that
+ * really does hold that many people. Twenty-two real accounts, joined for real:
+ * the count on screen is the homeserver's own.
+ */
+const CROWDED_MEMBERS = 22;
+/**
+ * The Sensor's account on the shared stack (`provision-bots.sh`).
+ *
+ * The **process** is not started here. `tests/e2e/consent/sensor.ts` starts one
+ * for the `consent` project and the `portals` project borrows the same helper,
+ * because the Sensor's consent consumer is a durable with a constant name and
+ * two Sensors on one bus would split the consent stream between them. What this
+ * file publishes is only the account's Matrix ID, which is what a portal
+ * journey asks the homeserver about.
+ */
+const SENSOR_LOCALPART = 'sensor';
 
 /**
  * Runs `work` with nobody else in this checkout running it.

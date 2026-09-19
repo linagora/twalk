@@ -66,7 +66,14 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
-			testIgnore: ['networks/**', 'dashboard/**', 'approvals/**', 'session/**'],
+			testIgnore: [
+				'networks/**',
+				'dashboard/**',
+				'approvals/**',
+				'consent/**',
+				'portals/**',
+				'session/**'
+			],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',
@@ -144,6 +151,60 @@ export default defineConfig({
 			fullyParallel: false,
 			workers: 1,
 			dependencies: ['dashboard'],
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
+		},
+		{
+			// The consent screen (#170), on the same origin as the approval
+			// screen and for the same reasons: deciding about a contact needs a
+			// signed-in device, a bus for the decision to be published on and
+			// the Gateway's own consent journal and pending-contact projection —
+			// which is the bridge Gateway, the only one configured with all of
+			// them.
+			//
+			// One worker, and after `approvals`, because this project is the one
+			// that starts a **real Sensor** (`tests/e2e/consent/sensor.ts`): the
+			// Sensor's consent consumer is a durable with a constant name, so two
+			// of them on one bus would split the consent stream between them. It
+			// also writes consent decisions and makes a new contact pending,
+			// which is state the dashboard's own counts are asserted against, so
+			// it runs when those have finished rather than beside them.
+			name: 'consent',
+			testMatch: 'consent/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			dependencies: ['approvals'],
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
+		},
+		{
+			// The conversation chooser (#143), on the bridge origin: it reads a
+			// portal register, which needs a bridge configured with an appservice
+			// token and the bot to read as, and it drives a real Sensor into a
+			// real portal room.
+			//
+			// One worker, and after `consent` rather than beside it, for a reason
+			// that is not about state: **that project starts a real Sensor too**,
+			// and so does this one. The Sensor's consent consumer is a durable
+			// with a constant name, so two of them on one bus split the consent
+			// stream between them — which is why `sensor/tests/harness` locks
+			// around every test that starts one, and why these two projects are
+			// ordered rather than parallel. It borrows that project's own helper
+			// (`tests/e2e/consent/sensor.ts`) rather than growing a second way to
+			// start the same binary.
+			name: 'portals',
+			testMatch: 'portals/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			dependencies: ['consent'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',

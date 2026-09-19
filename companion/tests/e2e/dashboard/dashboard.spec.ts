@@ -132,7 +132,8 @@ test('a contact who writes and has never been decided about becomes a number, an
 	// The strongest form of screen 5's rule. The Gateway *knows* who this is —
 	// its pending-contact projection stores the Matrix ID, because a decision
 	// has to name its subject — and the home screen still does not say it. The
-	// chip is a count; the list behind it is the consent inbox, which is v0.2.
+	// chip is a count; the list behind it lives on `/consent` (#170), opened
+	// deliberately.
 	const before = await pendingTotal(request, deviceToken);
 
 	const contact = `@whatsapp_69_${Date.now()}:test.twalk`;
@@ -152,9 +153,10 @@ test('a contact who writes and has never been decided about becomes a number, an
 	const chip = page.getByTestId('pending-chip');
 	await expect(chip).toBeVisible();
 	await expect(chip).toContainText(/waiting|attend/i);
-	// And it says where those decisions are not taken, rather than leading to a
-	// screen that does not exist.
-	await expect(page.getByTestId('pending-no-inbox')).toBeVisible();
+	// And since #170 it leads somewhere: the consent screen, where the
+	// identities this screen drops at the seam are actually decided about.
+	await expect(page.getByTestId('pending-inbox')).toBeVisible();
+	await expect(page.getByTestId('to-consent')).toHaveAttribute('href', '/consent');
 
 	// The whole screen, again, now that the Gateway has a name to leak.
 	const rendered = (await page.getByTestId('screen-dashboard').innerText()).replace(/\s+/gu, ' ');

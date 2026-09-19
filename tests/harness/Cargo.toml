@@ -13,9 +13,11 @@ anyhow = "1"
 async-nats = "0.50"
 futures = "0.3"
 jsonschema = "0.56"
+# Moved out of dev-dependencies by #171: `stack.rs` itself now asks the test
+# Synapse whether it has loaded the appservice registration, so the harness
+# fails with a diagnosis instead of letting a suite discover an unregistered
+# appservice as a failed assertion about the code under test.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
-
-[dev-dependencies]
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }

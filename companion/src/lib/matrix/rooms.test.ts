@@ -5,7 +5,14 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { matchesQuery, resolveDisplayNames, roomLabel, roomsFromSync, type RoomSummary } from './rooms';
+import {
+	matchesQuery,
+	resolveDisplayNames,
+	roomLabel,
+	roomsFromSync,
+	scopedBulkControl,
+	type RoomSummary
+} from './rooms';
 
 function sync(rooms: Record<string, unknown>) {
 	return { next_batch: 's1', rooms: { join: rooms } };
@@ -256,5 +263,50 @@ describe('resolveDisplayNames', () => {
 		await expect(
 			resolveDisplayNames('https://x', 'token', ['@a:x'], { fetchImpl: throwing })
 		).resolves.toEqual(new Map());
+	});
+});
+
+describe('scopedBulkControl', () => {
+	// The rule two choosers now obey: the Matrix room chooser (#137) and the
+	// portal chooser (#143), whose lists contain a 246-member association.
+	const shown = ['!a:x', '!b:x', '!c:x'];
+
+	it('touches what the filter is showing and nothing else', () => {
+		const control = scopedBulkControl(shown, new Set(['!z:x']));
+		expect(control.count).toBe(3);
+		expect(control.selectsRatherThanDeselects).toBe(true);
+		// `!z:x` is outside the filter and is neither added nor removed: a
+		// selection made under one search survives another.
+		expect([...control.apply()].sort()).toEqual(['!a:x', '!b:x', '!c:x', '!z:x']);
+	});
+
+	it('becomes a deselect once everything shown is already chosen', () => {
+		const control = scopedBulkControl(shown, new Set([...shown, '!z:x']));
+		expect(control.selectsRatherThanDeselects).toBe(false);
+		expect([...control.apply()]).toEqual(['!z:x']);
+	});
+
+	it('adds when the selection covers the filter only partly', () => {
+		// Not a deselect: a user who has ticked one of three and presses the
+		// control means "the other two as well".
+		const control = scopedBulkControl(shown, new Set(['!a:x']));
+		expect(control.selectsRatherThanDeselects).toBe(true);
+		expect([...control.apply()].sort()).toEqual(shown);
+	});
+
+	it('does nothing, and says so, when the filter shows nothing', () => {
+		// With an empty result there is nothing to select, which is the
+		// behaviour #137 asked for: never a control that means "everything I
+		// have".
+		const control = scopedBulkControl([], new Set(['!z:x']));
+		expect(control.count).toBe(0);
+		expect(control.selectsRatherThanDeselects).toBe(false);
+		expect([...control.apply()]).toEqual(['!z:x']);
+	});
+
+	it('leaves the selection it was given alone', () => {
+		const selected = new Set(['!z:x']);
+		scopedBulkControl(shown, selected).apply();
+		expect([...selected]).toEqual(['!z:x']);
 	});
 });

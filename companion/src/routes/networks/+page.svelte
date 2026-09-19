@@ -233,6 +233,25 @@
 						</p>
 					{/if}
 
+					{#if state.linked && state.blockedBy === null}
+						<!-- The standing decision, not a setup step (#143). A
+						     bridge builds a portal room every time a
+						     conversation becomes active, so this list grows all
+						     day and the user comes back to it — which is why it
+						     is on the card rather than inside the login journey
+						     that ran once. -->
+						<p class="tile__action">
+							<a
+								class="button button--secondary"
+								href={`/networks/conversations?network=${state.card.network}`}
+								data-testid={`conversations-${state.card.network}`}
+							>
+								<Icon name="observing" size="dense" />
+								{$t('networks.conversations')}
+							</a>
+						</p>
+					{/if}
+
 					{#if manage !== null && state.blockedBy === null}
 						<!-- A link exists, so *Manage* opens the screen that manages it.
 						     It used to lead to the login screen, which started a fresh

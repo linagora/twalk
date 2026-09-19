@@ -2399,6 +2399,29 @@ export interface components {
             name: string | null;
             network: components["schemas"]["Network"];
             /**
+             * @description **The network's own identifier for this conversation**, exactly as
+             *     the bridge wrote it into the room's `m.bridge` marker
+             *     (`channel.id`), or `null` where it wrote none. Read through and
+             *     stored nowhere, like `name`.
+             *
+             *     Passed through untouched — not parsed, not normalised, not
+             *     invented by this Gateway. It is the network's vocabulary, and its
+             *     **suffix** is what says what kind of conversation this is without
+             *     guessing: `231546065817642@lid` and
+             *     `33612345678@s.whatsapp.net` are how WhatsApp addresses one
+             *     person, `120363201980306353@g.us` how it addresses a group.
+             *     Reading that suffix is the Companion's job (#143); nothing here
+             *     interprets it.
+             *
+             *     It is served because a chooser has to be able to say *which*
+             *     conversation. A WhatsApp community arrives as a parent, an
+             *     announcement group and subgroups carrying near-identical names —
+             *     two rooms called `Communauté CKCP`, created in the same minute,
+             *     with 109 members and 6 — and a name and a headcount cannot tell
+             *     those apart.
+             */
+            network_conversation_id: string | null;
+            /**
              * @description `observing` — the Sensor has joined, and this conversation
              *     reaches the bus.
              *     `invited` — the Sensor was invited and has not joined; normally
@@ -2412,8 +2435,32 @@ export interface components {
             /** @description The portal room on this deployment's homeserver. */
             room_id: string;
         };
-        /** @description Whether one configured bridge could be read. */
+        /**
+         * @description Whether one configured bridge could be read, **which account did the
+         *     asking**, and how many rooms that account is in.
+         *
+         *     The last two are there because `absent: 0` with every bridge readable
+         *     used to say two different things — "your bridges have built no
+         *     conversations yet", which is the truth on a fresh deployment, and "the
+         *     register asked an account that is in no rooms", which is a defect — and
+         *     a deployment with 32 portal rooms could not tell which it had been told
+         *     (#171).
+         */
         PortalBridgeReading: {
+            /**
+             * @description The Matrix ID the register actually spoke as: the bridge bot the
+             *     operator configured (`GATEWAY_BRIDGE_<ID>_BOT_USER_ID`), or —
+             *     where none is configured — whatever the homeserver's own
+             *     `whoami` says that credential is. `null` only where the bridge
+             *     could not be read at all.
+             *
+             *     An appservice token used with no `?user_id=` acts as the
+             *     registration's `sender_localpart`, which for a generated
+             *     registration is a random localpart joined to nothing. That is what
+             *     this field is for: it names the account so a zero can be
+             *     attributed.
+             */
+            asked_as: string | null;
             bridge_id: string;
             /**
              * @description On `readable: false`, what stopped the read, in the operator's
@@ -2421,6 +2468,14 @@ export interface components {
              *     refusal. `null` otherwise.
              */
             detail: string | null;
+            /**
+             * @description How many rooms that account is joined to — **every** room, not
+             *     only the ones carrying an `m.bridge` marker. `0` says the asker is
+             *     in nothing at all; a positive number with no portals says it is in
+             *     rooms and none of them is a conversation. `null` where the bridge
+             *     could not be read.
+             */
+            joined_rooms: number | null;
             network: components["schemas"]["Network"];
             /**
              * @description `false` means none of this bridge's conversations are in

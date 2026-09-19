@@ -20,14 +20,17 @@ pub mod stack;
 pub mod stub_llm;
 mod wait;
 
-pub use bus::{Bus, StoredMessage};
+pub use bus::{Bus, ConsumerState, StoredMessage};
 pub use contract::{
     contract_fixture, contract_fixture_types, contract_schema, contract_schema_types,
     contract_type_allows_consent, contract_types_about_a_person, contract_variant_fixture,
     contract_variant_fixtures, validate_against_contract, MATRIX_USER_ID_SUBJECT_PATTERN,
 };
-pub use stack::{ensure_stack, nats_url, synapse_url, SERVER_NAME};
-pub use stub_llm::{StubLlm, StubRequest};
+pub use stack::{
+    ensure_stack, nats_url, synapse_url, PORTALS_APPSERVICE_AS_TOKEN,
+    PORTALS_APPSERVICE_SENDER, SERVER_NAME,
+};
+pub use stub_llm::{StubAnswer, StubLlm, StubRequest};
 pub use wait::poll_until;
 
 use sha2::{Digest, Sha256};

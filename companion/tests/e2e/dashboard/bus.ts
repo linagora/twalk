@@ -14,7 +14,9 @@
 // # Why forty lines of protocol instead of a client library
 //
 // The NATS wire protocol for *subscribing* is text: read `INFO`, send
-// `CONNECT` and `SUB`, then parse `MSG` frames. Adding a NATS client to the
+// `CONNECT` and `SUB`, then parse `MSG` frames — over a `Buffer`, because a
+// frame's length is in bytes and these events carry French (see [`watchBus`]).
+// Adding a NATS client to the
 // Companion's `package.json` would put a dependency in the shipped app's
 // manifest for the sake of one test file, and the Companion is a browser app
 // that must never speak to NATS. Declaring `headers: false` in `CONNECT` also
@@ -62,24 +64,30 @@ export interface BusWatch {
 
 export async function watchBus(port: number, subject: string): Promise<BusWatch> {
 	const socket: Socket = createConnection({ host: '127.0.0.1', port });
-	socket.setEncoding('utf8');
 	const seen: BusMessage[] = [];
-	let buffer = '';
+	// **Bytes, not characters**, and the difference is not theoretical. A `MSG`
+	// header counts its payload in UTF-8 bytes; this parser used to accumulate a
+	// string and slice by length, which is the same number only while every
+	// payload is ASCII. The first event carrying a French body — `c'est noté`,
+	// which is what these journeys publish — makes the slice one byte short per
+	// accented character, so that frame fails to parse **and every frame after
+	// it is cut in the wrong place**. The symptom is an event that reached the
+	// bus and never reached the test: #143's journey lost a message the Sensor's
+	// own log showed it had published one second earlier.
+	let buffer = Buffer.alloc(0);
 	/** Set while a `MSG` header has been read and its payload has not. */
 	let pending: { subject: string; bytes: number } | null = null;
 
-	socket.on('data', (chunk: string) => {
-		buffer += chunk;
+	socket.on('data', (chunk: Buffer) => {
+		buffer = Buffer.concat([buffer, chunk]);
 		for (;;) {
 			if (pending !== null) {
-				// The payload is `bytes` of UTF-8 followed by CRLF. The
-				// CloudEvent is ASCII-safe JSON, so counting characters is
-				// counting bytes here; anything else would need a Buffer.
+				// The payload is `bytes` of UTF-8 followed by CRLF.
 				if (buffer.length < pending.bytes + 2) {
 					return;
 				}
-				const payload = buffer.slice(0, pending.bytes);
-				buffer = buffer.slice(pending.bytes + 2);
+				const payload = buffer.subarray(0, pending.bytes).toString('utf8');
+				buffer = buffer.subarray(pending.bytes + 2);
 				try {
 					seen.push({ subject: pending.subject, event: JSON.parse(payload) });
 				} catch {
@@ -93,8 +101,8 @@ export async function watchBus(port: number, subject: string): Promise<BusWatch>
 			if (end === -1) {
 				return;
 			}
-			const line = buffer.slice(0, end);
-			buffer = buffer.slice(end + 2);
+			const line = buffer.subarray(0, end).toString('utf8');
+			buffer = buffer.subarray(end + 2);
 			if (line.startsWith('PING')) {
 				socket.write('PONG\r\n');
 				continue;
@@ -130,7 +138,7 @@ export async function watchBus(port: number, subject: string): Promise<BusWatch>
 	// afterwards cannot be missed.
 	await new Promise<void>((resolve, reject) => {
 		const deadline = setTimeout(() => reject(new Error('NATS did not answer PING')), 10_000);
-		const onData = (chunk: string) => {
+		const onData = (chunk: Buffer) => {
 			if (chunk.includes('PONG')) {
 				clearTimeout(deadline);
 				socket.off('data', onData);

@@ -50,6 +50,7 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `src/lib/matrix/` | The user's own homeserver: discovery, sign-in (`login.ts`) and the room listing screen 3d selects from (`rooms.ts`). |
 | `src/lib/personas/` | Screen 4: the `assistant` card and its two locked abilities (`catalogue.ts`), the perimeter an activation is scoped to (`scope.ts`, pure) and the consent decision it writes (`activation.ts`). |
 | `src/lib/dashboard/` | Screen 5's judgements (`model.ts`, pure: the rows, the health roll-up, the feed and what may not be in it), the four reads it needs (`load.ts`) and its relative times (`format.ts`). |
+| `src/lib/portals/` | Which conversations a network is observed on (#143): the kind each one is, from the network's own identifier (`conversations.ts`, pure); what a tick costs in people, and when that has to be acknowledged (`selection.ts`, pure); and the two calls that read and write it (`register.ts`). |
 | `src/lib/qr/` | The QR encoder. The only module that imports an encoding library. |
 | `src/lib/version/` | The version handshake against the Gateway's `/health`, and the reload it forces. |
 | `src/lib/i18n/` | French and English, ICU patterns, `<locale>.json` per the wireframes. |
@@ -60,6 +61,7 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `tests/real-stack.mjs` | Brings up the compose stack and the Gateway binaries the stack-backed journeys run against. |
 | `tests/stub-bridge.mjs` | bridgev2's provisioning contract, stubbed — including its blocking step. |
 | `tests/e2e/dashboard/bus.ts` | Forty lines of the NATS wire protocol: a journey subscribes, to assert that a consent decision reached the bus and not only the screen, and publishes, to make a contact pending without running a Sensor. |
+| `tests/e2e/portals/` | The conversation chooser's journey (#143): real portal rooms built through the stack's appservice, a real Sensor beside the Gateway, and the bus read at the end of it. |
 
 ## The decisions worth knowing before you change something
 
@@ -333,13 +335,69 @@ serves, and it is dropped in `$lib/dashboard/load.ts`, at the seam, rather than
 carried into a component where a later row could render it. The chip is
 therefore a number by construction and not by discipline.
 
-It leads nowhere, and says so: the searchable consent inbox is v0.2, and the
-copy points at the one decision v0.1 does offer — granting or revoking a whole
-network, which decides for everyone on it at once. A chip linking to a screen
-that does not exist would be worse than one that explains itself.
+Since #170 it leads to `/consent`, which is where that array is read and acted
+on. The reduction stays exactly where it was, for the reason the approval chip
+gives: a home screen is what gets unlocked on a train, so this one carries a
+number and a link and nothing else.
 
 `null` (the deployment projects no inbound stream, or the read failed) and `0`
 (nobody is waiting) are different facts and both draw nothing.
+
+### The consent screen shows three states, because the model has three (#170)
+
+`/consent` and `$lib/consent/` are the screen the product's central promise had
+no interface for. Four decisions in it are the ones to argue with.
+
+**`pending` is not `revoked`, and never-decided is neither.** `$lib/consent/model.ts`
+carries `state` (`granted`, `pending`, `revoked`) and `decidedBy` (`contact`,
+`network`, `nothing`) as two facts, because ADR 0010 is explicit that an absent
+subject means no decision was ever recorded and never a revoked one. `awaiting`
+is `decidedBy === 'nothing'` and is deliberately *not* a synonym for
+`state === 'pending'` — the Gateway draws the same line, since
+`GET /api/contacts/pending` lists exactly the rows whose `decided_by` is `null`
+and a contact the owner deliberately left `pending` is not in it. Most of a real
+list is never-decided (eighteen conversations appeared on the reference
+deployment in one day), so a screen with two states where the model has three
+teaches the user a wrong picture of their own deployment.
+
+**Only `revoked` withholds content, and the legend says so.** `granted` lets a
+persona read; `pending` publishes the message in full and consumers refuse it by
+convention; only `revoked` reduces what is published (ADR 0012). `withholds` is
+a function in the model rather than an adjective in a catalogue, because copy
+implying that undecided means unseen would be a comforting untrue thing.
+
+**None of it is retroactive, said twice.** The label is stamped by the Sensor at
+publication, so a decision taken now reaches nothing already on the bus. It is
+in the legend and again against the decision the user has just taken, because a
+user who grants a contact and sees nothing happen would otherwise conclude the
+product is broken.
+
+**The bulk control is scoped to the filter, and asks twice.** #137's rule with
+higher stakes: `bulkDecisions(shown, state)` takes the rows on screen and
+nothing else, the number on the button is that array's length, and there is no
+function in the module that takes the whole list. Two presses, because "grant
+all" over a list containing a 246-member association is the affordance this
+screen exists to avoid. Answering for a whole *network* is not offered here at
+all — it decides for people who have not written yet, and #122 is the open
+question about how it should be.
+
+The owner is **labelled, not filtered**. ADR 0018 and ADR 0021 say the owner has
+no consent state on any event; a row about them is #149's Gateway half showing
+through, and hiding it would hide the only symptom a user can see. What this
+browser can recognise is the owner's canonical Matrix ID, from the session — the
+network ghosts #149 is actually about cannot be recognised here, because the
+Gateway does not know them either.
+
+The journey (`tests/e2e/consent/`) is the only Companion suite that starts a
+**real Sensor**, and `tests/e2e/consent/sensor.ts` says why: the consent label is
+stamped by the Sensor, so a test that published the label itself would assert its
+own string. That Sensor runs with **no Gateway snapshot configured**, so its cache
+starts cold and everything is `pending`; a `granted` label can only have come
+from the decision the browser took, through the Gateway's outbox, onto the bus,
+into the Sensor's cache. It is also the one shape of this journey no other suite
+covers — `sensor/tests/consent.rs` proves relabelling on WhatsApp from a decision
+the test published, and this proves it on `matrix` from a decision a user took in
+a browser.
 
 ### The approval screen cannot name the contact, and says so (#160)
 
@@ -564,6 +622,29 @@ without knowing a second port.
 The bridge is stubbed for the reason spec #47 gives: a real mautrix-whatsapp
 needs a live WhatsApp account and a human with a phone. Nothing else is stubbed.
 
+### The consent journey runs a real Sensor, and it is the only one that does
+
+`tests/e2e/consent/` starts the actual `twalk-sensor` binary beside the bridge
+origin's stack (`tests/e2e/consent/sensor.ts`), because #170's keystone
+criterion is a fact about a *label* and the Sensor is what stamps it. It logs in
+to the real Synapse, joins a real room on the owner's invitation, reads real
+messages and publishes to the real JetStream the Gateway's outbox publishes the
+decision to. `SENSOR_GATEWAY_URL` is left unset on purpose: the cache then starts
+cold, everything is `pending`, and the consent consumer is still created — so a
+`granted` label is evidence about the decision and about nothing else.
+
+Two costs worth knowing. A cold `cargo build` of the Sensor is minutes
+(matrix-sdk and its crypto stack), which is why that project's timeout is
+generous. And the Sensor's consent consumer is a **durable with a constant
+name**, so two Sensors on one bus split the consent stream between them: this
+project runs one worker, reaps the process in `afterAll` whether it passed or
+not, and must not run beside `sensor/`'s own Cargo suites.
+
+The `consent` project depends on `approvals` (and so on `dashboard` and
+`networks`) for the reason those depend on each other: one Gateway, one consent
+journal, one pending-contact projection. It writes decisions and makes a contact
+pending, which is state the dashboard's counts are asserted against.
+
 ### Screen 3d learns the rooms, and the Gateway learns the selection
 
 The room list is read **here**, from the user's own homeserver with the user's
@@ -614,6 +695,63 @@ root layout initialises, and **not** in this route: the route did not always
 mount (the tab-lock screen rendered instead) and the credential stayed in the
 URL. A precaution that only runs when the page it guards is allowed to run is
 not a precaution (#135).
+
+### The conversation chooser is a third unit of decision, and it states its cost
+
+`/networks/conversations` (#143) asks one question per conversation: *do I watch
+this room.* It exists because the two units Twalk already had are not the unit a
+user thinks in here. For `maria` a contact and a conversation are the same thing
+and consent-per-contact works; for `Échecs en Yvelines` at 246 members nobody
+adjudicates 246 people one by one, and ticking that row is a decision about 246
+people in one gesture. Observation and consent compose rather than compete: an
+unwatched conversation produces nothing, and inside a watched one each sender's
+consent still governs what is published about them (ADR 0012).
+
+Four things about it are decisions rather than layout.
+
+**The kind is read, never guessed.** Every portal carries the network's own
+identifier for the conversation (`network_conversation_id`, the `m.bridge`
+`channel.id` passed through untouched by the Gateway) and its suffix is the
+network's own statement: `@lid` and `@s.whatsapp.net` are one person, `@g.us` a
+group, `@newsletter` a broadcast. A conversation whose bridge wrote no
+identifier is `unstated` and gets a section saying so — never inferred from the
+member count, which is evidence about a conversation's size and not its type.
+
+**Communities are grouped by name, and the screen says that is what it did.** A
+WhatsApp community is, at the network level, a set of ordinary `@g.us` groups,
+and no field anywhere says which groups belong to one. What the register can see
+is what the owner saw when they worked those eighteen rooms out: a community
+arrives as several groups whose names contain one another — `Communauté CKCP`
+twice in the same minute at 109 members and 6, `XVDSI` and `XVDSI - General`.
+So `families()` clusters on whole-word containment of one folded name in
+another, and the screen states plainly that the network never told it which row
+is the parent. Each row keeps its member count and its network address, which is
+what tells two rows called `XVDSI` apart at all. Its limit is stated too: a
+subgroup with an unrelated name is indistinguishable from an ordinary group and
+appears as one.
+
+**The consequence is stated before the tick takes effect.** Every row carries
+its count, a community carries the total across its conversations *in the label
+of the control that ticks it*, and the pending decision is costed in people
+against the whole account rather than against what the search left on screen.
+Past `CROWD` — twenty, which sits between the largest of those eighteen
+conversations a user could have named person by person (eleven) and the smallest
+that is unmistakably a crowd (seventy-three) — the decision cannot be sent until
+the number has been acknowledged, and changing the selection asks again. A
+number is not a warning, and a warning nobody reads is not a decision (#122).
+
+**The bulk control and the search are `$lib/matrix/rooms.ts`'s.**
+`scopedBulkControl` and `matchesQuery`, the same implementations the Matrix room
+chooser obeys (#137) — the Matrix screen was moved onto the shared one in the
+same change. "Select the 4 shown", never "select all", over a list that can
+contain a 246-member association. A second spelling of a rule like this is how
+#110 happened.
+
+An empty list is never rendered as "you have no conversations": the register
+names every configured bridge, whether it could be read, which account it was
+read as and how many rooms that account is in (#171), and the screen renders a
+bridge with no token and a bridge whose asker is in no rooms as the two
+different things they are.
 
 ### Screen 3c asks the user to copy cookies, and says why
 

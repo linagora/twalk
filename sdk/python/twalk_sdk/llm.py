@@ -6,6 +6,13 @@ speaks it directly runs against llama.cpp, Ollama, vLLM, LiteLLM or a
 remote provider with nothing but a different ``TWALK_LLM_BASE_URL``. The
 operator chooses the endpoint, which is the only reason message content
 ever leaves their infrastructure.
+
+What an answer *means* is deliberately not here: :mod:`twalk_sdk.completion`
+reads it, so that a completion and the four ways there is no completion — an
+unreachable endpoint, a refused request, a model that answered nothing, and a
+model that spent its whole budget reasoning — are decided in a pure module and
+tested without a network (issue #162). This file owns the transport and
+nothing else.
 """
 
 from __future__ import annotations
@@ -14,11 +21,26 @@ from typing import Dict, Mapping, Optional, Sequence
 
 import httpx
 
+from .completion import (
+    LlmAnsweredNothing,
+    LlmError,
+    LlmRefused,
+    LlmSpentItsBudgetThinking,
+    LlmUnreachable,
+    completion_text,
+)
 from .config import LlmConfig
 
-
-class LlmError(RuntimeError):
-    """The endpoint refused the request, or answered something unusable."""
+__all__ = [
+    "Llm",
+    "LlmAnsweredNothing",
+    "LlmError",
+    "LlmRefused",
+    "LlmSpentItsBudgetThinking",
+    "LlmUnreachable",
+    "system",
+    "user",
+]
 
 
 def system(content: str) -> Dict[str, str]:
@@ -54,9 +76,15 @@ class Llm:
     ) -> str:
         """Sends one completion request and returns the assistant's text.
 
-        Raises :class:`LlmError` on anything else — a refused request, an
-        answer with no choices, an empty completion. A persona that cannot
+        Raises one of :mod:`twalk_sdk.completion`'s four named failures on
+        anything else — an endpoint that could not be reached, one that
+        refused the request, a model that answered nothing, and a model that
+        spent its whole budget reasoning (issue #162). A persona that cannot
         reason produces no suggestion; it never invents one.
+
+        The distinction is not cosmetic: the last of the four is the only
+        one that cannot change on a second try, and it is metered, so the
+        persona loop refuses the trigger instead of retrying it.
         """
         # The body, including the operator's provider parameters (ADR 0015),
         # is assembled by the configuration itself — see
@@ -77,7 +105,7 @@ class Llm:
                 timeout=self._config.timeout_seconds,
             )
         except httpx.HTTPError as error:
-            raise LlmError(
+            raise LlmUnreachable(
                 f"the chat-completions endpoint at {self._config.chat_completions_url} "
                 f"is unreachable: {error}"
             ) from error
@@ -85,24 +113,27 @@ class Llm:
         if response.status_code >= 400:
             # The body may carry the endpoint's own error message, which is
             # the operator's most useful clue; it is never message content.
-            raise LlmError(
+            raise LlmRefused(
                 f"the chat-completions endpoint answered HTTP "
                 f"{response.status_code}: {response.text[:512]}"
             )
         try:
             body = response.json()
         except ValueError as error:
-            raise LlmError("the chat-completions answer is not JSON") from error
+            raise LlmRefused("the chat-completions answer is not JSON") from error
 
-        choices = body.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise LlmError("the chat-completions answer carries no choices")
-        message = choices[0].get("message") if isinstance(choices[0], Mapping) else None
-        content = message.get("content") if isinstance(message, Mapping) else None
-        if not isinstance(content, str) or not content.strip():
-            raise LlmError("the chat-completions answer carries no content")
-        return content.strip()
+        # What the answer means is `twalk_sdk.completion`'s, tested without a
+        # network. The budget it is told about is the one the request actually
+        # carried — the operator's parameters are merged last, so it is not
+        # necessarily the one the persona asked for.
+        return completion_text(body, budget=_budget(payload))
 
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _budget(payload: Mapping[str, object]) -> Optional[int]:
+    """The ``max_tokens`` the request carries, if it carries one."""
+    value = payload.get("max_tokens")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
