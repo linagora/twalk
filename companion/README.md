@@ -547,8 +547,52 @@ refuses a second — that way the journey is repeatable without tearing down a
 stack the Rust suites share. `TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT` and
 `TWALK_TEST_NATS_PORT` move the stack aside for a parallel worktree, and
 `TWALK_TEST_PORT` moves the origin — worth setting both when another worktree
-is running its own suite, since `reuseExistingServer` will otherwise happily
-reuse *its* server.
+is running its own suite.
+
+### The suite cannot adopt a server it did not start
+
+`reuseExistingServer` used to make that a hope rather than a fact, and on
+2026-09-19 it cost a day (#185). A `serve-like-gateway.mjs` left on port 4319 by
+a run started **twenty-eight hours earlier** was reused, every spec met the
+previous day's export, and thirty-six failed — including `serving.spec.ts`
+reporting a prerendered page as a 404, which is an assertion with nothing to do
+with any recent change. The natural response is to look for the defect in the
+diff, and the defect was not there.
+
+So a build has a **name**: `tests/build-id.mjs` hashes every file of `build/` by
+path and content, `tests/serve-like-gateway.mjs` publishes the name it is serving
+at `/__twalk_test__/serving` — the one route here that is *not* transcribed from
+the Gateway — and `tests/port-guard.mjs` consults it for all three origins before
+anything starts. Three outcomes, and the middle one is why this is not simply
+"fail when the port is busy":
+
+- **free** — nothing to say;
+- **a server serving this very build** — adopted, and the run says so, because
+  the name is the export's own content and "serving this build" is therefore a
+  fact. That is what keeps `npm run test:e2e` twice over one build cheap;
+- **anything else** — the run stops before a single assertion, naming the port,
+  the pid and command that holds it, when that process started, which build it
+  is serving and which build is under test. And it names `TWALK_TEST_PORT`,
+  because a hard stop for everyone whenever somebody leaves a server behind is
+  the other way to get this wrong.
+
+Under `npm run test:e2e:stack` nothing is adopted at all: each origin has a
+Gateway and a Synapse of its own behind it, so a server already listening has
+none however right its build is — and the guard says *that* rather than letting
+Playwright refuse the port without explaining it.
+
+The guard runs from `playwright.config.ts`'s own body, which is the last place
+early enough: Playwright starts `webServer` **before** `globalSetup`, so a global
+setup would be told about the stale server after the stale server had already
+been adopted. `tests/e2e/ports.spec.ts` proves the diagnosis — it stands a decoy
+server up and asserts what the guard says — and it needs no stack, so it runs in
+CI's required tier where a defence like this has to live if it is not to rot.
+
+The other half is that this server does not outlive its run: it stops on
+`SIGINT`, `SIGTERM` and `SIGHUP`, taking the Gateway and the stub bridge with it,
+and it exits on its own when the process that started it is gone. An orphaned
+test server is the leftover nobody will remember, and two seconds' granularity is
+nothing against twenty-eight hours.
 
 The **approval journeys** (`tests/e2e/approvals/`) run as their own Playwright
 project on the bridge Gateway's origin, after the `dashboard` project: approving
@@ -607,11 +651,12 @@ then starts it **three times**:
   `bot_alpha` (already provisioned on the shared test stack), with the three
   bridges of `tests/stub-bridge.mjs` configured;
 - `startSessionStack()` — the session journeys' Gateway (#111), the same owner
-  and the same stub bridges, on a deployment whose **device token lives five
+  and the same stub bridges, on a deployment whose **device token lives fifteen
   seconds**. The ticket asks for the expiry to be arranged at the Gateway
   rather than waited for, and `GATEWAY_DEVICE_TOKEN_TTL` is the operator's own
   knob for it. It cannot be the bridge origin's, because that lifetime is
   deployment-wide and every other spec there would spend its life mid-expiry.
+  Fifteen rather than five is #186, and the reason is in the next section.
 
 One Gateway cannot be all three, which is the whole reason for the extra
 origins. Everything else is shared: one orchestrator, one `proxyToGateway` in
@@ -622,6 +667,83 @@ without knowing a second port.
 
 The bridge is stubbed for the reason spec #47 gives: a real mautrix-whatsapp
 needs a live WhatsApp account and a human with a phone. Nothing else is stubbed.
+
+### The session journeys have a tolerance, and it is the lifetime
+
+These four journeys are the only ones in this suite whose subject is *when*
+something happened, so they are the only ones a slow machine can beat. #186 is
+what that cost, and the fix is one number plus one place in the ordering.
+
+The client renews a token with a fifth of its lifetime still in hand
+(`refreshAfterSeconds`). That fraction is right for a deployment — a
+fifteen-minute token is renewed after twelve minutes, three whole minutes of
+slack — and it means the **absolute** headroom a test gets is a fifth of whatever
+this origin is configured with. At five seconds' lifetime that was one second,
+which is less than a browser timer slips on a machine that is linking a Rust
+binary. The suite was racing the mechanism it exists to observe, and it lost
+differently every time, which is exactly how a flaky suite teaches people to
+re-run instead of to look.
+
+Fifteen seconds buys three, stated as the tolerance in
+`tests/e2e/session/harness.ts` and derived there rather than written into each
+spec. It costs about forty-five seconds and changes nothing about what is proved:
+the same rotation, the same `expires_in`, the same expiry arranged at the Gateway
+— what #111 refused was waiting the fifteen real minutes, not choosing a number.
+
+Two smaller things in the same ticket, and both were the suite measuring itself
+rather than the product:
+
+- **the death of a credential is asked about, not timed.** A spec that needed a
+  dead token used to sleep for the configured lifetime, but the page rotates its
+  token whenever it likes, so "a lifetime from now" was never a bound on when the
+  one it holds expires. When the guess fell short the next click simply worked,
+  no `401` arrived to be repaired, and the spec failed as though the repair were
+  broken. It now polls the Gateway from inside the page until the credential is
+  actually refused.
+- **"a sleeping tab refreshes nothing" counts requests.** It is a statement about
+  a timer not firing, and the old assertion counted answers — so a refresh
+  already in flight when the clock froze had its answer arrive during the sleep
+  and was counted against the tab.
+- **the journeys have a budget of their own.** They had Playwright's default
+  thirty seconds, which was quietly carrying an eighteen-second deliberate wait
+  plus a real-stack sign-in, an app load and two screens — a margin nobody had
+  chosen, in the one project whose specs are allowed to be slow. When it ran out
+  the failure was a *timeout* on a spec about keeping sessions alive, which says
+  nothing about what went slowly. `journeyBudgetMs` states it. The `approvals`
+  project had the identical defect and it was worse there: every one of its specs
+  opens with a thirty-second poll inside that thirty-second budget, so the poll
+  could never use its window at all.
+
+#### A rotation is a moment a request must not cross
+
+Found while measuring the above, and worth knowing because it is the product and
+not the fixture. `Sessions::refresh` overwrites `device_token_sha256`, so the
+previous device token stops working the instant the new pair is issued —
+deliberately, so a token that leaked dies at the next refresh rather than living
+out its lifetime. A request that crosses a rotation therefore carries a
+credential that has just stopped being one, is refused, and is repaired centrally
+by the belt. In a deployment that is one rotation every twelve minutes against a
+round trip of milliseconds; here it is one every twelve seconds.
+
+Three lifetimes is *exactly four* renewal intervals on this origin, so the first
+journey was clicking into a rotation on most runs and failing on an overlap it
+had arranged itself. It now waits for every renewal due in those three lifetimes
+to have landed — a stronger statement than the "at least three" it replaced,
+since a missed renewal covered for by the `401` repair would satisfy the old one
+— and then clicks with a whole interval of runway, which is what a user has.
+
+And it keeps **no `dependencies`**, which was reconsidered rather than assumed.
+Ordering it last looked right — it runs beside `consent`, whose `beforeAll`
+compiles the Sensor and then runs it against a real homeserver with a crypto
+stack, and a browser measuring three seconds' headroom while the same machine
+does that is measuring the load this suite creates for itself. It was tried, and
+measured, and undone: with the lifetime and the waits fixed these four journeys
+pass on a host pinned at load 25–30, so they do not need an idle machine — and a
+dependency is not free, because a project whose dependency fails does not run at
+all. Behind `portals` the one suite that proves an expired session is refused
+went silent the moment an unrelated project went red (#211), which is how a
+suite stops being believed rather than how it starts. Running it alone is
+`--project=session`.
 
 ### The consent journey runs a real Sensor, and it is the only one that does
 
@@ -645,6 +767,48 @@ The `consent` project depends on `approvals` (and so on `dashboard` and
 `networks`) for the reason those depend on each other: one Gateway, one consent
 journal, one pending-contact projection. It writes decisions and makes a contact
 pending, which is state the dashboard's counts are asserted against.
+
+#### A contact is never a Matrix ID on its own
+
+That is #200, and the interesting part of it is that the screen was right all
+along. *"Returning a contact to undecided is a decision, not an erasure"* failed
+on both attempts, eight specs behind it never ran, and both the screen and the
+Gateway were doing exactly what ADR 0010 asks: the decision was recorded, the row
+kept `decidedBy: 'contact'`, and `model.ts` expresses the distinction between
+"decided pending" and "never decided" exactly as #170 built it to.
+
+What was wrong was the question. Consent is keyed on `(subject, network)` — the
+perimeter is half of the fact — and this spec asked the Gateway "is this contact
+waiting for a decision?" by flattening the pending list to Matrix IDs. On this
+project's shared test stack `@bot_beta:test.twalk` is the consent journey's
+contact on `matrix` **and** a WhatsApp sender in half of `sensor/tests/`, on one
+JetStream every suite publishes to and that the Gateway's pending-contact
+projection replays from the beginning on each run. So a `matrix` decision left a
+`whatsapp` row waiting — correctly, and `companion-gateway/tests/pending.rs`
+asserts precisely that — and the flattened answer stayed `true`. Whether the spec
+passed depended on whether the Sensor's suite had ever run against that stack,
+which is why one report said 52 specs passed and CI's said one failed twice.
+
+Three things changed, and each proves more than before:
+
+- the pending list is read **per network**, the same question
+  `pending.rs::waiting_networks` asks the same endpoint;
+- a bus event is matched on subject **and** network, because the contract's own
+  inbound fixture carries `consent: granted` and another suite's event about the
+  same account would otherwise satisfy an assertion that *this* conversation's
+  message is labelled `pending` — which is the same cause wearing the other face,
+  and the intermittent first spec of that file;
+- the second perimeter is **arranged** rather than inherited: `beforeAll`
+  publishes a WhatsApp sighting of the same contact, so the journey now asserts
+  that the `matrix` decision answers for `matrix` and leaves `whatsapp` waiting.
+  That is what a perimeter *is*, and it no longer depends on the stack's history.
+
+One more thing that file got wrong and that produced the same misleading shape:
+`test.setTimeout` at describe level applies to the tests, not to `beforeAll` — so
+the hook that builds the Sensor, logs it into a homeserver and waits for it to
+accept an invitation had the default thirty seconds. When it runs out, Playwright
+reports the first spec as failed and every other one as never run. The hook now
+states its own budget.
 
 ### Screen 3d learns the rooms, and the Gateway learns the selection
 

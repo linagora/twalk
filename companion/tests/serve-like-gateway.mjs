@@ -21,6 +21,12 @@
 //   - `/health`, whose `version` is the server half of the version handshake.
 //     `TWALK_TEST_GATEWAY_VERSION` moves it, which is how the mismatch is
 //     tested without a stale build.
+//   - `/__twalk_test__/serving`, which the Gateway has no equivalent of and
+//     deliberately so: it is how this server proves *which build* it is
+//     serving, so a run can tell its own server from one left behind by
+//     yesterday's (#185, `tests/build-id.mjs`, `tests/port-guard.mjs`). It is
+//     under a path no Companion route and no Gateway route can collide with,
+//     and it is the one thing here that is not transcribed from the Gateway.
 //   - `/api` and `/api/*`: a JSON refusal, never the app shell. Under the
 //     Gateway's guard a browser with no device cookie gets `401
 //     unauthenticated`, and that is what a signed-out Companion sees.
@@ -35,12 +41,14 @@
 // else with a `TypeError` and has no fallback, and the Matrix crypto stack of
 // ADR 0014 is loaded that way.
 
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync } from 'node:fs';
 import { stat, readFile } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
+
+import { buildId, SERVING_PATH } from './build-id.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
@@ -50,6 +58,17 @@ const PORT = Number(process.env.TWALK_TEST_PORT ?? 4319);
 const GATEWAY_VERSION = process.env.TWALK_TEST_GATEWAY_VERSION ?? '0.1.0';
 const GATEWAY_REVISION = process.env.TWALK_TEST_GATEWAY_REVISION ?? 'test';
 const OPENAPI = resolve(join(here, '..', '..', 'companion-gateway', 'openapi.yaml'));
+/**
+ * Which build this server is serving, published at [`SERVING_PATH`] (#185).
+ *
+ * Taken from the environment when the suite computed it — one hash of one
+ * directory at one moment, so the value the guard compared against and the value
+ * this server reports cannot drift — and computed here otherwise, for a server
+ * started by hand.
+ */
+const BUILD_ID = process.env.TWALK_TEST_BUILD_ID ?? buildId(ROOT);
+/** When this process started, so a leftover can say how old it is. */
+const STARTED_AT = new Date().toISOString();
 /**
  * With `TWALK_TEST_REAL_STACK=1` this server stops standing in for the API and
  * puts the **real Companion Gateway** behind `/api` — with a real Synapse
@@ -308,6 +327,25 @@ const server = createServer((request, response) => {
 			return;
 		}
 
+		// Who this server is and what it is serving (#185). Not a Gateway route
+		// and never mistaken for one: a run asks this before adopting a server
+		// it did not start, and a server that cannot name the build under test
+		// is not that run's server. `root` and `startedAt` are here for the
+		// failure message — "a serve-like-gateway serving <other build> out of
+		// <directory>, started yesterday at 00:26" is the sentence that would
+		// have saved a day.
+		if (path === SERVING_PATH) {
+			json(response, 200, {
+				server: 'serve-like-gateway',
+				build: BUILD_ID,
+				root: ROOT,
+				pid: process.pid,
+				startedAt: STARTED_AT,
+				api: gatewayOrigin === null ? 'stubbed' : 'proxied'
+			});
+			return;
+		}
+
 		if (path === '/metrics') {
 			response.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
 			response.end('# the Gateway exposes its own metrics here\n');
@@ -371,6 +409,9 @@ const server = createServer((request, response) => {
 	});
 });
 
+/** Whatever this process has to take down with it, in the order it was raised. */
+const teardown = [];
+
 // The real stack, when asked for, comes up *before* the origin answers
 // anything: Playwright waits on `/health`, so a server that is listening is a
 // server whose Gateway and Synapse are ready.
@@ -383,10 +424,110 @@ if ((REAL_STACK || BRIDGE_STACK || SESSION_STACK) && gatewayOrigin === null) {
 			: await startRealStack();
 	gatewayOrigin = stack.gatewayOrigin;
 	stubOrigin = stack.stubOrigin ?? null;
+	teardown.push(stack.stop);
 	console.log(`the real Gateway answers /api at ${gatewayOrigin}`);
 	console.log(`the real Synapse is ${stack.synapseUrl}, owner ${stack.ownerId}`);
 	if (stubOrigin !== null) {
 		console.log(`the stub bridge answers /stub-control at ${stubOrigin}`);
+	}
+}
+
+/**
+ * Going away, and taking what this process started with it (#185).
+ *
+ * Playwright terminates its `webServer` when a run ends, but a run does not
+ * always end that way: the terminal is closed, the process tree is killed, an
+ * agent's shell goes away. Node runs no `exit` handler for an unhandled `SIGINT`
+ * or `SIGTERM`, so before this the Gateway binaries and the stub bridge simply
+ * stayed — and so did this server, which is the leftover that made a day-old
+ * build look like a regression.
+ */
+let leaving = false;
+async function leave(why, code) {
+	if (leaving) {
+		return;
+	}
+	leaving = true;
+	console.log(`serve-like-gateway on ${PORT} is stopping: ${why}`);
+	server.close();
+	for (const stop of teardown.reverse()) {
+		await stop().catch((error) => console.error(`a teardown step failed: ${error}`));
+	}
+	process.exit(code);
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+	process.on(signal, () => void leave(signal, 0));
+}
+
+/**
+ * An orphaned test server exits rather than waiting a day to mislead somebody.
+ *
+ * This is the other half of #185's fix, and the half that acts on a server
+ * nobody is going to remember: when the run this belongs to is over, a
+ * `serve-like-gateway` still listening is exactly what ran thirty-six tests
+ * against the previous day's export. Two seconds' granularity, which is nothing
+ * against twenty-eight hours.
+ *
+ * **What is watched is the run, not the parent**, and the difference was
+ * measured rather than reasoned: Playwright starts this through a `/bin/sh -c`,
+ * and that shell survives its own parent's death perfectly happily. Watching
+ * `ppid` alone therefore saw nothing when Playwright was killed — three servers
+ * outlived their run by ten minutes in testing, and the next run's guard is what
+ * caught them. So this walks up at startup to the nearest ancestor that is
+ * Playwright and watches *that*, with the parent check kept as the fallback for
+ * a server somebody started by hand.
+ */
+const startedUnder = process.ppid;
+const run = runProcess();
+setInterval(() => {
+	if (run !== null) {
+		if (commandOf(run.pid) !== run.command) {
+			void leave(`the run that started it is gone (pid ${run.pid})`, 0);
+		}
+		return;
+	}
+	if (process.ppid !== startedUnder) {
+		void leave(`the process that started it is gone (was pid ${startedUnder})`, 0);
+	}
+}, 2_000).unref();
+
+/** The nearest ancestor that is the Playwright run, or `null` if none is. */
+function runProcess() {
+	let pid = process.ppid;
+	for (let hops = 0; hops < 8 && pid > 1; hops += 1) {
+		const command = commandOf(pid);
+		if (command === null) {
+			return null;
+		}
+		if (command.includes('playwright')) {
+			// The command is kept as well as the pid: a pid is reused eventually,
+			// and a server that exited because some unrelated process inherited
+			// the number would be its own kind of mystery.
+			return { pid, command };
+		}
+		pid = parentOf(pid);
+	}
+	return null;
+}
+
+function commandOf(pid) {
+	try {
+		return readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+	} catch {
+		return null;
+	}
+}
+
+function parentOf(pid) {
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+		// `comm` is parenthesised and may itself contain spaces and brackets, so
+		// the fields are counted from after its closing bracket. `ppid` is the
+		// second of those.
+		return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+	} catch {
+		return 0;
 	}
 }
 

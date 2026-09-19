@@ -456,12 +456,35 @@ export async function startSessionStack() {
 /**
  * How long a device token lives on the session origin.
  *
- * Five seconds: short enough that a test waits for an expiry rather than a
- * coffee, and long enough that a page load, its boot refresh and its first
- * screen's reads are not racing the clock. Two seconds was tried and is not:
- * a browser can spend that much of it fetching the app.
+ * **Fifteen seconds, and the number is the fix for #186.** It was five, and five
+ * was the race.
+ *
+ * What a test on this origin is measuring is the client's *headroom*: the
+ * Companion renews a token with a fifth of its lifetime still in hand
+ * (`refreshAfterSeconds` in `src/lib/session/refresh.ts`, `margin = expiresIn /
+ * 5`, at least a second). That fraction is right for a deployment — a
+ * fifteen-minute token is renewed after twelve minutes, three whole minutes of
+ * slack — and it means the *absolute* headroom a test gets is a fifth of whatever
+ * this origin is configured with. At five seconds that was **one second**. A
+ * browser timer on a machine that is also compiling a Rust binary slips further
+ * than that, and when it does the page holds a dead token while the specs are
+ * asserting that it never does. The suite was racing the mechanism it exists to
+ * observe, which is why it failed differently every time.
+ *
+ * Fifteen buys **three seconds** of headroom, stated as this suite's tolerance in
+ * `tests/e2e/session/harness.ts` and asserted there rather than assumed. It costs
+ * about forty-five seconds of wall clock across the four journeys, and it changes
+ * nothing about what they prove: the same code path, the same rotation, the same
+ * `expires_in`, the same expiry **arranged at the Gateway** rather than waited for
+ * — which is what #111 asked for and what it refused was the fifteen real minutes.
+ *
+ * Two seconds was tried when this was written and was already too short: a
+ * browser can spend that much fetching the app. That direction has not changed;
+ * the mistake was reading "long enough to load the app" as the requirement, when
+ * the requirement is "long enough that the client's own margin survives a loaded
+ * host".
  */
-const SESSION_DEVICE_TOKEN_TTL_SECONDS = 5;
+const SESSION_DEVICE_TOKEN_TTL_SECONDS = 15;
 
 /**
  * The bridges the networks suite configures, and the network each one serves.

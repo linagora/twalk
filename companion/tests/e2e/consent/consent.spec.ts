@@ -18,6 +18,37 @@
 // shape of this journey no existing suite covers: `sensor/tests/consent.rs`
 // proves relabelling on WhatsApp with a decision the test itself published, and
 // this proves it on `matrix` with a decision a **user took in a browser**.
+//
+// # A contact is never a Matrix ID on its own here
+//
+// Consent is keyed on `(subject, network)` — the perimeter is half of the fact —
+// and this file used to ask the Gateway and the bus about a contact by Matrix ID
+// alone. That is #200, and it cost two days of believing the consent screen was
+// broken. The same account writes on more than one network in this project's own
+// test stack: `@bot_beta:test.twalk` is the contact of this journey on `matrix`
+// and a WhatsApp ghost's stand-in in half of `sensor/tests/`, on one shared
+// JetStream that every suite publishes to and that the Gateway's pending-contact
+// projection replays from the beginning on each run. So:
+//
+//   - the pending list is read **per network** ([`waitingNetworks`], which asks
+//     the Gateway the same question `companion-gateway/tests/pending.rs` asks
+//     it), because "is this contact waiting?" has no answer and "is this contact
+//     waiting on matrix?" has one. Read the other way, *"returning a contact to
+//     undecided is a decision"* failed on both attempts against a screen and a
+//     Gateway that were both doing exactly the right thing, and eight specs
+//     behind it never ran;
+//   - a bus event is matched on its subject **and** its network
+//     ([`about`]), because another suite's event about the same account, carrying
+//     the contract fixture's own `consent: granted`, would otherwise satisfy an
+//     assertion that this journey's message is labelled `pending` — which is the
+//     intermittent failure of the first spec, the same cause wearing the other
+//     face;
+//   - and this journey **arranges** the second perimeter rather than inheriting
+//     it: `beforeAll` publishes a WhatsApp sighting of the same contact, so the
+//     distinction is a fixture of this file and passing no longer depends on
+//     whether the Sensor's suite has ever run against this stack. It is also the
+//     stronger assertion: the `matrix` decision answers for `matrix` and leaves
+//     `whatsapp` waiting, which is what a perimeter *is*.
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -75,6 +106,18 @@ const INBOUND_FIXTURE = JSON.parse(
  */
 const SECOND_CONTACT = `@whatsapp_170${Date.now().toString(36)}:test.twalk`;
 
+/**
+ * The network this journey decides about, and the network it deliberately does
+ * not.
+ *
+ * The contact writes to the user in a native Matrix room, so every decision this
+ * file takes is scoped to `matrix`. `OTHER_NETWORK` is the second perimeter the
+ * same person is seen on — arranged in `beforeAll` — and the whole point of it is
+ * that no decision here ever covers it.
+ */
+const NETWORK = 'matrix';
+const OTHER_NETWORK = 'whatsapp';
+
 const stack = bridgeStack();
 
 test.describe.configure({ mode: 'serial' });
@@ -92,6 +135,15 @@ test.describe('the consent screen', () => {
 	let token: string;
 
 	test.beforeAll(async ({ browser }) => {
+		// The describe-level `setTimeout` above applies to the **tests**, not to
+		// this hook, which had the default thirty seconds — and this hook builds
+		// the Sensor if it is cold, logs it into a real homeserver, waits for it
+		// to accept an invitation and publishes to the bus. Thirty seconds is
+		// enough on a warm machine and nowhere near enough otherwise, and when it
+		// runs out Playwright reports the first spec as failed and the rest as
+		// never run, which is the same misleading shape #200 describes. So the
+		// hook says its own budget, here, where it is the hook's.
+		test.setTimeout(1_800_000);
 		if (stack === null) {
 			return;
 		}
@@ -129,6 +181,28 @@ test.describe('the consent screen', () => {
 			subject: SECOND_CONTACT,
 			time: new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z')
 		});
+
+		// The **same contact, on another network** (#200). The fixture is already
+		// a WhatsApp event, so only the subject moves.
+		//
+		// This is the perimeter made into a fixture. Consent is `(subject,
+		// network)` and a decision taken here covers `matrix` alone, so this
+		// person is two rows on the screen and two entries in the Gateway's
+		// pending list — and every assertion below about "waiting for a decision"
+		// has to name which of the two it means. The reason to publish it rather
+		// than to let the stack supply it: on this project's shared test stack
+		// `@bot_beta:test.twalk` *is* a WhatsApp sender in half of
+		// `sensor/tests/`, on the one JetStream the Gateway's projection replays
+		// from the beginning — so a run after the Sensor's suite saw this and a
+		// run on a stack created that morning did not, and the two runs disagreed
+		// about whether this file passes. Arranged here, they agree.
+		await publish(stack.natsPort, INBOUND_SUBJECT, {
+			...INBOUND_FIXTURE,
+			id: `${Date.now().toString(16)}${'1'.repeat(48)}`.slice(0, 64),
+			subject: contact.userId,
+			network: OTHER_NETWORK,
+			time: new Date().toISOString().replace(/\.\d{3}Z$/u, 'Z')
+		});
 	});
 
 	test.afterAll(async () => {
@@ -144,19 +218,28 @@ test.describe('the consent screen', () => {
 			await sendMessage(stack!.synapseUrl, contact, roomId, 'bonjour, on se voit demain ?');
 			// The Sensor's own label before any decision exists. `pending` and
 			// not `revoked`: nothing has been decided (ADR 0010).
-			const first = await inbound.waitFor(about(contact.userId), 60_000);
+			//
+			// Matched on the network as well as the subject: this same account is
+			// a WhatsApp sender elsewhere on this bus, and the contract's own
+			// fixture carries `consent: granted`, so an event about them from
+			// another suite would answer this assertion with the wrong label
+			// about the wrong conversation.
+			const first = await inbound.waitFor(about(contact.userId, NETWORK), 60_000);
 			expect(labelOf(first)).toBe('pending');
 		} finally {
 			inbound.close();
 		}
 
 		// The Gateway's projection is a durable consumer, so the list catches up
-		// rather than being instantaneous.
+		// rather than being instantaneous. Read per network, because that is the
+		// unit the list is keyed on: this contact is waiting on `matrix` — and on
+		// `whatsapp` too, which is the perimeter `beforeAll` arranged and which
+		// the decisions below will leave exactly where it is.
 		await expect
-			.poll(async () => (await pendingContacts(request, token)).includes(contact.userId), {
+			.poll(async () => await waitingNetworks(request, token, contact.userId), {
 				timeout: 60_000
 			})
-			.toBe(true);
+			.toEqual([OTHER_NETWORK, NETWORK].sort());
 
 		await signIn(page.context(), page.context().request, 'consent-screen');
 		await page.goto('/consent');
@@ -220,7 +303,8 @@ test.describe('the consent screen', () => {
 						await sendMessage(stack!.synapseUrl, contact, roomId, 'et pour 20h ?');
 						const later = inbound.seen.filter(
 							(message) =>
-								about(contact.userId)(message) && !seenBefore.has(message.event.id)
+								about(contact.userId, NETWORK)(message) &&
+								!seenBefore.has(message.event.id)
 						);
 						return later.some((message) => labelOf(message) === 'granted');
 					},
@@ -229,17 +313,17 @@ test.describe('the consent screen', () => {
 				.toBe(true);
 
 			// The label is on the envelope, and the envelope is about the contact
-			// on the network the decision was scoped to. A `granted` label about
-			// somebody else, or on another network, would pass a weaker
-			// assertion.
+			// on the network the decision was scoped to — which `about` is now the
+			// keeper of, so a `granted` label about somebody else, or about this
+			// person's WhatsApp perimeter, cannot satisfy the poll above either.
 			const granted = inbound.seen.find(
 				(message) =>
-					about(contact.userId)(message) &&
+					about(contact.userId, NETWORK)(message) &&
 					!seenBefore.has(message.event.id) &&
 					labelOf(message) === 'granted'
 			);
 			expect(granted).toBeDefined();
-			expect(networkOf(granted as BusMessage)).toBe('matrix');
+			expect(networkOf(granted as BusMessage)).toBe(NETWORK);
 		} finally {
 			decisions.close();
 			inbound.close();
@@ -275,13 +359,20 @@ test.describe('the consent screen', () => {
 		// The point: `pending` by decision is *not* never-decided. The journal is
 		// append-only and there is nothing to un-record, so the row keeps saying
 		// somebody answered — and the Gateway's pending list, which is exactly
-		// the never-decided ones, no longer holds this contact.
+		// the never-decided ones, no longer holds this contact **on this
+		// network**.
 		await expect(row).toHaveAttribute('data-decided-by', 'contact');
+		// And what remains is the assertion that says why the network belongs in
+		// the question. The decision was scoped to `matrix`; this same person is
+		// still waiting on `whatsapp`, because nobody has answered for that
+		// conversation and an absent decision is never a revoked one (ADR 0010).
+		// Asserted as the whole list rather than as an absence, so a decision that
+		// answered for too much would fail here too.
 		await expect
-			.poll(async () => (await pendingContacts(request, token)).includes(contact.userId), {
+			.poll(async () => await waitingNetworks(request, token, contact.userId), {
 				timeout: 60_000
 			})
-			.toBe(false);
+			.toEqual([OTHER_NETWORK]);
 	});
 
 	test('the owner is never somebody to decide about', async ({ page, request }) => {
@@ -297,15 +388,19 @@ test.describe('the consent screen', () => {
 			// Wait for the event the Gateway's projection had the chance to
 			// read, so that the absence asserted below is an absence and not a
 			// race.
-			await inbound.waitFor(about(stack!.ownerId), 60_000);
+			await inbound.waitFor(about(stack!.ownerId, NETWORK), 60_000);
 		} finally {
 			inbound.close();
 		}
 
 		// Given a moment, and then asked. A poll that waited for the owner to
 		// appear would be the wrong shape: this asserts they never do.
+		//
+		// Asked about **every** network rather than one: the owner is not a
+		// contact anywhere, so the empty list is the whole statement and naming a
+		// perimeter here would weaken it.
 		await new Promise((resolve) => setTimeout(resolve, 3_000));
-		expect(await pendingContacts(request, token)).not.toContain(stack!.ownerId);
+		expect(await waitingNetworks(request, token, stack!.ownerId)).toEqual([]);
 
 		await signIn(page.context(), page.context().request, 'consent-owner');
 		await page.goto('/consent');
@@ -350,38 +445,55 @@ test.describe('the consent screen', () => {
 	}) => {
 		// The second contact has to be in the list for "scoped" to mean anything.
 		await expect
-			.poll(async () => (await pendingContacts(request, token)).includes(SECOND_CONTACT), {
+			.poll(async () => await waitingNetworks(request, token, SECOND_CONTACT), {
 				timeout: 60_000
 			})
-			.toBe(true);
+			.toEqual([OTHER_NETWORK]);
 
 		await signIn(page.context(), page.context().request, 'consent-bulk');
 		await page.goto('/consent');
 		await expect(page.getByTestId('consent-rows')).toBeVisible();
 
-		// Narrow to one person, and the control says one. #137's rule: it acts
-		// on what is on screen, never on the whole list.
+		// Narrow to one person, and the control says what it is about to write.
+		// #137's rule: it acts on what is on screen, never on the whole list.
+		//
+		// Two rows, not one, and that is the perimeter again rather than a looser
+		// assertion: one person seen on two networks is **two decisions**, because
+		// a decision covers a conversation's network and not a human being. The
+		// count on the button is the length of the array `bulkDecisions` returns
+		// for the rows on screen, so this is the number of requests the press
+		// would make.
 		await page.getByTestId('consent-search').fill(CONTACT_LOCALPART);
 		const showing = page.getByTestId('consent-showing');
-		await expect(showing).toHaveAttribute('data-shown', '1');
+		await expect(showing).toHaveAttribute('data-shown', '2');
 		// The point of the assertion: the list is longer than what is shown, and
 		// the control below counts the shown ones.
-		expect(Number(await showing.getAttribute('data-total'))).toBeGreaterThan(1);
+		expect(Number(await showing.getAttribute('data-total'))).toBeGreaterThan(2);
 		const grant = page.getByTestId('bulk-grant');
-		await expect(grant).toHaveAttribute('data-count', '1');
+		await expect(grant).toHaveAttribute('data-count', '2');
 
 		// And it asks twice. One press arms, and the confirmation names the
 		// number again.
 		await grant.click();
-		await expect(page.getByTestId('bulk-confirm')).toHaveAttribute('data-count', '1');
+		await expect(page.getByTestId('bulk-confirm')).toHaveAttribute('data-count', '2');
 		await page.getByTestId('bulk-cancel').click();
 		await expect(page.getByTestId('bulk-confirm')).toHaveCount(0);
 	});
 });
 
-/** Whether a bus message is an event about this subject. */
-function about(subject: string) {
-	return (message: BusMessage) => message.event.subject === subject;
+/**
+ * Whether a bus message is an event about this subject **on this network**.
+ *
+ * Both halves, because consent is keyed on both and this bus is shared. The same
+ * Matrix ID is this journey's contact on `matrix` and a WhatsApp sender in
+ * `sensor/tests/`, and the contract's own inbound fixture carries `consent:
+ * granted` — so a predicate on the subject alone would let another suite's event
+ * answer an assertion about this conversation's label, which is #200's other half
+ * and why the first spec of this file was intermittent.
+ */
+function about(subject: string, network: string) {
+	return (message: BusMessage) =>
+		message.event.subject === subject && networkOf(message) === network;
 }
 
 /**
@@ -400,12 +512,30 @@ function networkOf(message: BusMessage): string | undefined {
 	return (message.event as unknown as { network?: string }).network;
 }
 
-/** Who the Gateway says is waiting for a first decision. */
-async function pendingContacts(request: APIRequestContext, token: string): Promise<string[]> {
+/**
+ * Which networks the Gateway says this contact is waiting for a first decision on
+ * — sorted, and empty when none.
+ *
+ * The same question `companion-gateway/tests/pending.rs::waiting_networks` asks
+ * the same endpoint, deliberately the same shape: the pending list is keyed on
+ * `(contact, network)` and that suite already asserts the consequence — *"a
+ * contact that writes on a second network is waiting again there: consent has a
+ * perimeter, and so does the list."* The version of this helper that returned
+ * only the Matrix IDs threw the perimeter away, and a `true` it could not
+ * distinguish from the one it wanted is #200.
+ */
+async function waitingNetworks(
+	request: APIRequestContext,
+	token: string,
+	contact: string
+): Promise<string[]> {
 	const answer = await request.get('/api/contacts/pending', {
 		headers: { cookie: `twalk_device=${token}` }
 	});
 	expect(answer.ok(), await answer.text()).toBeTruthy();
-	const body = (await answer.json()) as { contacts: { contact: string }[] };
-	return body.contacts.map((entry) => entry.contact);
+	const body = (await answer.json()) as { contacts: { contact: string; network: string }[] };
+	return body.contacts
+		.filter((entry) => entry.contact === contact)
+		.map((entry) => entry.network)
+		.sort();
 }

@@ -9,10 +9,20 @@
 // the Signal bridge had never been contacted.
 //
 // The TTL is not the bug and is not raised here to hide it. This origin
-// configures a **five-second** device token (`tests/real-stack.mjs`), so the
-// expiry the ticket describes arrives inside a test rather than inside an
-// afternoon. Everything else is the deployment: a real Gateway, a real
-// Synapse, the real cookies with the paths the Gateway scopes them to.
+// configures a **short** device token (`tests/real-stack.mjs`), so the expiry the
+// ticket describes arrives inside a test rather than inside an afternoon.
+// Everything else is the deployment: a real Gateway, a real Synapse, the real
+// cookies with the paths the Gateway scopes them to.
+//
+// How short, and what that number buys, is #186 and is stated in
+// `./harness.ts`: the client renews with a fifth of the lifetime in hand, so the
+// lifetime this origin picks *is* the tolerance these four journeys have. It was
+// five seconds, which left one, which is less than a browser timer slips on a
+// machine that is compiling something — so this suite lost to load it created
+// itself and was read as flaky. Nothing below waits for a clock to have probably
+// run out any more: where the death of a credential is the precondition, the
+// Gateway is asked; where the point is that something did *not* happen, the wait
+// is the moment it was due, and the moment is derived rather than guessed.
 //
 // Four journeys, and each proves a different half of the mechanism:
 //
@@ -31,14 +41,18 @@ import { expect, test } from '@playwright/test';
 
 import {
 	connectWhatsApp,
+	headroomMs,
+	journeyBudgetMs,
 	NO_STACK,
 	rememberDeployment,
+	renewedAfterMs,
 	revokeDevice,
 	sessionStack,
 	signInDevice,
 	Traffic,
 	useDevice,
-	waitForTokenToExpire
+	waitPastTheScheduledRenewal,
+	waitUntilTheGatewayRefusesThisBrowser
 } from './harness';
 
 const stack = sessionStack();
@@ -49,6 +63,16 @@ test.skip(stack === null, NO_STACK);
 // devices and complete logins, and each would otherwise inherit the last one's
 // deployment.
 test.describe.configure({ mode: 'serial' });
+
+// And a budget of their own, derived from the lifetime rather than left to the
+// default thirty seconds — which was quietly carrying an eighteen-second
+// deliberate wait plus a real-stack journey, and timing out under load on a spec
+// about keeping sessions alive. `./harness.ts` says what the number is made of.
+test.beforeEach(() => {
+	if (stack !== null) {
+		test.setTimeout(journeyBudgetMs(stack));
+	}
+});
 
 test('a session refreshed on time never interrupts the screen the user is on', async ({
 	page,
@@ -63,15 +87,65 @@ test('a session refreshed on time never interrupts the screen the user is on', a
 	await page.goto('/networks');
 	await expect(page.getByTestId('network-grid')).toBeVisible();
 
-	// Counted from here, with the screen up and the session adopted. A browser
-	// handed a five-second token that then spends longer than that fetching the
-	// app is this fixture racing itself on a loaded machine, and says nothing
-	// about the fifteen-minute credential a deployment issues.
+	// The session this browser was handed has been adopted, which is the first
+	// renewal and the thing that gives the page its schedule. Counted from after
+	// it, with the screen up: a browser handed a short-lived token that then
+	// spends a chunk of it fetching the app is this fixture racing itself on a
+	// loaded machine, and says nothing about the fifteen-minute credential a
+	// deployment issues.
+	await expect
+		.poll(() => traffic.successfulRefreshes.length, {
+			message: 'the page adopted the session it was given'
+		})
+		.toBeGreaterThanOrEqual(1);
 	const settled = traffic.refusals.length;
+	const renewedBefore = traffic.successfulRefreshes.length;
 
 	// Three whole token lifetimes of the user reading the screen and touching
 	// nothing. Before this ticket, the session was dead after the first one.
-	await page.waitForTimeout(3 * (deployment.deviceTokenTtlSeconds + 1) * 1000);
+	//
+	// This is the spec the tolerance in `./harness.ts` is for: across these three
+	// lifetimes the client has to renew on time every time, each renewal within
+	// its own headroom, and if that headroom is smaller than the machine's timer
+	// slip then what fails here is the fixture rather than the product (#186).
+	const idleMs = 3 * deployment.deviceTokenTtlSeconds * 1000;
+	await page.waitForTimeout(idleMs);
+
+	// **Every** renewal that fell inside those three lifetimes happened — not
+	// "at least three", which three lifetimes would satisfy while the client
+	// quietly missed one and the `401` repair covered for it.
+	//
+	// `floor` and not `ceil`, and the difference is a whole renewal: the count is
+	// of renewals whose moment is *inside* the window, which is a fact already
+	// settled when the wait ends. Asking for one more means asking for the
+	// renewal due just **after** it, and that is a wait on the future dressed up
+	// as an assertion about the past — measured failing on a machine at load 25,
+	// which is the exact mistake #186 is about.
+	const renewalsDue = Math.floor(idleMs / renewedAfterMs(deployment));
+	expect(
+		traffic.successfulRefreshes.length - renewedBefore,
+		'the session was renewed once per lifetime, ahead of each expiry'
+	).toBeGreaterThanOrEqual(renewalsDue);
+
+	// And nothing is mid-rotation as the user clicks. A refresh **rotates both
+	// tokens**, and the Gateway invalidates the previous device token the moment
+	// it issues the new one (`companion-gateway/src/session.rs`,
+	// `Sessions::refresh`) — deliberately, so a leaked token stops working at the
+	// next refresh rather than living out its lifetime. A request that crosses a
+	// rotation therefore carries a credential that has just stopped being one, is
+	// refused, and is repaired centrally, which is the *next* spec's subject and
+	// not this one's.
+	//
+	// Two things keep the click clear of one. The wait above is three lifetimes,
+	// which is **3.75 renewal intervals** on this origin (the client renews at
+	// four fifths), so it ends in the middle of an interval rather than on a
+	// boundary — the earlier `3 × (lifetime + 1)` was exactly four intervals and
+	// clicked into a rotation on most runs, measuring an overlap it had arranged
+	// itself. And a renewal cannot be in flight here, because every one the page
+	// has asked for has answered.
+	expect(traffic.refreshesAsked.length, 'no renewal is in flight as the user clicks').toBe(
+		traffic.refreshes.length
+	);
 
 	// And the next thing they do just works.
 	await page.getByTestId('to-personas').click();
@@ -79,15 +153,13 @@ test('a session refreshed on time never interrupts the screen the user is on', a
 	await expect(page.getByTestId('scope-unknown')).toHaveCount(0);
 	await expect(page.getByTestId('session-expired')).toHaveCount(0);
 
-	// The assertion that matters: over three lifetimes of a working screen, not
-	// one request was refused. The user was never interrupted, and nothing had
-	// to be retried on their behalf.
-	await expect
-		.poll(() => traffic.successfulRefreshes.length, {
-			message: 'the session was renewed once per lifetime, ahead of each expiry'
-		})
-		.toBeGreaterThanOrEqual(3);
-	expect(traffic.refusals.length).toBe(settled);
+	// The assertion that matters: over three lifetimes of a working screen and
+	// the click that followed them, not one request was refused. The user was
+	// never interrupted, and nothing had to be retried on their behalf.
+	expect(
+		traffic.refusals.length,
+		`refused: ${JSON.stringify(traffic.refusals)}; refreshes: ${JSON.stringify(traffic.refreshes)}`
+	).toBe(settled);
 });
 
 test('a token that died while nothing was refreshing is repaired centrally, once', async ({
@@ -107,8 +179,16 @@ test('a token that died while nothing was refreshing is repaired centrally, once
 	// The refresh this page had planned fails, the client backs off, and the
 	// token dies with nobody watching — which is precisely the case a timer
 	// cannot cover and the `401` must.
+	//
+	// Waited out by **asking the Gateway**, not by sleeping for the configured
+	// lifetime: this page rotates its token on its own schedule, so a lifetime
+	// counted from here was never a bound on when the one it holds dies. When the
+	// guess was short the click below simply worked, no `401` arrived to repair,
+	// and this spec failed as though the repair were broken (#186).
 	await page.route('**/api/session/refresh', (route) => route.abort());
-	await waitForTokenToExpire(page, deployment);
+	await waitUntilTheGatewayRefusesThisBrowser(page, deployment);
+	// Including the refusals that probe just caused: what this spec counts is what
+	// the *user's* next click costs.
 	traffic.clear();
 	await page.unroute('**/api/session/refresh');
 
@@ -161,21 +241,33 @@ test('a tab that slept through its refresh catches up when it wakes', async ({
 
 	// Asleep, from here. Counted rather than cleared: a response the page has
 	// already had can still be on its way to this process.
+	//
+	// Counted as **requests**, which is the fix for this spec's own flake (#186).
+	// "A sleeping tab refreshes nothing" is about a timer not firing, and a
+	// refresh already in flight when the clock froze has its answer arrive during
+	// the sleep — so counting answers made a legitimate in-flight response look
+	// like a refresh the sleeping tab had made.
 	await page.clock.pauseAt(new Date(Date.now() + 500));
-	const beforeSleeping = traffic.refreshes.length;
+	const askedBeforeSleeping = traffic.refreshesAsked.length;
+	const answeredBeforeSleeping = traffic.refreshes.length;
 	const refusedBeforeSleeping = traffic.refusals.length;
 
-	await waitForTokenToExpire(page, deployment);
-	expect(traffic.refreshes.length, 'a sleeping tab refreshes nothing').toBe(beforeSleeping);
+	// Past the moment this tab had scheduled its renewal for — which, its clock
+	// being frozen, is a moment that goes by without the timer firing.
+	await waitPastTheScheduledRenewal(page, deployment);
+	expect(traffic.refreshesAsked.length, 'a sleeping tab refreshes nothing').toBe(
+		askedBeforeSleeping
+	);
 
 	// Waking up: the page's timers run again, late, and the refresh this tab
-	// slept through happens now.
-	await page.clock.runFor(10_000);
+	// slept through happens now. `runFor` past the renewal it missed, with this
+	// suite's headroom on top.
+	await page.clock.runFor(renewedAfterMs(deployment) + headroomMs(deployment));
 	await expect
 		.poll(() => traffic.successfulRefreshes.length, {
 			message: 'the woken tab refreshes the session it slept through'
 		})
-		.toBeGreaterThan(beforeSleeping);
+		.toBeGreaterThan(answeredBeforeSleeping);
 
 	// Fully awake: the page's clock runs by itself again, as a foregrounded
 	// tab's does.
@@ -212,16 +304,25 @@ test('with both credentials dead the user is told, and comes back to the same sc
 	await page.getByTestId('to-personas').click();
 	await expect(page.getByTestId('scope')).toBeVisible();
 
-	// Both credentials dead at the Gateway: the device token by its own
-	// lifetime, the refresh token because this device was revoked — the
-	// dashboard's own button, or the same thing done from another device.
+	// Both credentials dead at the Gateway, and dead the moment this returns:
+	// revoking a device drops **both** of its token digests, so there is nothing
+	// left to wait for at the Gateway — the dashboard's own button does this, and
+	// so does signing out from another device.
 	await revokeDevice(request, device, elsewhere);
-	await waitForTokenToExpire(page, deployment);
 
 	// Nobody clicked anything. The scheduled refresh came round, could not be
 	// honoured, and the user is told then and there rather than at their next
 	// failure — not a spinner, not a blank screen, and not the first screen.
-	await expect(page.getByTestId('session-expired')).toBeVisible();
+	//
+	// The only wait here is for that renewal to come round, and it is given the
+	// interval it is actually due at rather than a sleep that happened to be
+	// longer than it (#186). Before, the sleep was the token's lifetime, which is
+	// shorter than the renewal interval for any lifetime this origin might sanely
+	// be given — so the assertion's own five-second default was doing the waiting,
+	// invisibly, and would have started failing the moment the lifetime moved.
+	await expect(page.getByTestId('session-expired')).toBeVisible({
+		timeout: renewedAfterMs(deployment) + headroomMs(deployment)
+	});
 	await expect(page).toHaveURL(/\/personas$/);
 
 	// The screen underneath is still mounted and still theirs: the dialog is

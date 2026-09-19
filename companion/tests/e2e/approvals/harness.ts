@@ -173,6 +173,32 @@ export async function decideAbout(
 }
 
 /**
+ * How long a suggestion may take to become visible to the Gateway's read.
+ *
+ * Exported because it is half of [`journeyBudgetMs`]: a wait deliberately placed
+ * inside a test has to be smaller than the test's own budget, and until #186 this
+ * one was not — see below.
+ */
+export const SUGGESTION_WAIT_MS = 30_000;
+
+/**
+ * How long one of these journeys may take, stated rather than inherited.
+ *
+ * This project had no budget of its own, so every one of its specs ran under
+ * Playwright's default **thirty seconds** — and every one of them begins by
+ * waiting up to [`SUGGESTION_WAIT_MS`], which is also thirty. A poll can never
+ * use a window as long as the budget containing it: the test dies first, and it
+ * dies as a timeout on a spec about approving a reply, which says nothing about
+ * what went slowly. That is the `approvals` intermittent reported in #186, and it
+ * is the same defect as that ticket's `session` one — a number nobody chose
+ * deciding whether the suite is believed.
+ *
+ * The budget is the longest wait inside it plus a minute for the sign-in, the
+ * publish, the screen and the read off NATS. A ceiling, not a delay.
+ */
+export const journeyBudgetMs = SUGGESTION_WAIT_MS + 60_000;
+
+/**
  * Waits for the Gateway's projection to see a suggestion.
  *
  * The listing is a bounded scan of the stream rather than a store, so there is
@@ -193,7 +219,7 @@ export async function waitForSuggestion(
 				});
 				return answer.status();
 			},
-			{ timeout: 30_000 }
+			{ timeout: SUGGESTION_WAIT_MS }
 		)
 		.toBe(200);
 }
