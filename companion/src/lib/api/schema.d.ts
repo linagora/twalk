@@ -3149,9 +3149,10 @@ export interface components {
             };
         };
         /**
-         * @description The bridge itself is the problem, not the request. The three codes
-         *     are three different investigations, and telling them apart without
-         *     reading `detail` is the point of having three.
+         * @description The bridge itself, or this build's conversation with it, is the
+         *     problem — never the user's values. The four codes are four different
+         *     investigations, and telling them apart without reading `detail` is
+         *     the point of having four.
          *
          *     - `bridge_unreachable` — **nothing answered**: connection refused,
          *       timeout, no route. This is the one an operator checks containers,
@@ -3166,6 +3167,16 @@ export interface components {
          *       Twalk's reading of that bridge's provisioning API rather than a
          *       broken deployment, and nothing about the deployment will explain
          *       it. `detail` names the provisioning call and what was looked for.
+         *     - `bridge_request_unusable` — the mirror: it answered `400
+         *       M_NOT_JSON`, meaning it could not read what **this build sent**.
+         *       bridgev2 refuses the body before any connector runs, so the
+         *       network saw nothing, refused nothing, and the login is still
+         *       waiting on the same step. A defect in Twalk's writing of the
+         *       provisioning API; `detail` says so and names the code. It exists
+         *       because a cookie jar sent as a nested map arrived here as
+         *       `invalid_request` — *"the network refused what was submitted,
+         *       start the login again"* — and sent a user round the same paste
+         *       three times (#221).
          *
          *       It exists because it used to be `bridge_unreachable` (#116): the
          *       first live WhatsApp login failed here, was reported as a bridge
@@ -3184,7 +3195,7 @@ export interface components {
             content: {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
-                    error?: "bridge_unreachable" | "bridge_refused" | "bridge_answer_unusable";
+                    error?: "bridge_unreachable" | "bridge_refused" | "bridge_answer_unusable" | "bridge_request_unusable";
                 };
             };
         };
