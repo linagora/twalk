@@ -484,18 +484,30 @@ test('a server name is enough: the field follows .well-known delegation', async 
 	await expect(page.getByTestId('screen-matrix')).toHaveAttribute('data-stage', 'rooms');
 });
 
+/** How long a name that resolves to nothing may take to be reported as that. */
+const UNRESOLVABLE_WAIT_MS = 20_000;
+
 test('a homeserver that answers nothing is named as that, before any credential', async ({
 	context,
 	page,
 	request
 }) => {
+	// A budget of its own, because the wait below is deliberate and long: twenty
+	// seconds inside Playwright's default thirty leaves ten for a sign-in, two
+	// navigations and the assertions, and a name that resolves to nothing is
+	// precisely the thing that takes longer on a loaded host or an unhelpful
+	// resolver. That is the shape that explains the `approvals` intermittent of
+	// #186 — a deliberate wait that leaves the budget containing it no room — and
+	// this is the one other place in the suite that has it.
+	test.setTimeout(UNRESOLVABLE_WAIT_MS + 60_000);
+
 	await signIn(context, request, 'the Matrix device');
 	await page.goto('/networks/matrix');
 	await page.getByTestId('matrix-homeserver').fill('nothing-here.invalid');
 	await page.getByTestId('matrix-homeserver-continue').click();
 
 	const problem = page.getByTestId('matrix-problem');
-	await expect(problem).toBeVisible({ timeout: 20_000 });
+	await expect(problem).toBeVisible({ timeout: UNRESOLVABLE_WAIT_MS });
 	await expect(problem).toContainText(/nothing-here.invalid/);
 	// No form for a server that is not there.
 	await expect(page.getByTestId('matrix-username')).toHaveCount(0);

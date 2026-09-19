@@ -15,7 +15,12 @@
 // The suite runs against `build/`, so `npm run build` comes first — `npm test`
 // sequences them.
 
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+
 import { defineConfig, devices } from '@playwright/test';
+
+import { buildId } from './tests/build-id.mjs';
 
 const port = Number(process.env.TWALK_TEST_PORT ?? 4319);
 
@@ -50,6 +55,70 @@ const sessionPort = Number(process.env.TWALK_TEST_SESSION_PORT ?? port + 2);
  * a Node-only suite, and `npm run test:e2e:stack` is the full one.
  */
 const realStack = process.env.TWALK_TEST_REAL_STACK === '1';
+
+/**
+ * The build this run is about to test, as one name (#185).
+ *
+ * `tests/build-id.mjs` hashes the export's own contents, and it is computed
+ * **once, here**: the guard below compares against it and every server is handed
+ * it, so the value a server reports and the value the suite expected cannot
+ * drift apart between two hashings.
+ */
+const build = buildId();
+
+/**
+ * Refuses to run when a port this suite needs is held by something that is not
+ * this suite's server (#185).
+ *
+ * Why here, in the config's own body, rather than in `globalSetup`: Playwright
+ * starts `webServer` **before** `globalSetup`, so a global setup would be told
+ * about the stale server after Playwright had already adopted it. The config is
+ * the last place that is still early enough.
+ *
+ * Why a child process: the check has to probe three ports over HTTP, which is
+ * asynchronous, and this file must answer synchronously. The cost is one node
+ * process and one directory hash.
+ *
+ * The workers re-evaluate this file, and by then the servers are up and are this
+ * suite's own — so the check runs in the main process only, where it can still
+ * change the outcome.
+ */
+function guardPorts(): void {
+	if (process.env.TEST_WORKER_INDEX !== undefined) {
+		return;
+	}
+	const origins = [
+		`${port}=the Companion's own origin`,
+		`${bridgePort}=the bridge journeys' origin`,
+		`${sessionPort}=the session journeys' origin`
+	];
+	try {
+		execFileSync(
+			process.execPath,
+			[
+				join(import.meta.dirname, 'tests', 'port-guard.mjs'),
+				build ?? '-',
+				// With a real stack every origin has a Gateway of its own behind
+				// it, raised by the server this run starts; a server already
+				// listening has none, whatever build it is serving. So reuse is
+				// not on offer there, and the guard says so rather than letting
+				// Playwright refuse the port without explaining it.
+				realStack ? '--exclusive' : '--reuse',
+				...origins
+			],
+			{ stdio: ['ignore', 'inherit', 'inherit'] }
+		);
+	} catch {
+		// The diagnosis is already on stderr, in full. This is the sentence that
+		// stops the run.
+		throw new Error("the Companion's e2e suite did not start: see the ports named above (#185)");
+	}
+}
+
+guardPorts();
+
+/** Handed to every server this suite starts, so each can say what it serves. */
+const serverEnv = build === null ? {} : { TWALK_TEST_BUILD_ID: build };
 
 export default defineConfig({
 	testDir: 'tests/e2e',
@@ -219,6 +288,23 @@ export default defineConfig({
 			// one Gateway, one device list, one login per bridge. These tests
 			// revoke devices and complete logins, which is state the next one
 			// would otherwise inherit.
+			//
+			// **And deliberately no `dependencies`, which #186 reconsidered and
+			// kept.** This is the only project whose assertions are about *when*
+			// something happened, so the obvious move was to order it last and
+			// give it an idle machine — it runs beside `consent`, whose
+			// `beforeAll` compiles the Sensor and then runs it against a real
+			// homeserver with a crypto stack, and "the session project flakes" was
+			// partly that load.
+			//
+			// It was tried, and measured, and undone. With the lifetime and the
+			// waits fixed (`tests/e2e/session/harness.ts`) these four journeys pass
+			// on a host pinned at load 25–30, so they do not need an idle machine —
+			// and a `dependencies` chain is not free: a project whose dependency
+			// fails does not run at all. Ordered behind `portals`, the one suite
+			// that proves an expired session is refused and renewed went silent the
+			// moment an unrelated project went red, which is how a suite stops
+			// being believed rather than how it starts.
 			name: 'session',
 			testMatch: 'session/**/*.spec.ts',
 			fullyParallel: false,
@@ -241,9 +327,12 @@ export default defineConfig({
 				{
 					command: 'node tests/serve-like-gateway.mjs',
 					url: `http://127.0.0.1:${port}/health`,
+					env: { ...serverEnv },
 					// Never reuse when a real stack is wanted: a server already
 					// listening is one with no Gateway behind it, and the
 					// journey would fail obscurely instead of not running.
+					// `guardPorts` above has already said so in words, naming the
+					// process that holds the port (#185).
 					reuseExistingServer: false,
 					// Long enough for `docker compose up --wait` on a cold
 					// Synapse and a cold `cargo build`; the default 60 s is not.
@@ -255,6 +344,7 @@ export default defineConfig({
 					command: 'node tests/serve-like-gateway.mjs',
 					url: `http://127.0.0.1:${bridgePort}/health`,
 					env: {
+						...serverEnv,
 						TWALK_TEST_PORT: String(bridgePort),
 						TWALK_TEST_BRIDGE_STACK: '1'
 					},
@@ -267,6 +357,7 @@ export default defineConfig({
 					command: 'node tests/serve-like-gateway.mjs',
 					url: `http://127.0.0.1:${sessionPort}/health`,
 					env: {
+						...serverEnv,
 						TWALK_TEST_PORT: String(sessionPort),
 						TWALK_TEST_SESSION_STACK: '1'
 					},
@@ -279,6 +370,10 @@ export default defineConfig({
 		: {
 				command: 'node tests/serve-like-gateway.mjs',
 				url: `http://127.0.0.1:${port}/health`,
+				env: { ...serverEnv },
+				// Reuse is allowed here and it is no longer blind: `guardPorts`
+				// has proved that whatever answers this port is serving the build
+				// this run just made, and refused the run otherwise (#185).
 				reuseExistingServer: !process.env.CI,
 				timeout: 60_000,
 				stdout: 'pipe',

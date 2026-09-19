@@ -15,6 +15,7 @@ import { watchBus } from '../dashboard/bus';
 import {
 	bridgeStack,
 	decideAbout,
+	journeyBudgetMs,
 	NO_STACK,
 	publishSuggestion,
 	signIn,
@@ -27,6 +28,14 @@ const stack = bridgeStack();
 
 test.skip(stack === null, NO_STACK);
 test.describe.configure({ mode: 'serial' });
+
+// A budget of this file's own, because every spec below opens by waiting up to
+// thirty seconds for the Gateway to see the suggestion it just published — and
+// the default budget is also thirty, so that wait could never use its window
+// (#186). `./harness.ts` says what the number is made of.
+test.beforeEach(() => {
+	test.setTimeout(journeyBudgetMs);
+});
 
 /** Everything the page rendered, for an absence assertion to search. */
 async function rendered(page: Page): Promise<string> {
