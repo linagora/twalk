@@ -473,6 +473,27 @@ impl Bot {
         extract_str(&response, "membership", "get membership")
     }
 
+    /// The rooms this account currently holds an invitation to, as one initial
+    /// `/sync` lists them. An invitation that was rejected — and, as
+    /// matrix-sdk does it, forgotten — is no longer in this list, while a
+    /// state read of the room answers 403 to the account that forgot it, so
+    /// this is the observer for "the invitation is gone".
+    pub async fn pending_invitations(&self) -> Result<Vec<String>> {
+        let response = self
+            .send_json(
+                reqwest::Method::GET,
+                "/_matrix/client/v3/sync?timeout=0&filter=%7B%22room%22%3A%7B%22timeline%22%3A%7B%22limit%22%3A0%7D%7D%7D",
+                None,
+                "sync for invitations",
+            )
+            .await?;
+        Ok(response
+            .pointer("/rooms/invite")
+            .and_then(Value::as_object)
+            .map(|rooms| rooms.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
     /// Kicks a user out of a room (requires power, like a bridge admin has).
     pub async fn kick(&self, room_id: &str, user_id: &str) -> Result<()> {
         self.send_json(

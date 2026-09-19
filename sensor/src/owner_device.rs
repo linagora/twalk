@@ -18,6 +18,9 @@
 //! which invitations the owner's device may accept, and what a posted reply
 //! reached — and nothing that does I/O; `main.rs` wires them to matrix-sdk.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use crate::bridge_bot::BridgeBots;
 
 /// Subdirectory of `SENSOR_STATE_DIR` the owner-device's own stores live in.
@@ -161,6 +164,170 @@ pub fn reach(by_the_owners_device: bool, the_room_is_a_portal: bool) -> Reach {
     }
 }
 
+/// What the homeserver answered to a join request, reduced to the facts that
+/// decide whether asking again can change anything.
+///
+/// `status` is `None` when there was no HTTP answer at all — the connection
+/// was refused, timed out, or dropped — which is the one case that is
+/// unambiguously the network's and not the room's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinAnswer {
+    pub status: Option<u16>,
+    pub errcode: Option<String>,
+    pub message: String,
+}
+
+/// Why a join failed, sorted by what the Sensor should do next (issue #237).
+///
+/// Before this every failure was retried at sync frequency, for ever, at
+/// `ERROR`: seventy-eight attempts in five minutes for one room that could
+/// never be joined, which is a log nobody reads and the line that matters —
+/// a portal that *should* have joined — arriving in the middle of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinFailure {
+    /// Every member has left, so the homeserver has no server it could join
+    /// through — its words are "no servers that are in the room". Nothing can
+    /// make such a room joinable again: the conversation, if it still exists,
+    /// lives in another room now (ADR 0029). The invitation is meaningless and
+    /// is **rejected**, so the homeserver records the outcome (`leave`), nothing
+    /// is retried after a restart either, and the register reads the fact
+    /// without a log.
+    Orphaned,
+    /// The homeserver refused on the facts of the invitation — the device is
+    /// banned, the room version is one it cannot join, the room is gone. Only a
+    /// new membership event changes those facts, and one would arrive as a new
+    /// invitation, so this one is not asked about again in this process. The
+    /// invitation is left where it is: a refusal this project cannot name
+    /// precisely is not grounds to throw the user's invitation away.
+    Refused,
+    /// No answer, a server error, or a rate limit: the room may be fine and
+    /// the homeserver was not, so it is asked again — with backoff, never at
+    /// sync frequency.
+    Transient,
+}
+
+impl JoinFailure {
+    /// Whether the invitation should be rejected on the homeserver, so that the
+    /// outcome outlives this process.
+    pub fn rejects_the_invitation(&self) -> bool {
+        matches!(self, Self::Orphaned)
+    }
+
+    /// The metric's label value and the word in the log line.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Orphaned => "orphaned",
+            Self::Refused => "refused",
+            Self::Transient => "transient",
+        }
+    }
+}
+
+/// Sorts a failed join by what the homeserver answered — never by how many
+/// times it has failed, because "it keeps failing" is exactly what a permanent
+/// condition and a long outage have in common.
+pub fn join_failure(answer: &JoinAnswer) -> JoinFailure {
+    let Some(status) = answer.status else {
+        return JoinFailure::Transient;
+    };
+    let errcode = answer.errcode.as_deref().unwrap_or("");
+    if status == 429 || errcode == "M_LIMIT_EXCEEDED" || status >= 500 {
+        return JoinFailure::Transient;
+    }
+    if answer.message.contains("no servers that are in the room") {
+        return JoinFailure::Orphaned;
+    }
+    JoinFailure::Refused
+}
+
+/// The delay before the `attempt`-th retry of a transient failure: doubling
+/// from `base`, never above `cap`. The first retry waits `base`.
+pub fn backoff(attempt: u32, base: Duration, cap: Duration) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(16);
+    base.saturating_mul(1u32 << exponent).min(cap)
+}
+
+/// What the owner's device remembers about the invitations it could not
+/// accept, per room, for the life of the process.
+///
+/// A room is unknown here until a join fails. After a transient failure it is
+/// **waiting**, and not asked about until its delay has passed; after a refusal
+/// it is **given up**, and not asked about at all. A room the homeserver no
+/// longer lists as invited is forgotten (`keep_only`), so a fresh invitation to
+/// the same room — after a ban lifted, say — starts from nothing.
+#[derive(Debug)]
+pub struct JoinRetries {
+    base: Duration,
+    cap: Duration,
+    rooms: HashMap<String, RetryState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryState {
+    Waiting { attempts: u32, due: Instant },
+    GivenUp,
+}
+
+impl JoinRetries {
+    pub fn new(base: Duration, cap: Duration) -> Self {
+        Self {
+            base,
+            cap,
+            rooms: HashMap::new(),
+        }
+    }
+
+    /// Whether a join should be attempted for this room now.
+    pub fn is_due(&self, room: &str, now: Instant) -> bool {
+        match self.rooms.get(room) {
+            None => true,
+            Some(RetryState::Waiting { due, .. }) => *due <= now,
+            Some(RetryState::GivenUp) => false,
+        }
+    }
+
+    /// Records a transient failure and returns how long this room now waits.
+    pub fn failed(&mut self, room: &str, now: Instant) -> Duration {
+        let attempts = match self.rooms.get(room) {
+            Some(RetryState::Waiting { attempts, .. }) => attempts + 1,
+            _ => 1,
+        };
+        let delay = backoff(attempts, self.base, self.cap);
+        self.rooms.insert(
+            room.to_owned(),
+            RetryState::Waiting {
+                attempts,
+                due: now + delay,
+            },
+        );
+        delay
+    }
+
+    /// How many times this room's join has failed transiently so far.
+    pub fn attempts(&self, room: &str) -> u32 {
+        match self.rooms.get(room) {
+            Some(RetryState::Waiting { attempts, .. }) => *attempts,
+            _ => 0,
+        }
+    }
+
+    /// Records that this room will not be asked about again in this process.
+    pub fn gave_up(&mut self, room: &str) {
+        self.rooms.insert(room.to_owned(), RetryState::GivenUp);
+    }
+
+    /// Forgets a room that joined.
+    pub fn succeeded(&mut self, room: &str) {
+        self.rooms.remove(room);
+    }
+
+    /// Forgets every room `still_invited` does not hold, so an invitation that
+    /// was withdrawn and sent again is a new one.
+    pub fn keep_only(&mut self, still_invited: impl Fn(&str) -> bool) {
+        self.rooms.retain(|room, _| still_invited(room));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,5 +399,124 @@ mod tests {
         assert!(
             reach(false, true).as_str() == "nobody" && !reach(false, true).reaches_the_contact()
         );
+    }
+
+    fn answer(status: Option<u16>, errcode: Option<&str>, message: &str) -> JoinAnswer {
+        JoinAnswer {
+            status,
+            errcode: errcode.map(str::to_owned),
+            message: message.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_room_everybody_left_is_orphaned_and_its_invitation_is_rejected() {
+        // Word for word what Synapse answered on the reference deployment,
+        // seventy-eight times in five minutes (issue #237).
+        let synapse = answer(
+            Some(404),
+            Some("M_UNKNOWN"),
+            "Can't join remote room because no servers that are in the room have been provided.",
+        );
+        assert_eq!(join_failure(&synapse), JoinFailure::Orphaned);
+        assert!(JoinFailure::Orphaned.rejects_the_invitation());
+    }
+
+    #[test]
+    fn a_failure_is_sorted_by_what_the_homeserver_answered_and_not_by_how_often() {
+        // No answer at all: the network's, so the room is asked about again.
+        assert_eq!(
+            join_failure(&answer(None, None, "connection refused")),
+            JoinFailure::Transient
+        );
+        // The homeserver itself in trouble, or rate-limiting: again later.
+        assert_eq!(
+            join_failure(&answer(Some(502), Some("M_UNKNOWN"), "Bad Gateway")),
+            JoinFailure::Transient
+        );
+        assert_eq!(
+            join_failure(&answer(
+                Some(429),
+                Some("M_LIMIT_EXCEEDED"),
+                "Too Many Requests"
+            )),
+            JoinFailure::Transient
+        );
+        // Refused on the facts: not asked about again, but not thrown away
+        // either — only the orphan's invitation is rejected.
+        let banned = answer(
+            Some(403),
+            Some("M_FORBIDDEN"),
+            "You are banned from this room",
+        );
+        assert_eq!(join_failure(&banned), JoinFailure::Refused);
+        assert!(!JoinFailure::Refused.rejects_the_invitation());
+        assert_eq!(
+            join_failure(&answer(
+                Some(400),
+                Some("M_UNSUPPORTED_ROOM_VERSION"),
+                "Your homeserver does not support the features required to join this room"
+            )),
+            JoinFailure::Refused
+        );
+        assert!(!JoinFailure::Transient.rejects_the_invitation());
+    }
+
+    #[test]
+    fn a_transient_failure_backs_off_and_is_never_asked_at_sync_frequency() {
+        let base = Duration::from_secs(5);
+        let cap = Duration::from_secs(600);
+        assert_eq!(backoff(1, base, cap), Duration::from_secs(5));
+        assert_eq!(backoff(2, base, cap), Duration::from_secs(10));
+        assert_eq!(backoff(5, base, cap), Duration::from_secs(80));
+        assert_eq!(
+            backoff(20, base, cap),
+            cap,
+            "capped, and no overflow far past the cap"
+        );
+
+        let mut retries = JoinRetries::new(base, cap);
+        let t0 = Instant::now();
+        let room = "!portal:twalk.localhost";
+        assert!(
+            retries.is_due(room, t0),
+            "a room nothing is known about is asked about"
+        );
+        assert_eq!(retries.failed(room, t0), Duration::from_secs(5));
+        assert!(!retries.is_due(room, t0), "not on the very next sync");
+        assert!(!retries.is_due(room, t0 + Duration::from_secs(4)));
+        assert!(retries.is_due(room, t0 + Duration::from_secs(5)));
+        let t1 = t0 + Duration::from_secs(5);
+        assert_eq!(retries.failed(room, t1), Duration::from_secs(10));
+        assert_eq!(retries.attempts(room), 2);
+        assert!(!retries.is_due(room, t1 + Duration::from_secs(9)));
+        assert!(retries.is_due(room, t1 + Duration::from_secs(10)));
+        // The cause cleared: the room is forgotten, and a later failure of the
+        // same room starts the schedule over.
+        retries.succeeded(room);
+        assert_eq!(retries.attempts(room), 0);
+        assert_eq!(retries.failed(room, t1), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_refused_room_is_asked_about_once_per_process_and_a_fresh_invitation_starts_over() {
+        let mut retries = JoinRetries::new(Duration::from_secs(5), Duration::from_secs(600));
+        let now = Instant::now();
+        let room = "!banned:twalk.localhost";
+        retries.gave_up(room);
+        assert!(!retries.is_due(room, now));
+        assert!(
+            !retries.is_due(room, now + Duration::from_secs(86_400)),
+            "never, not just later"
+        );
+        // The invitation was withdrawn and sent again: the homeserver no longer
+        // lists the old one, so the room is forgotten and the new one is judged
+        // on its own answer.
+        retries.keep_only(|_| false);
+        assert!(retries.is_due(room, now));
+        // But while the invitation is still the same one, it stays given up.
+        retries.gave_up(room);
+        retries.keep_only(|invited| invited == room);
+        assert!(!retries.is_due(room, now));
     }
 }

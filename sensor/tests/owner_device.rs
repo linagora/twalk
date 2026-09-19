@@ -37,8 +37,13 @@
 //! - with **no** owner device the behaviour is unchanged — `@sensor:` posts —
 //!   and the Sensor now says the reply reached nobody instead of calling it
 //!   sent, which is #216's whole complaint;
-//! - and a token for **another account** is refused at startup, rather than
-//!   being found later by a contact receiving a reply from a stranger.
+//! - a token for **another account** is refused at startup, rather than
+//!   being found later by a contact receiving a reply from a stranger;
+//! - and a portal the device **cannot** join — every member gone, so the
+//!   homeserver has no server to join through — is said once and its
+//!   invitation rejected, instead of being retried for ever at sync frequency
+//!   and at `ERROR` (issue #237): the loop goes on past it, and the outcome is
+//!   on the homeserver rather than only in a log.
 //!
 //! Isolation is the suite's: `TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT` and
 //! `TWALK_TEST_NATS_PORT` move the whole stack aside for a parallel worktree
@@ -122,6 +127,15 @@ fn approved_reply(room_id: &str, body: &str) -> Result<Value> {
 /// are the bridges' bots, and — unless `owner_device` is `None` — holds a
 /// device of the operator's own account.
 fn owner_device_env(test_name: &str, owner_device: Option<(&str, &str)>) -> Vec<(String, String)> {
+    owner_device_env_with(test_name, owner_device, &[])
+}
+
+/// `owner_device_env` plus whatever else one test needs set.
+fn owner_device_env_with(
+    test_name: &str,
+    owner_device: Option<(&str, &str)>,
+    extra: &[(&str, &str)],
+) -> Vec<(String, String)> {
     let state_dir = fresh_state_dir(test_name);
     let mut overrides = vec![
         ("SENSOR_OWNER", OWNER.to_owned()),
@@ -134,6 +148,9 @@ fn owner_device_env(test_name: &str, owner_device: Option<(&str, &str)>) -> Vec<
     if let Some((access_token, device_id)) = owner_device {
         overrides.push(("SENSOR_OWNER_DEVICE_ACCESS_TOKEN", access_token.to_owned()));
         overrides.push(("SENSOR_OWNER_DEVICE_ID", device_id.to_owned()));
+    }
+    for (key, value) in extra {
+        overrides.push((key, (*value).to_owned()));
     }
     let overrides: Vec<(&str, &str)> = overrides
         .iter()
@@ -441,6 +458,122 @@ async fn without_the_owners_device_the_reply_reaches_nobody_and_says_so() -> Res
         }),
         "the degradation is stated once at startup and named after the issue: {logs:?}"
     );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// Issue #237: a portal the owner's device cannot join is said **once**, and
+/// the loop goes on.
+///
+/// The room is the one the reference deployment held: a portal the bridge
+/// built, invited the user into, and then abandoned — every member gone, so
+/// the homeserver has "no servers that are in the room" to join through, and
+/// never will. Before this, that one room produced seventy-eight `ERROR`
+/// lines in five minutes, in the middle of which the line that matters — a
+/// portal that *should* have joined and did not — would have been invisible.
+///
+/// What proves "once" is not a timer: a third portal, invited **after** the
+/// orphan was refused, is joined — so the loop has demonstrably run again —
+/// and the orphan's refusal is still one line and one count. And what proves
+/// the outcome outlives the process is the homeserver: the invitation is
+/// **rejected**, so the owner no longer holds it, a restart has nothing to
+/// retry, and the register can read the fact without a log.
+#[tokio::test]
+async fn an_orphaned_portal_is_refused_once_and_its_invitation_rejected() -> Result<()> {
+    const METRICS_LISTEN: &str = "127.0.0.1:19014";
+    const METRICS_URL: &str = "http://127.0.0.1:19014/metrics";
+
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let owner = Bot::login("owner").await?;
+    let bridge = Bot::login("whatsappbot").await?;
+
+    let orphan = make_whatsapp_portal(&bridge, "owner-device-orphan").await?;
+    bridge.invite(&orphan, OWNER).await?;
+    bridge.leave_room(&orphan).await?;
+    let living = make_whatsapp_portal(&bridge, "owner-device-living").await?;
+    bridge.invite(&living, OWNER).await?;
+
+    let sensor = SensorProc::start(&owner_device_env_with(
+        "orphaned-portal",
+        Some((owner.access_token(), owner.device_id())),
+        &[("SENSOR_METRICS_LISTEN", METRICS_LISTEN)],
+    ))?;
+
+    // The living portal joins: the dead one did not stop the loop.
+    bridge.wait_for_membership(&living, OWNER, "join").await?;
+    // The orphan's invitation is rejected: the owner no longer holds it. That
+    // is read from the homeserver as the owner, and not as a membership
+    // state — the bridge left before the rejection and reads the room as of
+    // its own leave, and the owner's client forgets a room it declined, after
+    // which a state read of it answers 403. What a restart's initial sync
+    // would show is exactly this list, so "nothing to retry" is this.
+    poll_until(
+        || async {
+            let pending = owner.pending_invitations().await.ok()?;
+            (!pending.contains(&orphan)).then_some(())
+        },
+        "the orphan's invitation to be rejected",
+    )
+    .await?;
+
+    // One more turn of the loop, proven by a portal invited only now.
+    let later = make_whatsapp_portal(&bridge, "owner-device-later").await?;
+    bridge.invite(&later, OWNER).await?;
+    bridge.wait_for_membership(&later, OWNER, "join").await?;
+
+    let logs = sensor.logs().await;
+    let refusals: Vec<&String> = logs
+        .iter()
+        .filter(|line| line.contains("cannot be joined") && line.contains(&orphan))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "the orphan is said once, naming the room, the inviter and what the homeserver \
+         answered — not once per sync: {refusals:?}"
+    );
+    assert!(
+        refusals[0].contains("orphaned") && refusals[0].contains(BRIDGE_BOT),
+        "the line says why and who invited: {}",
+        refusals[0]
+    );
+    assert!(
+        !logs
+            .iter()
+            .any(|line| line.contains("retrying on the next sync")),
+        "nothing about this room is retried at sync frequency: {logs:?}"
+    );
+
+    // The owner account outlives a run, so an earlier run that failed before
+    // its orphan was rejected leaves that invitation for this run to find:
+    // what is asserted is therefore "one count per room said unjoinable",
+    // read off this run's own log, and never a fixed number.
+    let body = reqwest::get(METRICS_URL).await?.text().await?;
+    let rooms_said_unjoinable = logs
+        .iter()
+        .filter(|line| line.contains("cannot be joined"))
+        .count();
+    assert!(
+        body.contains(&format!(
+            "twalk_sensor_owner_device_invites_total{{outcome=\"unjoinable\"}} {rooms_said_unjoinable}\n"
+        )),
+        "each unjoinable room is counted once, under its own outcome ({rooms_said_unjoinable} \
+         said in the log):\n{body}"
+    );
+    assert!(
+        body.contains("twalk_sensor_owner_device_invites_total{outcome=\"failed\"} 0\n"),
+        "an orphan is not a transient failure:\n{body}"
+    );
+    let joined = body
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("twalk_sensor_owner_device_invites_total{outcome=\"joined\"} ")
+        })
+        .and_then(|rest| rest.trim().parse::<u64>().ok())
+        .expect("the joined outcome is rendered");
+    assert!(joined >= 2, "both living portals joined:\n{body}");
 
     sensor.stop().await;
     Ok(())
