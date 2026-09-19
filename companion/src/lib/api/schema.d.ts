@@ -3944,10 +3944,12 @@ export interface operations {
                 };
             };
             /**
-             * @description The suggestion exists and cannot be approved. Six situations,
-             *     six codes: each one is a different sentence for the user, and
+             * @description The suggestion exists and cannot be approved. Seven situations,
+             *     seven codes: each one is a different sentence for the user, and
              *     collapsing them would be the defect that cost this project seven
-             *     incidents in two days.
+             *     incidents in two days. Six are about the suggestion or the
+             *     sender's consent; the seventh, `trigger_has_no_room`, is about
+             *     the message it answers.
              *
              *     - `suggestion_expired` - its `expires_at` has passed. A stale
              *       suggestion cannot be approved late (the policy that sets it is
