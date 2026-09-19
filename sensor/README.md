@@ -30,6 +30,8 @@ The second is a device of the **owner's own account** (`SENSOR_OWNER_DEVICE_ACCE
 
 It joins **only** a room a bridge bot named in `SENSOR_BRIDGE_BOTS` invited it to. The inviter is the one authenticated fact in an invitation — the room id, the room's name and its `m.bridge` marker are all chosen by whoever sent it — and this device posts messages, so nothing else is enough.
 
+A join it cannot make is sorted by **what the homeserver answered**, never by how many times it has failed ([#237](https://github.com/linagora/twalk/issues/237)). A room every member has left — `M_UNKNOWN`, "no servers that are in the room" — is an **orphan** that nothing can make joinable again: it is said once, counted, and its invitation **rejected**, so the outcome is on the homeserver, a restart has nothing to retry, and the portal register reads it without a log. A refusal on the facts of the invitation — a ban, a room version — is said once and not asked again in this process, but the invitation is left where it is. Everything else — no answer, a server error, a rate limit — is asked again with backoff, five seconds doubling to ten minutes, never at sync frequency. `twalk_sensor_owner_device_invites_total{outcome}` counts all of it: `joined`, `refused` (not a portal), `failed` (one transient attempt) and `unjoinable` (one room, once).
+
 Both halves are unset-by-default, and the degradation is stated rather than implied. With no owner device the Sensor says so once at startup, naming #123, and then says per reply what the reply reached:
 
 | Posted by | Into | What the Sensor reports |

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use async_nats::jetstream::AckKind;
@@ -40,7 +40,7 @@ use twalk_sensor::bridge_bot::BridgeBots;
 use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
 use twalk_sensor::metrics::{DropReason, Metrics, OwnerDeviceInvite};
-use twalk_sensor::owner_device::Reach;
+use twalk_sensor::owner_device::{JoinAnswer, JoinFailure, JoinRetries, Reach};
 use twalk_sensor::{consent, network, normalize, outbound, owner_device};
 
 #[tokio::main]
@@ -1392,6 +1392,12 @@ async fn bring_up_owner_device(
 /// before retrying a failed one.
 const OWNER_DEVICE_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 const OWNER_DEVICE_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// The backoff of a portal join that failed for a reason that may clear
+/// (issue #237): the first retry after five seconds, doubling, never more than
+/// ten minutes apart. Joins are attempted after a sync, so the real wait is
+/// this or the next sync, whichever is later — never sync frequency.
+const OWNER_DEVICE_JOIN_RETRY_BASE: Duration = Duration::from_secs(5);
+const OWNER_DEVICE_JOIN_RETRY_CAP: Duration = Duration::from_secs(600);
 
 /// The **minimum** sync that makes `room.send` work with Megolm, and why it is
 /// the minimum.
@@ -1473,11 +1479,21 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
     // process; the bounded memory cost is one room id per invitation the owner
     // holds, which is the same order as the number the homeserver already keeps.
     let mut already_refused: HashSet<matrix_sdk::ruma::OwnedRoomId> = HashSet::new();
+    // And a join that failed is not asked again at sync frequency: a room the
+    // homeserver said can never be joined is asked once, one it could not
+    // answer for is asked again after a longer and longer wait (issue #237).
+    let mut retries = JoinRetries::new(OWNER_DEVICE_JOIN_RETRY_BASE, OWNER_DEVICE_JOIN_RETRY_CAP);
     loop {
         match client.sync_once(settings.clone()).await {
             Ok(_) => {
-                join_portal_invitations(&client, &bridge_bots, &metrics, &mut already_refused)
-                    .await;
+                join_portal_invitations(
+                    &client,
+                    &bridge_bots,
+                    &metrics,
+                    &mut already_refused,
+                    &mut retries,
+                )
+                .await;
                 metrics.record_owner_device_rooms(client.joined_rooms().len() as u64);
             }
             Err(error) => {
@@ -1503,8 +1519,20 @@ async fn join_portal_invitations(
     bridge_bots: &BridgeBots,
     metrics: &Metrics,
     already_refused: &mut HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    retries: &mut JoinRetries,
 ) {
-    for room in client.invited_rooms() {
+    let invited = client.invited_rooms();
+    // An invitation the homeserver no longer lists — withdrawn, or rejected
+    // below — is forgotten, so a fresh one to the same room is judged anew.
+    retries.keep_only(|room| {
+        invited
+            .iter()
+            .any(|invited| invited.room_id().as_str() == room)
+    });
+    for room in invited {
+        if !retries.is_due(room.room_id().as_str(), Instant::now()) {
+            continue;
+        }
         let inviter = match room.invite_details().await {
             Ok(invite) => invite.inviter_id.to_string(),
             Err(error) => {
@@ -1528,6 +1556,7 @@ async fn join_portal_invitations(
                     .map(|network| network.as_str());
                 match room.join().await {
                     Ok(()) => {
+                        retries.succeeded(room.room_id().as_str());
                         let joined = metrics.record_owner_device_invite(OwnerDeviceInvite::Joined);
                         info!(
                             room = %room.room_id(),
@@ -1539,13 +1568,37 @@ async fn join_portal_invitations(
                         );
                     }
                     Err(error) => {
-                        metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
-                        warn!(
-                            room = %room.room_id(),
-                            %inviter,
-                            %error,
-                            "the owner's device failed to join a portal; retrying on the next sync"
-                        );
+                        let answer = join_answer(&error);
+                        let failure = owner_device::join_failure(&answer);
+                        let failed_join = FailedJoin {
+                            room: &room,
+                            inviter: &inviter,
+                            network,
+                            answer: &answer,
+                        };
+                        match failure {
+                            JoinFailure::Transient => {
+                                let delay = retries.failed(room.room_id().as_str(), Instant::now());
+                                let attempts = retries.attempts(room.room_id().as_str());
+                                metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
+                                warn!(
+                                    room = %room.room_id(),
+                                    %inviter,
+                                    network,
+                                    status = answer.status,
+                                    errcode = answer.errcode.as_deref(),
+                                    message = %answer.message,
+                                    attempts,
+                                    retry_in_seconds = delay.as_secs(),
+                                    "the owner's device could not join a portal, for a reason \
+                                     that may clear; asking again later, not on the next sync"
+                                );
+                            }
+                            JoinFailure::Orphaned | JoinFailure::Refused => {
+                                retries.gave_up(room.room_id().as_str());
+                                say_unjoinable_once(failed_join, failure, metrics).await;
+                            }
+                        }
                     }
                 }
             }
@@ -1566,6 +1619,83 @@ async fn join_portal_invitations(
                 );
             }
         }
+    }
+}
+
+/// One portal join the owner's device could not make, and the facts the log
+/// line names about it.
+struct FailedJoin<'a> {
+    room: &'a Room,
+    inviter: &'a str,
+    network: Option<&'static str>,
+    answer: &'a JoinAnswer,
+}
+
+/// A portal the homeserver said can never be joined (issue #237): said once,
+/// counted under its own outcome, and — when the room is an orphan every
+/// member has left — its invitation **rejected**, so the outcome is recorded on
+/// the homeserver as the owner's `leave` there. A restart then has nothing to
+/// retry, and the register reads the fact without a log.
+///
+/// The invitation of a room refused for a reason this code cannot name as
+/// precisely is left where it is: not asked about again in this process, and
+/// not thrown away either.
+async fn say_unjoinable_once(failed: FailedJoin<'_>, failure: JoinFailure, metrics: &Metrics) {
+    let unjoinable = metrics.record_owner_device_invite(OwnerDeviceInvite::Unjoinable);
+    let invitation = if failure.rejects_the_invitation() {
+        match failed.room.leave().await {
+            Ok(()) => "rejected",
+            Err(error) => {
+                warn!(
+                    room = %failed.room.room_id(),
+                    %error,
+                    "could not reject the invitation to a portal that cannot be joined; it stays \
+                     pending, and is not asked about again until the Sensor restarts"
+                );
+                "left pending"
+            }
+        }
+    } else {
+        "left pending"
+    };
+    warn!(
+        room = %failed.room.room_id(),
+        inviter = %failed.inviter,
+        network = failed.network,
+        why = failure.as_str(),
+        status = failed.answer.status,
+        errcode = failed.answer.errcode.as_deref(),
+        message = %failed.answer.message,
+        invitation,
+        unjoinable,
+        "a portal the owner's device was invited to cannot be joined, so approved replies to \
+         that conversation cannot reach the contact; said once, not retried"
+    );
+}
+
+/// What the homeserver answered to a failed request, reduced to the facts
+/// `owner_device::join_failure` sorts on. No HTTP answer at all — the
+/// connection refused, timed out, dropped — is `status: None`.
+fn join_answer(error: &matrix_sdk::Error) -> JoinAnswer {
+    match error.as_client_api_error() {
+        Some(api) => {
+            let (errcode, message) = match &api.body {
+                matrix_sdk::ruma::api::error::ErrorBody::Standard(body) => {
+                    (Some(body.kind.errcode().to_string()), body.message.clone())
+                }
+                other => (None, format!("{other:?}")),
+            };
+            JoinAnswer {
+                status: Some(api.status_code.as_u16()),
+                errcode,
+                message,
+            }
+        }
+        None => JoinAnswer {
+            status: None,
+            errcode: None,
+            message: error.to_string(),
+        },
     }
 }
 

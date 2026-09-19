@@ -83,6 +83,7 @@ pub struct Metrics {
     owner_device_invites_joined: AtomicU64,
     owner_device_invites_refused: AtomicU64,
     owner_device_invites_failed: AtomicU64,
+    owner_device_invites_unjoinable: AtomicU64,
     /// Approved replies the Sensor posted, by what they reached (issue #216).
     ///
     /// This is the count behind the sentence the approval screen was getting
@@ -124,8 +125,14 @@ pub enum OwnerDeviceInvite {
     /// Not a portal of a configured bridge — the inviter is somebody else, or
     /// the deployment named no bridge bots at all.
     Refused,
-    /// A portal invitation the join request itself failed on.
+    /// A portal invitation the join request itself failed on, for a reason
+    /// that may clear: counted per attempt, each one after a longer wait.
     Failed,
+    /// A portal invitation the homeserver answered can never be accepted — a
+    /// room every member has left, a ban — said once and not asked again
+    /// (issue #237). The orphan's invitation is rejected, so the owner's
+    /// membership on the homeserver records the outcome.
+    Unjoinable,
 }
 
 impl OwnerDeviceInvite {
@@ -135,6 +142,7 @@ impl OwnerDeviceInvite {
             Self::Joined => "joined",
             Self::Refused => "refused",
             Self::Failed => "failed",
+            Self::Unjoinable => "unjoinable",
         }
     }
 }
@@ -167,6 +175,7 @@ impl Metrics {
             owner_device_invites_joined: AtomicU64::new(0),
             owner_device_invites_refused: AtomicU64::new(0),
             owner_device_invites_failed: AtomicU64::new(0),
+            owner_device_invites_unjoinable: AtomicU64::new(0),
             replies_reaching_contact: AtomicU64::new(0),
             replies_reaching_nobody: AtomicU64::new(0),
         }
@@ -264,6 +273,7 @@ impl Metrics {
             OwnerDeviceInvite::Joined => &self.owner_device_invites_joined,
             OwnerDeviceInvite::Refused => &self.owner_device_invites_refused,
             OwnerDeviceInvite::Failed => &self.owner_device_invites_failed,
+            OwnerDeviceInvite::Unjoinable => &self.owner_device_invites_unjoinable,
         };
         counter.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -371,6 +381,10 @@ impl Metrics {
                 &self.owner_device_invites_refused,
             ),
             (OwnerDeviceInvite::Failed, &self.owner_device_invites_failed),
+            (
+                OwnerDeviceInvite::Unjoinable,
+                &self.owner_device_invites_unjoinable,
+            ),
         ] {
             out.push_str(&format!(
                 "twalk_sensor_owner_device_invites_total{{outcome=\"{}\"}} {}\n",
@@ -565,7 +579,7 @@ mod tests {
                 "{body}"
             );
         }
-        for outcome in ["joined", "refused", "failed"] {
+        for outcome in ["joined", "refused", "failed", "unjoinable"] {
             assert!(
                 body.contains(&format!(
                     "twalk_sensor_owner_device_invites_total{{outcome=\"{outcome}\"}} 0\n"
