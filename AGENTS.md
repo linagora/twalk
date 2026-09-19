@@ -21,6 +21,8 @@ As of 2026-09-17 the repository contains documentation, the complete event contr
 
 ## Build and test commands
 
+Run these to find out whether your change works. They are not the verification — a pull request gets its verdict from the `verified` check (see "Continuous integration" below), and "I ran the suites in my worktree" is evidence for a reviewer rather than a substitute for it. Two red-`main` incidents came from a shared change merged on the strength of exactly that sentence.
+
 Requires Docker (the harness brings up its own Synapse + NATS stack) and a Rust toolchain.
 
 Four Cargo packages, each with its own lockfile and target directory — there is no workspace, so build and test each from its own directory:
@@ -69,6 +71,16 @@ suite).
 
 The Sensor and Hermes suites bring up the same test stack (one Synapse, one NATS JetStream), each on its own bus subjects; `TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT` and `TWALK_TEST_NATS_PORT` move a stack aside for a parallel worktree. The Hermes persona tests take that further, because a durable consumer over the shared `twalk.>` history would replay every message another suite ever published: each gives the persona a JetStream stream and a bus subject prefix of its own run (`TWALK_BUS_SUBJECT_PREFIX`, `twalk` in every deployment), and deletes the stream and the container when it is done. The Companion Gateway's suite uses the same stack: real Synapse mints the OpenID tokens its sign-in tests need and answers the admin registration call bootstrap relays (the test Synapse serves the `openid` resource for the first), and its consent tests publish to the same NATS JetStream, reading back the events they caused by the ids the write API returned. Its process-boundary tests ask the kernel for a free port, and its pending-contact suite publishes contract-valid inbound events onto the same JetStream and reads the list back over HTTP; its deployment test uses the deploy-stack variables (`TWALK_DEPLOY_TEST_STACK`, `TWALK_DEPLOY_TEST_GATEWAY_PORT`, `TWALK_DEPLOY_TEST_SYNAPSE_PORT`, `TWALK_DEPLOY_TEST_NATS_PORT`) the Sensor's deployment test established — its bootstrap test is the one that needs the bus, since it asserts the invited room's traffic on it. `sensor/tests/bridges_deployment.rs` runs the reference deployment a third time, with the `bridges` profile on and all three bridges up, under its own `TWALK_BRIDGES_TEST_*` project, ports and teardown flag; since #172 it also runs it a fourth way, with **no** bridge variable set at all (`TWALK_NO_BRIDGES_TEST_*`, torn down every run), because a stack that runs no bridge must never be asked for a bridge token — its module docs list them. `companion-gateway/tests/portals_deployment.rs` runs it again on a stack of its own (`TWALK_PORTALS_TEST_STACK`, ports 17309/17319/17329, `TWALK_PORTALS_TEST_KEEP=1` to keep it): the whole deployment comes up first, a portal room is built afterwards, the user chooses it, the **real Sensor** joins on the bridge bot's invitation and the conversation reaches the bus — and it tears its stack and its per-stack images down at the end of every run, passing or failing. `hermes/tests/full_loop.rs` runs it a fourth time, because the full loop needs a real Sensor to post the approved reply, a real Gateway to serve the approval and — since #158 — the deployment's own Hermes to produce the suggestion: its own `TWALK_LOOP_TEST_STACK` project and ports 19508/19518/19522 (`TWALK_LOOP_TEST_SYNAPSE_PORT`, `TWALK_LOOP_TEST_GATEWAY_PORT`, `TWALK_LOOP_TEST_NATS_PORT`), and — unlike the other three — it tears its stack and its per-stack images down at the end of every run, passing or failing (`TWALK_LOOP_TEST_KEEP=1` keeps them).
 
+## Continuous integration
+
+A pull request is verified by `.github/workflows/pull-request.yml` and the check to look at is **`verified`**. Three things to know before reading a red one, with the rest in `docs/agents/continuous-integration.md`:
+
+- **What runs is a function of what changed**, and it is decided by `.github/ci/suites.json` — never by a `paths:` filter in a workflow. A change to `contracts/`, `tests/harness/` or `companion-gateway/openapi.yaml` runs the **consumers'** suites, and `.github/ci/test_selection.py` derives those consumers from the repository's own dependency graph rather than trusting the table, so a fourth consumer of the harness fails the routing check until it is routed. Adding a suite, or a Rust test file, means editing that table; the same test fails if you do not.
+- **The deployment suites are advisory.** `sensor-deployment`, `gateway-deployment`, `hermes-full-loop` and `companion-e2e-stack` do not block a merge: they run nightly on `main`, and on a pull request only when it carries the **`ci:deployment`** label. Add the label when you touch `deploy/docker-compose/` or `bridges/`.
+- **No suite with an open flake ticket is in the required tier** (#148, #186), and none is promoted while that ticket is open. So a red required check means something — do not re-run it until it passes.
+
+The stack suites need a self-hosted runner, named by the repository variable `TWALK_STACK_RUNNER`. Until it is set they report that they did not run and print the command to type instead. Their ports and compose projects are all set in one place, `.github/ci/stack-env.sh`, in the 18300–18499 band, and `.github/ci/stack-teardown.sh` runs after every one of them, passing or failing.
+
 ## Code organization
 
 Monorepo with 13 top-level directories — see the "Repository layout" section of `README.md`. Stacks: Rust for `sensor/`, `hermes/` and `companion-gateway/`, SvelteKit (static export) for `companion/`, Python for `sdk/python/` and the personas in `hermes/personas/` (ADR 0008: the runtime is Rust, personas are separate processes and Python's LLM ergonomics stay inside them). The Sensor test harness speaks the Matrix client-server API over plain HTTP — the HTTP `Bot` helpers deliberately do not depend on matrix-sdk; the exception is the `CryptoBot` helper (`sensor/tests/harness/crypto.rs`), which runs matrix-sdk with its crypto stack because raw HTTP cannot Megolm-encrypt.
@@ -100,3 +112,7 @@ The five canonical roles, each label named after its role, plus this repo's own 
 ### Domain docs
 
 Single-context: `CONTEXT.md` at the root, ADRs in `docs/architecture/adr/`. See `docs/agents/domain.md`.
+
+### Continuous integration
+
+One routing table (`.github/ci/suites.json`) and one test that checks it against the repository. See `docs/agents/continuous-integration.md`.

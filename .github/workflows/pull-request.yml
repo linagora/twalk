@@ -1,0 +1,382 @@
+# The merge condition (issue #183).
+#
+# Before this file, a pull request got its verdict from whichever agent or human
+# happened to run the suites in their own worktree and say so in prose. That
+# mostly worked, and twice it did not: `main` went red because a change to a
+# shared path merged after only its own component's suite had run.
+#
+# Three things about the shape, each measured rather than assumed — the numbers
+# are in the pull request that added this file:
+#
+#   - The **hosted** runners do all the work that fits on them. A GitHub-hosted
+#     runner gives 2 CPUs and ~14 GB of disk; `cargo build --tests` for the
+#     Sensor alone produces a 17 GB target directory at this project's default
+#     debug settings, so the Rust suites do not fit as they stand. Dropping the
+#     debug info a CI run never reads is what makes the harness's own units fit;
+#     the suites that also need Docker still do not.
+#   - The **stack** suites need a runner with Docker, the images cached and room
+#     to build. They run on whatever `vars.TWALK_STACK_RUNNER` names, and until
+#     that variable is set they report, loudly, that they did not run and what
+#     to type instead — so this workflow is useful on the day it merges rather
+#     than on the day somebody provisions a host.
+#   - **What runs is a function of what changed**, and the rule lives in
+#     `.github/ci/suites.json` — not in this file's `paths:` filters, which is
+#     deliberate. `.github/ci/test_selection.py` derives the consumers of
+#     `contracts/`, `tests/harness/` and `companion-gateway/openapi.yaml` from
+#     the repository's own dependency graph and fails when the table does not
+#     route them. A `paths:` filter here could not be tested that way.
+#
+# `verified` is the check to require on `main`. It always reports, so a pull
+# request that legitimately selects nothing is not left waiting for a check that
+# will never arrive.
+#
+# Every interpolation that reaches a shell goes through `env:` first. On a
+# self-hosted runner that matters more than usual, and the pull request says why
+# it is not the whole answer.
+
+name: pull request
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      run_advisory:
+        description: 'also run the advisory (deployment) suites'
+        type: boolean
+        default: false
+
+concurrency:
+  # One run per pull request. A superseded push is cancelled rather than left to
+  # compete with its own replacement for the stack runner's ports.
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The check that the routing rule holds. Unconditional, hosted, well under a
+  # second, no dependencies: the one that can be required whatever else skips.
+  # ---------------------------------------------------------------------------
+  routing:
+    name: routing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: the routing table against the repository
+        working-directory: .github/ci
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+
+  # ---------------------------------------------------------------------------
+  # Which suites this change needs. The answer comes from suites.json through
+  # routing.py; nothing in this file knows a suite's name or its command.
+  # ---------------------------------------------------------------------------
+  select:
+    name: select
+    runs-on: ubuntu-latest
+    outputs:
+      hosted: ${{ steps.pick.outputs.hosted }}
+      stack: ${{ steps.pick.outputs.stack }}
+      advisory: ${{ steps.pick.outputs.advisory }}
+      any_hosted: ${{ steps.pick.outputs.any_hosted }}
+      any_stack: ${{ steps.pick.outputs.any_stack }}
+      any_advisory: ${{ steps.pick.outputs.any_advisory }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: what changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE_SHA" ]; then
+            # workflow_dispatch, or anything without a base: take the whole tree,
+            # which selects everything. Wrong in the expensive direction only.
+            git ls-files >changed.txt
+          else
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" >changed.txt
+          fi
+          echo '--- changed paths'
+          cat changed.txt
+
+      - name: which suites
+        id: pick
+        run: python3 .github/ci/plan.py changed.txt
+
+  # ---------------------------------------------------------------------------
+  # Required, and free: everything that needs no Docker and no stack.
+  # ---------------------------------------------------------------------------
+  hosted-suites:
+    name: ${{ matrix.id }}
+    needs: select
+    if: needs.select.outputs.any_hosted == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.hosted) }}
+    env:
+      SUITE_ID: ${{ matrix.id }}
+      SUITE_WHAT: ${{ matrix.what }}
+      SUITE_RUN: ${{ matrix.run }}
+      SUITE_WHY: ${{ matrix.why }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: why this suite is running
+        run: |
+          printf '%s — %s\n' "$SUITE_ID" "$SUITE_WHAT"
+          printf 'selected because: %s\n' "$SUITE_WHY"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: contains(matrix.needs, 'rust')
+
+      - uses: actions/setup-node@v4
+        if: contains(matrix.needs, 'node')
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ${{ matrix.workdir }}/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
+        if: contains(matrix.needs, 'rust')
+        with:
+          workspaces: ${{ matrix.workdir }}
+
+      - name: a browser for Playwright
+        if: contains(matrix.needs, 'playwright')
+        working-directory: ${{ matrix.workdir }}
+        run: npm ci && npx playwright install --with-deps chromium
+
+      - name: run
+        working-directory: ${{ matrix.workdir }}
+        env:
+          # Measured: the Sensor's test build is 17 GB of target directory at
+          # this project's default debug settings, and a hosted runner has about
+          # 14 GB. Dropping debug info a CI run never reads is the difference
+          # between fitting and not. Never set for a local run — a developer
+          # wants their backtraces.
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+          CARGO_PROFILE_TEST_DEBUG: line-tables-only
+          CARGO_TERM_COLOR: always
+          CI: '1'
+        run: bash -eo pipefail -c "$SUITE_RUN"
+
+      - uses: actions/upload-artifact@v4
+        if: failure() && contains(matrix.needs, 'playwright')
+        with:
+          name: playwright-report-${{ matrix.id }}
+          path: ${{ matrix.workdir }}/playwright-report
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Required, and not free: the suites that raise a Synapse and a NATS.
+  #
+  # `max-parallel: 1`, and the runner is registered with one job slot. Measured:
+  # five concurrent Rust builds took this project's reference host to a load
+  # average of 939 with 30 GB of swap exhausted, and that host runs the owner's
+  # production services. A runner that can take the machine down is not a win.
+  # ---------------------------------------------------------------------------
+  stack-suites:
+    name: ${{ matrix.id }}
+    needs: select
+    if: needs.select.outputs.any_stack == 'true'
+    runs-on: ${{ vars.TWALK_STACK_RUNNER || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.select.outputs.stack) }}
+    env:
+      SUITE_ID: ${{ matrix.id }}
+      SUITE_WHAT: ${{ matrix.what }}
+      SUITE_RUN: ${{ matrix.run }}
+      SUITE_WHY: ${{ matrix.why }}
+      SUITE_WORKDIR: ${{ matrix.workdir }}
+      HAVE_RUNNER: ${{ vars.TWALK_STACK_RUNNER != '' }}
+    steps:
+      # Fails rather than passes, and that is the whole point. A job that reported
+      # success here would fold "the Sensor's suite passed" and "the Sensor's
+      # suite did not run" into one green tick — this project's signature defect,
+      # committed by the thing built to prevent it. `verified-stack` carries this
+      # result and is a *separate* check from `verified` for the same reason.
+      - name: no stack runner is configured
+        if: vars.TWALK_STACK_RUNNER == ''
+        run: |
+          {
+            printf '### `%s` did not run\n\n%s\n\n' "$SUITE_ID" "$SUITE_WHAT"
+            printf 'It needs a runner with Docker, this project'"'"'s images cached and room\n'
+            printf 'for a build. Set the repository variable `TWALK_STACK_RUNNER` to that\n'
+            printf 'runner'"'"'s label to enable it.\n\n'
+            printf 'Until then, by hand: `cd %s && %s`\n' "$SUITE_WORKDIR" "$SUITE_RUN"
+          } >>"$GITHUB_STEP_SUMMARY"
+          printf '::error title=%s did not run::no stack runner configured (repository variable TWALK_STACK_RUNNER)\n' "$SUITE_ID"
+          exit 1
+
+      - uses: actions/checkout@v4
+        if: env.HAVE_RUNNER == 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.HAVE_RUNNER == 'true' && contains(matrix.needs, 'rust')
+
+      - uses: actions/setup-node@v4
+        if: env.HAVE_RUNNER == 'true' && contains(matrix.needs, 'node')
+        with:
+          node-version: 22
+
+      - name: ports and compose projects for this run
+        if: env.HAVE_RUNNER == 'true'
+        run: bash .github/ci/stack-env.sh >>"$GITHUB_ENV"
+
+      - name: run
+        if: env.HAVE_RUNNER == 'true'
+        working-directory: ${{ matrix.workdir }}
+        env:
+          # Four, not twenty. The host this runs on is somebody's server.
+          CARGO_BUILD_JOBS: '4'
+          CARGO_TERM_COLOR: always
+          CI: '1'
+        run: bash -eo pipefail -c "$SUITE_RUN"
+
+      - name: leave nothing behind
+        if: env.HAVE_RUNNER == 'true' && always()
+        run: bash .github/ci/stack-teardown.sh
+
+  # ---------------------------------------------------------------------------
+  # The deployment tier. Measured as the expensive one, so on a pull request it
+  # is advisory and opt-in: it runs when the pull request carries the
+  # `ci:deployment` label or is dispatched by hand, and nightly on `main`
+  # regardless. Its result never blocks a merge — the pull request argues why,
+  # and says what that leaves uncovered.
+  # ---------------------------------------------------------------------------
+  advisory-suites:
+    name: ${{ matrix.id }} (advisory)
+    needs: select
+    if: >-
+      needs.select.outputs.any_advisory == 'true' &&
+      (
+        inputs.run_advisory ||
+        contains(github.event.pull_request.labels.*.name, 'ci:deployment')
+      )
+    runs-on: ${{ vars.TWALK_STACK_RUNNER || 'ubuntu-latest' }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.select.outputs.advisory) }}
+    env:
+      SUITE_ID: ${{ matrix.id }}
+      SUITE_RUN: ${{ matrix.run }}
+      HAVE_RUNNER: ${{ vars.TWALK_STACK_RUNNER != '' }}
+    steps:
+      - name: no stack runner is configured
+        if: vars.TWALK_STACK_RUNNER == ''
+        run: printf '::warning title=%s was not run::no stack runner configured\n' "$SUITE_ID"
+
+      - uses: actions/checkout@v4
+        if: env.HAVE_RUNNER == 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.HAVE_RUNNER == 'true' && contains(matrix.needs, 'rust')
+
+      - uses: actions/setup-node@v4
+        if: env.HAVE_RUNNER == 'true' && contains(matrix.needs, 'node')
+        with:
+          node-version: 22
+
+      - name: ports and compose projects for this run
+        if: env.HAVE_RUNNER == 'true'
+        run: bash .github/ci/stack-env.sh >>"$GITHUB_ENV"
+
+      - name: run
+        if: env.HAVE_RUNNER == 'true'
+        working-directory: ${{ matrix.workdir }}
+        env:
+          CARGO_BUILD_JOBS: '4'
+          CARGO_TERM_COLOR: always
+          CI: '1'
+        run: bash -eo pipefail -c "$SUITE_RUN"
+
+      - name: leave nothing behind
+        if: env.HAVE_RUNNER == 'true' && always()
+        run: bash .github/ci/stack-teardown.sh
+
+  # ---------------------------------------------------------------------------
+  # Two aggregate checks, because there are two facts and this project's most
+  # repeated defect is two facts sharing one signal.
+  #
+  # Both always report. A matrix job that is skipped never reports at all, and a
+  # required check that never reports blocks a pull request for ever, so a change
+  # that legitimately selects nothing has to get a green from somewhere.
+  #
+  #   `verified`        — what CI can verify today, on runners that exist:
+  #                       the routing rule, the Python SDK, the shared harness's
+  #                       units, and the Companion's Node-only suite. **Require
+  #                       this one on `main` now.**
+  #   `verified-stack`  — the suites that need a Docker host: the Sensor, the
+  #                       Gateway and Hermes at their process boundaries. Red
+  #                       until `vars.TWALK_STACK_RUNNER` names a runner, on
+  #                       purpose. **Require it the day that variable is set**,
+  #                       and until then read it as "nothing has run these".
+  #
+  # Folding the second into the first would make a green `verified` mean either
+  # "three components passed" or "three components were never tested", which is
+  # the failure mode the whole workflow exists to prevent.
+  # ---------------------------------------------------------------------------
+  verified:
+    name: verified
+    if: always()
+    needs: [routing, select, hosted-suites]
+    runs-on: ubuntu-latest
+    steps:
+      - name: the verdict
+        env:
+          ROUTING: ${{ needs.routing.result }}
+          SELECT: ${{ needs.select.result }}
+          HOSTED: ${{ needs.hosted-suites.result }}
+        run: |
+          fail=0
+          for pair in "routing:$ROUTING" "select:$SELECT" "hosted suites:$HOSTED"; do
+            name=${pair%%:*}; result=${pair##*:}
+            case "$result" in
+              success|skipped) printf 'ok       %s (%s)\n' "$name" "$result" ;;
+              *)               printf 'NOT OK   %s (%s)\n' "$name" "$result"; fail=1 ;;
+            esac
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo '::error title=verification failed::a suite this change selected did not pass'
+            exit 1
+          fi
+          echo 'every hosted suite this change selected passed, or was not selected.'
+          echo 'the stack suites are verified-stack, which is a separate check.'
+
+  verified-stack:
+    name: verified-stack
+    if: always()
+    needs: [select, stack-suites]
+    runs-on: ubuntu-latest
+    steps:
+      - name: the verdict
+        env:
+          SELECTED: ${{ needs.select.outputs.any_stack }}
+          STACK: ${{ needs.stack-suites.result }}
+          RUNNER: ${{ vars.TWALK_STACK_RUNNER }}
+        run: |
+          if [ "$SELECTED" != 'true' ]; then
+            echo 'this change selected no suite that needs a stack.'
+            exit 0
+          fi
+          if [ -z "$RUNNER" ]; then
+            echo '::error title=the stack suites did not run::set the repository variable TWALK_STACK_RUNNER to a runner with Docker'
+            echo 'This change selected suites that need a Docker host, and no runner is'
+            echo 'configured. They did not run. Nothing here says they would pass.'
+            exit 1
+          fi
+          case "$STACK" in
+            success) echo "every stack suite this change selected passed on $RUNNER" ;;
+            *)       echo "::error title=a stack suite failed::stack suites: $STACK"; exit 1 ;;
+          esac
