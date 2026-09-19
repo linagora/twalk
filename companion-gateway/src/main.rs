@@ -14,6 +14,7 @@ use twalk_companion_gateway::bridge_status::{reconcile, Statuses};
 use twalk_companion_gateway::config::{Config, Consent};
 use twalk_companion_gateway::consent_snapshot::Snapshots;
 use twalk_companion_gateway::contacts::{project_until_shutdown, Contacts};
+use twalk_companion_gateway::hermes_answer::Answers;
 use twalk_companion_gateway::http::{router, Gateway};
 use twalk_companion_gateway::matrix_openid::Verifier;
 use twalk_companion_gateway::metrics::Metrics;
@@ -142,7 +143,7 @@ async fn main() -> Result<()> {
     // and one bus: the outbox that publishes decisions (#49) and the
     // projection that consumes the inbound stream to know who is waiting for
     // one (#54).
-    let (consent, contacts, approvals, suggestions) = match &config.consent {
+    let (consent, contacts, approvals, suggestions, answers) = match &config.consent {
         Some(consent) => {
             let (store, outbox, owner) = open_consent(consent, &metrics)?;
             tokio::spawn(publish_until_shutdown(
@@ -197,11 +198,38 @@ async fn main() -> Result<()> {
                 lookup_window = config.approval_lookup_window,
                 "suggestion reads are on: GET /api/suggestions projects the bus — nothing is                  stored, and the answer says how far back it looked"
             );
+            // Hermes's answers (ticket #206, ADR 0032). Built on the
+            // approval half rather than beside it: the trigger lookup, the
+            // consent read at that moment, the refusal vocabulary and the
+            // in-request publish are the same, and two implementations of
+            // any of them would be two vocabularies for one fact.
+            let answers = match &config.hermes_answers {
+                Some(seam) => {
+                    info!(
+                        hermes_domain = %seam.domain,
+                        suggestion_ttl_seconds = seam.suggestion_ttl_seconds,
+                        "the seam to Hermes is on: POST {} turns a signed answer into a \
+                         persona.suggest.produced, refused if the sender's consent is no longer \
+                         granted at that moment and refused if the answer names no language",
+                        twalk_companion_gateway::hermes_answer::ANSWER_PATH
+                    );
+                    Some(Arc::new(Answers::new(
+                        approvals.clone(),
+                        metrics.clone(),
+                        seam.secret.clone(),
+                        seam.domain.clone(),
+                        seam.suggestion_ttl_seconds,
+                        std::time::SystemTime::now,
+                    )))
+                }
+                None => None,
+            };
             (
                 Some(outbox),
                 Some(projection),
                 Some(approvals),
                 Some(suggestions),
+                answers,
             )
         }
         None => {
@@ -214,7 +242,7 @@ async fn main() -> Result<()> {
                      is read from the bus and the reply is published on it"
                 );
             }
-            (None, None, None, None)
+            (None, None, None, None, None)
         }
     };
 
@@ -456,7 +484,8 @@ async fn main() -> Result<()> {
             .with_approvals(approvals)
             .with_suggestions(suggestions)
             .with_settings(settings)
-            .with_portals(portals.clone()),
+            .with_portals(portals.clone())
+            .with_answers(answers),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming

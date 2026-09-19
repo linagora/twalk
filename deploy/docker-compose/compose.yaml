@@ -406,6 +406,20 @@ services:
       # the /metrics counts of observed and unobserved conversations are —
       # GET /api/portals always reads the homeserver there and then.
       GATEWAY_PORTAL_REFRESH_SECONDS: ${GATEWAY_PORTAL_REFRESH_SECONDS:-}
+      # The seam to Hermes, the Gateway's half (#206, ADR 0032): the secret
+      # Hermes's outbound hook signs each answer with, and the domain a
+      # suggestion published from one names its persona under — the same
+      # value HERMES_DOMAIN below. Empty on both means this deployment has
+      # no seam, and POST /_twalk/hermes/answers says so rather than
+      # refusing as though the answer were wrong. Set, the secret must be
+      # at least 32 characters or the Gateway refuses to start.
+      GATEWAY_HERMES_ANSWER_SECRET: ${GATEWAY_HERMES_ANSWER_SECRET:-}
+      GATEWAY_HERMES_DOMAIN: ${GATEWAY_HERMES_DOMAIN:-${HERMES_DOMAIN:-}}
+      # How long a suggestion the Gateway publishes stays approvable. The
+      # same window HERMES_SUGGESTION_TTL_SECONDS gives the personas, and
+      # the same default (an hour) — a suggestion that came through Hermes
+      # must not age differently from one a persona drafted itself (#22).
+      GATEWAY_SUGGESTION_TTL_SECONDS: ${GATEWAY_SUGGESTION_TTL_SECONDS:-${HERMES_SUGGESTION_TTL_SECONDS:-}}
       # The model and the language (ticket #98): the LLM endpoint credential
       # as a FILE, which wins over anything the Companion writes, so a
       # production stack can lock the credential down while the model name
@@ -616,6 +630,24 @@ services:
       # personas then answer in each message's own language and say so in
       # their logs.
       HERMES_USER_LANGUAGE: ${HERMES_USER_LANGUAGE:-}
+      # The seam to Hermes, the persona's half (#206, ADR 0032): the URL of
+      # one of Hermes's webhook routes and the secret a persona signs each
+      # wake with, injected into every persona as TWALK_HERMES_WEBHOOK_URL
+      # and TWALK_HERMES_WEBHOOK_SECRET. Empty is a deployment with no seam,
+      # which is what this file has always described: the personas then
+      # reason with the model endpoint above and nothing leaves the
+      # deployment. A URL with no secret is a startup refusal, because
+      # Hermes refuses a route that has none.
+      #
+      # An `http://` URL is refused by the persona unless
+      # HERMES_WEBHOOK_ALLOW_INSECURE_URL says otherwise: the HMAC
+      # authenticates the sender and not the content, so plaintext gives the
+      # user's messages no confidentiality at all, and "both ends are on one
+      # host today" is a decision somebody has to make rather than a default.
+      HERMES_WEBHOOK_URL: ${HERMES_WEBHOOK_URL:-}
+      HERMES_WEBHOOK_SECRET: ${HERMES_WEBHOOK_SECRET:-}
+      HERMES_WEBHOOK_TIMEOUT_SECONDS: ${HERMES_WEBHOOK_TIMEOUT_SECONDS:-}
+      HERMES_WEBHOOK_ALLOW_INSECURE_URL: ${HERMES_WEBHOOK_ALLOW_INSECURE_URL:-}
       HERMES_LOG_LEVEL: ${HERMES_LOG_LEVEL:-info}
       # The personas' own level: debugging a persona should not make the
       # supervisor noisy too.

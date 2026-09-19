@@ -110,7 +110,7 @@
 			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, approvals, suggestions, settings, the portal register, and the OpenAPI description against the routes it serves.",
 			"component": "companion-gateway",
 			"workdir": "companion-gateway",
-			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test openapi --test pending --test portals --test service --test settings --test signin --test suggestions",
+			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test hermes_answers --test openapi --test pending --test portals --test service --test settings --test signin --test suggestions",
 			"targets": [
 				"approvals",
 				"bootstrap",
@@ -118,6 +118,7 @@
 				"bridges",
 				"consent",
 				"consent_snapshot",
+				"hermes_answers",
 				"openapi",
 				"pending",
 				"portals",
@@ -146,9 +147,10 @@
 			"what": "The Hermes runtime and the reference persona at their process boundaries: the persona container against the bus and the stub LLM, the runtime starting it, activation, the suggestion policy, the reasoning budget, the language fallback, and the settings the runtime reads from the Gateway.",
 			"component": "hermes",
 			"workdir": "hermes",
-			"run": "cargo test --lib --test assistant --test language_fallback --test reasoning_budget --test runtime_lifecycle --test runtime_settings --test smoke --test suggestion",
+			"run": "cargo test --lib --test assistant --test hermes_seam --test language_fallback --test reasoning_budget --test runtime_lifecycle --test runtime_settings --test smoke --test suggestion",
 			"targets": [
 				"assistant",
+				"hermes_seam",
 				"language_fallback",
 				"reasoning_budget",
 				"runtime_lifecycle",

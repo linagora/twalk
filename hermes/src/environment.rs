@@ -57,6 +57,21 @@ pub const SUGGESTION_TTL_SECONDS: &str = "TWALK_SUGGESTION_TTL_SECONDS";
 /// it from the Gateway also opens the consent snapshot.
 pub const USER_LANGUAGE: &str = "TWALK_USER_LANGUAGE";
 pub const LOG_LEVEL: &str = "TWALK_LOG_LEVEL";
+/// The seam to Hermes (ADR 0032, ticket #206). Four names in the closed list,
+/// and the second of them is a **credential** — the first this list has carried
+/// besides the model endpoint's key.
+///
+/// That is worth stating rather than passing over. The rule this module keeps
+/// is not "a persona holds no secret"; it is that a persona holds no secret
+/// belonging to the *runtime*, and above all not the Gateway's service token,
+/// which opens the consent snapshot. This one is the persona's own credential
+/// for its own outbound call, it authenticates that persona to one Hermes
+/// route, and it opens nothing on this deployment. A persona that could not
+/// hold it could not sign a wake.
+pub const HERMES_WEBHOOK_URL: &str = "TWALK_HERMES_WEBHOOK_URL";
+pub const HERMES_WEBHOOK_SECRET: &str = "TWALK_HERMES_WEBHOOK_SECRET";
+pub const HERMES_TIMEOUT_SECONDS: &str = "TWALK_HERMES_TIMEOUT_SECONDS";
+pub const HERMES_ALLOW_INSECURE_URL: &str = "TWALK_HERMES_ALLOW_INSECURE_URL";
 
 /// Everything one persona process is started with, in a stable order.
 ///
@@ -114,6 +129,22 @@ pub fn persona_environment(
     if let Some(language) = &settings.user_language {
         environment.push((USER_LANGUAGE.to_owned(), language.clone()));
     }
+    // The seam to Hermes (ADR 0032). Left out entirely when unset, like every
+    // optional value above: a persona handed no URL reasons with the model
+    // endpoint and speaks to nothing outside the deployment, which is a
+    // different state from one handed a URL it cannot reach.
+    if let Some(url) = &config.hermes_webhook_url {
+        environment.push((HERMES_WEBHOOK_URL.to_owned(), url.clone()));
+        if let Some(secret) = &config.hermes_webhook_secret {
+            environment.push((HERMES_WEBHOOK_SECRET.to_owned(), secret.clone()));
+        }
+        if let Some(timeout) = &config.hermes_timeout_seconds {
+            environment.push((HERMES_TIMEOUT_SECONDS.to_owned(), timeout.clone()));
+        }
+        if let Some(allowed) = &config.hermes_allow_insecure_url {
+            environment.push((HERMES_ALLOW_INSECURE_URL.to_owned(), allowed.clone()));
+        }
+    }
     environment
 }
 
@@ -148,6 +179,10 @@ mod tests {
             persona_log_level: "debug".to_owned(),
             suggestion_ttl_seconds: Some("900".to_owned()),
             user_language: None,
+            hermes_webhook_url: None,
+            hermes_webhook_secret: None,
+            hermes_timeout_seconds: None,
+            hermes_allow_insecure_url: None,
             restart: RestartPolicy::default(),
             shutdown_grace: Duration::from_secs(10),
             env_passthrough: vec!["PATH".to_owned()],
@@ -304,6 +339,57 @@ mod tests {
                 value(&environment, absent),
                 None,
                 "{absent} must be absent, not empty"
+            );
+        }
+    }
+
+    #[test]
+    fn the_seam_to_hermes_crosses_and_the_gateways_token_still_does_not() {
+        let mut config = config();
+        config.hermes_webhook_url =
+            Some("https://hermes.example.org:8644/webhooks/twalk-messages".to_owned());
+        config.hermes_webhook_secret = Some("a-secret-only-that-route-holds".to_owned());
+        let environment = persona_environment(&config, &settings(), &persona());
+        let held = |name: &str| {
+            environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            held(HERMES_WEBHOOK_URL).as_deref(),
+            Some("https://hermes.example.org:8644/webhooks/twalk-messages")
+        );
+        assert_eq!(
+            held(HERMES_WEBHOOK_SECRET).as_deref(),
+            Some("a-secret-only-that-route-holds")
+        );
+        // The rule this module keeps, restated against the one change that
+        // could have broken it: the persona gains its own outbound credential
+        // and still not the runtime's. The Gateway's service token opens the
+        // consent snapshot — the list of every contact — and nothing a persona
+        // does needs it (ADR 0015).
+        for (name, value) in &environment {
+            assert!(
+                !value.contains("a-service-token-no-persona-may-hold"),
+                "{name} carries the Gateway's service token"
+            );
+        }
+    }
+
+    #[test]
+    fn no_seam_puts_no_seam_variable_in_the_environment() {
+        let environment = persona_environment(&config(), &settings(), &persona());
+        for name in [
+            HERMES_WEBHOOK_URL,
+            HERMES_WEBHOOK_SECRET,
+            HERMES_TIMEOUT_SECONDS,
+            HERMES_ALLOW_INSECURE_URL,
+        ] {
+            assert!(
+                !environment.iter().any(|(key, _)| key == name),
+                "{name} is set on a deployment that configured no seam: unset and \
+                 \"\" are different states to the SDK"
             );
         }
     }

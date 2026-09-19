@@ -19,6 +19,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from .language import USER_LANGUAGE_VARIABLE
 from .language import parse as parse_language
 from .policy import DEFAULT_SUGGESTION_TTL_SECONDS, SuggestionPolicy
+from .webhook import HermesSeam, SeamError
 
 #: ``data.persona_id`` and the last segment of ``source`` in every
 #: ``persona.*`` schema.
@@ -122,6 +123,13 @@ class Config:
     #: a persona's own judgement: the window the user gets to approve in is
     #: the operator's to set, while what to suggest is the persona's.
     suggestion: SuggestionPolicy = field(default_factory=SuggestionPolicy)
+    #: The seam to Hermes (:mod:`twalk_sdk.webhook`), or ``None`` when this
+    #: deployment configured none — in which case the persona reasons with
+    #: the model endpoint above and speaks to nothing outside the deployment,
+    #: which is every deployment before ADR 0032. The endpoint stays required
+    #: either way: the persona runtime refuses to start without a model
+    #: (ADR 0015), and the seam does not replace that decision.
+    hermes: Optional[HermesSeam] = None
 
     def __post_init__(self) -> None:
         if not PERSONA_ID_PATTERN.match(self.persona_id):
@@ -231,6 +239,15 @@ class Config:
             # was configured by hand and has no name for it (ADR 0016).
             raise ConfigError(str(error)) from error
 
+        try:
+            hermes = HermesSeam.from_env(env)
+        except SeamError as error:
+            # A seam half-configured, plaintext without the operator saying
+            # so, or pointed at something that is not a route: every one of
+            # those is a startup refusal rather than a persona that runs and
+            # silently reaches nothing (ADR 0032).
+            raise ConfigError(str(error)) from error
+
         api_key = (env.get("TWALK_LLM_API_KEY") or "").strip() or None
         return cls(
             persona_id=required("TWALK_PERSONA_ID"),
@@ -249,4 +266,5 @@ class Config:
             log_level=optional("TWALK_LOG_LEVEL", "info"),
             suggestion=suggestion,
             user_language=user_language,
+            hermes=hermes,
         )

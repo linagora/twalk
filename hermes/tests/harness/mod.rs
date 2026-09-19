@@ -44,8 +44,13 @@ mod deployment;
 /// it makes it with.
 mod gateway;
 
+/// A stub of Hermes's webhook route (ticket #206, ADR 0032): the whole of the
+/// contract this project speaks to an agent runtime outside it.
+mod hermes;
+
 pub use deployment::*;
 pub use gateway::*;
+pub use hermes::*;
 pub use runtime::*;
 pub use twalk_test_harness::*;
 
@@ -231,7 +236,7 @@ impl PersonaRun {
     /// policy's own default — which is what a deployment that configured
     /// nothing gets.
     pub async fn start(test_name: &str, canned_reply: &str) -> Result<Self> {
-        Self::start_with(test_name, canned_reply, None, None).await
+        Self::start_with(test_name, canned_reply, None, None, None).await
     }
 
     /// [`start`](Self::start) with the user's own language configured, as the
@@ -242,7 +247,7 @@ impl PersonaRun {
         canned_reply: &str,
         user_language: &str,
     ) -> Result<Self> {
-        Self::start_with(test_name, canned_reply, None, Some(user_language)).await
+        Self::start_with(test_name, canned_reply, None, Some(user_language), None).await
     }
 
     /// [`start`](Self::start) with the operator's suggestion window named
@@ -253,7 +258,24 @@ impl PersonaRun {
         canned_reply: &str,
         ttl_seconds: i64,
     ) -> Result<Self> {
-        Self::start_with(test_name, canned_reply, Some(ttl_seconds), None).await
+        Self::start_with(test_name, canned_reply, Some(ttl_seconds), None, None).await
+    }
+
+    /// [`start`](Self::start) with the seam to Hermes configured (ADR 0032,
+    /// ticket #206): the persona hands the message to Hermes instead of
+    /// drafting with the model endpoint, and the suggestion comes back through
+    /// the Companion Gateway rather than from this process.
+    ///
+    /// The stub LLM is still configured and still answers, deliberately: a
+    /// persona refuses to start without a model (ADR 0015) whether or not a
+    /// seam is configured, and a test that asserts the model was **not** asked
+    /// needs it to have been reachable.
+    pub async fn start_with_hermes(
+        test_name: &str,
+        canned_reply: &str,
+        hermes_url: &str,
+    ) -> Result<Self> {
+        Self::start_with(test_name, canned_reply, None, None, Some(hermes_url)).await
     }
 
     async fn start_with(
@@ -261,6 +283,7 @@ impl PersonaRun {
         canned_reply: &str,
         ttl_seconds: Option<i64>,
         user_language: Option<&str>,
+        hermes_url: Option<&str>,
     ) -> Result<Self> {
         ensure_stack().await?;
         ensure_image().await?;
@@ -299,6 +322,24 @@ impl PersonaRun {
                     // language preference is the state ADR 0016's fallback
                     // does not exist in, and it has to be runnable.
                     user_language.unwrap_or_default().to_owned(),
+                ),
+                // The seam to Hermes. Empty on both is no seam at all, which is
+                // what every test but `hermes_seam.rs` runs with — so the
+                // persona's own drafting path stays the one those suites
+                // assert about.
+                (
+                    "TWALK_TEST_PERSONA_HERMES_URL",
+                    hermes_url.unwrap_or_default().to_owned(),
+                ),
+                (
+                    "TWALK_TEST_PERSONA_HERMES_SECRET",
+                    hermes_url
+                        .map(|_| hermes::WEBHOOK_SECRET.to_owned())
+                        .unwrap_or_default(),
+                ),
+                (
+                    "TWALK_TEST_PERSONA_HERMES_INSECURE",
+                    hermes_url.map(|_| "true".to_owned()).unwrap_or_default(),
                 ),
             ],
         );

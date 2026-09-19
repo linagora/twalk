@@ -990,6 +990,131 @@ pub fn gateway_env_with_bridges_and_consent(
     env
 }
 
+/// The secret the Gateway and Hermes share for the answer webhook (ticket
+/// #206). Long enough to pass the Gateway's own minimum, which is the point:
+/// a suite that used a short one would be testing a Gateway that refuses to
+/// start.
+pub const HERMES_ANSWER_SECRET: &str =
+    "a-throwaway-hermes-answer-secret-for-the-test-stack-only";
+
+/// The domain the Gateway names a published suggestion's persona under
+/// (`GATEWAY_HERMES_DOMAIN`), and therefore the authority of every `source`
+/// this suite reads back off the bus.
+pub const HERMES_DOMAIN: &str = "twalk.test";
+
+/// [`gateway_env_with_consent`] plus the two variables the seam to Hermes
+/// adds. Everything else it needs — the store, the bus, the owner — it takes
+/// from the consent configuration, because it reuses the approval half.
+pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String, String)> {
+    gateway_env_with(
+        static_dir,
+        &[
+            ("GATEWAY_NATS_URL", nats_url),
+            ("GATEWAY_HERMES_ANSWER_SECRET", HERMES_ANSWER_SECRET),
+            ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
+        ],
+    )
+}
+
+/// The signature Hermes's outbound hook puts on a push: hex HMAC-SHA256 over
+/// the raw body, prefixed `sha256=`.
+///
+/// Computed here from the wire format rather than from the Gateway's own code,
+/// so the test states the contract instead of agreeing with the
+/// implementation.
+pub fn hermes_signature(body: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(HERMES_ANSWER_SECRET.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(body.as_bytes());
+    format!("sha256={:x}", mac.finalize().into_bytes())
+}
+
+/// One of Hermes's `transform_llm_output` pushes, carrying whatever the model
+/// is said to have written, stamped now.
+///
+/// A string and not a `Value`, because the signature covers the bytes: a test
+/// that serialised a `Value` twice would sign one body and send another, which
+/// is the mistake this helper exists to make impossible.
+pub fn hermes_push(response_text: &str) -> String {
+    hermes_push_at(response_text, &rfc3339_now())
+}
+
+/// The same push, stamped at a moment the caller chooses — for the replay
+/// assertion, where the timestamp is the thing under test.
+pub fn hermes_push_at(response_text: &str, timestamp: &str) -> String {
+    serde_json::json!({
+        "hook_event_name": "transform_llm_output",
+        "tool_name": null,
+        "tool_input": null,
+        "session_id": "",
+        "cwd": "/home/hermes",
+        "extra": {
+            "response_text": response_text,
+            "session_id": "agent:main:webhook:webhook:webhook:twalk-messages:deadbeef",
+            "platform": "webhook",
+            "model": "a-model-the-operator-named",
+        },
+        "delivery_id": "1f2e3d4c5b6a79887766554433221100",
+        "timestamp": timestamp,
+    })
+    .to_string()
+}
+
+/// The answer a route's prompt asks Hermes for: a reference, a reply, and the
+/// language the reply is written in.
+pub fn hermes_answer(reference: &str, reply: &str, language: Option<&str>) -> String {
+    let mut answer = serde_json::json!({ "reference": reference, "reply": reply });
+    if let Some(language) = language {
+        answer["language"] = serde_json::Value::String(language.to_owned());
+    }
+    answer.to_string()
+}
+
+/// The `TWALK-REF:` token a persona puts in a wake and Hermes copies back.
+pub fn hermes_reference(persona_id: &str, trigger_event_id: &str, attempt: u64) -> String {
+    format!("TWALK-REF:{persona_id}:{trigger_event_id}:{attempt}")
+}
+
+/// Now, as the contract spells an instant.
+pub fn rfc3339_now() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_secs();
+    rfc3339_of(seconds)
+}
+
+/// An instant, as the contract spells one, from unix seconds.
+pub fn rfc3339_of(seconds: u64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(seconds as i64)
+        .expect("a representable instant")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC 3339 formatting never fails for a valid instant")
+        .replace(".000000000", "")
+}
+
+/// Posts one push at the Gateway's answer webhook, as Hermes does — with
+/// whatever signature the caller chooses, so a test can send the right one,
+/// the wrong one, or none.
+pub async fn post_hermes_answer(
+    base: &str,
+    signature: Option<&str>,
+    body: &str,
+) -> Result<reqwest::Response> {
+    let mut request = reqwest::Client::new()
+        .post(format!("{base}/_twalk/hermes/answers"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_owned());
+    if let Some(signature) = signature {
+        request = request.header("X-Hermes-Signature-256", signature);
+    }
+    request
+        .send()
+        .await
+        .context("the Hermes answer webhook did not answer")
+}
+
 /// Pushes one mautrix `BridgeState` at the Gateway's status webhook, as a
 /// bridge does — with a bearer token the caller chooses, so a test can send
 /// the right one, the wrong one, or none.

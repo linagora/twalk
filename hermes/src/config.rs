@@ -277,6 +277,27 @@ pub struct Config {
     /// the ambiguous case, and a deployment that suggests replies correctly
     /// for every readable message is not an outage.
     pub user_language: Option<String>,
+    /// The seam to Hermes — Nous Research's agent runtime, outside this
+    /// deployment (ADR 0032, ticket #206): the URL of one of its webhook
+    /// routes and the secret a persona signs each wake with.
+    ///
+    /// Operator configuration that travels the **injection** channel, like the
+    /// model endpoint and for the same reason (ADR 0015): a persona never
+    /// fetches its own configuration, because the credential that would read
+    /// it from the Companion Gateway is the credential that opens the consent
+    /// snapshot. `None` on both is a supported state and is every deployment
+    /// before ADR 0032 — the personas then reason with the model endpoint and
+    /// nothing leaves the deployment. What the *seam* is, as opposed to what
+    /// Hermes is, is validated by the SDK at the persona's startup
+    /// (`twalk_sdk.webhook`): the runtime carries the two values and does not
+    /// duplicate the rules about them.
+    pub hermes_webhook_url: Option<String>,
+    pub hermes_webhook_secret: Option<String>,
+    /// How long a wake waits for Hermes's front door, and whether a plaintext
+    /// URL is accepted. Both optional; the SDK holds the defaults and the
+    /// refusal.
+    pub hermes_timeout_seconds: Option<String>,
+    pub hermes_allow_insecure_url: Option<String>,
     pub restart: RestartPolicy,
     /// How long a persona is given to exit after SIGTERM before it is
     /// killed.
@@ -312,6 +333,10 @@ impl Config {
                 .unwrap_or_else(|| "info".to_owned()),
             suggestion_ttl_seconds: optional("HERMES_SUGGESTION_TTL_SECONDS"),
             user_language: optional("HERMES_USER_LANGUAGE"),
+            hermes_webhook_url: optional("HERMES_WEBHOOK_URL"),
+            hermes_webhook_secret: optional("HERMES_WEBHOOK_SECRET"),
+            hermes_timeout_seconds: optional("HERMES_WEBHOOK_TIMEOUT_SECONDS"),
+            hermes_allow_insecure_url: optional("HERMES_WEBHOOK_ALLOW_INSECURE_URL"),
             restart: RestartPolicy {
                 base_backoff: millis("HERMES_RESTART_BACKOFF_BASE_MS", 1_000)?,
                 max_backoff: millis("HERMES_RESTART_BACKOFF_MAX_MS", 60_000)?,
@@ -386,6 +411,19 @@ impl Config {
                     language
                 );
             }
+        }
+        // A URL with no secret would be refused by every persona, on its
+        // first line, at every spawn — so it is refused here instead, the same
+        // way a language outside the five is (ADR 0032 and #206: Hermes itself
+        // refuses a route with no secret, and its INSECURE_NO_AUTH escape hatch
+        // is for its own tests). The mirror case, a secret with no URL, is not
+        // an error: the URL is what turns the seam on.
+        if self.hermes_webhook_url.is_some() && self.hermes_webhook_secret.is_none() {
+            bail!(
+                "HERMES_WEBHOOK_URL is set without HERMES_WEBHOOK_SECRET: a persona signs every \
+                 wake with that secret, Hermes refuses a route that has none, and a persona \
+                 started without it would refuse to start on its first line at every spawn"
+            );
         }
         if let Some(params) = &self.llm.params {
             let parsed: Value = serde_json::from_str(params)
@@ -601,6 +639,10 @@ mod tests {
             persona_log_level: "info".to_owned(),
             suggestion_ttl_seconds: None,
             user_language: None,
+            hermes_webhook_url: None,
+            hermes_webhook_secret: None,
+            hermes_timeout_seconds: None,
+            hermes_allow_insecure_url: None,
             restart: RestartPolicy::default(),
             shutdown_grace: Duration::from_secs(10),
             env_passthrough: vec!["PATH".to_owned()],
@@ -612,6 +654,34 @@ mod tests {
             id: id.to_owned(),
             command: vec!["/bin/true".to_owned()],
         }
+    }
+
+    #[test]
+    fn a_seam_url_with_no_secret_is_refused_at_startup() {
+        let mut config = config_with(vec![spec("assistant")]);
+        config.hermes_webhook_url =
+            Some("https://hermes.example.org:8644/webhooks/twalk-messages".to_owned());
+        let refusal = config
+            .validate()
+            .expect_err(
+                "every persona would refuse this on its first line at every spawn, so the \
+                 runtime refuses it once",
+            )
+            .to_string();
+        assert!(refusal.contains("HERMES_WEBHOOK_SECRET"), "got {refusal:?}");
+
+        config.hermes_webhook_secret = Some("a-secret-only-that-route-holds".to_owned());
+        config.validate().expect("a URL with a secret is a seam");
+    }
+
+    #[test]
+    fn a_seam_secret_with_no_url_is_not_an_error() {
+        // The mirror of the Gateway-read rule above: the URL is what says "use
+        // the seam", so a secret left behind by an experiment turns nothing on
+        // and stops nothing.
+        let mut config = config_with(vec![spec("assistant")]);
+        config.hermes_webhook_secret = Some("a-secret-only-that-route-holds".to_owned());
+        config.validate().expect("a secret alone turns nothing on");
     }
 
     #[test]

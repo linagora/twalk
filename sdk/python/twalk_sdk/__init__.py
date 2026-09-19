@@ -23,7 +23,13 @@ of that which is the same for every persona:
   named, is not retried, and names its own remedy (issue #162);
 * the user's own language (:mod:`twalk_sdk.language`), which a persona falls
   back to only when it cannot tell what language it is answering
-  (ADR 0016).
+  (ADR 0016);
+* the **seam to Hermes** — Nous Research's agent runtime, outside this
+  deployment (ADR 0032): the narrow template of named fields that crosses
+  it and the signature that authenticates the sender
+  (:mod:`twalk_sdk.webhook`, pure), and the signed POST itself
+  (:mod:`twalk_sdk.hermes`). A persona cannot widen the template, for the
+  same reason it cannot forget the consent gate.
 
 The reference persona built on it is ``hermes/personas/assistant/``.
 
@@ -81,6 +87,17 @@ from .trigger import (
     triggers_a_persona,
     type_of,
 )
+from .webhook import (
+    MESSAGE_RECEIVED_EVENT,
+    TEMPLATE_VERSION,
+    HermesSeam,
+    SeamError,
+    delivery_id,
+    encode_body,
+    reference,
+    signed_headers,
+    webhook_body,
+)
 
 __all__ = [
     "Config",
@@ -90,6 +107,13 @@ __all__ = [
     "EnvelopeError",
     "FIRST_ATTEMPT",
     "GRANTED",
+    "HandedToHermes",
+    "Hermes",
+    "HermesError",
+    "HermesRateLimited",
+    "HermesRefused",
+    "HermesSeam",
+    "HermesUnreachable",
     "InboundMessage",
     "LANGUAGES",
     "LANGUAGE_NAMES",
@@ -100,23 +124,30 @@ __all__ = [
     "LlmRefused",
     "LlmSpentItsBudgetThinking",
     "LlmUnreachable",
+    "MESSAGE_RECEIVED_EVENT",
     "MESSAGE_RECEIVED_TYPE",
     "OUTBOUND_MESSAGE_SENT_TYPE",
     "OUTBOUND_REACTION_ADDED_TYPE",
     "PERSONA_TRIGGER_TYPES",
     "Persona",
     "SUGGEST_TYPE",
+    "SeamError",
     "Suggestion",
     "SuggestionPolicy",
+    "TEMPLATE_VERSION",
     "THINKING_TYPE",
     "Trigger",
     "USER_LANGUAGE_VARIABLE",
     "completion_text",
     "consent_of",
+    "delivery_id",
     "deterministic_id",
+    "encode_body",
     "is_granted",
     "language_name",
     "nats_headers",
+    "reference",
+    "signed_headers",
     "suggest_event",
     "suggest_id",
     "system",
@@ -125,6 +156,7 @@ __all__ = [
     "triggers_a_persona",
     "type_of",
     "user",
+    "webhook_body",
 ]
 
 #: The names that cost a third-party dependency, and the module each comes
@@ -135,6 +167,16 @@ _LAZY = {
     "user": "twalk_sdk.llm",
     "Context": "twalk_sdk.persona",
     "Persona": "twalk_sdk.persona",
+    # twalk_sdk.hermes is the seam's transport half and costs httpx, so it
+    # is lazy like the LLM client — while twalk_sdk.webhook above, which
+    # decides what crosses, is pure and imported eagerly. That split is the
+    # point: the template and the signature are testable wherever Python is.
+    "HandedToHermes": "twalk_sdk.hermes",
+    "Hermes": "twalk_sdk.hermes",
+    "HermesError": "twalk_sdk.hermes",
+    "HermesRateLimited": "twalk_sdk.hermes",
+    "HermesRefused": "twalk_sdk.hermes",
+    "HermesUnreachable": "twalk_sdk.hermes",
 }
 
 

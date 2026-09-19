@@ -97,6 +97,16 @@ pub enum Requirement {
     /// guard authenticates nothing here and injects no device identity, so a
     /// device cookie grants no access to such a route.
     ServiceToken,
+    /// An HMAC-SHA256 signature over the request body, which the route's own
+    /// handler verifies — Hermes's answer (#206, ADR 0032). A fifth
+    /// credential rather than a reuse of the fourth for the reason the fourth
+    /// exists: a bridge's `as_token` opens the status webhook and nothing
+    /// else, and the secret shared with an agent runtime outside this
+    /// deployment must open nothing else either. It is a signature and not a
+    /// bearer token because the sender is Hermes's own outbound hook, whose
+    /// wire format signs the body — which is also what makes the Gateway able
+    /// to refuse a replay.
+    HermesSignature,
     /// The calling bridge's own `as_token`, which the route's handler
     /// verifies — the status webhook (#56), whose caller is a mautrix bridge
     /// and not a browser. As above, the guard authenticates nothing and
@@ -116,6 +126,13 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
     // below and is closed.
     if crate::bridge_status::webhook_bridge_id(path).is_some() && method == Method::POST {
         return Requirement::BridgeToken;
+    }
+    // Hermes's answer (ticket #206). Outside `/api/` like the status webhook
+    // above, and in this table for the same reason: a route the guard does not
+    // classify is a hole in the policy, and this one's caller is outside the
+    // deployment.
+    if path == crate::hermes_answer::ANSWER_PATH && method == Method::POST {
+        return Requirement::HermesSignature;
     }
     match (method, path) {
         (&Method::POST, "/api/session") => Requirement::Open,
@@ -185,7 +202,8 @@ pub async fn guard(State(gateway): State<Gateway>, mut request: Request, next: N
         Requirement::Open
         | Requirement::RefreshToken
         | Requirement::ServiceToken
-        | Requirement::BridgeToken => next.run(request).await,
+        | Requirement::BridgeToken
+        | Requirement::HermesSignature => next.run(request).await,
         Requirement::DeviceToken => {
             let Some(token) = cookie(request.headers(), DEVICE_COOKIE) else {
                 return refused(StatusCode::UNAUTHORIZED, "unauthenticated");
