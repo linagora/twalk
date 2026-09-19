@@ -783,6 +783,28 @@ did not declare**, refuses that field and names it on screen: the alternative,
 and the previous behaviour, was a password field whose type a bridge had omitted
 drawn as a plain text input.
 
+The known types come from **bridgev2's own enumerations** — `mautrix/go`,
+`bridgev2/login.go`'s `LoginInputFieldType` and `LoginCookieFieldSourceType` —
+and not from the types this repository has met. That distinction is the whole
+difference between refusing a field nobody can draw and refusing a legitimate
+login: the first version of this module knew one grouped type, `cookie`, because
+that is the one #57's screen was written for, and a first-party connector
+(LinkedIn) asks for three `request_header` fields. So when a type appears that is
+not there, the fix is to read the enumeration again rather than to add the one
+value in front of you.
+
+The two field documents are not the same shape, which is the thing to know
+before reading the parse. A `user_input` field carries its `type` itself; a
+`cookies` field carries **no type at all** — it has `sources`, a list, each with
+a type, the `name` the value goes by in the browser and a `cookie_domain` — and
+it carries `required`. Three consequences: the answer is keyed by the field's
+`id` while the paste is keyed by the source's `name`, and only the id will do;
+all five grouped source types share one control, because bridgev2's own answer
+to a `cookies` step is one map whatever each field's source was; and a field the
+bridge called **optional** never blocks the step — it is left out of the answer
+and said so on screen, because a field that vanished silently is a field the
+user goes looking for.
+
 A step is **named, never counted** — a bridge cannot say how many remain — and a
 **refused answer is its own outcome** rather than a banner over the step. The
 bridge destroys the login process when it declines a value, so the step is

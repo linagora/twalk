@@ -27,32 +27,73 @@ export type BridgeLogin = components['schemas']['BridgeLogin'];
 export type BridgeLoginStep = components['schemas']['BridgeLoginStep'];
 export type LoginErrorCode = NonNullable<BridgeLogin['error']>['code'];
 
-/** A `user_input` step's fields, as bridgev2 describes them. */
+/**
+ * One field a step asks for, from either of the two shapes bridgev2 declares.
+ *
+ * The two are not the same document, which is the thing to know before reading
+ * the parse below (`mautrix/go`, `bridgev2/login.go`):
+ *
+ *   - a `user_input` step's field is a `LoginInputDataField`, whose `type` sits
+ *     on the field itself;
+ *   - a `cookies` step's field is a `LoginCookieField`, which has **no type**:
+ *     it carries `sources`, a *list* of `LoginCookieFieldSource`, each with its
+ *     own `type`, the `name` the value goes by in the browser, and a
+ *     `cookie_domain`. It also carries `required`.
+ *
+ * Reading only the field's own `type` therefore refuses every real bridgev2
+ * cookie step as "the bridge declared no type" — the failure mode this file's
+ * `null` was introduced to make *visible*, arrived at from the other side.
+ */
 export interface InputField {
+	/** What the answer is submitted under. Never what is shown to the user. */
 	readonly id: string;
 	readonly name: string;
 	readonly description: string | null;
 	/**
-	 * bridgev2's own field type — `phone_number`, `email`, `username`,
-	 * `password`, `2fa_code`, `token`, `cookie` — and `null` when the bridge
-	 * declared none.
+	 * bridgev2's own field type, and `null` when the bridge declared none.
+	 *
+	 * For a `user_input` field it is `type`; for a `cookies` field it is the
+	 * first source's `type`, since that is where a cookie field's type lives.
+	 * The set of values this Companion draws is `step-fields.ts`'s, taken from
+	 * bridgev2's own enumerations rather than from what this repository has
+	 * happened to meet.
 	 *
 	 * `null` rather than a default, because the type is what decides how the
 	 * field is drawn (ADR 0030): this used to become `username`, so a password
 	 * field whose type a bridge had not declared would have been drawn as a
 	 * plain text input with its value on screen. An absent type is refused and
-	 * named, exactly as an unknown one is — see `step-fields.ts`.
+	 * named, exactly as an unknown one is.
 	 */
 	readonly type: string | null;
 	readonly pattern: string | null;
 	/**
-	 * The domain a grouped field shares with the rest of its group —
-	 * bridgev2's `cookie_domain`, and `null` on every other field type.
+	 * What the value is called **where the user will find it** — a cookie's or
+	 * a header's own name (`sources[].name`), which is not always the `id` the
+	 * answer is submitted under.
 	 *
-	 * Read because it is what makes a jar a jar: the bridge saying these
-	 * fields belong to one origin is the signal that they arrive together.
+	 * `null` when the bridge named no source, and then the id is the best guess
+	 * available.
+	 */
+	readonly sourceName: string | null;
+	/**
+	 * The domain a grouped field's source names, when it names one.
+	 *
+	 * Read because it is what a jar can say about itself: the bridge stating
+	 * that these values belong to one origin is worth putting on screen.
 	 */
 	readonly cookieDomain: string | null;
+	/**
+	 * Whether the bridge says the login needs this one — `LoginCookieField`'s
+	 * `required`, and `true` for every `user_input` field, which has no such
+	 * member.
+	 *
+	 * It decides whether a field this build cannot collect stops the step:
+	 * refusing a *required* field means the step cannot be answered, and
+	 * refusing an optional one must not.
+	 */
+	readonly required: boolean;
+	/** The choices of a `select` field (`LoginInputDataField.options`). */
+	readonly options: readonly string[];
 }
 
 /**
@@ -67,6 +108,7 @@ export interface InputField {
 export interface CookieRequest {
 	readonly url: string | null;
 	readonly extractJs: string | null;
+	/** bridgev2's `wait_for_url_pattern`; a regular expression, not a URL. */
 	readonly waitForUrl: string | null;
 }
 
@@ -344,7 +386,8 @@ function displayPayload(step: BridgeLoginStep, wanted: 'qr' | 'emoji'): string |
 }
 
 /**
- * A step's field list, read the same way whatever the step type is.
+ * A step's field list, from either of the two shapes bridgev2 declares — see
+ * [`InputField`], which says why they differ.
  *
  * `bare` is the type a field named as a **bare string** has. bridgev2 declares
  * every field as an object, and a `cookies` step whose payload listed names
@@ -368,7 +411,10 @@ function inputFields(step: BridgeLoginStep, bare: string | null): InputField[] {
 							description: null,
 							type: bare,
 							pattern: null,
-							cookieDomain: null
+							sourceName: null,
+							cookieDomain: null,
+							required: true,
+							options: []
 						}
 					]
 				: [];
@@ -381,21 +427,62 @@ function inputFields(step: BridgeLoginStep, bare: string | null): InputField[] {
 		if (id === null) {
 			return [];
 		}
+		// The first source, which is where a `cookies` field's type lives.
+		// Several are allowed — one value obtainable from a cookie *or* from a
+		// request header — and the first is the one the bridge prefers.
+		const source = firstSource(field['sources']);
 		return [
 			{
 				id,
-				name: typeof field['name'] === 'string' ? field['name'] : id,
+				name: typeof field['name'] === 'string' ? field['name'] : (source?.name ?? id),
 				description: typeof field['description'] === 'string' ? field['description'] : null,
-				// `null`, never a default: see [`InputField.type`].
-				type: typeof field['type'] === 'string' && field['type'] !== '' ? field['type'] : null,
+				// The field's own type, then its first source's. `null`, never a
+				// default: see [`InputField.type`].
+				type: text(field['type']) ?? source?.type ?? null,
 				pattern: typeof field['pattern'] === 'string' ? field['pattern'] : null,
-				cookieDomain:
-					typeof field['cookie_domain'] === 'string' && field['cookie_domain'] !== ''
-						? field['cookie_domain']
-						: null
+				sourceName: source?.name ?? null,
+				// `cookie_domain` on the source, which is where bridgev2 puts it;
+				// the field-level spelling is read too, because the stub bridges
+				// that stand in for a real one used to invent it there.
+				cookieDomain: source?.cookieDomain ?? text(field['cookie_domain']) ?? null,
+				// Absent means required: a field a bridge said nothing about is
+				// one this Companion must not quietly leave out of the answer.
+				required: field['required'] !== false,
+				options: Array.isArray(field['options'])
+					? field['options'].filter((option): option is string => typeof option === 'string')
+					: []
 			}
 		];
 	});
+}
+
+/** A non-empty string, or `null`. */
+function text(value: unknown): string | null {
+	return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/**
+ * The first of a cookie field's `sources`, read for its type, its browser-side
+ * name and its domain.
+ */
+function firstSource(
+	raw: unknown
+): { type: string | null; name: string | null; cookieDomain: string | null } | null {
+	if (!Array.isArray(raw)) {
+		return null;
+	}
+	for (const entry of raw) {
+		if (entry === null || typeof entry !== 'object') {
+			continue;
+		}
+		const source = entry as Record<string, unknown>;
+		return {
+			type: text(source['type']),
+			name: text(source['name']),
+			cookieDomain: text(source['cookie_domain'])
+		};
+	}
+	return null;
 }
 
 function cookieRequest(step: BridgeLoginStep): CookieRequest {
@@ -403,7 +490,7 @@ function cookieRequest(step: BridgeLoginStep): CookieRequest {
 	return {
 		url: typeof payload['url'] === 'string' ? payload['url'] : null,
 		extractJs: typeof payload['extract_js'] === 'string' ? payload['extract_js'] : null,
-		waitForUrl: typeof payload['wait_for_url'] === 'string' ? payload['wait_for_url'] : null
+		waitForUrl: text(payload['wait_for_url_pattern']) ?? text(payload['wait_for_url'])
 	};
 }
 

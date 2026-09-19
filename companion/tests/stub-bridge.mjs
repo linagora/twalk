@@ -364,9 +364,23 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 						instructions: 'Paste the cookies from a private window',
 						cookies: {
 							url: 'https://messages.google.com/web/authentication',
+							// bridgev2's own `LoginCookieField`: a field has no type of
+							// its own — it carries `sources`, each with the type, the
+							// name the value goes by in the browser, and the domain
+							// (`mautrix/go`, `bridgev2/login.go`). The stub used to
+							// invent a `type` on the field itself, which is the shape
+							// no bridge sends.
 							fields: [
-								{ type: 'cookie', cookie_domain: '.google.com', id: 'SID' },
-								{ type: 'cookie', cookie_domain: '.google.com', id: 'SAPISID' }
+								{
+									id: 'SID',
+									required: true,
+									sources: [{ type: 'cookie', name: 'SID', cookie_domain: '.google.com' }]
+								},
+								{
+									id: 'SAPISID',
+									required: true,
+									sources: [{ type: 'cookie', name: 'SAPISID', cookie_domain: '.google.com' }]
+								}
 							]
 						}
 					});

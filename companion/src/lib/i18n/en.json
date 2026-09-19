@@ -153,6 +153,9 @@
 	"networks.cookies.unreadable": "That could not be read as cookies. Paste either “name=value; name=value”, or the JSON your cookie extension exports.",
 	"networks.cookies.missing": "These are missing: {names}. Check you copied every row, including the ones your browser hides behind a scroll.",
 
+	"networks.jar.wanted": "{count, plural, one {The value your bridge asked for} other {The # values your bridge asked for}}, as your browser sends them:",
+	"networks.jar.label": "Paste them here as JSON",
+
 
 	"networks.field.empty": "Fill this in before sending it.",
 	"networks.field.pattern": "That is not the shape this network accepts for this field. Check it before sending: a value the network refuses ends the login, and you would have to start again.",
@@ -160,6 +163,9 @@
 	"networks.field.blockedBody": "Sending part of it would not get you a correction: the network ends the login when it refuses an answer, and you would have to start over anyway. Update Twalk if an update is available, or finish this login in the network’s own app.",
 	"networks.field.refusedNoType": "Twalk will not draw “{field}”: your bridge did not say what kind of value it is, and guessing could put a password on screen in plain text.",
 	"networks.field.refusedUnknownType": "Twalk will not draw “{field}”: this version does not know the field type “{type}”, and guessing could put a password on screen in plain text.",
+	"networks.field.choose": "Choose one…",
+	"networks.field.refusedNoOptions": "Twalk will not draw “{field}”: your bridge asked for a choice and listed nothing to choose from, and picking for you is worse than saying so.",
+	"networks.field.leftOut": "“{field}” is not being sent: this version cannot collect it, and your bridge says the login does not need it.",
 
 	"networks.step.submit": "Send this to my Twalk server",
 	"networks.step.neverStored": "Nothing on this screen is saved in your browser. Close the tab and what you typed is gone.",

@@ -82,12 +82,27 @@ test('a whole cookie login: the cookies, the emoji, the connection', async ({ pa
 	await expect(emoji).toBeVisible();
 	await expect(emoji).toContainText('🐢');
 
-	// The cookies reached the bridge, unchanged and whole.
+	// The cookies reached the bridge unchanged — and **only the ones it asked
+	// for**. The user pastes whatever their browser gave them, which is their
+	// whole Google session; the bridge's own field list is what leaves this
+	// origin, so the five it did not ask for are not relayed anywhere (ADR 0011).
+	// The paste is still checked against the same list, so nothing is silently
+	// dropped: a name the bridge wants and the paste lacks is named on screen.
 	const stats = await bridge.stats();
 	const relayed = stats.submits?.find((submit) => submit.step_type === 'cookies');
 	expect(relayed, JSON.stringify(stats.submits)).toBeDefined();
 	expect(relayed?.body?.cookies?.['SID']).toBe('value-for-SID');
-	expect(Object.keys(relayed?.body?.cookies ?? {})).toHaveLength(NAMES.length);
+	expect(relayed?.body?.cookies).toEqual({
+		SID: 'value-for-SID',
+		SAPISID: 'value-for-SAPISID'
+	});
+	// By key, not by substring: `APISID` is inside `SAPISID`, and an absence
+	// test that can be satisfied by a coincidence is not an absence test.
+	const sent = Object.keys(relayed?.body?.cookies ?? {});
+	const unasked = NAMES.filter((name) => name !== 'SID' && name !== 'SAPISID');
+	for (const name of unasked) {
+		expect(sent, `${name} was not asked for`).not.toContain(name);
+	}
 
 	// And they are in no browser store, nor left on screen.
 	await expect(page.getByTestId('cookie-paste')).toHaveCount(0);

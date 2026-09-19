@@ -278,6 +278,9 @@
 	"networks.cookies.unreadable": "Impossible d'y lire des cookies. Collez soit « nom=valeur ; nom=valeur », soit le JSON exporté par votre extension.",
 	"networks.cookies.missing": "Il manque : {names}. Vérifiez que vous avez bien copié toutes les lignes, y compris celles que votre navigateur cache sous un défilement.",
 
+	"networks.jar.wanted": "{count, plural, one {La valeur demandée par votre passerelle} other {Les # valeurs demandées par votre passerelle}}, telles que votre navigateur les envoie :",
+	"networks.jar.label": "Collez-les ici au format JSON",
+
 
 	"networks.field.empty": "Remplissez ce champ avant de l’envoyer.",
 	"networks.field.pattern": "Ce n’est pas la forme attendue par ce réseau pour ce champ. Vérifiez avant d’envoyer : une valeur refusée par le réseau met fin à la connexion, et il faudrait tout recommencer.",
@@ -285,6 +288,9 @@
 	"networks.field.blockedBody": "En envoyer une partie ne vous vaudrait pas une correction : le réseau met fin à la connexion dès qu’il refuse une réponse, et il faudrait recommencer de toute façon. Mettez Twalk à jour si une version existe, ou terminez cette connexion dans l’application du réseau.",
 	"networks.field.refusedNoType": "Twalk n’affichera pas « {field} » : votre passerelle n’a pas indiqué de quel type de valeur il s’agit, et le deviner pourrait afficher un mot de passe en clair.",
 	"networks.field.refusedUnknownType": "Twalk n’affichera pas « {field} » : cette version ne connaît pas le type de champ « {type} », et le deviner pourrait afficher un mot de passe en clair.",
+	"networks.field.choose": "Choisissez…",
+	"networks.field.refusedNoOptions": "Twalk n’affichera pas « {field} » : votre passerelle demande un choix sans indiquer les possibilités, et choisir à votre place serait pire que de le dire.",
+	"networks.field.leftOut": "« {field} » ne sera pas envoyé : cette version ne sait pas le collecter, et votre passerelle indique que la connexion n’en a pas besoin.",
 
 	"networks.step.submit": "Envoyer à mon serveur Twalk",
 	"networks.step.neverStored": "Rien de cet écran n’est enregistré dans votre navigateur. Fermez l’onglet et ce que vous avez saisi disparaît.",

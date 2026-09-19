@@ -14,7 +14,17 @@ import type { InputField, LoginView } from './login-view';
 import { driftOf, overrideFor } from './step-copy';
 
 function field(id: string, type: string | null): InputField {
-	return { id, name: id, description: null, type, pattern: null, cookieDomain: null };
+	return {
+		id,
+		name: id,
+		description: null,
+		type,
+		pattern: null,
+		sourceName: null,
+		cookieDomain: null,
+		required: true,
+		options: []
+	};
 }
 
 function cookies(fields: readonly InputField[]): LoginView {

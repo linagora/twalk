@@ -812,9 +812,23 @@ async fn start(
             "type": "cookies",
             "step_id": COOKIES_STEP,
             "instructions": "Paste the cookies from a private window",
+            // bridgev2's own `LoginCookieField`: a field has no type of its
+            // own — it carries `sources`, each with the type, the name the
+            // value goes by in the browser and the domain (`mautrix/go`,
+            // `bridgev2/login.go`). This stub used to invent a `type` on the
+            // field itself, which is a shape no bridge sends, and #106 is
+            // what that class of invention costs.
             "cookies": {
                 "url": "https://messages.google.com/web/authentication",
-                "fields": [{ "type": "cookie", "cookie_domain": ".google.com", "id": "SID" }]
+                "fields": [{
+                    "id": "SID",
+                    "required": true,
+                    "sources": [{
+                        "type": "cookie",
+                        "name": "SID",
+                        "cookie_domain": ".google.com"
+                    }]
+                }]
             }
         }),
         _ => json!({
@@ -935,13 +949,18 @@ async fn step(
 
     // A non-blocking step: a canned refusal if the test asked for one, then
     // the next step if the test queued one, and the completion otherwise.
-    if let Some((status, errcode)) = state
+    // Each queue is popped in a statement of its own, and never inside an
+    // `if let` that still holds the guard: in edition 2021 the temporary
+    // `MutexGuard` lives to the end of an `if let` block, so locking again in
+    // the body deadlocks this stub against itself — which it did, and which
+    // presented as one test of this suite sitting there for ever.
+    let refused = state
         .inner
         .lock()
         .expect("the stub is not poisoned")
         .refuse_step
-        .pop_front()
-    {
+        .pop_front();
+    if let Some((status, errcode)) = refused {
         // A `400` **destroys the login process**: the capture is explicit that
         // every later call against it, the step cancel and the process cancel
         // included, answered `404 M_NOT_FOUND` (`fixtures/*/login-step.json`,
@@ -961,13 +980,13 @@ async fn step(
             &errcode,
         );
     }
-    if let Some(mut queued) = state
+    let queued = state
         .inner
         .lock()
         .expect("the stub is not poisoned")
         .next_steps
-        .pop_front()
-    {
+        .pop_front();
+    if let Some(mut queued) = queued {
         let txn_id = {
             let mut inner = state.inner.lock().expect("the stub is not poisoned");
             inner.next_txn += 1;

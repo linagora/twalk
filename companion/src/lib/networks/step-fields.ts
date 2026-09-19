@@ -22,13 +22,40 @@
 //     (#175's third defect), which is exactly that outcome for a bridge that
 //     simply omitted the member.
 //
+// # Where the known types come from
+//
+// From **bridgev2's own enumerations** — `mautrix/go`, `bridgev2/login.go`'s
+// `LoginInputFieldType` and `LoginCookieFieldSourceType` — and not from the
+// types this repository has happened to meet. The difference is not academic:
+// the first version of this module knew one grouped type, `cookie`, because
+// that is the one #57's screen was written for, and a first-party connector
+// (LinkedIn) asks for three `request_header` fields. A set assembled from
+// experience would have refused that legitimate login with a defect card on it.
+// So when a type appears that is not here, the fix is to read that enumeration
+// again rather than to add the one value in front of you.
+//
+// One consequence worth stating, and a known rough edge. All five grouped
+// source types share **one** control, because bridgev2's own answer to a
+// `cookies` step is one map keyed by field id whatever each field's source was.
+// A jar that is all cookies asks for the `name=value` spelling people arrive
+// with; a jar that is not asks for JSON, because a `Cookie` *header* is itself a
+// list of `name=value` pairs and pasting one beside two other headers has no
+// unambiguous flat reading. That is honest but not kind, and a better control
+// for a mixed jar — one field per header, say — is a decision for whoever
+// connects such a network rather than something to invent here.
+//
 // # Why refusing one field blocks the step
 //
 // Because a bridge drops the login process when it refuses a value: submitting
 // six of seven fields does not get a correction, it gets a dead login and a
-// user who has to fetch a fresh code. So a step with a field this build cannot
-// collect is not submittable, says which field and why, and offers the way out
-// rather than a button that spends the user's code.
+// user who has to fetch a fresh code. So a step with a **required** field this
+// build cannot collect is not submittable, says which field and why, and offers
+// the way out rather than a button that spends the user's code.
+//
+// Required, because bridgev2 says which fields are: refusing a step over a
+// field the bridge itself called optional would block a login that would have
+// worked. Such a field is left out of the answer and named on screen, since a
+// field that vanished silently is a field the user goes looking for.
 //
 // # Nothing here keeps a value
 //
@@ -40,7 +67,17 @@ import { missing, parseCookies, type CookieJar } from './cookies';
 import type { InputField } from './login-view';
 
 /**
- * The bridgev2 field types this Companion draws one control for, and how.
+ * The field types this Companion draws one control for, and how.
+ *
+ * **The set is bridgev2's `LoginInputFieldType`, in full** — `mautrix/go`,
+ * `bridgev2/login.go` — and not the types this repository has happened to meet.
+ * That distinction is the whole difference between refusing a field nobody can
+ * draw and refusing a legitimate login: the LinkedIn connector asks for three
+ * fields this project had never seen, and a set assembled from experience would
+ * have turned that into an unanswerable step with a defect card on it.
+ *
+ * So when a new type appears upstream, the fix is to read that enumeration
+ * again — never to add the one value in front of you.
  *
  * `autocomplete` matters for more than convenience: naming a field
  * `one-time-code` is what lets a phone offer the code out of the message that
@@ -49,13 +86,17 @@ import type { InputField } from './login-view';
  */
 const ENTRY_TYPES = {
 	username: { control: 'text', autocomplete: 'username', secret: false },
-	email: { control: 'email', autocomplete: 'email', secret: false },
-	phone_number: { control: 'tel', autocomplete: 'tel', secret: false },
 	password: { control: 'password', autocomplete: 'current-password', secret: true },
+	phone_number: { control: 'tel', autocomplete: 'tel', secret: false },
+	email: { control: 'email', autocomplete: 'email', secret: false },
 	'2fa_code': { control: 'text', autocomplete: 'one-time-code', secret: false },
 	token: { control: 'password', autocomplete: 'off', secret: true },
 	url: { control: 'url', autocomplete: 'url', secret: false },
-	domain: { control: 'text', autocomplete: 'off', secret: false }
+	domain: { control: 'text', autocomplete: 'off', secret: false },
+	/** One of `options`, so the control is a list and not a text input. */
+	select: { control: 'select', autocomplete: 'off', secret: false },
+	/** The answer to a challenge the network showed elsewhere. Never remembered. */
+	captcha_code: { control: 'text', autocomplete: 'off', secret: false }
 } as const;
 
 export type EntryType = keyof typeof ENTRY_TYPES;
@@ -71,19 +112,32 @@ export type AutocompleteHint = (typeof ENTRY_TYPES)[EntryType]['autocomplete'];
 /**
  * The field types a bridge sends **grouped**, collected through one control.
  *
- * Exactly one, deliberately. bridgev2's cookie step is the shape this project
- * has seen and the one #57's screen is written for; other grouped types exist
- * in mautrix for networks nothing here bridges, and adding them from the
- * documentation rather than from a capture is how this repository bought three
- * bugs in one ticket (#106). An ungrouped type is refused and named, which is
- * a screen that says what is missing — the safe direction.
+ * **The set is bridgev2's `LoginCookieFieldSourceType`, in full** —
+ * `mautrix/go`, `bridgev2/login.go`. All five belong to the *same* control
+ * rather than one each, and that is not a simplification: a `cookies` step's
+ * answer is one map keyed by field id whatever each field's source was, so the
+ * bridge itself does not separate them. A field wanting a cookie and a field
+ * wanting a request header are two values fetched from one browser session in
+ * one sitting, which is exactly what "grouped" means.
+ *
+ * Taking the set from the enumeration rather than from experience is the
+ * correction #175 needed: with `cookie` alone, LinkedIn's three
+ * `request_header` fields — a whole `Cookie` header and two `X-LI-*` values —
+ * would each have been refused as a type nobody draws, turning a legitimate
+ * login into a defect card.
  */
-const JAR_TYPES = ['cookie'] as const;
+const JAR_TYPES = ['cookie', 'local_storage', 'request_header', 'request_body', 'special'] as const;
 
 export type JarType = (typeof JAR_TYPES)[number];
 
-/** The member of the submitted `data` object a jar of a given type goes in. */
-const JAR_MEMBER: Record<JarType, string> = { cookie: 'cookies' };
+/**
+ * The member of the submitted `data` object a jar goes in.
+ *
+ * One for all five source types, because bridgev2 answers a `cookies` step with
+ * one map — `{"cookies": {…}}` on this origin, which
+ * `companion-gateway/openapi.yaml` documents and relays untouched.
+ */
+const JAR_MEMBER = 'cookies';
 
 /** One control on screen, and the fields it answers for. */
 export type Control =
@@ -99,15 +153,29 @@ export type Control =
 			/** A value that must never be echoed back to the screen. */
 			readonly secret: boolean;
 	  }
-	/** Several fields of one grouped type: one paste, one parser. */
+	/** Several fields of grouped types: one paste, one parser. */
 	| {
 			readonly kind: 'jar';
 			readonly id: string;
-			readonly type: JarType;
+			/**
+			 * Whether every field in it is a `cookie`.
+			 *
+			 * It decides the words, and only the words: a jar of request headers
+			 * must not be called a jar of cookies, and a `Cookie` header is one
+			 * *value* rather than a list of them, so the spelling to ask for is
+			 * not the same either.
+			 */
+			readonly allCookies: boolean;
 			/** The domain the bridge says they share, when it says one. */
 			readonly domain: string | null;
 			readonly fields: readonly InputField[];
-			/** The names the jar must contain, in the bridge's own order. */
+			/**
+			 * What to look for, as the user will see it in their browser: each
+			 * field's source name, falling back to its id.
+			 *
+			 * Not the same list as the ids the answer is submitted under, which is
+			 * why `answerOf` maps one to the other.
+			 */
 			readonly names: readonly string[];
 	  }
 	/** A field this build will not draw, and which the step therefore cannot answer. */
@@ -115,7 +183,7 @@ export type Control =
 			readonly kind: 'refused';
 			readonly id: string;
 			readonly field: InputField;
-			readonly because: 'no_type' | 'unknown_type';
+			readonly because: 'no_type' | 'unknown_type' | 'no_options';
 	  };
 
 /**
@@ -126,37 +194,37 @@ export type Control =
  */
 export function controlsOf(fields: readonly InputField[]): Control[] {
 	const controls: Control[] = [];
-	const jars = new Map<JarType, number>();
+	/** Where the one jar sits, once a grouped field has opened it. */
+	let jarAt: number | null = null;
 	for (const field of fields) {
 		if (field.type === null) {
 			controls.push({ kind: 'refused', id: field.id, field, because: 'no_type' });
 			continue;
 		}
-		const jarType = JAR_TYPES.find((known) => known === field.type);
-		if (jarType !== undefined) {
-			const at = jars.get(jarType);
-			if (at === undefined) {
-				jars.set(jarType, controls.length);
+		if (JAR_TYPES.some((known) => known === field.type)) {
+			const name = field.sourceName ?? field.id;
+			if (jarAt === null) {
+				jarAt = controls.length;
 				controls.push({
 					kind: 'jar',
-					id: `jar:${jarType}`,
-					type: jarType,
+					id: JAR_ID,
+					allCookies: field.type === 'cookie',
 					domain: field.cookieDomain,
 					fields: [field],
-					names: [field.id]
+					names: [name]
 				});
 				continue;
 			}
-			const jar = controls[at];
+			const jar = controls[jarAt];
 			if (jar?.kind === 'jar') {
-				controls[at] = {
+				controls[jarAt] = {
 					...jar,
-					// The first domain stated wins; a jar spanning two of them is
-					// a shape no capture shows, and the names are what the paste
-					// is checked against either way.
+					allCookies: jar.allCookies && field.type === 'cookie',
+					// The first domain stated wins; the names are what the paste is
+					// checked against either way.
 					domain: jar.domain ?? field.cookieDomain,
 					fields: [...jar.fields, field],
-					names: [...jar.names, field.id]
+					names: [...jar.names, name]
 				};
 			}
 			continue;
@@ -164,6 +232,12 @@ export function controlsOf(fields: readonly InputField[]): Control[] {
 		const entry = ENTRY_TYPES[field.type as EntryType];
 		if (entry === undefined) {
 			controls.push({ kind: 'refused', id: field.id, field, because: 'unknown_type' });
+			continue;
+		}
+		if (entry.control === 'select' && field.options.length === 0) {
+			// A list with nothing in it is not a control, and picking for the user
+			// is worse than saying so.
+			controls.push({ kind: 'refused', id: field.id, field, because: 'no_options' });
 			continue;
 		}
 		controls.push({
@@ -179,9 +253,23 @@ export function controlsOf(fields: readonly InputField[]): Control[] {
 	return controls;
 }
 
-/** Whether every control of a step can be answered at all. */
+/** The one jar's control id, since a step has at most one. */
+const JAR_ID = 'jar';
+
+/**
+ * Whether the step can be answered at all.
+ *
+ * A refused field stops the step only when the bridge says the login needs it.
+ * Both halves matter: sending part of a *required* answer does not get a
+ * correction — the network ends the login and the user pays a fresh code for it
+ * — and refusing a step over a field the bridge called optional would block a
+ * login that would have worked.
+ */
 export function answerable(controls: readonly Control[]): boolean {
-	return controls.length > 0 && !controls.some((control) => control.kind === 'refused');
+	return (
+		controls.some((control) => control.kind !== 'refused') &&
+		!controls.some((control) => control.kind === 'refused' && control.field.required)
+	);
 }
 
 /** Why one control's value will not do. */
@@ -205,7 +293,8 @@ export type Answer =
  *
  * `values` is keyed on [`Control.id`]. An ordinary field goes in under its own
  * id — `{"phone_number": "+33…"}`, which is what bridgev2 reads — and a jar
- * goes in under the member its type names: `{"cookies": {…}}`.
+ * goes in as one map under `cookies`, keyed by each field's id whatever its
+ * source was.
  *
  * The bridge's own `pattern` is checked here rather than left to the network,
  * because the network's refusal destroys the login process: a phone number this
@@ -220,8 +309,9 @@ export function answerOf(
 	const data: Record<string, unknown> = {};
 	for (const control of controls) {
 		if (control.kind === 'refused') {
-			// Not a problem with a value: the step is not answerable at all,
-			// which `answerable` is what says so.
+			// Not a problem with a value: either the step is not answerable at
+			// all — which `answerable` is what says — or the bridge called this
+			// field optional and the answer simply leaves it out.
 			continue;
 		}
 		const typed = (values[control.id] ?? '').trim();
@@ -235,12 +325,27 @@ export function answerOf(
 				problems.push({ controlId: control.id, because: 'unreadable' });
 				continue;
 			}
-			const absent = missing(control.names, parsed);
+			// Required fields only: a bridge that calls one optional must not have
+			// the paste rejected for lacking it.
+			const wanted = control.fields
+				.filter((field) => field.required)
+				.map((field) => field.sourceName ?? field.id);
+			const absent = missing(wanted, parsed);
 			if (absent.length > 0) {
 				problems.push({ controlId: control.id, because: 'incomplete', names: absent });
 				continue;
 			}
-			data[JAR_MEMBER[control.type]] = parsed;
+			// The paste is keyed by what the browser calls each value; the answer
+			// is keyed by the **id** the bridge submits it under. They are not
+			// always the same string, and only the bridge's id will do.
+			const jar: Record<string, string> = {};
+			for (const field of control.fields) {
+				const found = parsed[field.sourceName ?? field.id];
+				if (found !== undefined && found !== '') {
+					jar[field.id] = found;
+				}
+			}
+			data[JAR_MEMBER] = jar;
 			continue;
 		}
 		// The raw value, not the trimmed one: a credential's own whitespace is

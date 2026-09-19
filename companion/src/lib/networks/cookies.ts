@@ -32,7 +32,14 @@
 // storage, no store, no log. The textarea is cleared as soon as the submission
 // is made, and the values never leave the variable they were parsed into.
 
-/** A cookie jar: name to value, in the shape the bridge's step takes. */
+/**
+ * A jar: name to value.
+ *
+ * Named for the case it was written for and used for every grouped field type
+ * bridgev2 has (`step-fields.ts`): a `request_header` value parses the same way,
+ * and the JSON spelling below is the one a jar of headers is asked for, because
+ * a `Cookie` header is itself a list of `name=value` pairs.
+ */
 export type CookieJar = Record<string, string>;
 
 export type CookieParse =

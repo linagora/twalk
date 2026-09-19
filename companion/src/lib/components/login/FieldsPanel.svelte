@@ -173,6 +173,8 @@
 						<li data-testid="refused-field" data-field-id={control.field.id}>
 							{#if control.because === 'no_type'}
 								{$t('networks.field.refusedNoType', { field: control.field.name })}
+							{:else if control.because === 'no_options'}
+								{$t('networks.field.refusedNoOptions', { field: control.field.name })}
 							{:else}
 								{$t('networks.field.refusedUnknownType', {
 									field: control.field.name,
@@ -189,9 +191,15 @@
 		<form class="stack" onsubmit={answer}>
 			{#each controls as control (control.id)}
 				{#if control.kind === 'jar'}
+					<!-- One control for the whole group, because a bridge that groups
+					     these by type is saying they are fetched from one browser
+					     session in one sitting — and because the answer it wants is
+					     one map, whatever each field's source was. -->
 					<div class="field">
 						<p class="small">
-							{$t('networks.cookies.wanted', { count: control.names.length })}
+							{control.allCookies
+								? $t('networks.cookies.wanted', { count: control.names.length })
+								: $t('networks.jar.wanted', { count: control.names.length })}
 						</p>
 						<ul class="names" data-testid="cookie-names">
 							{#each control.names as name (name)}
@@ -201,7 +209,9 @@
 						{#if control.domain !== null}
 							<p class="small muted">{$t('networks.cookies.domain', { domain: control.domain })}</p>
 						{/if}
-						<label class="label" for={control.id}>{$t('networks.cookies.label')}</label>
+						<label class="label" for={control.id}>
+							{control.allCookies ? $t('networks.cookies.label') : $t('networks.jar.label')}
+						</label>
 						<textarea
 							id={control.id}
 							class="input paste"
@@ -209,10 +219,34 @@
 							spellcheck="false"
 							autocapitalize="none"
 							autocomplete="off"
-							placeholder={'SID=…; HSID=…; SSID=…'}
+							placeholder={control.allCookies
+								? 'SID=…; HSID=…; SSID=…'
+								: '{"Cookie": "…", "X-Example-Token": "…"}'}
 							bind:value={values[control.id]}
 							data-testid="cookie-paste"
 						></textarea>
+						{@render problem(control.id)}
+					</div>
+				{:else if control.kind === 'entry' && control.control === 'select'}
+					<div class="field">
+						<label class="label" for={control.id}>{control.field.name}</label>
+						{#if control.field.description !== null}
+							<p class="small muted">{control.field.description}</p>
+						{/if}
+						<select
+							id={control.id}
+							class="input"
+							bind:value={values[control.id]}
+							data-testid={`field-${control.field.id}`}
+							data-field-type={control.type}
+						>
+							<!-- No option selected to begin with: a list that answers
+							     itself is a value the user did not choose. -->
+							<option value="" disabled selected>{$t('networks.field.choose')}</option>
+							{#each control.field.options as option (option)}
+								<option value={option}>{option}</option>
+							{/each}
+						</select>
 						{@render problem(control.id)}
 					</div>
 				{:else if control.kind === 'entry'}
@@ -246,6 +280,17 @@
 			>
 				{$t(explained?.submit ?? 'networks.step.submit')}
 			</button>
+			{#each controls as control (control.id)}
+				{#if control.kind === 'refused'}
+					<!-- Answerable in spite of it: the bridge called this one
+					     optional, so the login can go on without it — said out loud,
+					     because a field that vanished silently is a field the user
+					     will look for. -->
+					<p class="small muted" data-testid="field-left-out" data-field-id={control.field.id}>
+						{$t('networks.field.leftOut', { field: control.field.name })}
+					</p>
+				{/if}
+			{/each}
 			{#if explained !== null}
 				{#each explained.after as line (line)}
 					<p class="small muted">{$t(line)}</p>

@@ -174,6 +174,74 @@ test('a field type this version cannot draw is refused and named', async ({ page
 	expect((await bridge.stats()).submits.some((s) => s.step_type === 'user_input')).toBe(false);
 });
 
+test('a jar of request headers is one paste, and is not called a jar of cookies', async ({
+	page,
+	request
+}) => {
+	// The shape a first-party bridgev2 connector really asks for (LinkedIn): three
+	// fields of type `request_header` — a whole `Cookie` header and two `X-LI-*`
+	// values — carried, as bridgev2 carries them, in each field's `sources` rather
+	// than on the field itself.
+	//
+	// It is here because the rule as first written would have refused this login:
+	// the grouped-type set came from the types this repository had met, and this
+	// one was not among them. The set is bridgev2's own enumeration now, and the
+	// one thing the browser must get right is that the answer is keyed by the
+	// bridge's **id** while the paste is keyed by the browser's **name**.
+	const bridge = new StubBridge(request, WHATSAPP_BRIDGE);
+	await page.goto('/networks/whatsapp');
+	await page.getByTestId('accept-disclosure').click();
+	await expect(page.getByTestId('qr-code')).toBeVisible();
+
+	await bridge.releaseStep({
+		step_id: 'fi.mau.stub.login.headers',
+		type: 'cookies',
+		instructions: 'Sign in, then bring back these request headers',
+		url: 'https://www.example.invalid/login',
+		fields: [
+			{ id: 'cookie', required: true, sources: [{ type: 'request_header', name: 'Cookie' }] },
+			{ id: 'csrf', required: true, sources: [{ type: 'request_header', name: 'Csrf-Token' }] },
+			{ id: 'track', required: false, sources: [{ type: 'request_header', name: 'X-Li-Track' }] }
+		]
+	});
+
+	const step = page.getByTestId('login-step');
+	await expect(step).toBeVisible();
+	// One control for the group, named as the browser names each value.
+	const names = page.getByTestId('cookie-names');
+	await expect(names).toContainText('Cookie');
+	await expect(names).toContainText('Csrf-Token');
+	// And not called cookies, because two of these are not.
+	await expect(step).not.toContainText(/cookies your bridge asked for|cookies demandés/);
+	await expect(step).toContainText(/values your bridge asked for|valeurs demandées/);
+	// A credential handover this project has no words for says so, rather than
+	// handing one over explained only by its bridge.
+	await expect(page.getByTestId('step-copy-missing')).toBeVisible();
+
+	await page
+		.getByTestId('cookie-paste')
+		.fill('{"Cookie": "li_at=a-session; lidc=b", "Csrf-Token": "ajax:42"}');
+	await page.getByTestId('submit-step').click();
+
+	// The stub answers a cookies step the way mautrix-gmessages does: with the
+	// emoji pairing step. Drawn here on a **QR** screen, which is the migration
+	// working — before ADR 0030 this panel lived inside the SMS screen and an
+	// emoji step anywhere else drew an empty seventeen-rem box.
+	await expect(page.getByTestId('sms-emoji')).toBeVisible();
+	await bridge.releaseCompletion('headers-login');
+	await expect(page.getByTestId('login-complete')).toBeVisible();
+
+	// The answer went out as one map, keyed by the bridge's own field ids — not
+	// by the header names the user pasted — and the optional value it did not
+	// have is simply absent rather than empty.
+	const stats = await bridge.stats();
+	const relayed = stats.submits.find((submit) => submit.step_type === 'cookies');
+	expect(relayed?.body?.cookies).toEqual({
+		cookie: 'li_at=a-session; lidc=b',
+		csrf: 'ajax:42'
+	});
+});
+
 test('a refused answer is its own outcome, and never blames the user’s server', async ({
 	page,
 	request

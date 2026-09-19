@@ -167,6 +167,50 @@ describe('the login view', () => {
 		});
 	});
 
+	it('reads a cookie field’s type out of its sources, which is where bridgev2 puts it', () => {
+		// A `LoginCookieField` has **no type of its own**: it carries `sources`,
+		// each with the type, the name the value goes by in the browser and the
+		// domain (`mautrix/go`, `bridgev2/login.go`). Reading only the field's own
+		// `type` refused every real bridgev2 cookie step as "the bridge declared
+		// none" — the same defect as the old `username` default, from the other
+		// side.
+		const state = viewOf(
+			login({
+				state: 'awaiting_input',
+				step: step({
+					type: 'cookies',
+					step_id: 'fi.mau.linkedin.login.cookies',
+					payload: {
+						url: 'https://www.linkedin.com/login',
+						wait_for_url_pattern: '^https://www\\.linkedin\\.com/feed',
+						fields: [
+							{
+								id: 'cookie',
+								required: true,
+								sources: [{ type: 'request_header', name: 'Cookie' }]
+							},
+							{
+								id: 'csrf',
+								required: false,
+								sources: [{ type: 'request_header', name: 'Csrf-Token' }]
+							}
+						]
+					}
+				})
+			})
+		);
+		expect(state).toMatchObject({
+			kind: 'cookies',
+			request: { waitForUrl: '^https://www\\.linkedin\\.com/feed' },
+			fields: [
+				// The id is what the answer is submitted under; the source name is
+				// what the user will see in their browser. They differ here.
+				{ id: 'cookie', type: 'request_header', sourceName: 'Cookie', required: true },
+				{ id: 'csrf', type: 'request_header', sourceName: 'Csrf-Token', required: false }
+			]
+		});
+	});
+
 	it('names a step type it has no panel for rather than drawing nothing', () => {
 		// The residual case: a Gateway newer than this build. The generated type
 		// says this cannot happen, and the wire is not the type system — which is
