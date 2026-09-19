@@ -5,7 +5,7 @@ How the engineering skills should consume this repo's domain documentation when 
 ## Before exploring, read these
 
 - **`CONTEXT.md`** at the repo root: the domain glossary, and the authority on which word to use.
-- **`docs/architecture/adr/`**: the ADRs. Read the ones touching the area you are about to work in. (Note the path — decisions live under `docs/architecture/adr/`, not `docs/adr/`. ADRs 0005–0013 are written; 0001–0004 are referenced from the docs but not yet written.)
+- **`docs/architecture/adr/`**: the ADRs. Read the ones touching the area you are about to work in. (Note the path — decisions live under `docs/architecture/adr/`, not `docs/adr/`. ADRs 0005–0025 are written; 0001–0004 are referenced from the README and the wireframes but not yet written, and their numbers are reserved.)
 - **`docs/architecture/roadmap.md`** when the work spans components: it maps the product milestones to the lots, with their specs and build order.
 - **`docs/architecture/security-model.md`** when the work touches a secret, a store, a credential or the consent gate: it states which component holds which secret, what is not encrypted at rest, and what consent does and does not stop.
 
@@ -21,7 +21,7 @@ Single-context repo: one glossary and one ADR directory for the whole monorepo, 
 ├── docs/architecture/
 │   ├── adr/
 │   │   ├── 0005-network-channel-and-bridge.md
-│   │   └── …
+│   │   └── … (through 0025)
 │   ├── roadmap.md
 │   └── security-model.md
 ├── sensor/
