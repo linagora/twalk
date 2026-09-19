@@ -50,6 +50,7 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `src/lib/matrix/` | The user's own homeserver: discovery, sign-in (`login.ts`) and the room listing screen 3d selects from (`rooms.ts`). |
 | `src/lib/personas/` | Screen 4: the `assistant` card and its two locked abilities (`catalogue.ts`), the perimeter an activation is scoped to (`scope.ts`, pure) and the consent decision it writes (`activation.ts`). |
 | `src/lib/dashboard/` | Screen 5's judgements (`model.ts`, pure: the rows, the health roll-up, the feed and what may not be in it), the four reads it needs (`load.ts`) and its relative times (`format.ts`). |
+| `src/lib/portals/` | Which conversations a network is observed on (#143): the kind each one is, from the network's own identifier (`conversations.ts`, pure); what a tick costs in people, and when that has to be acknowledged (`selection.ts`, pure); and the two calls that read and write it (`register.ts`). |
 | `src/lib/qr/` | The QR encoder. The only module that imports an encoding library. |
 | `src/lib/version/` | The version handshake against the Gateway's `/health`, and the reload it forces. |
 | `src/lib/i18n/` | French and English, ICU patterns, `<locale>.json` per the wireframes. |
@@ -60,6 +61,7 @@ Nothing built is committed. `build/` is produced by the Gateway's image
 | `tests/real-stack.mjs` | Brings up the compose stack and the Gateway binaries the stack-backed journeys run against. |
 | `tests/stub-bridge.mjs` | bridgev2's provisioning contract, stubbed — including its blocking step. |
 | `tests/e2e/dashboard/bus.ts` | Forty lines of the NATS wire protocol: a journey subscribes, to assert that a consent decision reached the bus and not only the screen, and publishes, to make a contact pending without running a Sensor. |
+| `tests/e2e/portals/` | The conversation chooser's journey (#143): real portal rooms built through the stack's appservice, a real Sensor beside the Gateway, and the bus read at the end of it. |
 
 ## The decisions worth knowing before you change something
 
@@ -693,6 +695,63 @@ root layout initialises, and **not** in this route: the route did not always
 mount (the tab-lock screen rendered instead) and the credential stayed in the
 URL. A precaution that only runs when the page it guards is allowed to run is
 not a precaution (#135).
+
+### The conversation chooser is a third unit of decision, and it states its cost
+
+`/networks/conversations` (#143) asks one question per conversation: *do I watch
+this room.* It exists because the two units Twalk already had are not the unit a
+user thinks in here. For `maria` a contact and a conversation are the same thing
+and consent-per-contact works; for `Échecs en Yvelines` at 246 members nobody
+adjudicates 246 people one by one, and ticking that row is a decision about 246
+people in one gesture. Observation and consent compose rather than compete: an
+unwatched conversation produces nothing, and inside a watched one each sender's
+consent still governs what is published about them (ADR 0012).
+
+Four things about it are decisions rather than layout.
+
+**The kind is read, never guessed.** Every portal carries the network's own
+identifier for the conversation (`network_conversation_id`, the `m.bridge`
+`channel.id` passed through untouched by the Gateway) and its suffix is the
+network's own statement: `@lid` and `@s.whatsapp.net` are one person, `@g.us` a
+group, `@newsletter` a broadcast. A conversation whose bridge wrote no
+identifier is `unstated` and gets a section saying so — never inferred from the
+member count, which is evidence about a conversation's size and not its type.
+
+**Communities are grouped by name, and the screen says that is what it did.** A
+WhatsApp community is, at the network level, a set of ordinary `@g.us` groups,
+and no field anywhere says which groups belong to one. What the register can see
+is what the owner saw when they worked those eighteen rooms out: a community
+arrives as several groups whose names contain one another — `Communauté CKCP`
+twice in the same minute at 109 members and 6, `XVDSI` and `XVDSI - General`.
+So `families()` clusters on whole-word containment of one folded name in
+another, and the screen states plainly that the network never told it which row
+is the parent. Each row keeps its member count and its network address, which is
+what tells two rows called `XVDSI` apart at all. Its limit is stated too: a
+subgroup with an unrelated name is indistinguishable from an ordinary group and
+appears as one.
+
+**The consequence is stated before the tick takes effect.** Every row carries
+its count, a community carries the total across its conversations *in the label
+of the control that ticks it*, and the pending decision is costed in people
+against the whole account rather than against what the search left on screen.
+Past `CROWD` — twenty, which sits between the largest of those eighteen
+conversations a user could have named person by person (eleven) and the smallest
+that is unmistakably a crowd (seventy-three) — the decision cannot be sent until
+the number has been acknowledged, and changing the selection asks again. A
+number is not a warning, and a warning nobody reads is not a decision (#122).
+
+**The bulk control and the search are `$lib/matrix/rooms.ts`'s.**
+`scopedBulkControl` and `matchesQuery`, the same implementations the Matrix room
+chooser obeys (#137) — the Matrix screen was moved onto the shared one in the
+same change. "Select the 4 shown", never "select all", over a list that can
+contain a 246-member association. A second spelling of a rule like this is how
+#110 happened.
+
+An empty list is never rendered as "you have no conversations": the register
+names every configured bridge, whether it could be read, which account it was
+read as and how many rooms that account is in (#171), and the screen renders a
+bridge with no token and a bridge whose asker is in no rooms as the two
+different things they are.
 
 ### Screen 3c asks the user to copy cookies, and says why
 

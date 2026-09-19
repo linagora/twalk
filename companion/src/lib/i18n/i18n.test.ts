@@ -95,7 +95,22 @@ describe('the catalogues', () => {
 			// message being answered, which is all this screen is given of it.
 			sequence: 4217,
 			attempt: 1,
-			type: 'fr.linagora.twalk.inbound.message.received.v1'
+			type: 'fr.linagora.twalk.inbound.message.received.v1',
+			// The conversation chooser (ticket #143). `people` is a member
+			// count, `conversations` how many rooms one decision covers,
+			// `starting`/`stopping` the two directions of that decision, and
+			// `observing` how many the Sensor is already inside. `bridge` and
+			// `account` are the two halves of #171's diagnosis: which bridge
+			// answered and which Matrix account the register asked as.
+			people: 246,
+			conversations: 3,
+			starting: 2,
+			stopping: 1,
+			observing: 1,
+			bridge: 'mautrix-whatsapp',
+			account: '@whatsappbot:twalk.localhost',
+			reason: 'M_FORBIDDEN',
+			name: 'Échecs en Yvelines'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();

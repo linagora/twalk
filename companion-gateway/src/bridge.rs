@@ -342,6 +342,24 @@ pub struct BridgeConfig {
     /// instead was explicitly rejected — the same reasoning that gave the
     /// Sensor a service token (`docs/architecture/security-model.md`).
     pub as_token: Option<String>,
+    /// The Matrix ID of this bridge's own **bot** — the account that is in
+    /// every portal room the bridge built and has the power to invite in them
+    /// (`GATEWAY_BRIDGE_<ID>_BOT_USER_ID`, ticket #171).
+    ///
+    /// Configured, never derived. An appservice token used with no
+    /// `?user_id=` acts as the registration's `sender_localpart`, and a
+    /// generated registration's sender is a random localpart joined to
+    /// nothing — so the register read 32 conversations as an account in zero
+    /// rooms and reported zero without a word (#171). The right asker is the
+    /// bot, whose localpart is the bridge's own `bridge.bot_username` and is
+    /// therefore the operator's to state: ADR 0018 refused to string-build
+    /// the owner's ghosts for the same reason, and a Gateway that guessed
+    /// `@{bridge_id}bot:` would be wrong on any bridge that renamed its bot.
+    ///
+    /// `None` when the operator configured none: the register then acts as
+    /// the token's own identity — correct for an ordinary access token — and
+    /// says in its answer which account that turned out to be.
+    pub bot_user_id: Option<String>,
 }
 
 impl std::fmt::Debug for BridgeConfig {
@@ -2166,6 +2184,7 @@ mod tests {
             provisioning_secret: "a-secret-of-at-least-16".to_owned(),
             acting_as: "@owner:twalk.localhost".to_owned(),
             as_token: None,
+            bot_user_id: None,
         };
         assert!(Bridges::new(vec![config("a"), config("b")]).is_ok());
         let error = match Bridges::new(vec![config("a"), config("a")]) {
@@ -2187,6 +2206,7 @@ mod tests {
                 provisioning_secret: "the-secret-that-drives-logins".to_owned(),
                 acting_as: "@owner:twalk.localhost".to_owned(),
                 as_token: Some("the-token-that-impersonates-the-appservice".to_owned()),
+                bot_user_id: Some("@whatsappbot:twalk.localhost".to_owned()),
             }
         );
         assert!(
@@ -2210,6 +2230,7 @@ mod tests {
             provisioning_secret: "a-secret-of-at-least-16".to_owned(),
             acting_as: "@owner:twalk.localhost".to_owned(),
             as_token: None,
+            bot_user_id: None,
         }]) {
             Ok(_) => panic!("a base URL without a scheme is not a URL"),
             Err(error) => error,
@@ -2252,6 +2273,7 @@ mod tests {
                     provisioning_secret: "a-secret-of-at-least-16".to_owned(),
                     acting_as: "@owner:twalk.localhost".to_owned(),
                     as_token: None,
+                    bot_user_id: None,
                 },
                 slot: Mutex::new(Slot::Active(Arc::new(ActiveLogin {
                     view: Mutex::new(view(phase)),

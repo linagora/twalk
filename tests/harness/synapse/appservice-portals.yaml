@@ -1,0 +1,46 @@
+# An appservice registration for the portal register's suite (ticket #171).
+#
+# Every credential here is a throwaway constant for a local, ephemeral test
+# stack. They must never be reused anywhere else.
+#
+# # Why the suite needs a real registration
+#
+# The portal register acts as a bridge's own bot by naming it in `?user_id=`
+# (ADR 0024, corrected by #171). Synapse honours that parameter **only** for a
+# token that belongs to an appservice: for any other token
+# `_get_appservice_user` returns early and normal token auth proceeds, so
+# `?user_id=` is silently ignored and the call acts as the token's own user.
+#
+# That is why #105's fixture could not fail on the defect. It hands the
+# register an ordinary account's access token, and for an ordinary token the
+# asker *is* the sender — so whether the parameter is sent or not is
+# unobservable, and a register that never sent it passed a suite that could
+# not have noticed. A fixture built on an ordinary token cannot make the
+# parameter load-bearing, in either direction.
+#
+# # What is arranged here, and why it is the deployment's own shape
+#
+# `sender_localpart` is the account the token acts as when nothing names
+# another — and it is deliberately **not** the bot. On the reference
+# deployment the registrations are generated, so that account is a random
+# localpart (`@jaay9HZczkCQNHiIzolLOrvm99Cby90B:twalk.localhost`) joined to no
+# rooms and never joined to any, while the account in all 20 portal rooms is
+# `@whatsappbot`. Reproducing that split is the whole point: a register that
+# forgets `?user_id=` reads zero rooms here exactly as it did in production.
+#
+# The namespace covers the bot the suite uses. It is not exclusive: the test
+# Synapse has open registration and other suites create ordinary accounts, and
+# an exclusive namespace would make `@portalbot…` unregistrable by anything but
+# this appservice.
+id: twalk-test-portals
+url: null
+as_token: "test-only-portals-appservice-as-token"
+hs_token: "test-only-portals-appservice-hs-token"
+# The account with no rooms. Named so that a failure reads as the defect it
+# stands for rather than as a typo.
+sender_localpart: "appservice_sender_in_no_rooms"
+rate_limited: false
+namespaces:
+  users:
+    - exclusive: false
+      regex: "@portalbot.*:test\\.twalk"

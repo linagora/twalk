@@ -396,6 +396,16 @@ fn path_segment(value: &str) -> String {
 pub struct MatrixUser {
     pub user_id: String,
     access_token: String,
+    /// `Some(user_id)` when [`Self::access_token`] is an **appservice** token
+    /// and every call must name the user it acts as in `?user_id=`.
+    ///
+    /// This is the whole of what an appservice handle is, and the reason it
+    /// exists in the harness at all (#171): Synapse honours that parameter
+    /// only for a token that belongs to an appservice, so the parameter the
+    /// portal register depends on cannot be exercised by any handle built on
+    /// an ordinary access token. `None` is an ordinary session and behaves
+    /// exactly as it always did.
+    masquerade: Option<String>,
     http: reqwest::Client,
 }
 
@@ -428,6 +438,7 @@ impl MatrixUser {
                 .as_str()
                 .context("the login answer carries no access token")?
                 .to_owned(),
+            masquerade: None,
             http,
         })
     }
@@ -438,11 +449,10 @@ impl MatrixUser {
     pub async fn openid_token(&self) -> Result<serde_json::Value> {
         let token: serde_json::Value = self
             .http
-            .post(format!(
-                "{}/_matrix/client/v3/user/{}/openid/request_token",
-                synapse_url(),
+            .post(self.url(&format!(
+                "/_matrix/client/v3/user/{}/openid/request_token",
                 self.user_id
-            ))
+            )))
             .bearer_auth(&self.access_token)
             .json(&serde_json::json!({}))
             .send()
@@ -464,7 +474,89 @@ impl MatrixUser {
         Self {
             user_id: user_id.to_owned(),
             access_token: access_token.to_owned(),
+            masquerade: None,
             http: reqwest::Client::new(),
+        }
+    }
+
+    /// A handle that acts as `localpart` **through the test stack's appservice
+    /// token**, the way a real bridge acts as its own bot.
+    ///
+    /// The account needs no registration and no password: an appservice may
+    /// act as any user its namespace covers, and Synapse creates the profile
+    /// on first use. `tests/harness/synapse/appservice-portals.yaml` is the
+    /// registration, and its namespace is `@portalbot…`.
+    ///
+    /// This is the only handle in the harness for which `?user_id=` does
+    /// anything at all, which is exactly why the portal register's suite needs
+    /// it: the appservice's own `sender_localpart` is an account in no rooms,
+    /// so a register that forgets the parameter reads nothing here for the
+    /// same reason it read nothing on the reference deployment (#171).
+    pub async fn as_appservice(localpart: &str) -> Result<Self> {
+        let user_id = format!("@{localpart}:{SERVER_NAME}");
+        let http = reqwest::Client::new();
+        // Synapse refuses to let an appservice act as a user it has not
+        // registered, even one its namespace covers ("Application service has
+        // not registered this user"). A real mautrix bridge registers its bot
+        // and each ghost exactly like this, so the fixture does too.
+        let response = http
+            .post(format!("{}/_matrix/client/v3/register", synapse_url()))
+            .bearer_auth(PORTALS_APPSERVICE_AS_TOKEN)
+            .json(&serde_json::json!({
+                "type": "m.login.application_service",
+                "username": localpart,
+            }))
+            .send()
+            .await
+            .context("failed to register an appservice user")?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        // Already registered is success: this is idempotent across runs, and
+        // the stack outlives a run.
+        anyhow::ensure!(
+            status.is_success() || body.contains("M_USER_IN_USE"),
+            "the homeserver refused to register the appservice user {user_id}: {status} {body}. \
+             The registration in tests/harness/synapse/appservice-portals.yaml has to cover this \
+             localpart, and the stack has to have loaded it."
+        );
+        Ok(Self {
+            user_id: user_id.clone(),
+            access_token: PORTALS_APPSERVICE_AS_TOKEN.to_owned(),
+            masquerade: Some(user_id),
+            http,
+        })
+    }
+
+    /// The same, with a localpart nobody else's rooms are in.
+    ///
+    /// A bridge bot's whole answer to "which conversations exist?" is the list
+    /// of rooms it is joined to, so a bot shared between tests would carry one
+    /// test's portals into another's register.
+    pub async fn as_fresh_appservice(prefix: &str) -> Result<Self> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        Self::as_appservice(&format!("{prefix}_{unique}")).await
+    }
+
+    /// The appservice token itself — what a bridge configures the Gateway with
+    /// as `GATEWAY_BRIDGE_<ID>_AS_TOKEN`, and which by itself acts as an
+    /// account in no rooms.
+    pub fn appservice_token(&self) -> &str {
+        &self.access_token
+    }
+
+    /// A client-server URL for this handle, carrying the masquerade when it has
+    /// one. Every call below goes through it, so a method added later cannot
+    /// quietly act as the wrong account — the mistake #171 was.
+    fn url(&self, path: &str) -> String {
+        match &self.masquerade {
+            Some(user_id) => format!(
+                "{}{path}?user_id={}",
+                synapse_url(),
+                path_segment(user_id)
+            ),
+            None => format!("{}{path}", synapse_url()),
         }
     }
 
@@ -473,10 +565,7 @@ impl MatrixUser {
     pub async fn whoami(&self) -> Result<String> {
         let body: serde_json::Value = self
             .http
-            .get(format!(
-                "{}/_matrix/client/v3/account/whoami",
-                synapse_url()
-            ))
+            .get(self.url("/_matrix/client/v3/account/whoami"))
             .bearer_auth(&self.access_token)
             .send()
             .await
@@ -498,7 +587,7 @@ impl MatrixUser {
     pub async fn create_room(&self, name: &str) -> Result<String> {
         let body: serde_json::Value = self
             .http
-            .post(format!("{}/_matrix/client/v3/createRoom", synapse_url()))
+            .post(self.url("/_matrix/client/v3/createRoom"))
             .bearer_auth(&self.access_token)
             .json(&serde_json::json!({ "name": name, "preset": "private_chat" }))
             .send()
@@ -521,10 +610,9 @@ impl MatrixUser {
     pub async fn membership(&self, room_id: &str, user_id: &str) -> Result<Option<String>> {
         let response = self
             .http
-            .get(format!(
-                "{}/_matrix/client/v3/rooms/{room_id}/state/m.room.member/{user_id}",
-                synapse_url()
-            ))
+            .get(self.url(&format!(
+                "/_matrix/client/v3/rooms/{room_id}/state/m.room.member/{user_id}"
+            )))
             .bearer_auth(&self.access_token)
             .send()
             .await
@@ -546,10 +634,9 @@ impl MatrixUser {
             .as_nanos();
         let answer: serde_json::Value = self
             .http
-            .put(format!(
-                "{}/_matrix/client/v3/rooms/{room_id}/send/m.room.message/twalk-g53-{unique}",
-                synapse_url()
-            ))
+            .put(self.url(&format!(
+                "/_matrix/client/v3/rooms/{room_id}/send/m.room.message/twalk-g53-{unique}"
+            )))
             .bearer_auth(&self.access_token)
             .json(&serde_json::json!({ "msgtype": "m.text", "body": body }))
             .send()
@@ -605,6 +692,7 @@ impl MatrixUser {
                 .as_str()
                 .context("the registration answer carries no access token")?
                 .to_owned(),
+            masquerade: None,
             http,
         })
     }
@@ -612,10 +700,7 @@ impl MatrixUser {
     /// Invites another account into a room.
     pub async fn invite(&self, room_id: &str, user_id: &str) -> Result<()> {
         self.http
-            .post(format!(
-                "{}/_matrix/client/v3/rooms/{room_id}/invite",
-                synapse_url()
-            ))
+            .post(self.url(&format!("/_matrix/client/v3/rooms/{room_id}/invite")))
             .bearer_auth(&self.access_token)
             .json(&serde_json::json!({ "user_id": user_id }))
             .send()
@@ -630,10 +715,7 @@ impl MatrixUser {
     /// own, played here by a test account.
     pub async fn join(&self, room_id: &str) -> Result<()> {
         self.http
-            .post(format!(
-                "{}/_matrix/client/v3/rooms/{room_id}/join",
-                synapse_url()
-            ))
+            .post(self.url(&format!("/_matrix/client/v3/rooms/{room_id}/join")))
             .bearer_auth(&self.access_token)
             .json(&serde_json::json!({}))
             .send()
@@ -653,11 +735,10 @@ impl MatrixUser {
         content: serde_json::Value,
     ) -> Result<()> {
         self.http
-            .put(format!(
-                "{}/_matrix/client/v3/rooms/{room_id}/state/{event_type}/{}",
-                synapse_url(),
+            .put(self.url(&format!(
+                "/_matrix/client/v3/rooms/{room_id}/state/{event_type}/{}",
                 path_segment(state_key)
-            ))
+            )))
             .bearer_auth(&self.access_token)
             .json(&content)
             .send()
@@ -696,10 +777,9 @@ impl MatrixUser {
     pub async fn joined_members(&self, room_id: &str) -> Result<Vec<String>> {
         let body: serde_json::Value = self
             .http
-            .get(format!(
-                "{}/_matrix/client/v3/rooms/{room_id}/joined_members",
-                synapse_url()
-            ))
+            .get(self.url(&format!(
+                "/_matrix/client/v3/rooms/{room_id}/joined_members"
+            )))
             .bearer_auth(&self.access_token)
             .send()
             .await
@@ -797,28 +877,48 @@ pub fn gateway_env_with_bridges(static_dir: &Path, stub_base_url: &str) -> Vec<(
     )
 }
 
-/// The bridge instances the portal register's suite configures (ticket
-/// #105): one whose appservice credential is a working Matrix session of the
-/// account playing the bridge bot, and one with no credential at all.
+/// The bridge instances the portal register's suite configures (tickets #105
+/// and #171).
 ///
-/// The second is not decoration. A bridge the operator wired up without
-/// giving the Gateway its token contributes no conversations to any total,
-/// and the whole point of the register is that such a bridge is *reported*
-/// rather than silently missing — "the Sensor is outside 17 of your 18
-/// conversations" must never quietly mean "…of the 18 I could see".
+/// # Why the credential is a real appservice token (#171)
 ///
-/// The token is an ordinary access token rather than an appservice one
-/// because the register only ever speaks the client-server API with it: in a
-/// deployment that credential is the bridge's `as_token`, and Synapse
-/// answers the same calls for both. What the test needs from it is what the
-/// bridge bot has — membership of the portal rooms and the power to invite
-/// in them.
+/// It used to be an ordinary account's access token, on the reasoning that
+/// the register only speaks the client-server API and Synapse answers the
+/// same calls for both. That reasoning was sound and the fixture it produced
+/// could not fail on the defect it needed to catch: acting as the bridge bot
+/// takes `?user_id=`, Synapse honours that parameter **only** for an
+/// appservice token, and for an ordinary token the asker *is* the sender — so
+/// whether the register sent the parameter was unobservable, in either
+/// direction, and a register that never sent it passed.
+///
+/// So this fixture is the deployment's own shape. The credential is the test
+/// stack's appservice token (`tests/harness/synapse/appservice-portals.yaml`),
+/// whose `sender_localpart` is an account in **no rooms** — as a generated
+/// mautrix registration's sender is — and the account that is in every portal
+/// is the bot named in `GATEWAY_BRIDGE_<ID>_BOT_USER_ID`. A register that
+/// forgets `?user_id=` therefore reads zero rooms here for exactly the reason
+/// it read zero of 32 on the reference deployment.
+///
+/// Three bridge instances, and each one is a distinct fact about the register:
+///
+/// - [`PORTAL_BRIDGE_ID`] — the working shape: appservice token plus the
+///   bot's Matrix ID.
+/// - [`PORTAL_TOKENLESS_BRIDGE_ID`] — no credential at all. Reported as
+///   unreadable with the variable that would open it, never silently missing:
+///   "the Sensor is outside 17 of your 18 conversations" must never quietly
+///   mean "…of the 18 I could see".
+/// - [`PORTAL_SENDER_BRIDGE_ID`] — the **defect's own configuration**: the
+///   appservice token with no bot named, so the register falls back to the
+///   token's own identity and acts as an account in no rooms. It must answer
+///   `readable: true` with `joined_rooms: 0` and name that account, because
+///   the whole cost of #171 was a zero nobody could attribute.
 pub const PORTAL_BRIDGE_ID: &str = "mautrix-portal";
 pub const PORTAL_TOKENLESS_BRIDGE_ID: &str = "mautrix-tokenless";
+pub const PORTAL_SENDER_BRIDGE_ID: &str = "mautrix-sender";
 
 pub fn gateway_env_with_portals(
     static_dir: &Path,
-    bridge_bot_access_token: &str,
+    bridge_bot: &MatrixUser,
 ) -> Vec<(String, String)> {
     let dead = unreachable_http_url().expect("the kernel can hand out a free port");
     gateway_env_with(
@@ -826,7 +926,9 @@ pub fn gateway_env_with_portals(
         &[
             (
                 "GATEWAY_BRIDGES",
-                &format!("{PORTAL_BRIDGE_ID},{PORTAL_TOKENLESS_BRIDGE_ID}"),
+                &format!(
+                    "{PORTAL_BRIDGE_ID},{PORTAL_TOKENLESS_BRIDGE_ID},{PORTAL_SENDER_BRIDGE_ID}"
+                ),
             ),
             // The register never calls a bridge's provisioning API — it asks
             // the homeserver — so these two instances need no listener, and
@@ -839,7 +941,13 @@ pub fn gateway_env_with_portals(
             ("GATEWAY_BRIDGE_MAUTRIX_PORTAL_NETWORK", "whatsapp"),
             (
                 "GATEWAY_BRIDGE_MAUTRIX_PORTAL_AS_TOKEN",
-                bridge_bot_access_token,
+                bridge_bot.appservice_token(),
+            ),
+            // The account the register must act as. Configured, never derived
+            // from the bridge id (#171, and ADR 0018's reason).
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_PORTAL_BOT_USER_ID",
+                &bridge_bot.user_id,
             ),
             ("GATEWAY_BRIDGE_MAUTRIX_TOKENLESS_URL", &dead),
             (
@@ -847,6 +955,20 @@ pub fn gateway_env_with_portals(
                 "test-only-unused-provisioning-secret",
             ),
             ("GATEWAY_BRIDGE_MAUTRIX_TOKENLESS_NETWORK", "signal"),
+            // #171's own configuration: a credential, and nobody named to act
+            // as. The register falls back to the token's own identity, which
+            // for an appservice token is its `sender_localpart` — an account
+            // in no rooms.
+            ("GATEWAY_BRIDGE_MAUTRIX_SENDER_URL", &dead),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_SENDER_PROVISIONING_SECRET",
+                "test-only-unused-provisioning-secret",
+            ),
+            ("GATEWAY_BRIDGE_MAUTRIX_SENDER_NETWORK", "telegram"),
+            (
+                "GATEWAY_BRIDGE_MAUTRIX_SENDER_AS_TOKEN",
+                bridge_bot.appservice_token(),
+            ),
             // The background refresh is off: every number this suite asserts
             // must come from a read it made itself, so that a passing test is
             // never a timer that happened to fire.

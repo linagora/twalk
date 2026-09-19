@@ -183,6 +183,20 @@ impl Settings {
 ///   status pushes with (ticket #56). Unset: that bridge's webhook is
 ///   **refused**, because an unverified push is not accepted — see
 ///   [`crate::bridge_status`].
+/// - `GATEWAY_BRIDGE_<ID>_BOT_USER_ID` — the Matrix ID of that bridge's own
+///   **bot**, e.g. `@whatsappbot:example.com`, which is the account the
+///   portal register acts as (ticket #171, ADR 0024). It is the bridge's own
+///   `bridge.bot_username` on the deployment's server name, and it is asked
+///   for rather than derived: an appservice token with no `?user_id=` acts as
+///   the registration's `sender_localpart`, which for a generated
+///   registration is a random localpart that is in no rooms at all — which is
+///   how the register answered "0 of 32 conversations" and said nothing. The
+///   Gateway will not string-build this from the bridge id, for the same
+///   reason ADR 0018 refused to derive the owner's ghosts: the localpart
+///   belongs to the bridge's configuration, not to a convention. Unset: the
+///   register acts as the token's own identity, which is right for an
+///   ordinary access token and wrong for an appservice one — and the answer
+///   says which account it asked as, so the two are distinguishable.
 /// - `GATEWAY_BRIDGE_<ID>_STATUS_ID` — the `bridge_id` this instance's
 ///   events carry, and the segment of its webhook URL. Defaults to
 ///   [`default_status_bridge_id`], which is what the reference deployment
@@ -235,6 +249,9 @@ pub fn bridges_from_env(acting_as: &str) -> Result<Vec<crate::bridge::BridgeConf
             base_url,
             provisioning_secret,
             as_token: env(&format!("GATEWAY_BRIDGE_{slug}_AS_TOKEN"))
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
+            bot_user_id: env(&format!("GATEWAY_BRIDGE_{slug}_BOT_USER_ID"))
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
         });

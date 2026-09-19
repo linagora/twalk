@@ -29,7 +29,8 @@ use anyhow::{Context, Result};
 use harness::{
     companion_build, ensure_stack, gateway_env_with_portals, parse_exposition,
     signed_in_device_token, GatewayProc, MatrixUser, OWNER_LOCALPART, PORTAL_BRIDGE_ID,
-    PORTAL_TOKENLESS_BRIDGE_ID, SENSOR_USER_ID,
+    PORTAL_SENDER_BRIDGE_ID, PORTAL_TOKENLESS_BRIDGE_ID, PORTALS_APPSERVICE_SENDER,
+    SENSOR_USER_ID,
 };
 use serde_json::{json, Value};
 
@@ -50,14 +51,16 @@ struct Running {
 impl Running {
     async fn start(test_name: &str) -> Result<Self> {
         ensure_stack().await?;
-        let bridge_bot = MatrixUser::register_fresh("portalbot").await?;
+        // The bridge bot, acting through the test stack's **appservice**
+        // token, exactly as a mautrix bot does. Not an ordinary account: the
+        // register names this bot in `?user_id=`, and Synapse honours that
+        // parameter only for an appservice token, so an ordinary session
+        // cannot exercise it at all (#171).
+        let bridge_bot = MatrixUser::as_fresh_appservice("portalbot").await?;
         let owner = MatrixUser::login(OWNER_LOCALPART).await?;
         let sensor = MatrixUser::login("sensor").await?;
         let static_dir = companion_build(test_name)?;
-        let gateway = GatewayProc::start(&gateway_env_with_portals(
-            &static_dir,
-            bridge_bot.matrix_access_token(),
-        ))?;
+        let gateway = GatewayProc::start(&gateway_env_with_portals(&static_dir, &bridge_bot))?;
         let base = gateway.base_url().await?;
         let cookie = signed_in_device_token(&base).await?;
         Ok(Self {
@@ -217,7 +220,7 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
     let bridges = register["bridges"]
         .as_array()
         .context("every configured bridge is in the answer")?;
-    assert_eq!(bridges.len(), 2, "{register}");
+    assert_eq!(bridges.len(), 3, "{register}");
     let tokenless = bridges
         .iter()
         .find(|bridge| bridge["bridge_id"] == PORTAL_TOKENLESS_BRIDGE_ID)
@@ -229,6 +232,24 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
             .unwrap_or_default()
             .contains("GATEWAY_BRIDGE_MAUTRIX_TOKENLESS_AS_TOKEN"),
         "and the reason names the variable that would open it: {register}"
+    );
+
+    // And the bridge that *was* read says which account read it, which is the
+    // half of #171 that is not the fix. `asked_as` is the configured bot and
+    // not the appservice's sender, and it is joined to the two portals it
+    // built — so a zero here would have a name attached to it.
+    let working = bridges
+        .iter()
+        .find(|bridge| bridge["bridge_id"] == PORTAL_BRIDGE_ID)
+        .context("the readable bridge is named")?;
+    assert_eq!(working["readable"], true, "{register}");
+    assert_eq!(
+        working["asked_as"], running.bridge_bot.user_id,
+        "the register acts as the bridge bot the operator configured, and says so: {register}"
+    );
+    assert_eq!(
+        working["joined_rooms"], 2,
+        "and says how many rooms that account is in at all: {register}"
     );
 
     // And the same fact on /metrics, so a deployment can say it without a
@@ -259,6 +280,130 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
         ),
         Some(1),
         "and the gauge says how many bridges the first number does not cover: {metrics:?}"
+    );
+
+    running.stop().await;
+    Ok(())
+}
+
+/// The register acts as the **bridge bot**, and a register that did not could
+/// not see a single conversation (ticket #171).
+///
+/// This is the test #105's suite could not contain. That suite handed the
+/// register an ordinary account's access token, and for an ordinary token
+/// Synapse ignores `?user_id=` — `_get_appservice_user` returns early when the
+/// token belongs to no appservice, and normal token auth then acts as the
+/// token's own user. So the parameter that decides which account reads a
+/// bridge's rooms was unobservable in both directions: the register never sent
+/// it, every assertion passed, and the reference deployment reported
+/// `observing=0 invited=0 absent=0 unreadable_bridges=0` against 32 portal
+/// rooms.
+///
+/// Here the credential is the stack's real appservice token, whose
+/// `sender_localpart` is an account in no rooms, and the bot is a different
+/// account named in configuration. Two facts are asserted, and the first fails
+/// on the code as it was:
+///
+/// 1. the conversations are found — which they are only if `?user_id=` names
+///    the bot;
+/// 2. and the bridge configured **without** a bot named — #171's own
+///    configuration — answers `readable: true` with `joined_rooms: 0` and
+///    names the account it asked as, so that a zero can be told apart from the
+///    truthful zero of a deployment whose bridges have built nothing yet.
+#[tokio::test]
+async fn the_register_reads_as_the_bridge_bot_and_not_as_the_appservices_sender() -> Result<()> {
+    let running = Running::start("portals-asks-as-the-bot").await?;
+    let chess = running.build_portal("Échecs en Yvelines").await?;
+
+    // The premise, established against the homeserver rather than assumed: the
+    // bot is in the conversation and the appservice's sender is in nothing. If
+    // this ever stops holding, the test below stops meaning anything.
+    assert_eq!(
+        running
+            .bridge_bot
+            .membership(&chess, &running.bridge_bot.user_id)
+            .await?
+            .as_deref(),
+        Some("join"),
+        "the bridge bot is in the portal it built"
+    );
+    assert_ne!(
+        running.bridge_bot.user_id, PORTALS_APPSERVICE_SENDER,
+        "the asker and the account in the rooms must be different accounts, or this test proves          nothing"
+    );
+
+    let register = running.register().await?;
+
+    // 1. Found — which takes `?user_id=`. On the code #105 shipped this is
+    //    zero, because the appservice's sender is joined to nothing.
+    assert_eq!(
+        register["summary"]["total"], 1,
+        "the register found the conversation, which it can only do by asking as the bridge bot:          {register}"
+    );
+    assert_eq!(observation_of(&register, &chess).as_deref(), Some("absent"));
+
+    let bridges = register["bridges"]
+        .as_array()
+        .context("every configured bridge is in the answer")?;
+
+    // 2. And the bridge with no bot named is #171 reproduced, reported rather
+    //    than silent. Not `unreadable`: nothing failed, and the Gateway cannot
+    //    know whether this network has simply built no conversation yet. What
+    //    it can do — and could not before — is name the account and the count.
+    let sender_only = bridges
+        .iter()
+        .find(|bridge| bridge["bridge_id"] == PORTAL_SENDER_BRIDGE_ID)
+        .context("the bridge configured with no bot is named")?;
+    assert_eq!(
+        sender_only["readable"], true,
+        "nothing failed: the token worked and the homeserver answered — {register}"
+    );
+    assert_eq!(
+        sender_only["asked_as"], PORTALS_APPSERVICE_SENDER,
+        "and the answer names the account it fell back to, which is the appservice's own sender          and not any bridge's bot: {register}"
+    );
+    assert_eq!(
+        sender_only["joined_rooms"], 0,
+        "which is in no rooms at all — the fact that makes this zero attributable: {register}"
+    );
+    assert!(
+        !register["portals"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|portal| portal["bridge_id"] == PORTAL_SENDER_BRIDGE_ID),
+        "and it contributes no conversation, so the list is not quietly wrong either: {register}"
+    );
+
+    running.stop().await;
+    Ok(())
+}
+
+/// Observing a conversation is done **as the bridge bot** too, not only read
+/// as it (ticket #171).
+///
+/// The read and the write are two different calls and only one of them was
+/// wrong on the reference deployment — because the read failed first, nothing
+/// ever reached the write. It would have failed too: the appservice's sender
+/// has no power level in a room it is not in, so the invitation would have
+/// been `M_FORBIDDEN` for a conversation the Gateway had somehow found. This
+/// asserts the whole path against the homeserver: the Sensor's membership,
+/// which no answer of the Gateway's can fake.
+#[tokio::test]
+async fn observing_a_conversation_acts_as_the_bridge_bot_as_well() -> Result<()> {
+    let running = Running::start("portals-invites-as-the-bot").await?;
+    let chess = running.build_portal("Échecs en Yvelines").await?;
+
+    let answer = running.set_observation(&[&chess], true).await?;
+    assert_eq!(
+        outcome_for(&answer, &chess).as_deref(),
+        Some("invited"),
+        "the bot can invite in the room it created: {answer}"
+    );
+    assert_eq!(
+        running.sensor_membership(&chess).await?.as_deref(),
+        Some("invite"),
+        "and the homeserver — not the Gateway's own answer — is where that is true"
     );
 
     running.stop().await;

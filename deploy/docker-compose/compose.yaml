@@ -304,10 +304,22 @@ services:
       # reach the Gateway's port, so the network is not a credential
       # (docs/architecture/security-model.md).
       GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_AS_TOKEN: ${WHATSAPP_AS_TOKEN:-}
+      # The account the portal register acts as (issue #171). An appservice
+      # token used with no ?user_id= acts as the registration's
+      # sender_localpart, and provision-bridges.sh generates that localpart —
+      # a random string joined to no rooms. The account that is in every
+      # portal is the bridge's BOT, whose localpart is its own
+      # `bridge.bot_username` (bridges/mautrix-whatsapp/config.yaml). Read
+      # from configuration and never assembled from the bridge id, for the
+      # reason ADR 0018 refused to derive the owner's ghosts — a bridge that
+      # renames its bot would otherwise leave the register reading nothing and
+      # reporting zero.
+      GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_BOT_USER_ID: ${WHATSAPP_BOT_USER_ID:-@whatsappbot:${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL: ${GATEWAY_BRIDGE_MAUTRIX_SIGNAL_URL:-http://bridge-signal:29328}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_PROVISIONING_SECRET: ${SIGNAL_PROVISIONING_SECRET:-}
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_NETWORK: signal
       GATEWAY_BRIDGE_MAUTRIX_SIGNAL_AS_TOKEN: ${SIGNAL_AS_TOKEN:-}
+      GATEWAY_BRIDGE_MAUTRIX_SIGNAL_BOT_USER_ID: ${SIGNAL_BOT_USER_ID:-@signalbot:${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}}
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_URL: ${GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_URL:-http://bridge-gmessages:29336}
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_PROVISIONING_SECRET: ${GMESSAGES_PROVISIONING_SECRET:-}
       # `sms`, and this is the line where that matters most. The bridge is
@@ -318,6 +330,7 @@ services:
       # instead sets the same value for a different bridge.
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_NETWORK: sms
       GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_AS_TOKEN: ${GMESSAGES_AS_TOKEN:-}
+      GATEWAY_BRIDGE_MAUTRIX_GMESSAGES_BOT_USER_ID: ${GMESSAGES_BOT_USER_ID:-@gmessagesbot:${MATRIX_DOMAIN:?set MATRIX_DOMAIN in .env}}
       # The bridge_id each one's events carry, and the segment of its status
       # webhook's URL. Left to the Gateway's own default here — the instance
       # id with `mautrix-` stripped under a `bridge-` prefix — which is
