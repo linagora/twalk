@@ -3,14 +3,22 @@
 # bridge's appservice registration, install it in Synapse's configuration, and
 # restart Synapse so it reads it.
 #
-#   ./provision-bridges.sh                  whatsapp, signal and gmessages
+#   ./provision-bridges.sh                  whatsapp, signal, gmessages, telegram
 #   ./provision-bridges.sh whatsapp         one of them only
 #   ./provision-bridges.sh gmessages        the SMS bridge on its own
 #
 # The names are mautrix's own names for the bridges, and each one selects that
 # bridge's binary, appservice id and registration file. `gmessages` is a bridge id
 # and never a network value (ADR 0005): the network it serves is `sms`, whether
-# it transits Google Messages Web or, in v0.2, the sovereign SMS Companion.
+# it transits Google Messages Web or, in v0.2, the sovereign SMS Companion. For
+# `telegram` the bridge id and the network value happen to coincide; that is a
+# coincidence and not a rule, and nothing here derives one from the other.
+#
+# One bridge needs more than a Matrix credential before it can be provisioned:
+# the telegram one stops with a message naming https://my.telegram.org/apps
+# unless TELEGRAM_API_ID and TELEGRAM_API_HASH are set, because `network.api_id`
+# is an application the operator registers with Telegram and there is no value
+# this repository may ship.
 #
 # Then bring the stack up with the profile on:
 #
@@ -51,7 +59,7 @@ compose() {
     -f "$DEPLOY_DIR/compose.yaml" --profile bridges "$@"
 }
 
-KNOWN_BRIDGES=(whatsapp signal gmessages)
+KNOWN_BRIDGES=(whatsapp signal gmessages telegram)
 
 bridges=("$@")
 if [ ${#bridges[@]} -eq 0 ]; then
@@ -145,8 +153,13 @@ holds it, and no script can stand in. WhatsApp and Signal are a QR code to
 scan. SMS through Google Messages is seven session cookies copied out of a
 PRIVATE browsing window of your own Google account, followed by an emoji match
 on the phone — nothing here asks for those cookies, reads them or stores them,
-and driving a browser to harvest them was rejected outright (#57).
+and driving a browser to harvest them was rejected outright (#57). Telegram is
+a phone number, a code Telegram sends you, and a password if your account has
+two-factor authentication on — or a QR code that asks for that same password.
 
 The Companion's networks screens exist for exactly this, and until they land
 the login runs through each bridge's provisioning API or its management room.
+Telegram's is the one that cannot be finished from the Companion yet: no screen
+renders a typed-answer step, so its login runs through the provisioning API or
+the management room until the Companion half of #175 lands.
 EOF

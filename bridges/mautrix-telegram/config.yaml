@@ -1,0 +1,236 @@
+# mautrix-telegram base configuration for the Twalk reference deployment.
+#
+# Same shape and the same rules as ../mautrix-whatsapp/config.yaml, which
+# carries the full commentary: decisions only, no secrets, partial config
+# merged onto the pinned version's upstream defaults, and the
+# environment-dependent fields rendered on top at provisioning time by
+# ../generate-registration.sh.
+#
+# This bridge's id is `mautrix-telegram` and the network it serves is
+# `telegram`. The two words coincide here, which they do not for
+# `mautrix-gmessages`/`sms` — that coincidence is not a rule (ADR 0005), so
+# `telegram` below is only ever mautrix's own name for the bridge: the binary,
+# the appservice id, the bot's localpart, the ghost prefix and the
+# registration's filename. The mapping from this bridge to that network still
+# lives in exactly one place, GATEWAY_BRIDGE_MAUTRIX_TELEGRAM_NETWORK in
+# ../../deploy/docker-compose/compose.yaml.
+#
+# What this path costs, stated here as it is stated in the Companion: a
+# Telegram login through the API is a full account session with the same
+# authority as the user's own app, Telegram places accounts that sign in
+# through unofficial API clients under observation, and it needs an `api_id`
+# the OPERATOR registered at https://my.telegram.org/apps before any user can
+# press Connect. No other network in this deployment has that step.
+
+network:
+    # api_id and api_hash are NOT here, deliberately, and this is the first
+    # credential in bridges/*/config.yaml that does not belong to Matrix.
+    #
+    # They are the operator's own Telegram application, registered at
+    # https://my.telegram.org/apps against the operator's own phone number,
+    # and ../generate-registration.sh renders them from TELEGRAM_API_ID and
+    # TELEGRAM_API_HASH. Committing a value — even a plausible-looking
+    # placeholder — is worse than leaving it absent: a shared or published
+    # api_id draws API_ID_PUBLISHED_FLOOD from Telegram and stops working for
+    # everyone using it, so the generator refuses upstream's sample pair by
+    # value rather than trusting nobody to copy it.
+    #
+    # api_id is an integer and is rendered as one. mautrix's config upgrader
+    # copies that key with an int type and silently skips a node of another
+    # type, so a quoted "12345" would leave upstream's sample in place instead
+    # of failing — which is why the generator renders it with `tonumber` and
+    # why a non-numeric value is refused before yq ever sees it.
+
+    device_info:
+        # What the user sees in Telegram's own device list ("Devices" in the
+        # app). It is how they recognise this session there, so it names the
+        # product rather than the software (upstream's default is
+        # `mautrix-telegram`) — as the WhatsApp config sets `os_name: Twalk`
+        # for WhatsApp's "Linked devices" list.
+        device_model: Twalk
+        # `system_version`, `app_version`, `lang_code` and
+        # `system_lang_code` are deliberately left at upstream's defaults
+        # (empty, `auto`, `en`, `en`). We have no opinion worth freezing, and
+        # `app_version: auto` is what keeps the session's reported version in
+        # step with the pinned bridge.
+
+    # How much of the user's Telegram arrives at the moment they log in. This
+    # is the one block here that is a deployment decision rather than a
+    # preference, because unlike WhatsApp — which builds portals purely
+    # lazily, as each conversation becomes active — mautrix-telegram syncs
+    # dialogs at startup and at login. The portal register (ADR 0024) and the
+    # conversation chooser (#143) therefore meet a register that arrives
+    # populated rather than one that grows from zero, and these three numbers
+    # are what decides how big that jump is.
+    #
+    # Pinned at upstream's own values rather than inherited, because an
+    # upstream change to any of them would change the size of that jump under
+    # a working deployment without anyone deciding it.
+    sync:
+        # Portals created when the chat list is synced. 15 is the number the
+        # first screen of the chooser has to be reviewable at: a human decides
+        # one conversation at a time (#143) and nothing is observed by default
+        # (ADR 0024), so this is a list of decisions waiting, not a list of
+        # rooms already being read. It is also the same order of magnitude as
+        # the reference deployment's lazy steady state — 18 WhatsApp portals
+        # appeared over one working day (#105) — so the chooser sees a
+        # familiar quantity rather than a new one.
+        #
+        # Not 0, and not -1. Zero is the defect #105 was about: a freshly
+        # connected network that publishes nothing and looks broken. No limit
+        # is a chooser nobody reads, and on this stack it is also several
+        # thousand Synapse memberships created in one burst.
+        create_limit: 15
+        # Chats synced immediately on login, before a data export is
+        # accepted. Kept equal to create_limit so that what appears at the
+        # instant of login is what the chooser will hold a minute later: two
+        # different numbers here mean a list that grows while the user is
+        # reading it, and a decision taken against a list that has moved.
+        login_sync_limit: 15
+        # Direct chats get portals at startup. Left on: a DM is the
+        # conversation Twalk is most about, and turning this off would make
+        # the most common kind of conversation invisible until somebody
+        # happened to write.
+        direct_chats: true
+        # `update_limit` (100) is left at upstream's default: it bounds which
+        # dialogs are *checked*, not which become portals, and create_limit
+        # above is the one that decides what the user is asked about.
+
+    member_list:
+        # How many members of a portal are synced up front. This is what
+        # makes the chooser's "how many people does this cover" affordance
+        # (#143) true rather than decorative, and for a group larger than
+        # this it is a floor and not a count — which is the Companion's to
+        # say, not this file's.
+        #
+        # It is also the expensive key on this stack. Every synced member is
+        # a ghost account and a membership on a SQLite Synapse: 15 portals at
+        # 100 is of the same order as the ~1,300 memberships the reference
+        # deployment already carries across its WhatsApp portals (#105), and
+        # that is the evidence for keeping 100 rather than a number chosen
+        # from nothing. The server caps it at 10000 regardless.
+        max_initial_sync: 100
+        # Do not sync the member list of a broadcast channel. Pinned as a
+        # decision rather than inherited: the subscribers of a channel are
+        # not the user's correspondents, syncing them manufactures ghosts
+        # wholesale, and a broadcast channel already materialises a ghost
+        # that is not a person (`@telegram_channel-<id>`) — the class of
+        # problem #152 is about, and #175's Sensor half.
+        sync_broadcast_channels: false
+        # `skip_deleted` (true) is left at upstream's default.
+
+    # No cap on the size of a chat that may be bridged, and this is a
+    # decision against one.
+    #
+    # A cap looks prudent — a 5,000-member supergroup is 5,000 memberships
+    # and a conversation no persona should be drafting into — but it is
+    # invisible in exactly the place that must not lie: the portal is never
+    # created, so the conversation never appears in the register at all, and
+    # nothing tells the user their largest group is missing. ADR 0024's whole
+    # position is that the register states what it could not see rather than
+    # omitting it silently, and a `max_member_count` cap is a silent
+    # omission. The right place to decline a large group is the chooser,
+    # where the user can see it and say no.
+    max_member_count: -1
+
+    # Do not bridge Telegram communities as Matrix spaces. Upstream's default
+    # is `true`, and this is the one place where this deployment departs from
+    # it.
+    #
+    # Why: a bridged community is itself a bridgev2 portal, so it carries the
+    # `m.bridge` state event, and the portal register's rule for "this is a
+    # conversation" is exactly that marker (ADR 0024). A space would
+    # therefore be offered to the user as a conversation to observe, with a
+    # member count that means nothing. bridgev2 does mark it —
+    # `com.beeper.room_type_v2` in `m.bridge`, and `com.beeper.room_features`
+    # — but nothing in this repository reads either key yet, so the honest
+    # deployment decision is not to create the rooms the register cannot
+    # classify.
+    #
+    # What it costs: the user loses the Matrix space that would have grouped
+    # a community's chats. The chats themselves still bridge as their own
+    # portals, so no conversation is lost.
+    #
+    # What it does NOT fix: a Telegram forum's parent space is a portal too
+    # (`channel:<id>:-1`) and is not governed by this key. Forum spaces still
+    # reach the register as conversations — `companion-gateway/src/portals.rs`
+    # is where that is settled, and this key closes the communities half
+    # only. Revert to upstream's `true` once the register reads the room-type
+    # member.
+    bridge_communities: false
+
+    # Migrate a group in place when Telegram promotes it to a supergroup,
+    # rather than creating a new room and tombstoning the old one. Upstream's
+    # default, pinned here because of what the alternative would do to the
+    # register.
+    #
+    # A conversation's identity on Telegram is not its Matrix room id. The
+    # portal register is keyed on room id, and so is the Sensor's own
+    # membership — which IS the register's answer to "is this conversation
+    # observed" (ADR 0024). Set this to `true` and a supergroup promotion
+    # replaces the portal with a room the Sensor is not in: a conversation
+    # the user decided to observe goes deaf, silently, *after* they decided
+    # about it. `false` keeps the room id stable across the promotion, which
+    # keeps that decision meaningful, and it is why this key is not left to
+    # an upstream default that could change.
+    always_tombstone_on_supergroup_migration: false
+
+    # Everything else in `network:` — the animated-sticker converter, the
+    # ping intervals, the proxy, takeout, contact avatars and names, the
+    # reaction and media thresholds, the displayname template — is left at
+    # the pinned version's upstream defaults. They are media fidelity and
+    # client behaviour, not deployment decisions.
+
+bridge:
+    # `bridge_status_notices` deliberately left at the upstream default
+    # (errors), and `command_prefix` at mautrix's own `!tg` — see the
+    # WhatsApp config for why the first of those is not silenced.
+
+    # Overwritten at provisioning time with MATRIX_OWNER_USER_ID.
+    permissions: {}
+
+database:
+    type: sqlite3-fk-wal
+    uri: file:/data/mautrix-telegram.db?_txlock=immediate
+
+homeserver:
+    # Rendered at provisioning time (MATRIX_INTERNAL_URL, MATRIX_DOMAIN).
+    address: http://synapse:8008
+    domain: localhost
+    software: standard
+    # Rendered from TELEGRAM_STATUS_ENDPOINT: the Companion Gateway's
+    # bridge-status webhook.
+    status_endpoint:
+
+appservice:
+    address: http://bridge-telegram:29317
+    hostname: 0.0.0.0
+    port: 29317
+
+    id: telegram
+    bot:
+        username: telegrambot
+        displayname: Telegram bridge bot
+
+    # Rendered at provisioning time (TELEGRAM_AS_TOKEN, TELEGRAM_HS_TOKEN).
+    as_token: ""
+    hs_token: ""
+
+matrix:
+    federate_rooms: false
+
+provisioning:
+    # Rendered from TELEGRAM_PROVISIONING_SECRET (at least 16 characters).
+    shared_secret: disable
+    allow_matrix_auth: false
+
+encryption:
+    allow: true
+    default: true
+    require: false
+
+logging:
+    min_level: info
+    writers:
+        - type: stdout
+          format: json
