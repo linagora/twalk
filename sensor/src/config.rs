@@ -111,6 +111,28 @@ pub struct Config {
     /// Unset: every bridge bot stays a contact, which is the behaviour issue
     /// #152 is about — so a deployment that runs a bridge sets it.
     pub bridge_bots: Vec<String>,
+    /// Access token of a device of the **owner's own account**
+    /// (SENSOR_OWNER_DEVICE_ACCESS_TOKEN, with SENSOR_OWNER_DEVICE_ID), the
+    /// identity Twalk *acts* as (ADR 0025, ADR 0034, issue #123). A mautrix
+    /// bridge relays to its network only what the logged-in user's own Matrix
+    /// account sends, so an approved reply posted by `@sensor:` is ignored
+    /// without a log line; this device is what makes the reply really be the
+    /// user's. It is write-only: it joins portal rooms and posts approved
+    /// replies, reads no history, and therefore needs neither cross-signing nor
+    /// a recovery key (all four configured bridges carry
+    /// `verification_levels.send: unverified`).
+    ///
+    /// Unset: the Sensor behaves exactly as it did before — it posts as itself,
+    /// and on a bridged conversation the contact receives nothing. That is a
+    /// degradation, said once at startup and named after issue #123, never a
+    /// silence.
+    pub owner_device_access_token: Option<String>,
+    /// Device ID the `owner_device_access_token` belongs to
+    /// (SENSOR_OWNER_DEVICE_ID). Required with it for the same reason
+    /// SENSOR_DEVICE_ID is required with SENSOR_ACCESS_TOKEN: the crypto store
+    /// is bound to the device, and matrix-sdk refuses to open a store belonging
+    /// to another one.
+    pub owner_device_id: Option<String>,
     /// The Gateway's service token (SENSOR_GATEWAY_SERVICE_TOKEN), the same
     /// secret the Gateway holds as GATEWAY_SERVICE_TOKEN. The snapshot is the
     /// one Gateway route a service reads, and it takes this token as an
@@ -156,11 +178,14 @@ impl Config {
             owner: optional_string("SENSOR_OWNER"),
             owner_identities: optional_list("SENSOR_OWNER_IDENTITIES"),
             bridge_bots: optional_list("SENSOR_BRIDGE_BOTS"),
+            owner_device_access_token: optional_string("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"),
+            owner_device_id: optional_string("SENSOR_OWNER_DEVICE_ID"),
         };
         config.validate_credentials()?;
         config.validate_gateway()?;
         config.validate_owner()?;
         config.validate_bridge_bots()?;
+        config.validate_owner_device()?;
         Ok(config)
     }
 
@@ -180,6 +205,18 @@ impl Config {
     /// a contact, which is the defect rather than a safe default.
     pub fn bridge_bots(&self) -> crate::bridge_bot::BridgeBots {
         crate::bridge_bot::BridgeBots::new(self.bridge_bots.clone())
+    }
+
+    /// The owner's own device, when the deployment has one: its access token
+    /// and the device ID the token was issued for, both halves or neither
+    /// (ADR 0025, ADR 0034). `None` is a deployment whose approved replies are
+    /// still posted by `@sensor:` — issue #123's defect, degraded explicitly
+    /// rather than silently.
+    pub fn owner_device(&self) -> Option<(&str, &str)> {
+        match (&self.owner_device_access_token, &self.owner_device_id) {
+            (Some(token), Some(device_id)) => Some((token, device_id)),
+            _ => None,
+        }
     }
 
     /// Where the consent snapshot is read from, and with what: both halves or
@@ -274,6 +311,56 @@ impl Config {
         }
         Ok(())
     }
+
+    /// The owner's device: both halves of the credential, and the account it is
+    /// a device **of**.
+    ///
+    /// Refused on startup for the same reason the Gateway's two halves are:
+    /// half a configuration degrades exactly like none — every approved reply
+    /// posted by `@sensor:` and relayed by no bridge, which is issue #123 — but
+    /// silently, and the operator would have set the variable believing it took
+    /// effect.
+    ///
+    /// `SENSOR_OWNER` is required with it because it is what the device is
+    /// checked against: the Sensor asks the homeserver whose token this is and
+    /// refuses to start when the answer is not the owner. With no
+    /// `SENSOR_OWNER` there is nothing to check against, and a token for the
+    /// wrong account would then be discovered by a contact receiving a reply
+    /// from somebody else.
+    fn validate_owner_device(&self) -> Result<()> {
+        owner_device_complete(
+            self.owner_device_access_token.as_deref(),
+            self.owner_device_id.as_deref(),
+            self.owner.as_deref(),
+        )
+    }
+}
+
+/// The three-way check [`Config::validate_owner_device`] refuses a deployment
+/// on, as a function of the values alone so it can be unit-tested without an
+/// environment.
+fn owner_device_complete(
+    access_token: Option<&str>,
+    device_id: Option<&str>,
+    owner: Option<&str>,
+) -> Result<()> {
+    match (access_token, device_id) {
+        (Some(_), None) => anyhow::bail!(
+            "SENSOR_OWNER_DEVICE_ACCESS_TOKEN is set without SENSOR_OWNER_DEVICE_ID: the token's \
+             device ID is required, as the crypto store is bound to it"
+        ),
+        (None, Some(_)) => anyhow::bail!(
+            "SENSOR_OWNER_DEVICE_ID is set without SENSOR_OWNER_DEVICE_ACCESS_TOKEN: there is no \
+             credential to act as the owner with, so every approved reply would be posted by the \
+             Sensor's own account and relayed to the network by no bridge (issue #123)"
+        ),
+        (Some(_), Some(_)) if owner.is_none() => anyhow::bail!(
+            "SENSOR_OWNER_DEVICE_ACCESS_TOKEN is set without SENSOR_OWNER: the owner's device is \
+             checked against the account it must be a device of, and there is no account to check \
+             it against"
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// Which of the named bridge bots the deployment also claims as the operator:
@@ -329,7 +416,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::also_the_operator;
+    use super::{also_the_operator, owner_device_complete};
 
     const OWNER: &str = "@michel:twalk.localhost";
     const WHATSAPP_BOT: &str = "@whatsappbot:twalk.localhost";
@@ -359,5 +446,38 @@ mod tests {
             vec![&WHATSAPP_BOT.to_owned()],
             "the operator's own Matrix ID counts, not only their confirmed ghosts"
         );
+    }
+
+    #[test]
+    fn the_owners_device_is_both_halves_or_neither() {
+        assert!(owner_device_complete(None, None, Some(OWNER)).is_ok(), "the ordinary deployment before the handover: no device, and the Sensor posts as itself");
+        assert!(owner_device_complete(Some("syt_token"), Some("TWALKDEVICE"), Some(OWNER)).is_ok());
+    }
+
+    #[test]
+    fn half_a_credential_is_refused_with_the_name_to_fix() {
+        // Half a configuration degrades exactly like none — the reply goes out
+        // as @sensor: and the bridge ignores it (issue #123) — but silently,
+        // which is the failure this project spends its time removing.
+        let error = owner_device_complete(Some("syt_token"), None, Some(OWNER)).unwrap_err();
+        assert!(
+            format!("{error}").contains("SENSOR_OWNER_DEVICE_ID"),
+            "the refusal names the variable to set: {error}"
+        );
+        let error = owner_device_complete(None, Some("TWALKDEVICE"), Some(OWNER)).unwrap_err();
+        assert!(
+            format!("{error}").contains("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_device_with_no_account_to_be_a_device_of_is_refused() {
+        // SENSOR_OWNER is what the token's whoami is checked against. Without
+        // it a token for the wrong account starts, and the first person to
+        // learn of it is a contact receiving a reply from somebody else.
+        let error =
+            owner_device_complete(Some("syt_token"), Some("TWALKDEVICE"), None).unwrap_err();
+        assert!(format!("{error}").contains("SENSOR_OWNER"), "{error}");
     }
 }
