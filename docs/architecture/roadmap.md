@@ -33,7 +33,9 @@ Last reviewed: 2026-09-17.
 | Companion (PWA) | v0.1 | [#65](https://github.com/linagora/twalk/issues/65) | specced — tickets #66–#70 |
 | Buzz Control Room integration | v0.1 | — | planned |
 | Sovereign SMS (Twake SMS Companion) | v0.2 | — | planned |
-| Telegram and Discord onboarding | v0.2 | — | planned |
+| Telegram and Discord onboarding | v0.2 | — | planned — Discord's path is [#242](https://github.com/linagora/twalk/issues/242): the bridgev2 rewrite exists upstream but offers no bot login, and the user-token login is the one Discord forbids ([#176](https://github.com/linagora/twalk/issues/176)) |
+| Mattermost | v0.2 | — | planned — the path is [#241](https://github.com/linagora/twalk/issues/241): a bridgev2 connector this project writes and contributes upstream, since none exists ([#182](https://github.com/linagora/twalk/issues/182)) |
+| Mail and Calendar as collectors | v0.2 | — | planned — neither is a network: [ADR 0033](adr/0033-twalk-perceives-what-involves-other-people.md) makes each a **collector** on the bus; studies [#243](https://github.com/linagora/twalk/issues/243) (mail) and [#244](https://github.com/linagora/twalk/issues/244) (calendar, Google Calendar first) name the decisions still open |
 | Personas `watch`, `archive`, `writing`, triage | v0.2 | — | planned |
 | Persona SDK (Python, TypeScript) | v0.2 | — | planned |
 | Kubernetes overlays | v0.2 | — | planned |
@@ -125,7 +127,9 @@ Oversight for what the personas do: suggestions surfaced for approval, approvals
 ## v0.2 — sovereignty and breadth (target: Q1 2027)
 
 - **Sovereign SMS.** The first-party Twake SMS Companion Android app on F-Droid (ADR 0004, referenced across the docs but not yet written) replaces mautrix-gmessages as the reference SMS path (design retained as screen 3c-next). mautrix-gmessages stays supported for operators who prefer it. This pays down the v0.1 proof-of-concept debt.
-- **Telegram and Discord onboarding.** mautrix-telegram and mautrix-discord, with their Companion screens.
+- **Telegram and Discord onboarding.** mautrix-telegram and mautrix-discord, with their Companion screens. Discord runs on the upstream bridgev2 rewrite and on a **bot** login only — the user-token route is the self-bot pattern Discord forbids, so the login flow is an upstream contribution before it is a screen ([#242](https://github.com/linagora/twalk/issues/242)).
+- **Mattermost.** The first network a vendor sanctions outright, and the one with no bridge fit to carry it: the path is a bridgev2 connector written here and contributed upstream, developed and tested against Team Edition and never under a LINAGORA commercial subscription ([#241](https://github.com/linagora/twalk/issues/241), [#182](https://github.com/linagora/twalk/issues/182)).
+- **Mail and Calendar.** Not networks and not bridged: ADR 0033 makes each a *collector*, scoped by a connection, on the same bus. Mail through Pimalaya/Carillon rather than a per-thread bridge, with the gate being an OAuth client rather than terms ([#243](https://github.com/linagora/twalk/issues/243)); Calendar as changes on the bus plus one governed pull, the owner's free/busy, with **Google Calendar** as the first backend — the REST API, since Google's CalDAV also demands OAuth and lacks free-busy ([#244](https://github.com/linagora/twalk/issues/244)). Both wait on the `connection` ADR 0033 decided and nobody has built.
 - **Four more personas.** `watch`, `archive`, `writing`, and a triage persona, on the Hermes runtime v0.1 proved.
 - **Persona SDK.** Python and TypeScript packages for third-party authors (Rust later), with the authoring guide.
 - **Kubernetes overlays.** Alongside the Compose reference; bare-metal Ansible later.
