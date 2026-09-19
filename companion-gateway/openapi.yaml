@@ -4417,7 +4417,7 @@ components:
       description: |
         Every portal room every readable bridge holds, what it is called,
         how many people are in it, and where the Sensor stands in it.
-      required: [portals, summary, bridges]
+      required: [portals, summary, bridges, crowd_threshold]
       additionalProperties: false
       properties:
         portals:
@@ -4426,6 +4426,18 @@ components:
             $ref: "#/components/schemas/Portal"
         summary:
           $ref: "#/components/schemas/PortalSummary"
+        crowd_threshold:
+          type: integer
+          minimum: 2
+          description: |
+            The member count at or above which a conversation is a **crowd**
+            the user must acknowledge the size of before observing it (#143):
+            `GATEWAY_CROWD_THRESHOLD`, default 20. Served because it has one
+            owner and it is this Gateway (#252, ADR 0029): the chooser draws
+            its crowds section from this number and holds none of its own,
+            and the register applies the same number when a conversation's
+            room is replaced — followed under it, returned to the chooser
+            above it.
         bridges:
           type: array
           description: Every configured bridge, readable or not.

@@ -31,6 +31,14 @@ export interface Register {
 	readonly rows: readonly ConversationRow[];
 	readonly summary: Summary;
 	readonly bridges: readonly BridgeReading[];
+	/**
+	 * Where a member count becomes a crowd the user must acknowledge, as the
+	 * Gateway serves it (#252). The number has one owner and it is not this
+	 * screen: the register applies it too when a conversation's room is
+	 * replaced (ADR 0029), so a threshold that lived here alone would be one
+	 * the two could disagree about.
+	 */
+	readonly crowdThreshold: number;
 }
 
 /** What a failed read was, so the screen can say which (`trouble.ts`). */
@@ -70,7 +78,8 @@ export async function readRegister(): Promise<ReadResult> {
 		register: {
 			rows: rows(portals),
 			summary: answer.data.summary,
-			bridges: answer.data.bridges
+			bridges: answer.data.bridges,
+			crowdThreshold: answer.data.crowd_threshold
 		}
 	};
 }

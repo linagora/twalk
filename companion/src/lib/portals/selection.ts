@@ -28,20 +28,6 @@
 
 import type { ConversationRow } from './conversations';
 
-/**
- * Where a member count stops being a list and becomes a crowd.
- *
- * Twenty, and the number comes from the register's own measurements rather
- * than from taste. In those eighteen conversations the largest that is plainly
- * a group whose members a user could name is eleven (`Échecs en Yvelines`, the
- * announcement group); the smallest that is unmistakably a crowd is
- * seventy-three (`RAG I Infos`). Twenty sits between them, on the side of
- * asking too often rather than too rarely.
- *
- * It gates an acknowledgement, never the action: nothing here can stop a user
- * observing a conversation they decided to observe.
- */
-export const CROWD = 20;
 
 /** One conversation, reduced to what a consequence needs to name it. */
 export interface Named {
@@ -66,7 +52,7 @@ export interface Consequence {
 	/** Conversations that would stop being observed. Never gated. */
 	readonly stopping: number;
 	/**
-	 * The additions at or over [`CROWD`], largest first, so the card that asks
+	 * The additions at or over the served crowd threshold, largest first, so the card that asks
 	 * for the acknowledgement can list them instead of summing them away.
 	 */
 	readonly crowds: readonly Named[];
@@ -99,10 +85,18 @@ export function observedNow(rows: readonly ConversationRow[]): Set<string> {
  * under one search and applied under another must be costed in full, or the
  * screen would state a number for the part of the decision that happens to be
  * on screen.
+ *
+ * `crowdThreshold` is the register's own (`crowd_threshold`), never a number
+ * of this screen's: the Gateway owns where a list becomes a crowd (#252), so
+ * that what the screen asks the user to acknowledge and what the register
+ * applies when a room is replaced (ADR 0029) are one number. It gates an
+ * acknowledgement, never the action: nothing here can stop a user observing a
+ * conversation they decided to observe.
  */
 export function consequence(
 	rows: readonly ConversationRow[],
-	selected: ReadonlySet<string>
+	selected: ReadonlySet<string>,
+	crowdThreshold: number
 ): Consequence {
 	const adding = rows.filter((row) => selected.has(row.roomId) && !isObserved(row));
 	const removing = rows.filter((row) => !selected.has(row.roomId) && isObserved(row));
@@ -110,7 +104,7 @@ export function consequence(
 	const named = adding
 		.map((row) => ({ label: row.label, members: row.members }))
 		.sort((left, right) => right.members - left.members);
-	const crowds = named.filter((row) => row.members >= CROWD);
+	const crowds = named.filter((row) => row.members >= crowdThreshold);
 	return {
 		starting: adding.length,
 		people,

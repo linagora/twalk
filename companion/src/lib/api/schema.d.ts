@@ -2767,6 +2767,17 @@ export interface components {
         PortalRegister: {
             /** @description Every configured bridge, readable or not. */
             bridges: components["schemas"]["PortalBridgeReading"][];
+            /**
+             * @description The member count at or above which a conversation is a **crowd**
+             *     the user must acknowledge the size of before observing it (#143):
+             *     `GATEWAY_CROWD_THRESHOLD`, default 20. Served because it has one
+             *     owner and it is this Gateway (#252, ADR 0029): the chooser draws
+             *     its crowds section from this number and holds none of its own,
+             *     and the register applies the same number when a conversation's
+             *     room is replaced — followed under it, returned to the chooser
+             *     above it.
+             */
+            crowd_threshold: number;
             portals: components["schemas"]["Portal"][];
             summary: components["schemas"]["PortalSummary"];
         };

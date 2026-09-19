@@ -98,6 +98,14 @@ test.describe('the conversation chooser', () => {
 		await page.goto('/networks/conversations?network=whatsapp');
 		await expect(page.getByTestId('screen-conversations')).toHaveAttribute('data-loaded', 'yes');
 
+		// The threshold the crowds are drawn from is the Gateway's, served with
+		// the register, and not a number of this screen's (#252): the stack
+		// starts its Gateway with 21, which no default would produce.
+		await expect(page.getByTestId('screen-conversations')).toHaveAttribute(
+			'data-crowd-threshold',
+			'21'
+		);
+
 		// One person, because `…@s.whatsapp.net` says one person. Not because it
 		// has two members — a group somebody left has one too.
 		const oneToOne = page.getByTestId('section-one-to-one');

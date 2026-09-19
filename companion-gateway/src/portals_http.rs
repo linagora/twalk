@@ -55,7 +55,11 @@ async fn portals(State(gateway): State<Gateway>) -> Response {
         return not_configured();
     };
     let register = portals.read().await;
-    (StatusCode::OK, Json(register_json(&register))).into_response()
+    (
+        StatusCode::OK,
+        Json(register_json(&register, portals.crowd_threshold())),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -113,9 +117,12 @@ async fn observation(
 /// The register as the Companion reads it. The summary is not derived by the
 /// client: "the Sensor is outside 17 of your 18 conversations" is a sentence
 /// the deployment states, so the numbers are in the answer.
-fn register_json(register: &Register) -> serde_json::Value {
+fn register_json(register: &Register, crowd_threshold: u64) -> serde_json::Value {
     let summary = register.summary();
     json!({
+        // Served, not assumed: the chooser draws its crowds section from this
+        // number and holds none of its own (#252).
+        "crowd_threshold": crowd_threshold,
         "portals": register
             .portals
             .iter()
@@ -218,7 +225,7 @@ mod tests {
                 joined_rooms: Some(3),
             }],
         };
-        let body = register_json(&register);
+        let body = register_json(&register, 20);
         assert_eq!(body["summary"]["total"], 3);
         assert_eq!(body["summary"]["observing"], 1);
         assert_eq!(body["summary"]["absent"], 2);
@@ -240,7 +247,7 @@ mod tests {
                 joined_rooms: None,
             }],
         };
-        let body = register_json(&register);
+        let body = register_json(&register, 20);
         assert_eq!(body["bridges"][0]["readable"], false);
         assert_eq!(
             body["bridges"][0]["detail"],
@@ -269,7 +276,7 @@ mod tests {
             portals: vec![community, announcements, nameless],
             bridges: Vec::new(),
         };
-        let body = register_json(&register);
+        let body = register_json(&register, 20);
         assert_eq!(
             body["portals"][0]["network_conversation_id"],
             "120363201980306353@g.us"

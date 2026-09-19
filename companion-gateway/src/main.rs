@@ -417,6 +417,7 @@ async fn main() -> Result<()> {
                 bot_user_id: bridge.bot_user_id.clone(),
             })
             .collect(),
+        config.crowd_threshold,
         metrics.clone(),
     )
     .context("failed to build the portal register")?
