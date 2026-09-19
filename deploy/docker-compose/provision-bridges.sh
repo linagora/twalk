@@ -3,15 +3,21 @@
 # bridge's appservice registration, install it in Synapse's configuration, and
 # restart Synapse so it reads it.
 #
-#   ./provision-bridges.sh                  whatsapp and signal
+#   ./provision-bridges.sh                  whatsapp, signal and gmessages
 #   ./provision-bridges.sh whatsapp         one of them only
+#   ./provision-bridges.sh gmessages        the SMS bridge on its own
+#
+# The names are mautrix's own names for the bridges, and each one selects that
+# bridge's binary, appservice id and registration file. `gmessages` is a bridge id
+# and never a network value (ADR 0005): the network it serves is `sms`, whether
+# it transits Google Messages Web or, in v0.2, the sovereign SMS Companion.
 #
 # Then bring the stack up with the profile on:
 #
 #   docker compose --profile bridges up -d --wait
 #
 # Why this is a separate step and not part of `docker compose up`: a bridge
-# generates its own registration (`mautrix-<network> -g`), but *installing*
+# generates its own registration (`mautrix-<id> -g`), but *installing*
 # one means naming its path in the homeserver's `app_service_config_files` and
 # restarting the homeserver. Synapse has no runtime API for that, so no
 # running service can do it — which is also why the Companion Gateway's bridge
@@ -45,15 +51,20 @@ compose() {
     -f "$DEPLOY_DIR/compose.yaml" --profile bridges "$@"
 }
 
-networks=("$@")
-if [ ${#networks[@]} -eq 0 ]; then
-  networks=(whatsapp signal)
+KNOWN_BRIDGES=(whatsapp signal gmessages)
+
+bridges=("$@")
+if [ ${#bridges[@]} -eq 0 ]; then
+  bridges=("${KNOWN_BRIDGES[@]}")
 fi
-for network in "${networks[@]}"; do
-  case "$network" in
-    whatsapp | signal) ;;
+for bridge in "${bridges[@]}"; do
+  case " ${KNOWN_BRIDGES[*]} " in
+    *" $bridge "*) ;;
     *)
-      echo "unknown bridge network: $network (known: whatsapp, signal)" >&2
+      echo "unknown bridge: $bridge (known: ${KNOWN_BRIDGES[*]})" >&2
+      echo "these are mautrix's own names for the bridges this deployment ships," >&2
+      echo "not network names: the SMS bridge is 'gmessages' (ADR 0005), and" >&2
+      echo "'sms' is the network it serves rather than a name to pass here." >&2
       exit 2
       ;;
   esac
@@ -65,8 +76,8 @@ done
 # is generated, is the difference between one clear message and a homeserver
 # that will not boot.
 expected=""
-for network in "${networks[@]}"; do
-  expected="${expected:+$expected,}/registrations/$network.yaml"
+for bridge in "${bridges[@]}"; do
+  expected="${expected:+$expected,}/registrations/$bridge.yaml"
 done
 configured="$(env_value MATRIX_APPSERVICE_REGISTRATIONS | tr -d '[:space:]')"
 normalize() { tr ',' '\n' <<<"$1" | sed '/^$/d' | sort; }
@@ -88,9 +99,9 @@ fi
 # 1. Each bridge's own registration. `run --rm` rather than `up`, so that this
 #    works on a stack that has never been started: generating a registration
 #    talks to nothing.
-for network in "${networks[@]}"; do
-  echo "==> generating the $network bridge's registration"
-  compose run --rm --no-deps -T "bridge-$network-registration"
+for bridge in "${bridges[@]}"; do
+  echo "==> generating the $bridge bridge's registration"
+  compose run --rm --no-deps -T "bridge-$bridge-registration"
 done
 
 # 2. Re-render Synapse's configuration, which is where the registrations are
@@ -124,13 +135,18 @@ fi
 
 cat <<EOF
 
-Bridges provisioned: ${networks[*]}
+Bridges provisioned: ${bridges[*]}
 
 Next:
   docker compose --profile bridges up -d --wait
 
-Then a human finishes the job: each network's login needs a phone. The
-Companion's networks screens exist for exactly that, and until they land the
-login runs through the bridge's provisioning API or its management room — a
-QR code to scan (WhatsApp, Signal) that no script can scan for you.
+Then a human finishes the job: every login needs the phone or the account that
+holds it, and no script can stand in. WhatsApp and Signal are a QR code to
+scan. SMS through Google Messages is seven session cookies copied out of a
+PRIVATE browsing window of your own Google account, followed by an emoji match
+on the phone — nothing here asks for those cookies, reads them or stores them,
+and driving a browser to harvest them was rejected outright (#57).
+
+The Companion's networks screens exist for exactly this, and until they land
+the login runs through each bridge's provisioning API or its management room.
 EOF
