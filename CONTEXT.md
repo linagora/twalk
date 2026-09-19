@@ -14,6 +14,14 @@ _Avoid_: connector
 A bridge's **own** Matrix account — mautrix's `sender_localpart`, `@whatsappbot`, `@signalbot` — as distinct from the *ghosts* it materialises for people. It creates portal rooms, puppets ghosts, invites the user, and is a member of every portal room of its network. It is neither the owner nor a contact and has no consent state, so nothing is published about it on any event type and no decision about it enters the consent model (ADR 0026). Which accounts they are is handed to the Sensor by the deployment, never inferred: every inference available can suppress a real person instead, and an account that was not named stays a contact.
 _Avoid_: "bot" unqualified (a persona is never a bot), or "bridge user" when the ghost is what is meant
 
+**Login flow**:
+The sequence of steps a bridge asks the user to complete before it will act as their account on a network. Its **shape is the bridge's** — how many steps there are, what each asks for, and in what order, which the bridge does not itself know in advance: a two-factor password step appears only for an account that has one, so a step is named and never counted. Its **words are the project's** wherever honesty needs more than a bridge says (ADR 0030). A refused answer ends the flow rather than re-asking, because the bridge drops the process with the refusal.
+_Avoid_: "authentication" for this, which is the Companion's own sign-in; "pairing", which is one kind of step
+
+**Login step**:
+One question in a login flow, with the fields it wants and the words explaining them. A field's **type** is what decides how it is drawn, so a type the deployment does not know is refused and named rather than guessed at — and fields the bridge groups by type, such as a jar of cookies, are collected through one control rather than one each. A step's answers pass through the Companion Gateway and are stored nowhere, logged nowhere, and written to no browser store (ADR 0011, ADR 0030).
+_Avoid_: "form", which implies the Companion decided what it contains
+
 **Portal room**:
 An end-to-end encrypted Matrix room a bridge maintains for one external conversation — though a room can carry several conversations inside it as threads, which the bus already distinguishes and the register cannot, so an observation decision is taken at the grain of the **room** and covers every thread in it, present and future (ADR 0029). A room is where a conversation currently lives and not its identity: a network can replace the room while the conversation continues, and `m.room.tombstone` names the successor. Built **lazily**, when that conversation becomes active, and not once at login: the set grows all day, which is why observing it is a continuous mechanism and not a step (ADR 0024).
 
