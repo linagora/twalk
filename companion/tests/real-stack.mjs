@@ -288,6 +288,7 @@ export async function startBridgeStack() {
 				{ length: CROWDED_MEMBERS },
 				(_, at) => `@${PORTAL_GHOST_LOCALPART}_${at}:${SERVER_NAME}`
 			),
+			crowdThreshold: CROWD_THRESHOLD,
 			sensorId: `@${SENSOR_LOCALPART}:${SERVER_NAME}`
 		}
 	};

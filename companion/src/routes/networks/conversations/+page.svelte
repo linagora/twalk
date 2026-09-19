@@ -73,8 +73,12 @@
 	/** Every conversation the register offered, of every network. */
 	let all = $state<ConversationRow[]>([]);
 	let bridges = $state<BridgeReading[]>([]);
-	/** The Gateway's crowd threshold, served with the register (#252). */
-	let crowdThreshold = $state(Number.POSITIVE_INFINITY);
+	/**
+	 * The Gateway's crowd threshold, served with the register (#252). `null`
+	 * until a register has been read: before that, nothing is costed at all
+	 * — never "nothing is a crowd", which would be the wrong side to fail on.
+	 */
+	let crowdThreshold = $state<number | null>(null);
 	let loaded = $state(false);
 	let failure = $state<ReadFailure | null>(null);
 	let query = $state('');
@@ -131,7 +135,7 @@
 	/** Scoped to the filter, counted, named. Never "all". */
 	const bulk = $derived(scopedBulkControl(shown.map((row) => row.roomId), selected));
 	/** Costed against every conversation, not only the ones on screen. */
-	const cost = $derived(consequence(all, selected, crowdThreshold));
+	const cost = $derived(consequence(all, selected, crowdThreshold ?? 0));
 	const observing = $derived(all.filter((row) => row.observation === 'observing').length);
 	const blocked = $derived(cost.empty || (cost.acknowledgementNeeded && !acknowledged));
 
@@ -239,7 +243,7 @@
 	data-testid="screen-conversations"
 	data-network={network ?? 'all'}
 	data-loaded={loaded ? 'yes' : 'no'}
-	data-crowd-threshold={loaded && failure === null ? crowdThreshold : undefined}
+	data-crowd-threshold={crowdThreshold ?? undefined}
 >
 	<header class="stack">
 		<p class="small">
