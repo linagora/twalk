@@ -67,8 +67,12 @@ The name is a term of art and it is **not the contact's own consent**: the conta
 **Consent snapshot**:
 The consent state of every known subject at one point in the event stream, served by the Companion Gateway and read by a consumer whose cache is cold (ADR 0010). It names the stream position it reflects, and states revocations explicitly: an absent subject means no decision was ever recorded, never a revoked one.
 
+**Words**:
+The free text a **contact** wrote, or a persona wrote about it: a message's body, a quoted excerpt wherever one appears, a suggestion and its rationale, an attachment's caption, and an attachment's decryption material. Published as **its own event on its own stream**, kept days rather than months, because portal rooms are end-to-end encrypted and the bus is therefore the only place in a deployment where other people's plaintext exists at rest (ADR 0028). The line is *whose words*, not content against metadata: the owner's own writing, and what was sent under their identity, stay with the identity. A consumer that must not read a contact's words is one that does not subscribe — explicit rather than enforced, since the reference bus has no authentication.
+_Avoid_: "content" or "payload" for the words of a specific person; "the message" when only its identity is meant
+
 **Event families**:
-The contract's two groups of event types. Message-flow events (`inbound.*`, `outbound.*`, `persona.*`) always carry the `network` extension, and carry `consent` whenever the event is about a contact; operational events (`consent.state.changed`, `bridge.status.changed`) declare both optional. The message-flow events that are not about a contact are the `outbound.*` family — the user's own message and their own reaction — and they carry no `consent` extension at all: the schema refuses one, because the extension is a contact's decision and the user is not a contact (ADR 0018, ADR 0021).
+The contract's two groups of event types. Message-flow events (`inbound.*`, `outbound.*`, `persona.*`) always carry the `network` extension, and carry `consent` whenever the event is about a contact; operational events (`consent.state.changed`, `bridge.status.changed`) declare both optional. A message-flow event carries the **identity** of what happened; the **words** travel separately and expire sooner (ADR 0028), so an event whose words are gone is a complete event and not a damaged one. The message-flow events that are not about a contact are the `outbound.*` family — the user's own message and their own reaction — and they carry no `consent` extension at all: the schema refuses one, because the extension is a contact's decision and the user is not a contact (ADR 0018, ADR 0021).
 
 ### Companion
 
