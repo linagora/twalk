@@ -71,6 +71,7 @@ export default defineConfig({
 				'dashboard/**',
 				'approvals/**',
 				'consent/**',
+				'portals/**',
 				'session/**'
 			],
 			use: {
@@ -177,6 +178,33 @@ export default defineConfig({
 			fullyParallel: false,
 			workers: 1,
 			dependencies: ['approvals'],
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
+		},
+		{
+			// The conversation chooser (#143), on the bridge origin: it reads a
+			// portal register, which needs a bridge configured with an appservice
+			// token and the bot to read as, and it drives a real Sensor into a
+			// real portal room.
+			//
+			// One worker, and after `consent` rather than beside it, for a reason
+			// that is not about state: **that project starts a real Sensor too**,
+			// and so does this one. The Sensor's consent consumer is a durable
+			// with a constant name, so two of them on one bus split the consent
+			// stream between them — which is why `sensor/tests/harness` locks
+			// around every test that starts one, and why these two projects are
+			// ordered rather than parallel. It borrows that project's own helper
+			// (`tests/e2e/consent/sensor.ts`) rather than growing a second way to
+			// start the same binary.
+			name: 'portals',
+			testMatch: 'portals/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			dependencies: ['consent'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',

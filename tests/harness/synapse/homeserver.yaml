@@ -32,6 +32,15 @@ media_store_path: /data/media_store
 signing_key_path: "/data/test.twalk.signing.key"
 trusted_key_servers: []
 
+# One appservice registration, for the portal register's suite (#171).
+# Synapse honours `?user_id=` only for a token that belongs to an appservice,
+# so without a real registration the parameter the register depends on is
+# unobservable and a test cannot fail on its absence. The registration's
+# `sender_localpart` is deliberately an account in no rooms — the shape a
+# generated mautrix registration has, and the shape the defect needed.
+app_service_config_files:
+  - /config/appservice-portals.yaml
+
 macaroon_secret_key: "test-only-macaroon-secret"
 form_secret: "test-only-form-secret"
 registration_shared_secret: "test-only-registration-shared-secret"

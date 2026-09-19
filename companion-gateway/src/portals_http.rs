@@ -18,9 +18,12 @@
 //!
 //! # What is served, and what the Gateway keeps
 //!
-//! A conversation's name and its member count are served, because a chooser
-//! the user cannot read is not a chooser: *Échecs en Yvelines, 246 members*
-//! is the sentence that makes the decision a real one. None of it is stored.
+//! A conversation's name, its member count and the network's own identifier
+//! for it are served, because a chooser the user cannot read is not a
+//! chooser: *Échecs en Yvelines, 246 members* is the sentence that makes the
+//! decision a real one, and the identifier is what keeps the *other* `Échecs
+//! en Yvelines` — the same community's announcement group, 11 members — from
+//! being an indistinguishable second row (#143). None of it is stored.
 //! Every field is read from the homeserver for this request and forgotten
 //! with the response, which is the difference between this and #54's
 //! pending-contact store, where a display name would have been *kept* and is
@@ -121,6 +124,10 @@ fn register_json(register: &Register) -> serde_json::Value {
                 "bridge_id": portal.bridge_id,
                 "network": portal.network,
                 "name": portal.name,
+                // The bridge's own id for the conversation, verbatim. The
+                // chooser reads its suffix to tell a person from a group
+                // (#143); nothing on this side of the wire reads it at all.
+                "network_conversation_id": portal.network_conversation_id,
                 "members": portal.members,
                 "observation": portal.observation.label(),
             }))
@@ -141,6 +148,13 @@ fn register_json(register: &Register) -> serde_json::Value {
                 "network": bridge.network,
                 "readable": bridge.unreadable.is_none(),
                 "detail": bridge.unreadable,
+                // Which account did the asking, and how many rooms it is in
+                // at all. #171: `absent: 0` with every bridge readable said
+                // both "you have no conversations yet" and "the register
+                // asked an account that is in no rooms", and a deployment
+                // with 32 portal rooms could not tell which it had been told.
+                "asked_as": bridge.asked_as,
+                "joined_rooms": bridge.joined_rooms,
             }))
             .collect::<Vec<_>>(),
     })
@@ -176,6 +190,7 @@ mod tests {
             bridge_id: "mautrix-whatsapp".to_owned(),
             network: "whatsapp".to_owned(),
             name: Some(name.to_owned()),
+            network_conversation_id: None,
             members,
             observation,
         }
@@ -193,6 +208,8 @@ mod tests {
                 bridge_id: "mautrix-whatsapp".to_owned(),
                 network: "whatsapp".to_owned(),
                 unreadable: None,
+                asked_as: Some("@whatsappbot:x".to_owned()),
+                joined_rooms: Some(3),
             }],
         };
         let body = register_json(&register);
@@ -213,6 +230,8 @@ mod tests {
                 bridge_id: "mautrix-signal".to_owned(),
                 network: "signal".to_owned(),
                 unreadable: Some("no appservice token configured".to_owned()),
+                asked_as: None,
+                joined_rooms: None,
             }],
         };
         let body = register_json(&register);
@@ -223,5 +242,36 @@ mod tests {
         );
         // And the totals do not pretend to cover it.
         assert_eq!(body["summary"]["total"], 0);
+    }
+
+    /// The network's own id crosses the wire exactly as the bridge wrote it,
+    /// and a bridge that wrote none says `null` rather than an empty string.
+    ///
+    /// The two rooms here are the pair #105's own measurements found at 06:46
+    /// — a WhatsApp community and its announcement group, identical names,
+    /// 109 members and 6 — and the ids are the only thing in the answer that
+    /// tells them apart.
+    #[test]
+    fn the_networks_own_conversation_id_is_passed_through_untouched() {
+        let mut community = portal("!a:x", "Communauté CKCP", 109, Observation::Absent);
+        community.network_conversation_id = Some("120363201980306353@g.us".to_owned());
+        let mut announcements = portal("!b:x", "Communauté CKCP", 6, Observation::Absent);
+        announcements.network_conversation_id = Some("120363333311112222@g.us".to_owned());
+        let nameless = portal("!c:x", "maria (WA)", 1, Observation::Observing);
+
+        let register = Register {
+            portals: vec![community, announcements, nameless],
+            bridges: Vec::new(),
+        };
+        let body = register_json(&register);
+        assert_eq!(
+            body["portals"][0]["network_conversation_id"],
+            "120363201980306353@g.us"
+        );
+        assert_eq!(
+            body["portals"][1]["network_conversation_id"],
+            "120363333311112222@g.us"
+        );
+        assert!(body["portals"][2]["network_conversation_id"].is_null());
     }
 }

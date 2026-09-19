@@ -70,6 +70,11 @@ const BRIDGE_BOT_PASSWORD: &str = "portals-test-only-password-whatsappbot";
 const GHOST_LOCALPART: &str = "whatsapp_33612345678";
 const GHOST_PASSWORD: &str = "portals-test-only-password-ghost";
 
+/// A WhatsApp group id, spelled the way WhatsApp spells one: an 18-digit
+/// group serial and the `@g.us` suffix that says *group*. Taken from the shape
+/// #105's own measurements recorded on the reference deployment.
+const WHATSAPP_GROUP_ID: &str = "120363201980306353@g.us";
+
 const STREAM: &str = "twalk";
 const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 
@@ -369,7 +374,18 @@ async fn sign_in(client: &reqwest::Client, base: &str, owner_token: &str) -> Res
 /// A portal room, as the bridge builds one when a conversation becomes
 /// active: the bot creates it, marks it with `m.bridge` (which is what the
 /// Sensor attributes a network by), and pulls the correspondent in.
-async fn build_portal(client: &reqwest::Client, bot_token: &str, name: &str) -> Result<String> {
+///
+/// `conversation_id` is what mautrix writes as the marker's `channel.id` —
+/// the network's own address for this conversation — so it is spelled the way
+/// WhatsApp spells one. The register passes it through untouched and the
+/// chooser reads its suffix (#143); a placeholder here would have let the
+/// whole path work for a value no bridge produces.
+async fn build_portal(
+    client: &reqwest::Client,
+    bot_token: &str,
+    name: &str,
+    conversation_id: &str,
+) -> Result<String> {
     let created: serde_json::Value = serde_json::from_str(
         &client
             .post(format!("{}/_matrix/client/v3/createRoom", homeserver_url()))
@@ -394,7 +410,7 @@ async fn build_portal(client: &reqwest::Client, bot_token: &str, name: &str) -> 
         .json(&serde_json::json!({
             "bridgebot": bridge_bot_user_id(),
             "protocol": { "id": "whatsapp", "displayname": "WhatsApp" },
-            "channel": { "id": "whatsapp-portals-test", "displayname": name },
+            "channel": { "id": conversation_id, "displayname": name },
         }))
         .send()
         .await?;
@@ -586,7 +602,7 @@ async fn run(env_files: &mut Vec<PathBuf>) -> Result<()> {
     // 13:24. Somebody writes, and the bridge builds a portal for it — while
     // the Gateway, the Sensor, the homeserver and the bus have all been
     // running for some time. This is the case no connection-time fix covers.
-    let room = build_portal(&client, &bot_token, "Échecs en Yvelines").await?;
+    let room = build_portal(&client, &bot_token, "Échecs en Yvelines", WHATSAPP_GROUP_ID).await?;
     invite(&client, &bot_token, &room, &owner_user_id()).await?;
     join(&client, &owner_token, &room).await?;
     invite(&client, &bot_token, &room, &ghost_user_id()).await?;
@@ -613,6 +629,14 @@ async fn run(env_files: &mut Vec<PathBuf>) -> Result<()> {
         "offered for observation, and entered by nobody: {offered}"
     );
     assert_eq!(offered["portals"][0]["network"], "whatsapp", "{offered}");
+    // The bridge's own id for the conversation, byte for byte. #143's chooser
+    // reads its `@g.us` suffix to know this is a group and not a person, and
+    // it can only do that if nothing between the marker and the browser
+    // normalises it.
+    assert_eq!(
+        offered["portals"][0]["network_conversation_id"], WHATSAPP_GROUP_ID,
+        "the network's own conversation id is passed through untouched: {offered}"
+    );
     assert_eq!(
         membership(&client, &bot_token, &room, &sensor_user_id()).await?,
         None,

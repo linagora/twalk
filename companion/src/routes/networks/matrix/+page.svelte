@@ -77,6 +77,7 @@
 		matchesQuery,
 		resolveDisplayNames,
 		roomLabel,
+		scopedBulkControl,
 		type RoomSummary
 	} from '$lib/matrix/rooms';
 	import { get } from 'svelte/store';
@@ -113,14 +114,17 @@
 	const anySelected = $derived(selected.size > 0);
 	const shown = $derived(rooms.filter((room) => matchesQuery(room, query, directory)));
 	/**
-	 * Whether every room the filter is showing is already chosen.
-	 *
 	 * The bulk control acts on **what is on screen**, never on the whole
 	 * account. On a work account this list is colleagues' private
 	 * conversations, and a control that selects all of them in one click is
 	 * how sixty people end up observed without anyone deciding to (#122).
+	 *
+	 * The rule itself lives in `$lib/matrix/rooms.ts` since #143, because the
+	 * portal chooser needs the same one over a list containing a 246-member
+	 * association, and a second implementation of a rule like this one is how
+	 * #110 happened.
 	 */
-	const allShownChosen = $derived(shown.length > 0 && shown.every((room) => selected.has(room.roomId)));
+	const bulk = $derived(scopedBulkControl(shown.map((room) => room.roomId), selected));
 
 	onMount(async () => {
 		// Which homeserver this deployment drives, so the screen can refuse a
@@ -387,17 +391,7 @@
 
 	/** Chooses, or unchooses, every room the filter is currently showing. */
 	function toggleShown() {
-		const next = new Set(selected);
-		if (allShownChosen) {
-			for (const room of shown) {
-				next.delete(room.roomId);
-			}
-		} else {
-			for (const room of shown) {
-				next.add(room.roomId);
-			}
-		}
-		selected = next;
+		selected = bulk.apply();
 	}
 
 	function toggle(roomId: string) {
@@ -678,9 +672,9 @@
 						disabled={stage === 'inviting'}
 						onclick={toggleShown}
 					>
-						{allShownChosen
-							? $t('matrix.rooms.deselectShown', { count: shown.length })
-							: $t('matrix.rooms.selectShown', { count: shown.length })}
+						{bulk.selectsRatherThanDeselects
+							? $t('matrix.rooms.selectShown', { count: bulk.count })
+							: $t('matrix.rooms.deselectShown', { count: bulk.count })}
 					</button>
 				</p>
 			{/if}

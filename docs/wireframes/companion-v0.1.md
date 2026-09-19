@@ -51,7 +51,7 @@ Two conventions carry that, and both exist so the document can be read beside th
 | 4 — Persona activation | `/personas` | [#69](https://github.com/linagora/twalk/issues/69) |
 | 5 — Home dashboard | `/dashboard` | [#69](https://github.com/linagora/twalk/issues/69), [#100](https://github.com/linagora/twalk/issues/100) |
 | 6 — Approving a suggestion (added below) | `/approvals` | [#100](https://github.com/linagora/twalk/issues/100) |
-| 7 — Choosing the observed conversations (added below) | not shipped | mechanism [#105](https://github.com/linagora/twalk/issues/105), screen [#143](https://github.com/linagora/twalk/issues/143) |
+| 7 — Choosing the observed conversations (added below) | `/networks/conversations` | mechanism [#105](https://github.com/linagora/twalk/issues/105), screen [#143](https://github.com/linagora/twalk/issues/143) |
 
 Three screens exist that this document never designed, and they are not omissions to be corrected but paths the implementation discovered: `/signin`, where a device whose token expired signs back in ([#111](https://github.com/linagora/twalk/issues/111)); `/recover`, the store-loss journey ADR 0014 makes a normal event; and `/diagnostics`, which is what the Companion has instead of telemetry — a page the user can read and copy, transmitted nowhere.
 
@@ -492,7 +492,7 @@ So the shipped screen compares the homeserver the typed name resolves to against
 
 ## Screen 7 — Choosing which conversations are observed
 
-**Not shipped, and named here because the mechanism is.** The wireframes never asked which conversations the Sensor may read, and the answer they implied — all of them, as soon as a network is connected — is the shape of the worst defect this product has had. This section records the decision so the screen is designed against it rather than against the old assumption. The register is live ([#105](https://github.com/linagora/twalk/issues/105)); the screen is [#143](https://github.com/linagora/twalk/issues/143).
+**Shipped** at `/networks/conversations`, reachable from each connected network's card ([#143](https://github.com/linagora/twalk/issues/143)). The wireframes never asked which conversations the Sensor may read, and the answer they implied — all of them, as soon as a network is connected — is the shape of the worst defect this product has had. This section records the decision the screen was designed against rather than the old assumption. The register is live ([#105](https://github.com/linagora/twalk/issues/105)).
 
 **What went wrong.** A freshly connected network published nothing at all while every component reported itself healthy. A bridge builds a portal room **lazily**, as each conversation becomes active — eighteen appeared on the reference deployment between 04:54 and 13:24 — and invites only the user, so nothing ever put the Sensor inside one and the deafness grew on its own. A fix aimed at the rooms that exist when a network is connected would have been right for about an hour ([ADR 0024](../architecture/adr/0024-a-portal-room-is-observed-by-invitation-per-conversation.md)).
 
@@ -504,7 +504,15 @@ So the shipped screen compares the homeserver the typed name resolves to against
 - **Both directions, one mechanism.** `POST /api/portals/observation` invites the Sensor into the named rooms, or removes it, as that bridge's own bot. One room failing does not fail the others.
 - **A portal stuck at `invited` is its own diagnosis:** the Sensor refused the inviter, which is `SENSOR_ALLOWED_INVITERS` not naming that bridge's bot.
 
-**Success criteria (proposed).** A user can see how many of their conversations Twalk is reading, change that one conversation at a time, and never discover after the fact that a 246-member group was observed because a screen selected everything for them.
+**What the shipped screen adds to that.**
+
+- **A third unit of decision.** Consent is per contact, persona activation is per network, and observation is **per conversation**. For `maria` a contact and a conversation are the same thing and consent-per-contact works; for a 246-member association nobody adjudicates 246 people one by one. The two compose rather than compete: an unwatched conversation produces nothing, and inside a watched one each sender's consent still governs what is published about them ([ADR 0012](../architecture/adr/0012-revoked-consent-reduces-publication.md)).
+- **Grouped by what the network says, not by what the screen guesses.** Each portal carries the network's own identifier for the conversation (`network_conversation_id`, the `m.bridge` `channel.id`, passed through the Gateway untouched), and its suffix says the kind: `@lid` and `@s.whatsapp.net` are one person, `@g.us` a group, `@newsletter` a broadcast. A conversation whose bridge wrote no identifier gets a section that says the kind was not stated — never one inferred from the member count, which is evidence about a conversation's size and not its type.
+- **Communities are grouped by name, and the screen says so.** A WhatsApp community is, at the network level, a set of ordinary `@g.us` groups and nothing says which groups form one. What the register can see is what the owner saw: a community arrives as several groups whose names contain one another — `Communauté CKCP` twice in the same minute at 109 members and 6, `XVDSI` and `XVDSI - General`. So they are clustered by name, no row is labelled the parent, and each keeps its member count and its network address, which is what tells two rows called `XVDSI` apart.
+- **The consequence is stated before the tick takes effect.** A community's control says how many people it covers in its own label, the pending decision is costed in people against the whole account rather than against what the search left on screen, and past a crowd it cannot be applied until the number has been acknowledged. A number is not a warning, and a warning nobody reads is not a decision ([#122](https://github.com/linagora/twalk/issues/122)).
+- **The bulk control is the room chooser's**, scoped to the filter and counted — "Select the 4 shown", never "select all" ([#137](https://github.com/linagora/twalk/issues/137)), one implementation for both screens.
+
+**Success criteria.** A user can see how many of their conversations Twalk is reading, change that one conversation at a time, and never discover after the fact that a 246-member group was observed because a screen selected everything for them.
 
 ---
 

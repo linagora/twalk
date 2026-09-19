@@ -125,13 +125,71 @@ export function matchesQuery(room: RoomSummary, query: string, directory?: Direc
 	return haystack.some((straw) => fold(straw).includes(needle));
 }
 
-/** Lower-cased and stripped of diacritics, so "lorre" finds "Lorré". */
-function fold(value: string): string {
+/**
+ * Lower-cased and stripped of diacritics, so "lorre" finds "Lorré".
+ *
+ * Exported because the portal chooser (#143) needs the *same* fold to decide
+ * which conversation names belong to one community, and a second spelling of
+ * this rule is how #110 happened. It is the only text-normalising rule in the
+ * Companion, and there is one of it.
+ */
+export function fold(value: string): string {
 	return value
 		.normalize('NFD')
 		.replace(/\p{Diacritic}/gu, '')
 		.toLowerCase()
 		.trim();
+}
+
+/**
+ * What a bulk control may do, given what the filter is showing.
+ *
+ * The rule #137 established, and the reason it is a function rather than four
+ * lines in a component: this screen hands a set of conversations to an
+ * observing agent, and the people in them do not know Twalk exists (#122). A
+ * control that reaches past the filter is how sixty of them get observed
+ * without anyone deciding to — so the scope is *what is on screen*, the count
+ * is in the label, and "select all" is never offered.
+ *
+ * Two choosers obey it now: the Matrix room chooser (#137) and the portal
+ * chooser (#143), whose lists contain a 246-member association. One rule, one
+ * implementation, tested once.
+ *
+ * `shown` is the ids the filter left in, in any order. Deselecting is
+ * unrestricted — removing is always safe — which is why there is no threshold
+ * anywhere in here: the asymmetry is in the copy the caller chooses from
+ * `selectsRatherThanDeselects`, not in what this will do.
+ */
+export function scopedBulkControl(
+	shown: readonly string[],
+	selected: ReadonlySet<string>
+): {
+	/** How many the control will touch. Never "all", always a number. */
+	readonly count: number;
+	/**
+	 * Whether pressing it *adds*. False when every shown id is already
+	 * chosen, which is when the same control becomes "deselect the 4 shown".
+	 */
+	readonly selectsRatherThanDeselects: boolean;
+	/** The selection after pressing it. A new set; the input is untouched. */
+	apply(): Set<string>;
+} {
+	const adds = shown.length > 0 && !shown.every((id) => selected.has(id));
+	return {
+		count: shown.length,
+		selectsRatherThanDeselects: adds,
+		apply(): Set<string> {
+			const next = new Set(selected);
+			for (const id of shown) {
+				if (adds) {
+					next.add(id);
+				} else {
+					next.delete(id);
+				}
+			}
+			return next;
+		}
+	};
 }
 
 /**
