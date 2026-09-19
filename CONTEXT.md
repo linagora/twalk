@@ -45,11 +45,15 @@ _Avoid_: queue, broker
 
 ### Agents
 
+**Persona runtime**:
+The component that hosts personas, consumes events from the bus, and publishes suggestions and replies back on it. It is the **enforcement boundary**: the consent gate and the trigger allowlist live in the SDK it starts personas with, so what it may do is arranged rather than trusted — which is why it is not scaffolding to be removed when a more capable agent arrives (ADR 0032). It holds no model of its own: an operator-chosen endpoint is injected into each persona (ADR 0015). Called `hermes` in the source tree, and **every ADR before 0032 calls it Hermes** — those are records of decisions and are not rewritten, so a reader of ADR 0008, 0013, 0015, 0017, 0022 or 0023 should read *Hermes* there as this entry. Renaming the directory, the crate and its environment variables is a wide mechanical refactor of its own.
+_Avoid_: **Hermes**, which now means only the agent below
+
 **Hermes**:
-The agent platform: hosts personas, consumes events from the bus, reasons with an LLM, and publishes suggestions and replies back on the bus.
+Nous Research's agent runtime, external to this project and to this deployment: it reasons, keeps memories, and has skills that can act. Reached by a signed webhook from a persona, so that what it sees has already passed the consent gate; its answer returns through the Companion Gateway and carries the language it was written in (ADR 0032). It is not governed by this project — it ships messaging adapters of its own, and events that arrive through them carry none of Twalk's guarantees.
 
 **Persona**:
-A named agentic identity hosted by Hermes (e.g. `assistant`, `watch`, `archive`, `writing`) that observes events and produces suggestions or replies under human oversight. Contract event types live in the `persona.*` domain.
+A named agentic identity hosted by the persona runtime (e.g. `assistant`, `watch`, `archive`, `writing`) that observes events and produces suggestions or replies under human oversight. Contract event types live in the `persona.*` domain.
 _Avoid_: bot, agent (as a product term; "agent" stays acceptable for the generic concept)
 
 **Persona activation**:
@@ -134,7 +138,7 @@ The first-party Android app (brand name: Twake SMS Companion) that reads and sen
 LINAGORA's personal messaging interface; renders the user's conversations. Built outside this repo.
 
 **Buzz**:
-LINAGORA's agent-oversight interface, organised around Control Room, Watch Room, and Dialogue Room patterns. Built outside this repo.
+Block's open-source, self-hostable workspace on the Nostr protocol, where humans and agents share channels and every message is a signed event on a relay the operator owns. Built outside this repo and not by LINAGORA, which this entry claimed until ADR 0032. It is where the user talks to Hermes and where approvals surface — a **surface** for approval and never its authority, since the Companion Gateway remains the single writer (ADR 0022).
 
 **Twake**:
 The LINAGORA product family Twalk belongs to; gives Twalk its name (Twake + Talk).
