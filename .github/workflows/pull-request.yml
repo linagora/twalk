@@ -240,6 +240,10 @@ jobs:
           CARGO_BUILD_JOBS: '4'
           CARGO_TERM_COLOR: always
           CI: '1'
+          # `CARGO_PROFILE_DEV_DEBUG` is deliberately *not* set here, unlike on
+          # the hosted runners. A stack runner is a machine with disk, and full
+          # debug info is what makes a panic in a red run worth reading — 17 GB
+          # of target directory buys a backtrace with line numbers in it.
         run: bash -eo pipefail -c "$SUITE_RUN"
 
       - name: leave nothing behind

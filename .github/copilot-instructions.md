@@ -1,6 +1,6 @@
 # Reviewing a pull request in this repository
 
-Twalk is a sovereign, self-hosted event hub: personal messaging lands in Matrix portal rooms, the Sensor normalises it into versioned CloudEvents on a NATS JetStream bus, and Hermes-hosted personas reason over it under human oversight. Read `CONTEXT.md` for the vocabulary and `AGENTS.md` for how each component is built and tested. `docs/architecture/adr/` holds twenty-seven decisions and is the reason most of the surprising code is the way it is.
+Twalk is a sovereign, self-hosted event hub: personal messaging lands in Matrix portal rooms, the Sensor normalises it into versioned CloudEvents on a NATS JetStream bus, and Hermes-hosted personas reason over it under human oversight. Read `CONTEXT.md` for the vocabulary and `AGENTS.md` for how each component is built and tested. `docs/architecture/adr/` holds this project's recorded decisions — twenty-three of them, numbered to 0027 — and is the reason most of the surprising code is the way it is.
 
 The review culture here is **argue with the decision**. Pull requests in this project routinely run to three or four thousand lines and carry their own rationale, an "argue with this" section, and often an ADR. A comment that says "consider extracting this into a helper" is worse than silence, because it costs a reader's attention and teaches them to skim your comments. A useful comment does one of exactly two things:
 
