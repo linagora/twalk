@@ -861,7 +861,8 @@ async fn a_step_the_companion_cannot_drive_fails_explicitly_instead_of_hanging()
 /// fragment of the bridge's answer comes back to the browser**, because a
 /// provisioning answer can carry identifiers from a network account.
 #[tokio::test]
-async fn a_bridge_that_answers_unreadably_is_not_a_bridge_that_could_not_be_reached() -> Result<()> {
+async fn a_bridge_that_answers_unreadably_is_not_a_bridge_that_could_not_be_reached() -> Result<()>
+{
     let fixture = Fixture::start("bridges-unreadable-answer").await?;
 
     // 1. Nothing is listening on that port. This one really is a bridge that
@@ -1421,6 +1422,70 @@ async fn a_value_the_network_refuses_is_a_400_that_says_to_start_again() -> Resu
         detail.contains("start the login again"),
         "the detail says the process is gone, so the user does not retry into a 404: {detail}"
     );
+
+    fixture.stop().await;
+    Ok(())
+}
+
+/// A request the bridge could not read is Twalk's defect, not the network's
+/// refusal (issue #221).
+///
+/// bridgev2 answers `400 M_NOT_JSON` when the submit body does not decode
+/// into its `map[string]string` — which a jar sent as a nested map does — and
+/// it answers it **before** the connector runs, so the login process is
+/// untouched and Google never saw anything. Reported as "the network refused
+/// what was submitted, start the login again" it cost a user three identical
+/// retries: the network had refused nothing, and starting again repeated the
+/// same defect. So the two are two codes, and this one says whose fault it
+/// is and that the login is still there.
+#[tokio::test]
+async fn a_request_the_bridge_cannot_read_is_twalks_defect_and_not_a_network_refusal() -> Result<()>
+{
+    let fixture = Fixture::start("bridges-request-unreadable").await?;
+
+    let (status, started) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            Some(json!({ "flow_id": PHONE_FLOW })),
+        )
+        .await?;
+    assert_eq!(status, 201, "{started}");
+    fixture.stub.refuse_next_step(400, "M_NOT_JSON");
+    let (status, refused) = fixture
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login/submit"),
+            Some(json!({ "step_id": PHONE_STEP, "data": { "phone_number": "+33600000000" } })),
+        )
+        .await?;
+    assert_eq!(status, 502, "{refused}");
+    assert_eq!(refused["error"], json!("bridge_request_unusable"));
+    let detail = refused["detail"].as_str().context("a detail")?;
+    assert!(
+        detail.contains("M_NOT_JSON"),
+        "the detail names the bridge's code: {detail}"
+    );
+    assert!(
+        detail.contains("defect in Twalk"),
+        "the detail says whose defect this is: {detail}"
+    );
+    assert!(
+        !detail.contains("network would not accept") && !detail.contains("start the login again"),
+        "nothing here blames the network or sends the user round the loop again: {detail}"
+    );
+
+    // The login process is untouched: bridgev2 refused the body before the
+    // connector ran, so a poll finds the same step still waiting.
+    let (status, polled) = fixture
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/bridges/{STUB_BRIDGE_ID}/login"),
+            None,
+        )
+        .await?;
+    assert_eq!(status, 200, "{polled}");
+    assert_eq!(polled["step"]["step_id"], json!(PHONE_STEP), "{polled}");
 
     fixture.stop().await;
     Ok(())
