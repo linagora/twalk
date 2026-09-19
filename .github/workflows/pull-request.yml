@@ -8,17 +8,19 @@
 # Three things about the shape, each measured rather than assumed — the numbers
 # are in the pull request that added this file:
 #
-#   - The **hosted** runners do all the work that fits on them. A GitHub-hosted
-#     runner gives 2 CPUs and ~14 GB of disk; `cargo build --tests` for the
-#     Sensor alone produces a 17 GB target directory at this project's default
-#     debug settings, so the Rust suites do not fit as they stand. Dropping the
-#     debug info a CI run never reads is what makes the harness's own units fit;
-#     the suites that also need Docker still do not.
-#   - The **stack** suites need a runner with Docker, the images cached and room
-#     to build. They run on whatever `vars.TWALK_STACK_RUNNER` names, and until
-#     that variable is set they report, loudly, that they did not run and what
-#     to type instead — so this workflow is useful on the day it merges rather
-#     than on the day somebody provisions a host.
+#   - The **hosted** runners do all the work that fits on them: the routing
+#     check, the Python SDK, the shared harness's units, the Companion's
+#     Node-only suite. Free, and nobody's machine to maintain.
+#   - The **stack** suites need Docker, a Synapse and room to build, and they go
+#     to whatever `vars.TWALK_STACK_RUNNER` names. Disk is why: `cargo build
+#     --tests` for the Sensor alone produced a 17 GB target directory at this
+#     project's default debug settings, against a hosted runner's ~14 GB.
+#     `CARGO_PROFILE_DEV_DEBUG=line-tables-only` brings that to 6 GB, so disk
+#     alone would not settle it — what does is that the Sensor's suite is 383 s
+#     of Synapse round trips and Megolm, and pinned to two cores its presence
+#     assertion times out. Until that variable is set these jobs report, loudly,
+#     that they did not run and what to type instead, so this workflow is useful
+#     on the day it merges rather than on the day somebody provisions a host.
 #   - **What runs is a function of what changed**, and the rule lives in
 #     `.github/ci/suites.json` — not in this file's `paths:` filters, which is
 #     deliberate. `.github/ci/test_selection.py` derives the consumers of
@@ -26,9 +28,11 @@
 #     the repository's own dependency graph and fails when the table does not
 #     route them. A `paths:` filter here could not be tested that way.
 #
-# `verified` is the check to require on `main`. It always reports, so a pull
-# request that legitimately selects nothing is not left waiting for a check that
-# will never arrive.
+# **Require `routing` and `verified` on `main`, and `verified-stack` the day
+# `TWALK_STACK_RUNNER` is set.** All three always report, so a pull request that
+# legitimately selects nothing is never left waiting for a check that will never
+# arrive — and `verified-stack` is separate from `verified` so that "three
+# components passed" and "three components were never tested" are two signals.
 #
 # Every interpolation that reaches a shell goes through `env:` first. On a
 # self-hosted runner that matters more than usual, and the pull request says why
@@ -130,7 +134,7 @@ jobs:
   # Required, and free: everything that needs no Docker and no stack.
   # ---------------------------------------------------------------------------
   hosted-suites:
-    name: ${{ matrix.id }}
+    name: suite ${{ matrix.id }}
     needs: select
     if: needs.select.outputs.any_hosted == 'true'
     runs-on: ubuntu-latest
@@ -200,7 +204,7 @@ jobs:
   # production services. A runner that can take the machine down is not a win.
   # ---------------------------------------------------------------------------
   stack-suites:
-    name: ${{ matrix.id }}
+    name: suite ${{ matrix.id }}
     needs: select
     if: needs.select.outputs.any_stack == 'true'
     runs-on: ${{ vars.TWALK_STACK_RUNNER || 'ubuntu-latest' }}
@@ -275,7 +279,7 @@ jobs:
   # and says what that leaves uncovered.
   # ---------------------------------------------------------------------------
   advisory-suites:
-    name: ${{ matrix.id }} (advisory)
+    name: advisory suite ${{ matrix.id }}
     needs: select
     if: >-
       needs.select.outputs.any_advisory == 'true' &&
