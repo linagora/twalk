@@ -64,6 +64,12 @@ export type Snapshot = {
 	bridges: components['schemas']['ConfiguredBridge'][] | null;
 	consent: components['schemas']['ConsentStateEntry'][] | null;
 	devices: components['schemas']['Device'][] | null;
+	/**
+	 * The register's journal of moves (#255): conversations whose room was
+	 * replaced while the Sensor was in them, and what the register decided.
+	 * `null` when the deployment keeps no journal.
+	 */
+	moves: components['schemas']['PortalMove'][] | null;
 	/** `null` when the deployment does not project the inbound stream. */
 	pending: PendingSummary | null;
 	/**
@@ -81,25 +87,28 @@ export const EMPTY: Snapshot = {
 	bridges: null,
 	consent: null,
 	devices: null,
+	moves: null,
 	pending: null,
 	waiting: null,
 	reachable: true
 };
 
 export async function loadDashboard(): Promise<Snapshot> {
-	const [session, bridges, consent, devices, pending, suggestions] = await Promise.all([
+	const [session, bridges, consent, devices, pending, suggestions, moves] = await Promise.all([
 		ask(() => gateway.GET('/api/session')),
 		ask(() => gateway.GET('/api/bridges')),
 		ask(() => gateway.GET('/api/consent/state')),
 		ask(() => gateway.GET('/api/devices')),
 		ask(() => gateway.GET('/api/contacts/pending')),
-		ask(() => gateway.GET('/api/suggestions'))
+		ask(() => gateway.GET('/api/suggestions')),
+		ask(() => gateway.GET('/api/portals/moves'))
 	]);
 	return {
 		session: session,
 		bridges: bridges?.bridges ?? null,
 		consent: consent?.entries ?? null,
 		devices: devices?.devices ?? null,
+		moves: moves?.moves ?? null,
 		// `pending.contacts` is deliberately not carried past this line. See
 		// the module note: the counts are the dashboard's, the list is not.
 		pending: pending === null ? null : { total: pending.total, networks: pending.networks },

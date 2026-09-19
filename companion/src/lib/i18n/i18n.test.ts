@@ -56,6 +56,9 @@ describe('the catalogues', () => {
 			detail: 'the homeserver said no',
 			date: '18/09/2026',
 			network: 'WhatsApp',
+			// The register's moves in the dashboard feed (#255).
+			members: '24',
+			threshold: '20',
 			device: 'the laptop in the kitchen',
 			started: '2026-09-18T07:00:00.000Z',
 			seconds: 20,

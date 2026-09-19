@@ -980,6 +980,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/portals/moves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The conversations whose room was replaced while the Sensor was in them, and what the register decided.
+         * @description The register's journal of **moves** (ADR 0029, #255). A conversation's
+         *     room can be replaced — a Telegram group promoted to a supergroup, a
+         *     Matrix room upgraded — while the user's decision to observe it is on
+         *     record. The register follows `m.room.tombstone` to the successor and
+         *     decides what that decision now means: **followed** when the successor's
+         *     audience is under the crowd threshold (the Sensor is invited there),
+         *     **returned to the chooser** when it is not (the conversation stays
+         *     `moved` and asks to be acknowledged again as a crowd).
+         *
+         *     Either way the move is said here, once per successor, with the numbers
+         *     it was decided on. A deployment that changed rooms under the user
+         *     without being able to say so is one whose history they cannot check;
+         *     the dashboard's activity feed draws from this. Read from the Gateway's
+         *     store alone — no homeserver call.
+         */
+        get: operations["listPortalMoves"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/portals/observation": {
         parameters: {
             query?: never;
@@ -2717,6 +2750,30 @@ export interface components {
              *     `portals` or in `summary`.
              */
             readable: boolean;
+        };
+        /** @description One conversation's move, as the register decided it (#255). */
+        PortalMove: {
+            bridge_id: string;
+            /** @description The threshold applied, kept so the entry stays readable after the operator changes it. */
+            crowd_threshold: number;
+            /** Format: date-time */
+            decided_at: string;
+            /**
+             * @description `true` — the Sensor was invited into the successor: the decision
+             *     followed the conversation. `false` — the successor's audience is
+             *     at or above the threshold, so the conversation went back to the
+             *     chooser as a crowd, `moved`, for the user to acknowledge again.
+             */
+            followed: boolean;
+            /**
+             * @description People in the successor when the register decided, bridge bot
+             *     and Sensor excluded — the number the threshold was applied to.
+             */
+            members: number;
+            /** @description The room it left — the one the user's decision named. */
+            predecessor: string;
+            /** @description The room the conversation lives in now. */
+            successor: string;
         };
         /** @description One outcome per room asked about, in the order asked. */
         PortalObservation: {
@@ -5254,6 +5311,46 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             503: components["responses"]["PortalsNotConfigured"];
+        };
+    };
+    listPortalMoves: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The most recent moves, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        moves: components["schemas"]["PortalMove"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `portals_not_configured` — as for `GET /api/portals`. Or
+             *     `moves_not_journaled` — this Gateway has a register but no store
+             *     (no consent configured), so moves are decided and logged but not
+             *     kept; `detail` names what to configure.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "portals_not_configured" | "moves_not_journaled";
+                    };
+                };
+            };
         };
     };
     setPortalObservation: {

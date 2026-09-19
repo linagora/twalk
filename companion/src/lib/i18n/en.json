@@ -601,6 +601,8 @@
 	"dashboard.feed.title": "Recent activity",
 	"dashboard.feed.empty": "Nothing has happened yet.",
 	"dashboard.feed.privacy": "Operational events only: bridges, consent and agents, plus a count. Twalk does not keep a list of who writes to you, so this screen cannot show one.",
+	"dashboard.feed.move.followed": "A conversation you observe moved to a new room of {members} people; your decision followed it",
+	"dashboard.feed.move.returned": "A conversation you observe moved to a new room of {members} people — at or above {threshold}, it is back in the chooser for you to decide again",
 	"dashboard.feed.bridge.connected": "{network} was connected",
 	"dashboard.feed.bridge.connecting": "{network} is being connected",
 	"dashboard.feed.bridge.expired": "The {network} session expired",

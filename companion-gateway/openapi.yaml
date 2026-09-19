@@ -2742,6 +2742,59 @@ paths:
         "503":
           $ref: "#/components/responses/PortalsNotConfigured"
 
+  /api/portals/moves:
+    get:
+      operationId: listPortalMoves
+      tags: [portals]
+      summary: The conversations whose room was replaced while the Sensor was in them, and what the register decided.
+      description: |
+        The register's journal of **moves** (ADR 0029, #255). A conversation's
+        room can be replaced — a Telegram group promoted to a supergroup, a
+        Matrix room upgraded — while the user's decision to observe it is on
+        record. The register follows `m.room.tombstone` to the successor and
+        decides what that decision now means: **followed** when the successor's
+        audience is under the crowd threshold (the Sensor is invited there),
+        **returned to the chooser** when it is not (the conversation stays
+        `moved` and asks to be acknowledged again as a crowd).
+
+        Either way the move is said here, once per successor, with the numbers
+        it was decided on. A deployment that changed rooms under the user
+        without being able to say so is one whose history they cannot check;
+        the dashboard's activity feed draws from this. Read from the Gateway's
+        store alone — no homeserver call.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The most recent moves, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [moves]
+                additionalProperties: false
+                properties:
+                  moves:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PortalMove"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          description: |
+            `portals_not_configured` — as for `GET /api/portals`. Or
+            `moves_not_journaled` — this Gateway has a register but no store
+            (no consent configured), so moves are decided and logged but not
+            kept; `detail` names what to configure.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [portals_not_configured, moves_not_journaled]
+
   /api/portals/observation:
     post:
       operationId: setPortalObservation
@@ -4563,6 +4616,42 @@ components:
             and count are the dead room's, the room id is the successor's. A
             tombstone that points into the dark is a fact, not a reason to
             fold the conversation into nothing.
+
+    PortalMove:
+      type: object
+      description: One conversation's move, as the register decided it (#255).
+      required:
+        [successor, predecessor, bridge_id, members, crowd_threshold, followed, decided_at]
+      additionalProperties: false
+      properties:
+        successor:
+          type: string
+          description: The room the conversation lives in now.
+        predecessor:
+          type: string
+          description: The room it left — the one the user's decision named.
+        bridge_id:
+          type: string
+        members:
+          type: integer
+          minimum: 0
+          description: |
+            People in the successor when the register decided, bridge bot
+            and Sensor excluded — the number the threshold was applied to.
+        crowd_threshold:
+          type: integer
+          minimum: 2
+          description: The threshold applied, kept so the entry stays readable after the operator changes it.
+        followed:
+          type: boolean
+          description: |
+            `true` — the Sensor was invited into the successor: the decision
+            followed the conversation. `false` — the successor's audience is
+            at or above the threshold, so the conversation went back to the
+            chooser as a crowd, `moved`, for the user to acknowledge again.
+        decided_at:
+          type: string
+          format: date-time
 
     PortalSummary:
       type: object
