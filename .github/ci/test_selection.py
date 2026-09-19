@@ -317,6 +317,28 @@ class EveryTestIsClaimed(unittest.TestCase):
                         f"{name} runs --test {target} and {target}.rs is not there",
                     )
 
+    def test_one_suite_per_rust_component_runs_the_crate_s_own_unit_tests(self):
+        """`cargo test --test X` runs X and nothing else — not the lib's units.
+
+        Found by counting: `cargo test` in `sensor/` reports 188 tests and the
+        sixteen `--test` targets account for 62 of them. The other 123 are the
+        pure modules' own unit tests in `src/`, and naming targets explicitly had
+        silently dropped every one of them. `--lib` puts them back, on exactly
+        one suite per component so they are not run twice.
+        """
+        for component in ("sensor", "hermes", "companion-gateway"):
+            carriers = [
+                name
+                for name, suite in self.table["suites"].items()
+                if suite["component"] == component and " --lib" in suite["run"]
+            ]
+            with self.subTest(component=component):
+                self.assertEqual(
+                    1,
+                    len(carriers),
+                    f"{component}: exactly one suite must run --lib, found {carriers}",
+                )
+
     def test_the_run_command_names_the_targets_it_declares(self):
         """The `run` string and the `targets` list are one fact written twice."""
         for name, suite in self.table["suites"].items():

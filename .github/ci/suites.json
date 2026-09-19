@@ -65,7 +65,7 @@
 			"what": "The Sensor at its process boundary, against the shared test stack: normalisation, consent, the owner, bridge bots, presence, encryption, persistence, observability.",
 			"component": "sensor",
 			"workdir": "sensor",
-			"run": "cargo test --test bridge_bots_are_not_contacts --test consent --test encryption --test excerpt_consent --test fidelity --test message_to_event --test observability --test outbound --test outbound_message_sent --test owner_is_never_a_contact --test persistence --test presence --test presence_network --test reactions --test sensor_lifecycle --test smoke",
+			"run": "cargo test --lib --test bridge_bots_are_not_contacts --test consent --test encryption --test excerpt_consent --test fidelity --test message_to_event --test observability --test outbound --test outbound_message_sent --test owner_is_never_a_contact --test persistence --test presence --test presence_network --test reactions --test sensor_lifecycle --test smoke",
 			"targets": [
 				"bridge_bots_are_not_contacts",
 				"consent",
@@ -110,7 +110,7 @@
 			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, approvals, suggestions, settings, the portal register, and the OpenAPI description against the routes it serves.",
 			"component": "companion-gateway",
 			"workdir": "companion-gateway",
-			"run": "cargo test --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test openapi --test pending --test portals --test service --test settings --test signin --test suggestions",
+			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test openapi --test pending --test portals --test service --test settings --test signin --test suggestions",
 			"targets": [
 				"approvals",
 				"bootstrap",
@@ -146,7 +146,7 @@
 			"what": "The Hermes runtime and the reference persona at their process boundaries: the persona container against the bus and the stub LLM, the runtime starting it, activation, the suggestion policy, the reasoning budget, the language fallback, and the settings the runtime reads from the Gateway.",
 			"component": "hermes",
 			"workdir": "hermes",
-			"run": "cargo test --test assistant --test language_fallback --test reasoning_budget --test runtime_lifecycle --test runtime_settings --test smoke --test suggestion",
+			"run": "cargo test --lib --test assistant --test language_fallback --test reasoning_budget --test runtime_lifecycle --test runtime_settings --test smoke --test suggestion",
 			"targets": [
 				"assistant",
 				"language_fallback",
