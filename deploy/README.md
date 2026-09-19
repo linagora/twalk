@@ -103,6 +103,9 @@ A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversat
 | `docker-compose/.env.example` | Every variable, documented; the file to read first |
 | `docker-compose/provision.sh` | Matrix account provisioning (the Sensor, ad-hoc accounts) |
 | `docker-compose/provision-bridges.sh` | Step 1 above: registrations, Synapse's configuration, the restart |
+| `docker-compose/provision-owner-device.sh` | The operator route of ADR 0034: the device Twalk acts as the owner through, on the owner's own account, its credential written where the Sensor reads it (#227) |
+| `docker-compose/provision-hermes-nostr-key.sh` | Hermes's own Nostr key for Buzz, written once into Hermes's env file and never printed; prints the public half and how to tell the relay to accept it (#239, ADR 0032) |
+| `docker-compose/provision-buzz-channels.sh` | The operator route of #218: the owner's four Buzz channels, created **as the owner** from a key file only they write, Hermes added as a bot member, the UUIDs written where Hermes reads them — no UUID typed by hand |
 | `docker-compose/synapse/homeserver.yaml` | Synapse's configuration template (Jinja2, rendered by the image) |
 | `docker-compose/*.Dockerfile` | One image per Twalk component |
 | `docker-compose/hermes-entrypoint.sh` | Hermes's entrypoint: start the runtime, or say why it is hosting nothing |
