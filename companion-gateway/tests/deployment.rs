@@ -6,15 +6,15 @@
 //!
 //! The Gateway needs no homeserver to come up (it talks to one only while
 //! somebody signs in), and the bus its consent outbox publishes to comes up
-//! with it, so the first test brings up the `companion-gateway` service and
-//! the `nats` it depends on — compose still interpolates the whole file, so
-//! the env file below carries every documented variable, exactly as
-//! `.env.example` does. The second test is
-//! about the deployment's Synapse configuration: the `openid` resource that
-//! sign-in verifies tokens at (ticket #52), which nothing else in the
-//! repository would notice the loss of.
+//! with it, so the first scenario brings up the `companion-gateway` service
+//! and the `nats` it depends on — compose still interpolates the whole file,
+//! so the env file below carries every documented variable, exactly as
+//! `.env.example` does. The second scenario is about the deployment's Synapse
+//! configuration: the `openid` resource that sign-in verifies tokens at
+//! (ticket #52), which nothing else in the repository would notice the loss
+//! of.
 //!
-//! The third test (ticket #53) is the one that needs the whole stack: the
+//! The third scenario (ticket #53) is the one that needs the whole stack: the
 //! registration relay creating this deployment's one account on a homeserver
 //! whose own registration is closed, and the Sensor joining a room the Gateway
 //! invited it to and publishing that room's traffic to the bus as
@@ -26,16 +26,16 @@
 //! which is also where "the Sensor's startup does not depend on the Gateway"
 //! is asserted — from compose's own resolved configuration.
 //!
-//! Since ticket #24 the same test closes the loop: a suggestion is published
-//! against the correspondent's **real** message, the deployed Gateway is
-//! asked to approve it, and the approved reply is asserted to appear in the
-//! real Matrix room — posted by the real Sensor, read back from the
-//! homeserver. The persona is the one part stood in for, because Hermes does
-//! not run in this compose stack yet; everything downstream of the suggestion
-//! is the deployment's own. The owner's own message, in the same test, is
-//! `outbound.message.sent.v1` with no consent extension at all: the owner is
-//! not a contact (tickets #109 and #147, ADR 0018 and ADR 0021), and this
-//! test had gone on expecting `inbound.message.received` for it.
+//! Since ticket #24 the same scenario closes the loop: a suggestion is
+//! published against the correspondent's **real** message, the deployed
+//! Gateway is asked to approve it, and the approved reply is asserted to
+//! appear in the real Matrix room — posted by the real Sensor, read back from
+//! the homeserver. The persona is the one part stood in for, because Hermes
+//! does not run in this compose stack yet; everything downstream of the
+//! suggestion is the deployment's own. The owner's own message, in the same
+//! scenario, is `outbound.message.sent.v1` with no consent extension at all:
+//! the owner is not a contact (tickets #109 and #147, ADR 0018 and ADR 0021),
+//! and this scenario had gone on expecting `inbound.message.received` for it.
 //!
 //! The deploy stack runs under its own compose project and host ports, next
 //! to the harness's own stack: TWALK_DEPLOY_TEST_STACK (default
@@ -54,15 +54,60 @@
 //! followed by `docker image rm twalk/companion-gateway:<stack>
 //! twalk/sensor:<stack>`.
 //!
+//! **One stack, one owner, one teardown** (issue #199). Those three scenarios
+//! share a single compose project, and each of them used to be a
+//! `#[tokio::test]` that tore the stack down on its way out. `cargo test` runs
+//! the tests of a binary in parallel, so with the flag set the first two to
+//! finish removed the containers the third was still talking to, and it failed
+//! with `Connection reset by peer`. Teardown is not a property of a test; it is
+//! a property of the last test, and Rust's test harness has no such hook. So
+//! the lifetime of the stack belongs to one test —
+//! [`the_deploy_stack_serves_every_scenario_and_is_torn_down_once`] — which
+//! runs the three scenarios concurrently, as the harness did, and tears the
+//! stack down once when the last of them has returned. The scenarios keep
+//! their names and their doc comments; what they lost is the ability to tear
+//! down under each other.
+//!
+//! Four shapes were considered and not taken, because the next reader will
+//! think of them too. **`harness = false`** with a hand-written runner puts
+//! teardown genuinely outside every test and keeps three libtest names — but
+//! it needs a `[[test]]` stanza in `Cargo.toml`, a reimplementation of the
+//! filter and reporting libtest already does, and it turns a future
+//! `#[tokio::test]` in this file into a function that silently never runs. A
+//! **`Drop` or `atexit` hook** would run after the last test whatever the
+//! filter, but it cannot fail a run: a teardown that could not remove a
+//! network would leave one behind and say nothing, which is #128's failure
+//! again. A **countdown latch** over a declared roster never reaches zero
+//! under `cargo test <name>`, so a filtered run would leak exactly when a
+//! developer is iterating. And `--test-threads=1` is not a fix at all — it
+//! costs wall clock and it still does not work: the first scenario's teardown
+//! removes the per-stack images, [`ensure_images`] has already fired its
+//! `OnceCell` so the next scenario does not rebuild them, and its `up` then
+//! looks for an image nothing on the host has.
+//!
+//! Teardown is `docker compose down -v`, the whole project — containers,
+//! network and volumes — and the two per-stack images, as
+//! `sensor/tests/deployment.rs` has always done. It used to remove only the
+//! `companion-gateway` and `sensor` services and leave the homeserver and the
+//! bus to the Sensor's deployment test "which owns them"; those two suites
+//! default to the *same* compose project (TWALK_DEPLOY_TEST_STACK) and can
+//! never be running at once, so what that reasoning actually left behind was a
+//! network, two volumes and a Synapse, which is what issue #128 is about.
+//!
+//! A failing scenario still leaves the stack up, deliberately: a container and
+//! its logs are what a failure is diagnosed from.
+//!
 //! The credentials below are throwaway constants for the local, ephemeral
 //! deploy-test stack (same category as the test-bot passwords) — the env
 //! file they land in is generated in a temp directory, never committed.
 
 mod harness;
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use futures::FutureExt;
 use harness::{parse_exposition, poll_until, validate_against_contract, Bus};
 use tokio::process::Command;
 
@@ -307,17 +352,16 @@ fn teardown_requested() -> bool {
     )
 }
 
-/// Removes what this run created: the Gateway service and the Sensor the
-/// bootstrap test brings up next to it, their per-stack images and the
-/// generated env file. The rest of the stack (Synapse, the bus) is left to the
-/// Sensor's deployment test, which owns it.
+/// Removes everything this run created: the whole compose project with
+/// `down -v` — containers, network and volumes — the two per-stack images, the
+/// credential file the deployment mounts, and the generated env file.
+///
+/// Called from exactly one place, the end of
+/// [`the_deploy_stack_serves_every_scenario_and_is_torn_down_once`], after the
+/// last scenario has returned. A scenario must never call it: that is issue
+/// #199, where three tests each tore down a stack the others were using.
 async fn teardown(env_file: &Path) -> Result<()> {
-    compose_change(
-        env_file,
-        &["rm", "-sfv", "companion-gateway", "sensor"],
-        "rm companion-gateway sensor",
-    )
-    .await?;
+    compose_change(env_file, &["down", "-v", "--remove-orphans"], "down -v").await?;
     for image in [gateway_image(), sensor_image()] {
         let output = Command::new("docker")
             .args(["image", "rm", &image])
@@ -333,9 +377,22 @@ async fn teardown(env_file: &Path) -> Result<()> {
             );
         }
     }
-    std::fs::remove_file(env_file)
-        .with_context(|| format!("failed to remove {}", env_file.display()))?;
+    // The LLM endpoint credential the stack mounts (#98). Stable per compose
+    // project rather than per run, so nothing but a teardown ever removes it —
+    // and a teardown that left it behind would leave a file this suite created.
+    remove_if_present(&credential_file())?;
+    remove_if_present(env_file)?;
     Ok(())
+}
+
+/// `std::fs::remove_file`, tolerating a file that is already gone: teardown
+/// stays idempotent, as it does for an already-removed image.
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
 }
 
 /// The stack's containers as `docker compose ps --format json` reports them:
@@ -364,10 +421,16 @@ const OWNER_GHOST: &str = "@whatsapp_lid-115332874281144:test.twalk";
 /// two variables drifting apart on a live deployment, which is the outcome the
 /// ticket names. Asserted against compose's own interpolation, which is the
 /// thing that would be wrong.
+///
+/// The one test of this binary that stays a test of its own: it asks compose
+/// to interpolate a file and never creates a container, so it shares nothing
+/// with the stack the scenarios below run on, and it cleans up the only thing
+/// it does create — its own env file.
 #[tokio::test]
 async fn one_list_of_the_owners_identities_reaches_both_components() -> Result<()> {
     let env_file = write_env_file()?;
     let resolved = compose(&env_file, &["config"], "config").await?;
+    remove_if_present(&env_file)?;
     let configured: Vec<&str> = resolved
         .lines()
         .map(str::trim)
@@ -385,16 +448,20 @@ async fn one_list_of_the_owners_identities_reaches_both_components() -> Result<(
     Ok(())
 }
 
-#[tokio::test]
-async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Result<()> {
-    let env_file = write_env_file()?;
-
+/// One of the three scenarios of
+/// [`the_deploy_stack_serves_every_scenario_and_is_torn_down_once`], which
+/// owns the stack's lifetime and hands each scenario the run's one env file
+/// (#199). Not a `#[tokio::test]` of its own: one that tore the stack down on
+/// its way out is what this suite was fixed for.
+async fn the_compose_stack_serves_the_companion_with_health_and_metrics(
+    env_file: &Path,
+) -> Result<()> {
     // Build first so a build failure is attributed to the build; warm, this
     // is a cache hit. Then bring the service up exactly as an operator
     // would — the skeleton Gateway needs nothing else in the stack.
-    ensure_images(&env_file).await?;
+    ensure_images(env_file).await?;
     compose_change(
-        &env_file,
+        env_file,
         &["up", "-d", "--wait", "companion-gateway"],
         "up companion-gateway",
     )
@@ -404,7 +471,7 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
     // worktree's checkout may have rebuilt under it (issue #38), and compose
     // reports it healthy — `up --wait` returned, and the healthcheck is the
     // Gateway's own health endpoint.
-    let entries = compose_ps(&env_file).await?;
+    let entries = compose_ps(env_file).await?;
     let entry = entries
         .iter()
         .find(|entry| entry["Service"].as_str() == Some("companion-gateway"))
@@ -618,12 +685,6 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
          LLM credential is not one a device cookie opens"
     );
 
-    // Only on request: a service left up (with its image) is what makes the
-    // next run warm. Deliberately after the assertions, so a failure leaves
-    // the container and its logs in place to inspect.
-    if teardown_requested() {
-        teardown(&env_file).await?;
-    }
     Ok(())
 }
 
@@ -640,10 +701,13 @@ async fn the_compose_stack_serves_the_companion_with_health_and_metrics() -> Res
 /// Synapse belongs to the whole deploy stack rather than to the Gateway, so
 /// this test brings it up and leaves it up, as the Sensor's deployment test
 /// does — a warm stack is what makes the next run fast.
-#[tokio::test]
-async fn the_deployments_homeserver_serves_openid_userinfo_and_no_more_federation() -> Result<()> {
-    let env_file = write_env_file()?;
-    compose_change(&env_file, &["up", "-d", "--wait", "synapse"], "up synapse").await?;
+///
+/// One of the three scenarios of
+/// [`the_deploy_stack_serves_every_scenario_and_is_torn_down_once`] (#199).
+async fn the_deployments_homeserver_serves_openid_userinfo_and_no_more_federation(
+    env_file: &Path,
+) -> Result<()> {
+    compose_change(env_file, &["up", "-d", "--wait", "synapse"], "up synapse").await?;
     let homeserver = format!("http://localhost:{}", synapse_port());
 
     // A token this homeserver never minted: a 401 proves the endpoint is
@@ -688,13 +752,18 @@ async fn the_deployments_homeserver_serves_openid_userinfo_and_no_more_federatio
 /// The pieces are each covered at their own process boundary elsewhere
 /// (`tests/bootstrap.rs`, `sensor/tests/fidelity.rs`); what only this test can
 /// show is that they fit.
-#[tokio::test]
+///
+/// One of the three scenarios of
+/// [`the_deploy_stack_serves_every_scenario_and_is_torn_down_once`] (#199).
+/// This is the scenario the other two used to break: it is the longest, so it
+/// was still talking to the Gateway when their teardowns removed the
+/// container under it.
 async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_it_is_invited_to(
+    env_file: &Path,
 ) -> Result<()> {
-    let env_file = write_env_file()?;
-    ensure_images(&env_file).await?;
+    ensure_images(env_file).await?;
     compose_change(
-        &env_file,
+        env_file,
         &["up", "-d", "--wait", "companion-gateway", "sensor"],
         "up companion-gateway sensor",
     )
@@ -704,7 +773,7 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     // provisioning one-shot — never on the Gateway. Asserted from compose's
     // own resolved configuration, so adding such an edge fails here rather
     // than being noticed the first time a Gateway is down at boot.
-    let configuration = compose(&env_file, &["config", "--format", "json"], "config").await?;
+    let configuration = compose(env_file, &["config", "--format", "json"], "config").await?;
     let configuration: serde_json::Value = serde_json::from_str(&configuration)?;
     let sensor_dependencies: Vec<&str> = configuration["services"]["sensor"]["depends_on"]
         .as_object()
@@ -908,7 +977,7 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     // volume that survives between runs: a correspondent this deployment has
     // already been asked about would not be waiting for anything.
     let correspondent = fresh_correspondent();
-    provision_account(&env_file, &correspondent, CORRESPONDENT_PASSWORD).await?;
+    provision_account(env_file, &correspondent, CORRESPONDENT_PASSWORD).await?;
     let correspondent_id = format!("@{correspondent}:{SERVER_NAME}");
     let correspondent_token = login_as(&client, &correspondent, CORRESPONDENT_PASSWORD).await?;
     invite(&client, &owner_token, &room_id, &correspondent_id).await?;
@@ -1101,7 +1170,7 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     // (The store is asserted at the process boundary, in tests/bootstrap.rs,
     // where the test can read the file the Gateway writes.)
     let logs = compose(
-        &env_file,
+        env_file,
         &["logs", "--no-log-prefix", "companion-gateway"],
         "logs companion-gateway",
     )
@@ -1127,10 +1196,99 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
         );
     }
 
+    Ok(())
+}
+
+/// The owner of the deploy stack's lifetime: it brings the three scenarios
+/// above up on one compose project, runs them concurrently as the test harness
+/// used to, and — once, after the last of them has returned — tears the stack
+/// down if the run asked for it.
+///
+/// Issue #199. Rust's test harness has no suite-level teardown, so each
+/// scenario was a `#[tokio::test]` that called [`teardown`] on its way out.
+/// `cargo test` runs a binary's tests in parallel, so with
+/// TWALK_DEPLOY_TEST_TEARDOWN=1 the first two to finish removed the containers
+/// the third was still using and it failed with `Connection reset by peer` —
+/// which left the suite offering a choice between cleaning up and being
+/// reliable, and CI taking the second. Making the stack's lifetime belong to
+/// one test is the smallest shape that has an "after the last scenario" in it
+/// at all; the shapes that were considered and not taken are in this module's
+/// own documentation.
+///
+/// The scenarios still run concurrently: they are waiting on Docker and on
+/// HTTP, never on the CPU, and [`compose_change`] already serialises the
+/// compose commands that change the stack. Serialising them would have cost
+/// wall clock, which `docs/agents/continuous-integration.md` now records per
+/// tier.
+#[tokio::test]
+async fn the_deploy_stack_serves_every_scenario_and_is_torn_down_once() -> Result<()> {
+    let env_file = write_env_file()?;
+    let started = std::time::Instant::now();
+
+    let (origin, homeserver, bootstrap) = tokio::join!(
+        scenario(
+            "the Companion's origin, health and metrics",
+            the_compose_stack_serves_the_companion_with_health_and_metrics(&env_file),
+        ),
+        scenario(
+            "the deployment's homeserver and its OpenID resource",
+            the_deployments_homeserver_serves_openid_userinfo_and_no_more_federation(&env_file),
+        ),
+        scenario(
+            "the one account, the Sensor's join and the loop over the bus",
+            the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_it_is_invited_to(
+                &env_file,
+            ),
+        ),
+    );
+
+    // Every failure, not the first: three scenarios share one stack, and which
+    // of them a change broke is what a reader needs before the stack is gone.
+    let failures: Vec<String> = [origin, homeserver, bootstrap]
+        .into_iter()
+        .filter_map(|outcome| outcome.err().map(|error| format!("{error:?}")))
+        .collect();
+    eprintln!(
+        "    three deploy scenarios in {:.0?}, {} failed",
+        started.elapsed(),
+        failures.len()
+    );
+
+    if !failures.is_empty() {
+        // Deliberately no teardown. A failing run leaves its containers and
+        // their logs in place to be read, which is what the per-test teardown
+        // did too — and `.github/ci/stack-teardown.sh` is what takes a failed
+        // CI run's stack down, because it runs whatever the outcome.
+        bail!(
+            "{} of the three deploy scenarios failed:\n\n{}",
+            failures.len(),
+            failures.join("\n\n")
+        );
+    }
+
+    // Once, here, after the last scenario. Nothing else in this file calls it.
     if teardown_requested() {
         teardown(&env_file).await?;
     }
     Ok(())
+}
+
+/// Runs one scenario and turns a panicked assertion into an error.
+///
+/// Each scenario used to be its own `#[tokio::test]`, so a failed `assert!` in
+/// one left the other two running and reported. Sharing a test means sharing
+/// an unwind, and a panic that took the other two scenarios with it would
+/// replace one honest failure with three confusing ones — so the panic is
+/// caught here and reported like any other failure. Its own message has
+/// already been printed by the panic hook, with the file and line.
+async fn scenario<Fut>(what: &str, body: Fut) -> Result<()>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    match AssertUnwindSafe(body).catch_unwind().await {
+        Ok(outcome) => outcome.with_context(|| format!("scenario: {what}")),
+        Err(_) => bail!("scenario: {what} panicked; its assertion is printed above"),
+    }
 }
 
 /// A correspondent localpart no previous run has used. The Gateway's decision

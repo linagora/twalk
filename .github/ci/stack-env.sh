@@ -36,15 +36,20 @@
 # TWALK_PORTALS_TEST_* is the portal register over it; TWALK_LOOP_TEST_* is the
 # whole loop.
 #
-# The `_TEARDOWN` flags are deliberately **not** set, even though CI does want
-# the host back afterwards. `companion-gateway/tests/deployment.rs` calls its own
-# `teardown()` at the end of two of its three tests, and that teardown runs
-# `compose rm -sfv companion-gateway sensor` — while the third test is still
-# talking to the Gateway. With the flag on, measured: `Connection reset by peer
-# (os error 104)` on `POST /api/bootstrap/rooms`. So the job cleans up instead:
+# The `_TEARDOWN` flags are deliberately **not** set, and since #199 that is a
+# choice rather than a workaround. It used to be a workaround:
+# `companion-gateway/tests/deployment.rs` called its own `teardown()` at the end
+# of two of its three tests, and that teardown ran `compose rm -sfv
+# companion-gateway sensor` — while the third test was still talking to the
+# Gateway. With the flag on, measured: `Connection reset by peer (os error 104)`
+# on `POST /api/bootstrap/rooms`. That suite now tears its stack down once,
+# after its last scenario, so the flag is safe to set.
+#
+# CI still leaves it unset, because a suite's own teardown runs only when the
+# suite passes — deliberately, so a failure leaves its containers and their logs
+# to be read — and the run CI most needs the host back from is the failing one.
 # `stack-teardown.sh` takes the whole compose project down with `down -v` after
-# every run, passing or failing, which is strictly more thorough and races with
-# nothing.
+# every run, passing or failing, which is strictly more thorough.
 #
 # TWALK_TEST_PORT and the two after it are the Companion's origins. 4319 and
 # +1/+2 are the defaults, and a `serve-like-gateway.mjs` left on 4319 from a
