@@ -249,6 +249,108 @@ async fn the_owners_device_joins_portals_and_nothing_else() -> Result<()> {
     Ok(())
 }
 
+/// Issue #237: a portal the owner's device can never join is given up on
+/// **once**, from what the homeserver answered, and the loop goes on joining
+/// the portals it can.
+///
+/// The shape is the one measured live: a portal every member has left. The
+/// homeserver has no server to join through and says so with a 404 — and that
+/// answer will never change, so the seventy-eight retries in five minutes it
+/// produced were noise that buried the next real failure. What is asserted,
+/// from outside the Sensor:
+///
+/// - a *later* invitation, arriving after the first failure, is joined — so the
+///   loop has run at least once more since, and would have retried the orphan
+///   had it not remembered it;
+/// - the orphan is announced exactly once, as unjoinable, and never as "retrying";
+/// - and the fact is readable off `/metrics`, not only out of the log: the
+///   `unjoinable` outcome is 1 and the gauge of such portals is 1.
+#[tokio::test]
+async fn a_portal_that_can_never_be_joined_is_given_up_on_once() -> Result<()> {
+    const METRICS_LISTEN: &str = "127.0.0.1:19011";
+    const METRICS_URL: &str = "http://127.0.0.1:19011/metrics";
+
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let owner = Bot::login("owner").await?;
+    let bridge = Bot::login("whatsappbot").await?;
+
+    // The orphan: built and marked like any portal, the owner invited — then
+    // the only member leaves. Synapse now has no server that is in the room.
+    let orphan = make_whatsapp_portal(&bridge, "owner-device-orphan").await?;
+    bridge.invite(&orphan, OWNER).await?;
+    bridge.leave_room(&orphan).await?;
+
+    let mut env = owner_device_env(
+        "unjoinable-portal",
+        Some((owner.access_token(), owner.device_id())),
+    );
+    env.push((
+        "SENSOR_METRICS_LISTEN".to_owned(),
+        METRICS_LISTEN.to_owned(),
+    ));
+    let sensor = SensorProc::start(&env)?;
+
+    // The first pass over the orphan has happened once its refusal is logged.
+    poll_until(
+        || async {
+            sensor
+                .logs()
+                .await
+                .iter()
+                .any(|line| line.contains("can never be joined"))
+                .then_some(())
+        },
+        "waiting for the orphan portal to be given up on",
+    )
+    .await?;
+
+    // A portal that arrives *after* that: joining it proves the loop ran again.
+    let portal = make_whatsapp_portal(&bridge, "owner-device-after-orphan").await?;
+    bridge.invite(&portal, OWNER).await?;
+    bridge.wait_for_membership(&portal, OWNER, "join").await?;
+
+    let logs = sensor.logs().await;
+    let given_up = logs
+        .iter()
+        .filter(|line| line.contains(&orphan) && line.contains("can never be joined"))
+        .count();
+    assert_eq!(given_up, 1, "one refusal, not a stream: {logs:?}");
+    assert!(
+        !logs
+            .iter()
+            .any(|line| line.contains(&orphan) && line.contains("failed to join a portal")),
+        "a permanent answer is never retried: {logs:?}"
+    );
+    assert_eq!(
+        bridge.get_membership(&orphan, OWNER).await.ok().as_deref(),
+        Some("invite"),
+        "the orphan invitation is left where it was"
+    );
+
+    // The stack persists across runs, so the owner may hold orphans from
+    // earlier runs too: what is asserted is that this one is counted, and
+    // that the gauge and the once-per-room counter agree with each other.
+    let metrics = reqwest::get(METRICS_URL).await?.text().await?;
+    let sample = |name: &str| -> u64 {
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|rest| rest.trim().parse().ok())
+            .unwrap_or_else(|| panic!("no sample {name} in {metrics}"))
+    };
+    let unjoinable = sample("twalk_sensor_owner_device_invites_total{outcome=\"unjoinable\"} ");
+    let portals = sample("twalk_sensor_owner_device_unjoinable_portals ");
+    assert!(unjoinable >= 1, "the orphan is counted: {metrics}");
+    assert_eq!(
+        portals, unjoinable,
+        "readable without grepping logs, and consistent: {metrics}"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
 /// An approved reply is posted by the **owner's own account**, and the Sensor
 /// says on the bus that it reached the contact.
 #[tokio::test]
