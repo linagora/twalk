@@ -90,17 +90,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      # What this change touches, and *only* what this change touches.
+      #
+      # `pull_request.base.sha` is the base branch's tip when the event fired, not
+      # the point this branch left it, so a two-dot `git diff base head` also
+      # reports every file every *other* pull request merged in the meantime — in
+      # reverse. The first run of this workflow, on its own pull request, selected
+      # the Gateway, the Sensor and the Companion for a change that touches only
+      # `.github/` and three documents, because four pull requests had merged
+      # since the branch point. The merge base is the answer, and over-selection
+      # is why it was only embarrassing rather than dangerous.
       - name: what changed
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          if [ -z "$BASE_SHA" ]; then
-            # workflow_dispatch, or anything without a base: take the whole tree,
-            # which selects everything. Wrong in the expensive direction only.
+          base=''
+          if [ -n "$BASE_SHA" ]; then
+            base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" || true)
+          fi
+          if [ -z "$base" ]; then
+            # workflow_dispatch, a shallow clone, or a base this checkout does not
+            # have: take the whole tree, which selects everything. Wrong in the
+            # expensive direction only, and it says so.
+            echo "no merge base for '$BASE_SHA'..'$HEAD_SHA' — selecting everything"
             git ls-files >changed.txt
           else
-            git diff --name-only "$BASE_SHA" "$HEAD_SHA" >changed.txt
+            echo "merge base $base"
+            git diff --name-only "$base" "$HEAD_SHA" >changed.txt
           fi
           echo '--- changed paths'
           cat changed.txt
