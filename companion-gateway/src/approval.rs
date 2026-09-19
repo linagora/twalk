@@ -434,6 +434,48 @@ struct TriggerDocument {
     network: String,
 }
 
+/// The trigger event as a suggestion built **outside** a persona needs it
+/// (ticket #206): the attributes a `persona.*` envelope copies from the
+/// message it answers.
+///
+/// A second view of one event rather than a wider [`Trigger`], for the reason
+/// that struct exists: an approval needs the room to post into and nothing
+/// else, and widening it would hand the sender's identity to a path that has
+/// no use for it. This one needs the consent label and the trace — which the
+/// SDK copies from the trigger when a persona publishes a suggestion itself
+/// (`sdk/python/twalk_sdk/envelope.py`) — and, still, no `data`: the message's
+/// own words never become a value on this path either. Hermes was sent them;
+/// the Gateway is not told them back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerEnvelope {
+    pub event_id: String,
+    pub event_type: String,
+    /// The sender's Matrix user ID: the contact whose consent is checked
+    /// again at the moment the answer comes home.
+    pub contact: String,
+    pub network: Network,
+    /// The consent label the Sensor stamped when it observed the message. An
+    /// audit fact, copied onto the suggestion — never a substitute for the
+    /// current state, which is read separately.
+    pub consent_label: State,
+    pub traceparent: Option<String>,
+}
+
+/// What the Gateway reads of the trigger event on the answer path. No
+/// `source` and no `data`: one names a room this path never posts into, the
+/// other holds somebody's words.
+#[derive(Debug, Deserialize)]
+struct TriggerEnvelopeDocument {
+    id: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    subject: String,
+    network: String,
+    consent: String,
+    #[serde(default)]
+    traceparent: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // The act
 // ---------------------------------------------------------------------------
@@ -771,6 +813,151 @@ impl Approvals {
         self.lookup_window
     }
 
+    /// Finds one inbound message on the bus by its CloudEvents id, and reads
+    /// the attributes a `persona.*` envelope copies from it.
+    ///
+    /// Public because a second door opens onto this fact since ticket #206:
+    /// Hermes's answer arrives at [`crate::hermes_answer`] naming a trigger,
+    /// and the suggestion it becomes must carry that trigger's network,
+    /// consent label and trace — the same values the SDK copies when a persona
+    /// publishes a suggestion of its own. Reusing this scan rather than
+    /// writing a second one is the point: the bound, its visibility in the
+    /// answer and the refusal vocabulary are then one implementation, so the
+    /// two doors cannot teach a client two vocabularies.
+    ///
+    /// The window is counted from the stream's **head**, unlike the trigger
+    /// lookup an approval makes, which is anchored on the suggestion it
+    /// already found. There is no suggestion to anchor on here: the answer is
+    /// what will create one.
+    pub async fn trigger_envelope(&self, trigger_event_id: &str) -> Result<TriggerEnvelope, Refusal> {
+        let jetstream = self.jetstream().await.map_err(|error| {
+            warn!(%error, "the bus did not answer a trigger lookup");
+            Refusal::BusUnreachable(format!("{error:#}"))
+        })?;
+        let wanted = trigger_event_id.to_owned();
+        let found = self
+            .scan(
+                jetstream,
+                &bus_subject(crate::contacts::INBOUND_MESSAGE_TYPE),
+                None,
+                |payload| {
+                    let document: TriggerEnvelopeDocument = serde_json::from_slice(payload).ok()?;
+                    (document.id == wanted).then_some(document)
+                },
+            )
+            .await
+            .map_err(|error| {
+                warn!(%error, "the trigger lookup could not read the bus");
+                Refusal::BusUnreachable(format!("{error:#}"))
+            })?;
+        let document = match found {
+            Found::Match(document, _) => document,
+            Found::None { exhaustive } => {
+                return Err(if exhaustive {
+                    Refusal::TriggerNotFound {
+                        trigger_event_id: trigger_event_id.to_owned(),
+                    }
+                } else {
+                    Refusal::TriggerOutOfReach {
+                        trigger_event_id: trigger_event_id.to_owned(),
+                        window: self.lookup_window,
+                    }
+                })
+            }
+        };
+        let network = Network::parse(&document.network).ok_or_else(|| {
+            Refusal::SuggestionUnreadable(format!(
+                "the trigger names the network {:?}, which this build does not know",
+                document.network
+            ))
+        })?;
+        let consent_label = State::parse(&document.consent).ok_or_else(|| {
+            Refusal::SuggestionUnreadable(format!(
+                "the trigger names the consent state {:?}, which this build does not know",
+                document.consent
+            ))
+        })?;
+        Ok(TriggerEnvelope {
+            event_id: document.id,
+            event_type: document.event_type,
+            contact: document.subject,
+            network,
+            consent_label,
+            traceparent: document.traceparent,
+        })
+    }
+
+    /// Whether this contact's consent is `granted` **now**, read from this
+    /// Gateway's own journal.
+    ///
+    /// Public for the same reason as [`Self::trigger_envelope`]: the question
+    /// an approval asks before it sends is the question the answer path asks
+    /// before it publishes a suggestion, and a contact revoked while Hermes was
+    /// reasoning must not have a draft about them appear on the approval
+    /// screen. One implementation, one refusal vocabulary.
+    pub fn consent_now(&self, contact: &str, network: Network) -> Result<(), Refusal> {
+        let effective = self.store.effective(contact, network).map_err(|error| {
+            warn!(%error, %contact, "a consent state could not be read");
+            Refusal::StoreUnavailable(format!("the consent state could not be read: {error:#}"))
+        })?;
+        match effective.state {
+            State::Granted => Ok(()),
+            State::Revoked => Err(Refusal::ConsentRevoked {
+                contact: contact.to_owned(),
+                network,
+            }),
+            State::Pending => Err(Refusal::ConsentPending {
+                contact: contact.to_owned(),
+                network,
+            }),
+        }
+    }
+
+    /// Publishes one contract event inside the caller's request, with the
+    /// contract's id as `Nats-Msg-Id` and whatever extensions the caller
+    /// duplicates as headers.
+    ///
+    /// The one publishing path on this origin that does not go through the
+    /// outbox, shared by the two acts that must not be held for later: an
+    /// approval (a send whose consent check would go stale in a queue) and a
+    /// suggestion arriving from Hermes (whose reference and consent were
+    /// checked against this instant). Deduplication is the contract's
+    /// deterministic id, so a repeated publish is absorbed by the bus rather
+    /// than shown to the user twice.
+    pub async fn publish_envelope(
+        &self,
+        event_type: &str,
+        event_id: &str,
+        envelope: &Value,
+        extensions: &[(&str, &str)],
+    ) -> Result<u64> {
+        let jetstream = self.jetstream().await?;
+        jetstream
+            .get_or_create_stream(async_nats::jetstream::stream::Config {
+                name: STREAM_NAME.to_owned(),
+                subjects: crate::consent::STREAM_SUBJECTS
+                    .iter()
+                    .map(|subject| subject.to_string())
+                    .collect(),
+                ..Default::default()
+            })
+            .await
+            .context("the bus stream could not be reached")?;
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(async_nats::header::NATS_MESSAGE_ID, event_id);
+        for (name, value) in extensions {
+            headers.insert(*name, *value);
+        }
+        let payload = serde_json::to_vec(envelope)?;
+        let ack = jetstream
+            .publish_with_headers(bus_subject(event_type), headers, payload.into())
+            .await
+            .with_context(|| format!("the bus refused a {event_type}"))?
+            .await
+            .with_context(|| format!("the bus did not acknowledge a {event_type}"))?;
+        Ok(ack.sequence)
+    }
+
     /// One approval this Gateway recorded, or `None` when this suggestion was
     /// never approved. The answer to "did my reply go out?".
     pub fn recorded(&self, suggestion_event_id: &str) -> Result<Option<RecordedApproval>> {
@@ -862,32 +1049,10 @@ impl Approvals {
         // The clause the definition exists for. A read of this Gateway's own
         // consent state, at this moment — not the label the suggestion was
         // born with, which step 4 has already checked and which says nothing
-        // about now.
-        let effective = self
-            .store
-            .effective(&trigger.contact, trigger.network)
-            .map_err(|error| {
-                // Failing closed: an approval whose consent cannot be read is
-                // refused, because refusing a send is recoverable and sending
-                // is not.
-                warn!(%error, contact = %trigger.contact, "an approval could not read the consent state");
-                Refusal::StoreUnavailable(format!("the consent state could not be read: {error:#}"))
-            })?;
-        match effective.state {
-            State::Granted => {}
-            State::Revoked => {
-                return Err(Refusal::ConsentRevoked {
-                    contact: trigger.contact.clone(),
-                    network: trigger.network,
-                })
-            }
-            State::Pending => {
-                return Err(Refusal::ConsentPending {
-                    contact: trigger.contact.clone(),
-                    network: trigger.network,
-                })
-            }
-        }
+        // about now. Failing closed: an approval whose consent cannot be read
+        // is refused, because refusing a send is recoverable and sending is
+        // not ([`Self::consent_now`], shared with the answer path since #206).
+        self.consent_now(&trigger.contact, trigger.network)?;
 
         let content = request
             .edited
@@ -945,7 +1110,7 @@ impl Approvals {
         }
 
         let sequence = self
-            .publish(jetstream, &event_id, &envelope, &approval)
+            .publish(&event_id, &envelope, &approval)
             .await
             .map_err(|error| {
                 warn!(%error, %event_id, "an approved reply could not be published");
@@ -988,40 +1153,19 @@ impl Approvals {
     /// sees this event like any other.
     async fn publish(
         &self,
-        jetstream: &async_nats::jetstream::Context,
         event_id: &str,
         envelope: &Value,
         approval: &Approval,
     ) -> Result<u64> {
-        // The stream the Sensor declares. Ensured here for the same reason
-        // the outbox ensures it: a deployment must be able to publish
-        // whether or not a Sensor has ever started.
-        jetstream
-            .get_or_create_stream(async_nats::jetstream::stream::Config {
-                name: STREAM_NAME.to_owned(),
-                subjects: crate::consent::STREAM_SUBJECTS
-                    .iter()
-                    .map(|subject| subject.to_string())
-                    .collect(),
-                ..Default::default()
-            })
-            .await
-            .context("the bus stream could not be reached")?;
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert(async_nats::header::NATS_MESSAGE_ID, event_id);
-        headers.insert("network", approval.suggestion.network.as_str());
-        headers.insert("consent", approval.suggestion.consent_label.as_str());
+        let mut extensions = vec![
+            ("network", approval.suggestion.network.as_str()),
+            ("consent", approval.suggestion.consent_label.as_str()),
+        ];
         if let Some(traceparent) = &approval.suggestion.traceparent {
-            headers.insert("traceparent", traceparent.as_str());
+            extensions.push(("traceparent", traceparent.as_str()));
         }
-        let payload = serde_json::to_vec(envelope)?;
-        let ack = jetstream
-            .publish_with_headers(bus_subject(REPLY_APPROVED_TYPE), headers, payload.into())
+        self.publish_envelope(REPLY_APPROVED_TYPE, event_id, envelope, &extensions)
             .await
-            .context("the bus refused the approved reply")?
-            .await
-            .context("the bus did not acknowledge the approved reply")?;
-        Ok(ack.sequence)
     }
 
     /// Finds one suggestion on the bus by its CloudEvents id.

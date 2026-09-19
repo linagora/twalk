@@ -49,6 +49,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/_twalk/hermes/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Hermes pushes back an answer, which becomes a suggestion.
+         * @description The return half of ADR 0032's seam (ticket #206). A persona wakes
+         *     Hermes — Nous Research's agent runtime, outside this deployment — by
+         *     posting a signed webhook to it, and Hermes's answer comes back
+         *     **here**. Not onto the bus: the reference bus has no authentication,
+         *     so "Hermes may publish" would mean "anything that can reach the bus
+         *     may publish a suggestion", which stops being theoretical the moment
+         *     the two are different machines.
+         *
+         *     What the Gateway does with it is what it already does with a
+         *     suggestion. The answer becomes a `persona.suggest.produced.v1` on the
+         *     bus, with the contract's deterministic id
+         *     (`sha256(persona_id:trigger_event_id:attempt)`), the trigger's
+         *     `network`, `consent` and trace copied from the message being
+         *     answered, and a `source` naming the persona — so
+         *     `GET /api/suggestions`, the approval screen and `POST /api/approvals`
+         *     see one kind of suggestion and the contract gains no type for "a
+         *     suggestion that came from outside".
+         *
+         *     **Authentication.** An HMAC-SHA256 signature over the raw request
+         *     body, as `X-Hermes-Signature-256: sha256=<hex>` — the wire format
+         *     Hermes's own outbound hook sends. The secret is Twalk's configuration
+         *     (`GATEWAY_HERMES_ANSWER_SECRET`) and not Hermes's, and it opens
+         *     nothing else on this origin. A device token is not accepted here, the
+         *     Sensor's service token is not accepted here, and this signature opens
+         *     no other route.
+         *
+         *     The signature authenticates the **sender and not the content**, which
+         *     Nous Research's own documentation says of the inbound direction and
+         *     which is equally true of this one. So nothing in the body is trusted:
+         *     the reference the answer carries is checked for shape, the message it
+         *     names is looked up on the bus, and the sender's consent is read from
+         *     this Gateway's own journal **at that moment** — a contact the user
+         *     revoked while Hermes was reasoning gets no draft on the approval
+         *     screen. Replay is answered twice over: the push's own `timestamp` is
+         *     inside the signed body and must be within five minutes of this clock,
+         *     and the suggestion's id is deterministic, so a repeated answer
+         *     republishes one event the bus absorbs rather than a second draft.
+         *
+         *     **The answer's shape.** `extra.response_text` is a JSON object with
+         *     three required members — `reference` (the `TWALK-REF:` token the
+         *     persona sent and Hermes copies back), `reply`, and `language`. The
+         *     language is required and an answer without one is **refused rather
+         *     than defaulted**: a reply's disclosure is written in the language of
+         *     the reply and not the user's (ADR 0031), so a silent default is how a
+         *     French disclosure ends up under an English reply with nothing anywhere
+         *     to say so. Any language tag is allowed, because a suggestion follows
+         *     the conversation and not the user (ADR 0016).
+         *
+         *     **What is ignored rather than refused.** The Hermes hook fires for
+         *     every turn of its profile, so a turn the owner typed themselves
+         *     reaches this endpoint too. That answers `200` with
+         *     `status: "ignored"`, because a run that was never a Twalk wake is not
+         *     a failure and an endpoint that answered `4xx` to it would teach an
+         *     operator to ignore its errors.
+         */
+        post: operations["receiveHermesAnswer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/{companionPath}": {
         parameters: {
             query?: never;
@@ -2185,6 +2258,76 @@ export interface components {
             version: string;
         };
         /**
+         * @description What became of one push: a suggestion, or an ignored run. Two shapes
+         *     rather than one with optional members, because "published" and
+         *     "ignored" are different facts and a client should not have to
+         *     discover which by looking for a null.
+         */
+        HermesAnswerAccepted: {
+            /** @description The language the answer declared it was written in. */
+            language: string;
+            /** @enum {string} */
+            status: "published";
+            /** @description Where on the bus the suggestion landed. */
+            stream_sequence: number;
+            /**
+             * @description The suggestion's CloudEvents id: the contract's
+             *     `sha256(persona_id:trigger_event_id:attempt)`, which is also
+             *     the idempotency key the persona gave Hermes for the wake.
+             */
+            suggestion_event_id: string;
+        } | {
+            /**
+             * @description Why this push was not a Twalk wake. Counted on `/metrics`
+             *     under the same word.
+             * @enum {string}
+             */
+            reason: "not_our_hook" | "not_a_webhook_run";
+            /** @enum {string} */
+            status: "ignored";
+        };
+        /**
+         * @description One of Hermes's outbound-hook deliveries, as much of it as this
+         *     Gateway reads. Additional members are allowed and dropped: the hook's
+         *     wire format is Hermes's and grows with it, and pinning it would break
+         *     on a Tuesday (ADR 0032 pins the route's shape and nothing deeper).
+         */
+        HermesAnswerPush: {
+            /** @description Hermes's own id for this push. Logged, never trusted. */
+            delivery_id?: string;
+            /** @description The hook's own arguments. */
+            extra: {
+                /** @description The model Hermes reasoned with. Logged. */
+                model?: string;
+                /**
+                 * @description The Hermes platform the turn ran under. `webhook` is a Twalk
+                 *     wake; anything else is a turn somebody had with Hermes
+                 *     directly and is ignored.
+                 * @example webhook
+                 */
+                platform?: string;
+                /**
+                 * @description What the model wrote: a JSON object with `reference`, `reply`
+                 *     and `language`. A fenced code block around it is unwrapped.
+                 */
+                response_text: string;
+                /** @description Hermes's own session key. Logged, never the correlation. */
+                session_id?: string;
+            };
+            /**
+             * @description The Hermes hook that fired. `transform_llm_output` is the one this
+             *     endpoint acts on; any other is ignored with a `200`.
+             * @example transform_llm_output
+             */
+            hook_event_name: string;
+            /**
+             * @description When Hermes sent the push, RFC 3339. Inside the signed body, and
+             *     checked against this clock: it is this wire format's only replay
+             *     protection.
+             */
+            timestamp?: string;
+        };
+        /**
          * @description The homeserver would not do what the Gateway relayed, or could not
          *     be reached. Carries the homeserver's own error code where there was
          *     one, so a client can turn a password policy into a message instead
@@ -3360,6 +3503,238 @@ export interface operations {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
                         error?: "sign_in_not_configured" | "bridge_status_not_configured" | "as_token_not_configured";
+                    };
+                };
+            };
+        };
+    };
+    receiveHermesAnswer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * @description One of Hermes's outbound-hook deliveries. Only `hook_event_name`,
+         *     `timestamp` and `extra` are read; everything else is dropped as the
+         *     body is parsed. The hook this endpoint expects is
+         *     `transform_llm_output`, which carries the turn's answer and nothing
+         *     else — deliberately not `post_llm_call`, which carries the whole
+         *     conversation history and would ship Hermes's accumulated memory of
+         *     the user back into this process on every message.
+         */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HermesAnswerPush"];
+            };
+        };
+        responses: {
+            /**
+             * @description Either the answer became a suggestion (`status: "published"`, with
+             *     the suggestion's CloudEvents id, the language it declared and the
+             *     stream position it landed at) or the push was not a Twalk wake and
+             *     was ignored (`status: "ignored"`, with the reason, also counted on
+             *     `/metrics`).
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HermesAnswerAccepted"];
+                };
+            };
+            /**
+             * @description - `invalid_request` — the body is not one of Hermes's
+             *       outbound-hook deliveries.
+             *     - `hermes_answer_stale` — the push's own timestamp is more than
+             *       five minutes from this clock. That timestamp is inside the
+             *       signed body and is this wire format's only replay protection,
+             *       so it is checked rather than read.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request" | "hermes_answer_stale";
+                    };
+                };
+            };
+            /**
+             * @description `unauthenticated` — no `X-Hermes-Signature-256`, one that cannot
+             *     be read, or one this Gateway's secret does not produce over these
+             *     bytes. One answer for all of them.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unauthenticated";
+                    };
+                };
+            };
+            /**
+             * @description `trigger_not_found` — the message the answer's reference names is
+             *     not on the bus, and the read reached the start of the stream. The
+             *     same code and the same status `POST /api/approvals` gives for the
+             *     same fact: two doors onto one fact must not teach a client two
+             *     vocabularies.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "trigger_not_found";
+                    };
+                };
+            };
+            /**
+             * @description - `consent_revoked` — the sender's consent is `revoked` now,
+             *       whatever it was when the message arrived. The answer is
+             *       discarded and no suggestion is published.
+             *     - `consent_pending` — no decision has ever been recorded about
+             *       this sender, so there is nothing to draft a reply to.
+             *     - `suggestion_unreadable` — the trigger names a network or a
+             *       consent state this build does not know.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "consent_revoked" | "consent_pending" | "suggestion_unreadable";
+                    };
+                };
+            };
+            /**
+             * @description `trigger_out_of_reach` — the read did not go back far enough to
+             *     find the message, which is not the same fact as its not being
+             *     there. The bound is `GATEWAY_APPROVAL_LOOKUP_WINDOW`, shared with
+             *     the approval path.
+             */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "trigger_out_of_reach";
+                    };
+                };
+            };
+            /**
+             * @description `push_too_large` — the push is over this endpoint's limit. An
+             *     answer is one reply and three short fields, so a body this size
+             *     means the Hermes hook is pointed at a fatter event than
+             *     `transform_llm_output`.
+             */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "push_too_large";
+                    };
+                };
+            };
+            /**
+             * @description The push was well formed and correctly signed, and the answer
+             *     inside it cannot become a suggestion. Its own status family, so
+             *     that an operator can tell "Hermes sent nonsense" from "the model
+             *     answered something unusable".
+             *
+             *     - `hermes_answer_unreadable` — the answer is not the JSON object
+             *       the route asks Hermes to write.
+             *     - `hermes_answer_has_no_reference` — no `TWALK-REF:` token
+             *       anywhere in it, so there is no telling which message it answers,
+             *       and guessing would mean drafting into somebody else's
+             *       conversation.
+             *     - `hermes_answer_has_no_language` — the answer names no language.
+             *       Refused, deliberately not defaulted (ADR 0031).
+             *     - `hermes_answer_language_unreadable` — it names something that is
+             *       not a language tag.
+             *     - `hermes_answer_is_empty` — the reply is empty.
+             *     - `hermes_answer_too_long` — the reply is over the contract's
+             *       65536-character limit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_is_empty" | "hermes_answer_too_long";
+                    };
+                };
+            };
+            /**
+             * @description `store_unavailable` — the sender's consent state could not be
+             *     read. Failing closed: an answer whose consent cannot be read
+             *     publishes nothing.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            /**
+             * @description `bus_unreachable` — the bus did not answer, so the message could
+             *     not be looked up or the suggestion could not be published. A
+             *     `502` and not a `503` because the dependency that failed is
+             *     behind this Gateway and not this Gateway itself.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            /**
+             * @description - `sign_in_not_configured` — this deployment has no owner, so it
+             *       has no store and no bus either.
+             *     - `hermes_answers_not_configured` —
+             *       `GATEWAY_HERMES_ANSWER_SECRET` or `GATEWAY_HERMES_DOMAIN` is
+             *       unset, or `GATEWAY_NATS_URL` is, so there is no seam to answer
+             *       through. Saying so beats accepting an answer and throwing it
+             *       away, and it is how "Hermes does not answer" and "Hermes was
+             *       never configured" stay two sentences (ADR 0024's rule, applied
+             *       to the one component that is not ours).
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "sign_in_not_configured" | "hermes_answers_not_configured";
                     };
                 };
             };

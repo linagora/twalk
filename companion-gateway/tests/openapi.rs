@@ -175,6 +175,33 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "500",
         "store_unavailable, as above",
     ),
+    // Hermes's answer webhook (#206). What this suite reaches without bus
+    // state is exercised above; the four below need a bus in a particular
+    // state, and `tests/hermes_answers.rs` puts it there.
+    (
+        "post",
+        "/_twalk/hermes/answers",
+        "409",
+        "consent_revoked and consent_pending need a trigger on the bus and a decision in the journal; `hermes_answers.rs::a_contact_revoked_while_hermes_was_reasoning_gets_no_suggestion` stages both",
+    ),
+    (
+        "post",
+        "/_twalk/hermes/answers",
+        "410",
+        "trigger_out_of_reach needs a message behind a deliberately narrow lookup window, which is a Gateway of its own; `hermes_answers.rs` stages it",
+    ),
+    (
+        "post",
+        "/_twalk/hermes/answers",
+        "500",
+        "store_unavailable needs the consent journal to fail under a running process: the same fault-injection seam this suite does not have",
+    ),
+    (
+        "post",
+        "/_twalk/hermes/answers",
+        "502",
+        "bus_unreachable needs a Gateway whose bus is configured and does not answer; `hermes_answers.rs::a_bus_that_does_not_answer_is_a_502_and_not_a_503` stages it",
+    ),
     (
         "post",
         "/_twalk/bridges/{bridge_id}/status",
@@ -401,6 +428,41 @@ impl Call<'_> {
         .await
     }
 
+    /// The same check, with a body sent as the caller composed it and a
+    /// header of the caller's choosing.
+    ///
+    /// Hermes's answer webhook (#206) needs both: its credential is an HMAC
+    /// over the **bytes** of the request, so a body that this helper
+    /// re-serialised would authenticate something other than what the test
+    /// signed.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_raw(
+        &mut self,
+        method: Method,
+        base: &str,
+        template: &str,
+        target: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+        expected_status: u16,
+        expected_error: Option<&str>,
+    ) -> Result<Checked> {
+        let mut request = self
+            .client
+            .request(method.clone(), format!("{base}{target}"))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_owned());
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to call {method} {target}"))?;
+        self.verify(method, template, target, expected_status, expected_error, response)
+            .await
+    }
+
     /// The same check, with a bearer credential: the consent snapshot's
     /// service token (#50), which is the one endpoint of this origin that
     /// takes one. Kept as a separate entry point rather than a tenth
@@ -440,7 +502,24 @@ impl Call<'_> {
             .send()
             .await
             .with_context(|| format!("failed to call {method} {target}"))?;
+        self.verify(method, template, target, expected_status, expected_error, response)
+            .await
+    }
 
+    /// Everything both entry points do to an answer: the status, the media
+    /// type, the body against the response's own schema, and the error code.
+    ///
+    /// One implementation, because the conformance rule is about the answer and
+    /// not about how the request was composed.
+    async fn verify(
+        &mut self,
+        method: Method,
+        template: &str,
+        target: &str,
+        expected_status: u16,
+        expected_error: Option<&str>,
+        response: reqwest::Response,
+    ) -> Result<Checked> {
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -1018,6 +1097,7 @@ fn the_described_authentication_is_the_guards_own_table() -> Result<()> {
             Some("refreshToken") => Requirement::RefreshToken,
             Some("serviceToken") => Requirement::ServiceToken,
             Some("bridgeAsToken") => Requirement::BridgeToken,
+            Some("hermesSignature") => Requirement::HermesSignature,
             Some(other) => panic!("{other} is not one of the Gateway's credentials"),
         };
 
@@ -2905,12 +2985,26 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // not `404 not found`. Two answers for two different facts, and the
     // description declares both.
     //
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_nanos();
     // Traffic after the suggestion, so that it is genuinely behind the head:
     // a window of one position only excludes it once something newer exists.
+    //
+    // Each filler is a contact of this run's own, and that is not tidiness:
+    // `approval_trigger_event` keys the CloudEvents id on the sender, the id
+    // is the `Nats-Msg-Id`, and JetStream absorbs a duplicate for two minutes
+    // — so fillers with a fixed name were *deduplicated* when this suite ran
+    // twice inside that window, the head did not move, the suggestion was
+    // still inside a one-position window, and this assertion failed with
+    // `409 consent_pending` on a Gateway whose consent store is empty. A
+    // suite that passes only when it has not run recently is worse than one
+    // that fails (#206 found this while adding the endpoint below).
     for index in 0..4 {
         let filler = approval_trigger_event(
-            &format!("@whatsapp_openapi_g24_filler_{index}:{SERVER_NAME}"),
-            &format!("!openapig24filler{index}:{SERVER_NAME}"),
+            &format!("@whatsapp_openapi_g24_filler_{index}_{run}:{SERVER_NAME}"),
+            &format!("!openapig24filler{index}{run}:{SERVER_NAME}"),
         );
         bus.publish_event("twalk.inbound.message.received.v1", &filler)
             .await?;
@@ -3658,6 +3752,233 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     .await?;
     bridged.stop().await;
     stub.stop().await;
+
+    // --- Hermes's answer webhook (#206, ADR 0032): the one route whose
+    // caller is outside this deployment. Everything asserted here is reached
+    // without any bus state, which is why it belongs in the conformance suite
+    // rather than in `tests/hermes_answers.rs`: what a wrong, stale, unsigned
+    // or unusable answer is *answered with* is the description's business, and
+    // what a right one does to the bus is that suite's.
+    let hermes_static = companion_build("openapi-hermes-answers")?;
+    let hermes = GatewayProc::start(&harness::gateway_env_with_hermes(
+        &hermes_static,
+        &nats_url(),
+    ))?;
+    let hermes_base = hermes.base_url().await?;
+    wait_until_answering(&hermes_base).await?;
+    let absent_trigger = sha256_hex("a trigger no suite ever published, #206");
+    let good_reference = harness::hermes_reference("assistant", &absent_trigger, 1);
+
+    // No signature at all. One answer for every way the credential can be
+    // missing or wrong.
+    let unsigned = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        "ok",
+        Some("en"),
+    ));
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[],
+        &unsigned,
+        401,
+        Some("unauthenticated"),
+    )
+    .await?;
+    // A signature over other bytes, which is the interesting half: the MAC
+    // covers the body, so a push whose body was edited in flight fails here
+    // even though the header is a real signature of something.
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature("a different body entirely").as_str(),
+        )],
+        &unsigned,
+        401,
+        Some("unauthenticated"),
+    )
+    .await?;
+
+    // Correctly signed and not one of Hermes's deliveries.
+    let nonsense = "{\"not\":\"a push\"}";
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(nonsense).as_str(),
+        )],
+        nonsense,
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+
+    // Correctly signed, well formed, and hours old. The timestamp is inside
+    // the signed body and is this wire format's only replay protection, so it
+    // is checked rather than read.
+    let stale = harness::hermes_push_at(
+        &harness::hermes_answer(&good_reference, "ok", Some("en")),
+        "2026-09-17T10:00:00Z",
+    );
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&stale).as_str(),
+        )],
+        &stale,
+        400,
+        Some("hermes_answer_stale"),
+    )
+    .await?;
+
+    // A turn somebody had with Hermes directly, on the same profile. Ignored
+    // with a `200` and a reason, because a run that was never a Twalk wake is
+    // not a failure — and an endpoint that answered `4xx` to it would teach an
+    // operator to ignore its errors.
+    let other_hook = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        "ok",
+        Some("en"),
+    ))
+    .replace("\"transform_llm_output\"", "\"on_session_end\"");
+    let ignored = call
+        .check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/answers",
+            "/_twalk/hermes/answers",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&other_hook).as_str(),
+            )],
+            &other_hook,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        ignored.body["status"].as_str(),
+        Some("ignored"),
+        "a push that is not a Twalk wake is ignored and says why: {}",
+        ignored.body
+    );
+    assert_eq!(ignored.body["reason"].as_str(), Some("not_our_hook"));
+
+    // The answer with no language — the acceptance criterion this endpoint
+    // exists to satisfy loudly. Refused, and deliberately not defaulted: a
+    // reply's disclosure is written in the language of the reply and not the
+    // user's (ADR 0031).
+    let languageless =
+        harness::hermes_push(&harness::hermes_answer(&good_reference, "See you at 8", None));
+    let refused = call
+        .check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/answers",
+            "/_twalk/hermes/answers",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&languageless).as_str(),
+            )],
+            &languageless,
+            422,
+            Some("hermes_answer_has_no_language"),
+        )
+        .await?;
+    assert!(
+        refused.body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ADR 0031"),
+        "the refusal says which decision it is keeping: {}",
+        refused.body
+    );
+
+    // A push over the endpoint's limit. Signed, so that what is being
+    // asserted is the limit and not the credential.
+    let fat = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        &"x".repeat(300_000),
+        Some("en"),
+    ));
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&fat).as_str(),
+        )],
+        &fat,
+        413,
+        Some("push_too_large"),
+    )
+    .await?;
+
+    // A reference whose shape is right and whose message is not on the bus.
+    // The same code and the same status `POST /api/approvals` gives for the
+    // same fact.
+    let orphan = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        "an answer to a message that was never published",
+        Some("en"),
+    ));
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&orphan).as_str(),
+        )],
+        &orphan,
+        404,
+        Some("trigger_not_found"),
+    )
+    .await?;
+    hermes.stop().await;
+
+    // And the same route on a Gateway that configured no seam: the variable
+    // that would open it, not a refusal shaped like a wrong answer.
+    let seamless_static = companion_build("openapi-hermes-seamless")?;
+    let seamless_gateway = GatewayProc::start(&gateway_env(&seamless_static))?;
+    let seamless_base = seamless_gateway.base_url().await?;
+    wait_until_answering(&seamless_base).await?;
+    let seamless = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        "ok",
+        Some("en"),
+    ));
+    call.check_raw(
+        Method::POST,
+        &seamless_base,
+        "/_twalk/hermes/answers",
+        "/_twalk/hermes/answers",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&seamless).as_str(),
+        )],
+        &seamless,
+        503,
+        Some("hermes_answers_not_configured"),
+    )
+    .await?;
+    seamless_gateway.stop().await;
 
     // --- and now the coverage assertion: everything the description
     // declares was either exercised above, or is listed with its reason.

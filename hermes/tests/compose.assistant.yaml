@@ -51,6 +51,17 @@ services:
       # user has set no preference — the state ADR 0016's fallback did not
       # exist in before #164, and one the suite still has to be able to run.
       TWALK_USER_LANGUAGE: ${TWALK_TEST_PERSONA_USER_LANGUAGE:-}
+      # The seam to Hermes (ADR 0032, ticket #206). Empty is the state every
+      # deployment before that ADR is in: no seam, and the persona reasons
+      # with the endpoint above and speaks to nothing outside the deployment.
+      TWALK_HERMES_WEBHOOK_URL: ${TWALK_TEST_PERSONA_HERMES_URL:-}
+      TWALK_HERMES_WEBHOOK_SECRET: ${TWALK_TEST_PERSONA_HERMES_SECRET:-}
+      # The stub Hermes is on this host's loopback and speaks plaintext, which
+      # the SDK refuses unless an operator says so by name — so the suite says
+      # so by name. That refusal is asserted in `sdk/python/tests/test_webhook.py`;
+      # here the variable's presence is what makes the refusal visible as a
+      # deliberate exception rather than an absent rule.
+      TWALK_HERMES_ALLOW_INSECURE_URL: ${TWALK_TEST_PERSONA_HERMES_INSECURE:-}
       TWALK_LOG_LEVEL: debug
     # A crash must be visible to the test, not papered over by a restart:
     # supervision is the runtime's job (H4), and asserting it needs a

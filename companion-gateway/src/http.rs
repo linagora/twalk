@@ -40,6 +40,8 @@ use crate::consent_http;
 use crate::consent_snapshot::{self, Snapshots};
 use crate::contacts::Contacts;
 use crate::contacts_http;
+use crate::hermes_answer::Answers;
+use crate::hermes_answer_http;
 use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
 use crate::portals::Portals;
@@ -132,6 +134,11 @@ pub struct Gateway {
     /// built no conversations" and "this Gateway cannot see them" are very
     /// different claims and only one of them is about the user's messages.
     portals: Option<Arc<Portals>>,
+    /// Hermes's answers ([`crate::hermes_answer`], ticket #206). `None` when
+    /// no seam is configured, which is every deployment that has not opted
+    /// into ADR 0032's integration — and then the route says which variable
+    /// would open it rather than refusing as though the answer were wrong.
+    answers: Option<Arc<Answers>>,
     /// Reads the clock in seconds since the epoch — injected so the uptime
     /// gauge and the request logs are testable against a clock the caller
     /// controls.
@@ -156,6 +163,7 @@ impl Gateway {
             suggestions: None,
             settings: None,
             portals: None,
+            answers: None,
             now_unix_seconds,
         }
     }
@@ -229,6 +237,19 @@ impl Gateway {
 
     pub fn statuses(&self) -> Option<Arc<Statuses>> {
         self.statuses.clone()
+    }
+
+    /// Adds the half that receives Hermes's answers (ticket #206), the same
+    /// way. Configured together with approvals — it reuses that half's store,
+    /// bus, bounded lookup and refusal vocabulary — and still its own half,
+    /// because a deployment can have approvals and no seam.
+    pub fn with_answers(mut self, answers: Option<Arc<Answers>>) -> Self {
+        self.answers = answers;
+        self
+    }
+
+    pub fn answers(&self) -> Option<Arc<Answers>> {
+        self.answers.clone()
     }
 
     /// Adds the pending-contact projection (ticket #54), the same way. It is
@@ -372,6 +393,12 @@ pub fn router(gateway: Gateway) -> Router {
         // conversations the Sensor is inside — read live from the
         // homeserver, stored nowhere.
         .merge(portals_http::routes())
+        // Hermes's answer (ticket #206, ADR 0032): the second route on this
+        // origin whose caller is not a browser and not the Sensor, and the
+        // first whose caller is outside the deployment altogether. Merged like
+        // every other, so the guard's table decides what it must carry — a
+        // signature of its own, verified by its own handler.
+        .merge(hermes_answer_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))
@@ -550,6 +577,7 @@ fn classify(path: &str) -> Route {
         // reserved prefix (#56): its own label, so a flapping bridge is
         // visible in the exposition without being mistaken for the
         // Companion's own traffic.
+        crate::hermes_answer::ANSWER_PATH => Route::HermesAnswer,
         path if crate::bridge_status::is_reserved_path(path) => Route::BridgeStatus,
         _ => Route::Companion,
     }
@@ -571,6 +599,7 @@ mod tests {
             classify("/_twalk/bridges/bridge-whatsapp/status"),
             Route::BridgeStatus
         );
+        assert_eq!(classify("/_twalk/hermes/answers"), Route::HermesAnswer);
         assert_eq!(classify("/"), Route::Companion);
         assert_eq!(classify("/onboarding/whatsapp"), Route::Companion);
         // A path that merely starts with the same letters is not the API.

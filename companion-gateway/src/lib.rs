@@ -152,6 +152,8 @@ pub mod consent_http;
 pub mod consent_snapshot;
 pub mod contacts;
 pub mod contacts_http;
+pub mod hermes_answer;
+pub mod hermes_answer_http;
 pub mod http;
 pub mod matrix_openid;
 pub mod metrics;

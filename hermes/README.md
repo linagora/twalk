@@ -116,6 +116,10 @@ Environment variables, like every other Twalk component.
 | `HERMES_PERSONA_START_FAILURES` | | Default 3: consecutive failed starts before the verdict. |
 | `HERMES_SHUTDOWN_GRACE_MS` | | Default 10000: how long a persona is given after SIGTERM before it is killed. |
 | `HERMES_PERSONA_ENV_PASSTHROUGH` | | Names of the runtime's own variables a persona may inherit, comma-separated. Default `PATH`. |
+| `HERMES_WEBHOOK_URL` | | One of **Hermes's** webhook routes, injected into each persona as `TWALK_HERMES_WEBHOOK_URL` (ADR 0032, [#206](https://github.com/linagora/twalk/issues/206)). Unset is a deployment with no seam, which is every deployment before that ADR. Set without a secret is a **startup refusal**: every persona would refuse it on its first line, at every spawn. |
+| `HERMES_WEBHOOK_SECRET` | | The secret a persona signs each wake with, injected as `TWALK_HERMES_WEBHOOK_SECRET`. The first credential this runtime injects besides the model endpoint's key, and the distinction is the module's: it is the *persona's own* credential for its own outbound call, and not the runtime's — the Gateway's service token, which opens the consent snapshot, still crosses nothing. A secret with no URL is not an error: the URL is what turns the seam on. |
+| `HERMES_WEBHOOK_TIMEOUT_SECONDS` | | How long a wake waits for Hermes's front door. The SDK's default is 10 seconds. |
+| `HERMES_WEBHOOK_ALLOW_INSECURE_URL` | | Records that an operator accepted a plaintext hop to Hermes. Without it the SDK refuses an `http://` URL at startup. |
 
 ## Tests
 

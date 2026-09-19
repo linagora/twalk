@@ -71,7 +71,7 @@ import json
 import logging
 import signal
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 import nats
 import nats.errors
@@ -80,7 +80,6 @@ from nats.aio.msg import Msg
 from nats.js import JetStreamContext
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
-from .completion import LlmError
 from .config import Config
 from .consent import GRANTED, consent_of, is_granted
 from .envelope import (
@@ -92,6 +91,7 @@ from .envelope import (
     thinking_event,
     utc_now,
 )
+from .hermes import HandedToHermes, Hermes
 from .language import USER_LANGUAGE_VARIABLE
 from .llm import Llm
 from .trigger import MESSAGE_RECEIVED_TYPE, InboundMessage, triggers_a_persona, type_of
@@ -129,17 +129,37 @@ class Context:
     config: Config
     llm: Llm
     logger: logging.Logger = logger
+    #: The seam to Hermes (ADR 0032), or ``None`` when the deployment
+    #: configured none. A persona that finds it ``None`` reasons with
+    #: :attr:`llm` and nothing leaves the deployment — which is what every
+    #: deployment before this ticket does, and the reason the seam is a
+    #: capability the handler asks for rather than a step the loop takes.
+    hermes: Optional[Hermes] = None
 
 
-Handler = Callable[[InboundMessage, Context], Awaitable[Optional[Suggestion]]]
+#: What a handler may answer with. Three outcomes, because there are three
+#: facts: a draft this persona wrote, a wake it handed to Hermes (whose
+#: answer arrives later through the Companion Gateway, ADR 0032), and
+#: nothing to say.
+Outcome = Union[Suggestion, HandedToHermes, None]
+Handler = Callable[[InboundMessage, Context], Awaitable[Outcome]]
 
 
 class Persona:
     """A persona process, configured and ready to run."""
 
-    def __init__(self, config: Config, llm: Optional[Llm] = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        llm: Optional[Llm] = None,
+        hermes: Optional[Hermes] = None,
+    ) -> None:
         self.config = config
         self.llm = llm or Llm(config.llm)
+        # Built here and not in the handler: the seam's configuration is
+        # validated once, at startup, and a persona author is handed a client
+        # that can only send the narrow template (twalk_sdk.webhook).
+        self.hermes = hermes or (Hermes(config.hermes) if config.hermes else None)
         self._handler: Optional[Handler] = None
         self._stop = asyncio.Event()
 
@@ -192,6 +212,7 @@ class Persona:
             self.config.user_language or "unset",
         )
         self._say_what_the_language_fallback_will_do()
+        await self._say_where_hermes_is()
         connection = await self._connect()
         jetstream = connection.jetstream()
         await self._await_stream(jetstream)
@@ -203,6 +224,8 @@ class Persona:
             await self._consume(jetstream, subscription)
         finally:
             await self.llm.aclose()
+            if self.hermes is not None:
+                await self.hermes.aclose()
             await connection.drain()
             logger.info("persona stopped persona_id=%s", self.config.persona_id)
 
@@ -240,6 +263,23 @@ class Persona:
             "Every message whose language is readable is unaffected.",
             USER_LANGUAGE_VARIABLE,
         )
+
+    async def _say_where_hermes_is(self) -> None:
+        """States the seam, and whether Hermes is there (ADR 0032).
+
+        An unreachable Hermes does not stop this persona: the shape is the
+        Sensor's own answer to the same question about the Gateway's consent
+        snapshot — start anyway, ``ERROR`` naming the URL and what happens
+        instead, retry in the background (:mod:`twalk_sdk.hermes`). Saying
+        nothing when no seam is configured is deliberate too: a deployment
+        that never asked for one is not in an error state, and the startup
+        line above already names the model it reasons with.
+        """
+        if self.hermes is None:
+            return
+        self.hermes.say_what_it_is()
+        if not await self.hermes.announce_reachability():
+            self.hermes.retry_in_the_background()
 
     def _install_signal_handlers(self) -> None:
         """SIGTERM is how a container is asked to stop; an event in flight
@@ -387,14 +427,36 @@ class Persona:
                     model=self.llm.model,
                 ),
             )
-            suggestion = await handler(trigger, Context(config=self.config, llm=self.llm))
-            if suggestion is None:
+            outcome = await handler(
+                trigger,
+                Context(config=self.config, llm=self.llm, hermes=self.hermes),
+            )
+            if outcome is None:
                 logger.info(
                     "no suggestion for event_id=%s network=%s",
                     trigger.event_id,
                     trigger.network,
                 )
+            elif isinstance(outcome, HandedToHermes):
+                # The one outcome that produces no event here. Hermes is
+                # asynchronous by construction — its webhook adapter answers
+                # before the agent runs — so the suggestion arrives later,
+                # through the Companion Gateway's endpoint and never through
+                # this process (ADR 0032). The trigger is acked: it has been
+                # dealt with, and a redelivery would only re-wake Hermes on a
+                # delivery id it has already absorbed.
+                logger.info(
+                    "handed to hermes event_id=%s network=%s reference=%s "
+                    "delivery=%s already_seen=%s ignored_by_route=%s",
+                    trigger.event_id,
+                    trigger.network,
+                    outcome.reference,
+                    outcome.delivery,
+                    outcome.already_seen,
+                    outcome.ignored_by_route,
+                )
             else:
+                suggestion = outcome
                 # One reading of the clock for both: `time` says when the
                 # suggestion was produced and `expires_at` when it stops
                 # being approvable, and the operator's window is the
@@ -426,7 +488,7 @@ class Persona:
                         FIRST_ATTEMPT,
                     )
         except Exception as error:
-            if isinstance(error, LlmError) and not error.transient:
+            if _will_not_change(error):
                 # An answer that will not change. Retry is for a failure that
                 # might pass; this one is the model behaving exactly as
                 # configured, and every attempt is billed (issue #162). So the
@@ -458,13 +520,19 @@ class Persona:
                 )
                 await message.term()
                 return
+            # The delay is the failure's own when it has one. A rate-limited
+            # route says "not this minute" and retrying it in five seconds
+            # spends a delivery on an answer that cannot have changed yet
+            # (twalk_sdk.hermes.RATE_LIMIT_DELAY_SECONDS); everything else
+            # takes the loop's ordinary retry.
+            delay = float(getattr(error, "retry_after", 0) or RETRY_DELAY_SECONDS)
             logger.error(
                 "failed to process event_id=%s, retrying in %ss: %s",
                 trigger.event_id,
-                RETRY_DELAY_SECONDS,
+                delay,
                 error,
             )
-            await message.nak(delay=RETRY_DELAY_SECONDS)
+            await message.nak(delay=delay)
             return
         await message.ack()
 
@@ -488,6 +556,22 @@ class Persona:
             "published %s id=%s subject=%s", event["type"], event["id"], subject
         )
         return acknowledgement
+
+
+def _will_not_change(error: BaseException) -> bool:
+    """Whether redelivering this trigger would reproduce the same failure.
+
+    Read off the exception rather than off its class, because two different
+    outside things now answer the question and neither should have to know
+    about the other: a model that spent its whole budget reasoning
+    (:class:`twalk_sdk.completion.LlmError`, issue #162) and a Hermes route
+    that refused the signature or does not exist
+    (:class:`twalk_sdk.hermes.HermesError`, ADR 0032). Anything that does not
+    declare itself is retried, which is the safe default — a failure retried
+    once too often costs a redelivery, and one terminated too early loses a
+    message.
+    """
+    return getattr(error, "transient", True) is False
 
 
 def _sequence(message: Msg) -> Optional[int]:

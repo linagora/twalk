@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Optional
 
 from twalk_sdk import Context, InboundMessage, Persona, Suggestion, language_name
+from twalk_sdk.hermes import HandedToHermes
 from twalk_sdk.llm import system, user
 
 #: Short, and deliberately about restraint: what the model returns is shown
@@ -93,12 +94,23 @@ def system_prompt(user_language: Optional[str]) -> str:
 
 
 @persona.on_inbound_message
-async def draft_reply(message: InboundMessage, context: Context) -> Optional[Suggestion]:
+async def draft_reply(
+    message: InboundMessage, context: Context
+) -> Optional[Suggestion] | HandedToHermes:
     """Drafts one reply to one message the user consented to.
 
     Called only for events whose consent is `granted` — the SDK's gate has
     already dropped everything else, and no message content has been read
     at that point.
+
+    Two ways to a draft, and the deployment chooses by configuration. With no
+    seam to Hermes (`TWALK_HERMES_WEBHOOK_URL` unset) this persona reasons
+    with the model endpoint the operator named, which is what it has always
+    done and what every deployment before ADR 0032 does. With a seam, the
+    message is handed to Hermes instead and the suggestion comes back through
+    the Companion Gateway: Hermes has memory, skills and a calendar, and a
+    persona that also called a model would be asking two brains the same
+    question and publishing whichever answered first.
     """
     text = (message.body or "").strip()
     if not text:
@@ -112,6 +124,19 @@ async def draft_reply(message: InboundMessage, context: Context) -> Optional[Sug
             message.network,
         )
         return None
+
+    if context.hermes is not None:
+        # The whole body is the SDK's (`twalk_sdk.webhook`): this persona
+        # chooses *whether* to wake Hermes and cannot choose what crosses,
+        # which is the same arrangement as the consent gate and for the same
+        # reason. The prompt is not here either — it is the route's, on the
+        # Hermes host, because ADR 0032 has the Companion configure the seam
+        # and never the agent.
+        return await context.hermes.wake(
+            message,
+            persona_id=context.config.persona_id,
+            user_language=context.config.user_language,
+        )
 
     reply = await context.llm.complete(
         [system(system_prompt(context.config.user_language)), user(text)],

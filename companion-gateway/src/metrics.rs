@@ -66,6 +66,12 @@ pub struct Metrics {
     /// a bridge whose `as_token` does not match the Gateway's shows up here
     /// and nowhere else.
     bridge_status_refusals: Mutex<BTreeMap<&'static str, u64>>,
+    /// What became of each answer Hermes pushed back (ticket #206): the
+    /// outcome label is the code the caller was given, or `published`, or the
+    /// reason a push that was not a Twalk wake was ignored. One series,
+    /// because the question an operator asks is "is the seam working, and if
+    /// not which way is it failing?".
+    hermes_answers: Mutex<BTreeMap<&'static str, u64>>,
     /// Bridge transitions the outbox published, and how many are still
     /// waiting — the same pair as consent's, for the same question.
     bridge_status_published: Mutex<u64>,
@@ -140,6 +146,11 @@ pub enum Route {
     /// bridge pushing every few seconds would otherwise be indistinguishable
     /// from the Companion's own traffic.
     BridgeStatus,
+    /// Hermes's answer endpoint (`/_twalk/hermes/answers`, ticket #206). Its
+    /// own label for the bridge webhook's reason: its caller is an agent
+    /// runtime outside this deployment, and traffic from outside is worth
+    /// telling apart from a bridge's own and from the Companion's.
+    HermesAnswer,
     /// The Companion's static files, the app shell included.
     Companion,
 }
@@ -152,6 +163,7 @@ impl Route {
             Route::OpenApi => "openapi",
             Route::Api => "api",
             Route::BridgeStatus => "bridge_status",
+            Route::HermesAnswer => "hermes_answer",
             Route::Companion => "companion",
         }
     }
@@ -173,6 +185,7 @@ impl Metrics {
             owner_consent_rows: Mutex::new(None),
             bridge_statuses: Mutex::new(BTreeMap::new()),
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
+            hermes_answers: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
             bridge_status_outbox_pending: Mutex::new(None),
             approvals_published: Mutex::new(0),
@@ -249,6 +262,19 @@ impl Metrics {
             .approvals_published
             .lock()
             .expect("the metrics mutex is never poisoned") += 1;
+    }
+
+    /// One answer from Hermes, under the outcome the caller was given
+    /// (ticket #206): `published`, the reason an ignored push was ignored, or
+    /// the refusal code. One counter for the whole seam, because the question
+    /// is which way it is failing and not how many times it worked.
+    pub fn record_hermes_answer(&self, outcome: &'static str) {
+        *self
+            .hermes_answers
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
     }
 
     /// One approval was refused, under the code the caller was given — so a
@@ -493,6 +519,18 @@ impl Metrics {
                     .lock()
                     .expect("the metrics mutex is never poisoned")
             ));
+            out.push_str("# HELP twalk_companion_gateway_hermes_answers_total Answers Hermes pushed back, by outcome: published, the refusal code, or why a push was ignored (ticket #206).\n");
+            out.push_str("# TYPE twalk_companion_gateway_hermes_answers_total counter\n");
+            for (outcome, count) in self
+                .hermes_answers
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_hermes_answers_total{{outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
             out.push_str("# HELP twalk_companion_gateway_approval_refusals_total Approvals refused, by the code the caller was given.\n");
             out.push_str("# TYPE twalk_companion_gateway_approval_refusals_total counter\n");
             for (outcome, count) in self

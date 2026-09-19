@@ -67,6 +67,10 @@ pub struct Config {
     /// when GATEWAY_SERVICE_TOKEN is unset — in which case the snapshot
     /// endpoint answers 503 naming it. See [`Snapshot`].
     pub snapshot: Option<Snapshot>,
+    /// The Gateway's half of the seam to Hermes (ticket #206, ADR 0032), or
+    /// `None` when GATEWAY_HERMES_ANSWER_SECRET is unset — in which case the
+    /// answer endpoint answers 503 naming it. See [`HermesAnswers`].
+    pub hermes_answers: Option<HermesAnswers>,
     /// The durable JetStream consumer the pending-contact projection reads
     /// `inbound.message.received` through (GATEWAY_INBOUND_CONSUMER, default
     /// [`crate::contacts::DEFAULT_INBOUND_CONSUMER`], ticket #54).
@@ -519,6 +523,76 @@ impl Snapshot {
     }
 }
 
+/// The Gateway's half of the seam to Hermes (ticket #206, ADR 0032): the
+/// secret Hermes's answers are signed with, and the domain the suggestions
+/// this Gateway publishes name their persona under.
+///
+/// Deliberately **not** derived from the consent half even though it needs
+/// everything the consent half needs: a deployment can have approvals and no
+/// seam, which is every deployment that has not opted into ADR 0032's
+/// integration, and the endpoint then says which variable would open it.
+#[derive(Debug, Clone)]
+pub struct HermesAnswers {
+    /// GATEWAY_HERMES_ANSWER_SECRET — the shared secret Hermes's outbound hook
+    /// signs each answer with. The whole authentication of a route that
+    /// creates suggestions about the user's conversations, so the minimum
+    /// length is the service token's and for the same argument.
+    pub secret: String,
+    /// GATEWAY_HERMES_DOMAIN — the authority of the `source` URI a published
+    /// suggestion carries (`hermes://<domain>/personas/<id>`), which is the
+    /// persona runtime's own `HERMES_DOMAIN`.
+    ///
+    /// Configuration rather than a value taken from the answer: a signed push
+    /// is not a licence to name any source it likes, and ADR 0018's rule about
+    /// not deriving an identity applies to a persona's as much as to the
+    /// owner's ghosts.
+    pub domain: String,
+    /// GATEWAY_SUGGESTION_TTL_SECONDS — how long a suggestion published here
+    /// stays approvable. The same window the persona runtime gives the SDK
+    /// (`TWALK_SUGGESTION_TTL_SECONDS`), and the same default, because a
+    /// suggestion that came through Hermes must not age differently from one a
+    /// persona drafted itself (ticket #22).
+    pub suggestion_ttl_seconds: u64,
+}
+
+impl HermesAnswers {
+    /// `Ok(None)` when GATEWAY_HERMES_ANSWER_SECRET is unset. An error when it
+    /// is set and something else is missing or weak — the same loud direction
+    /// [`Snapshot::from_env`] takes, and for the same reason: an operator who
+    /// configured half a seam has said they want one, and a Gateway that
+    /// silently ran without it would look like a Hermes that never answers.
+    fn from_env() -> Result<Option<Self>> {
+        let Some(secret) = env("GATEWAY_HERMES_ANSWER_SECRET").map(|value| value.trim().to_owned())
+        else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            secret.chars().count() >= crate::hermes_answer::MINIMUM_SECRET_LENGTH,
+            "environment variable GATEWAY_HERMES_ANSWER_SECRET is too short to be a secret:              it is the whole authentication of the route that turns Hermes's answers into              suggestions, so it must be at least {} characters (generate one with              `openssl rand -hex 32`)",
+            crate::hermes_answer::MINIMUM_SECRET_LENGTH
+        );
+        let domain = env("GATEWAY_HERMES_DOMAIN")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && !value.contains('/'))
+            .context(
+                "environment variable GATEWAY_HERMES_DOMAIN must name the persona runtime's                  domain, without a slash: it is the authority of the `source` URI every                  suggestion this Gateway publishes carries (`hermes://<domain>/personas/<id>`),                  and it is the same value the runtime is configured with as HERMES_DOMAIN",
+            )?;
+        let suggestion_ttl_seconds: u64 = optional(
+            "GATEWAY_SUGGESTION_TTL_SECONDS",
+            &crate::hermes_answer::DEFAULT_SUGGESTION_TTL_SECONDS.to_string(),
+        )?;
+        anyhow::ensure!(
+            suggestion_ttl_seconds > 0,
+            "environment variable GATEWAY_SUGGESTION_TTL_SECONDS must be at least 1: a window of              zero would publish a suggestion that has already expired"
+        );
+        Ok(Some(Self {
+            secret,
+            domain,
+            suggestion_ttl_seconds,
+        }))
+    }
+}
+
 impl Consent {
     fn from_env(sign_in: Option<&SignIn>) -> Result<Option<Self>> {
         let nats_url = std::env::var("GATEWAY_NATS_URL")
@@ -582,6 +656,7 @@ impl Config {
                     .unwrap_or_default(),
             )?,
             snapshot: Snapshot::from_env()?,
+            hermes_answers: HermesAnswers::from_env()?,
             inbound_consumer: env("GATEWAY_INBOUND_CONSUMER")
                 .map(|name| name.trim().to_owned())
                 .filter(|name| !name.is_empty())
