@@ -754,7 +754,8 @@
 							alias: null,
 							encrypted: false,
 							heroes: [],
-							joinedMembers: null
+							joinedMembers: null,
+							type: null
 						}).text}
 						<span class="small muted">
 							{outcome.status === 'invited'

@@ -248,6 +248,16 @@ pub const SERVICE_TOKEN: &str = "test-only-gateway-service-token-g50";
 /// selects.
 pub const SENSOR_USER_ID: &str = "@sensor:test.twalk";
 
+/// The `m.room.create` type the Companion gives the handover room, so that
+/// nothing counts it as a conversation (ticket #226,
+/// `companion/src/lib/matrix/handover.ts`).
+pub const HANDOVER_ROOM_TYPE: &str = "fr.linagora.twalk.handover";
+
+/// The `events_default` that room is created with: one above the 100 a room's
+/// creator holds, so the homeserver refuses every message event from every
+/// member.
+pub const HANDOVER_SEND_LEVEL_NOBODY_HAS: u64 = 101;
+
 /// A Matrix ID nobody has yet, for a test of the registration relay: the
 /// relay creates the owner's account exactly once, so every such test needs
 /// an owner whose account does not exist on the shared stack.
@@ -650,6 +660,89 @@ impl MatrixUser {
         Ok(answer["event_id"]
             .as_str()
             .context("the send answer names no event id")?
+            .to_owned())
+    }
+
+    /// Tries to send a text message and answers what the homeserver said: the
+    /// `errcode` of a refusal, or `None` when it was accepted.
+    ///
+    /// The sibling of [`Self::send_message`] for a room where a refusal is the
+    /// property under test — the handover room of ticket #226, where nobody may
+    /// post at all.
+    pub async fn refusal_to_send(&self, room_id: &str, body: &str) -> Result<Option<String>> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let response = self
+            .http
+            .put(self.url(&format!(
+                "/_matrix/client/v3/rooms/{room_id}/send/m.room.message/twalk-g226-{unique}"
+            )))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "msgtype": "m.text", "body": body }))
+            .send()
+            .await
+            .context("failed to send a message")?;
+        if response.status().is_success() {
+            return Ok(None);
+        }
+        let document: serde_json::Value = response
+            .json()
+            .await
+            .context("the refusal is not a Matrix error")?;
+        Ok(Some(
+            document["errcode"]
+                .as_str()
+                .unwrap_or("M_UNKNOWN")
+                .to_owned(),
+        ))
+    }
+
+    /// The **handover room** of ticket #226, as the Companion creates one in
+    /// the browser: encrypted, typed as something other than a conversation,
+    /// the Sensor invited, and `events_default` above any power level a member
+    /// can hold so that nobody — the creator included — may post in it.
+    ///
+    /// This mirrors `companion/src/lib/matrix/handover.ts`'s
+    /// `handoverRoomCreation`, which is the authority on the shape and pins it
+    /// in its own test. Two spellings of one body is the cost of the room being
+    /// created by a browser and asserted about by a Rust suite; what keeps them
+    /// honest is that each side asserts the *properties* rather than the JSON.
+    pub async fn make_handover_room(&self, name: &str, sensor_user_id: &str) -> Result<String> {
+        let body: serde_json::Value = self
+            .http
+            .post(self.url("/_matrix/client/v3/createRoom"))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({
+                "preset": "private_chat",
+                "visibility": "private",
+                "name": name,
+                "invite": [sensor_user_id],
+                "is_direct": false,
+                "creation_content": { "type": HANDOVER_ROOM_TYPE },
+                "initial_state": [{
+                    "type": "m.room.encryption",
+                    "state_key": "",
+                    "content": { "algorithm": "m.megolm.v1.aes-sha2" },
+                }],
+                "power_level_content_override": {
+                    "events_default": HANDOVER_SEND_LEVEL_NOBODY_HAS,
+                    "invite": 100,
+                    "kick": 100,
+                    "redact": 100,
+                },
+            }))
+            .send()
+            .await
+            .context("failed to create the handover room")?
+            .error_for_status()
+            .context("the homeserver refused to create the handover room")?
+            .json()
+            .await
+            .context("the createRoom answer is not JSON")?;
+        Ok(body["room_id"]
+            .as_str()
+            .context("the createRoom answer names no room id")?
             .to_owned())
     }
 

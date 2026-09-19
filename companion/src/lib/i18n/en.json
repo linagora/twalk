@@ -392,6 +392,7 @@
 	"screen2.step.recovery-key": "Generating your recovery key…",
 	"screen2.step.secret-storage": "Securing your key backup…",
 	"screen2.step.signing-in": "Signing this device in…",
+	"screen2.step.handover": "Connecting Twalk’s Sensor to your account…",
 	"screen2.error.closed.title": "This Twalk deployment does not allow new accounts",
 	"screen2.error.closed.body": "Its account was created by its administrator. Ask them for the credentials, or for account creation to be opened.",
 	"screen2.error.exists.title": "This deployment already has its account",
@@ -431,6 +432,15 @@
 	"done.next.title": "Next: connect a network",
 	"done.next.body": "Connect WhatsApp, Signal, SMS or an existing Matrix account, then activate your assistant on it. If your Twalk server has no bridge configured, the Matrix card is the one that will work — the others say so on the screen.",
 	"done.diagnostics": "Open diagnostics",
+
+	"handover.roomName": "Twalk — internal",
+	"handover.ready": "Twalk can reach its Sensor with your account’s encryption.",
+	"handover.problem.title": "Twalk cannot reach its Sensor yet",
+	"handover.problem.noSensor": "This Twalk server runs no Sensor, so there is nothing to connect your account to. Your administrator sets GATEWAY_SENSOR_USER_ID.",
+	"handover.problem.didNotJoin": "Twalk’s Sensor was invited and has not accepted. It accepts invitations from the accounts SENSOR_ALLOWED_INVITERS names, and your administrator can check that yours is one of them — and that the Sensor is running.",
+	"handover.problem.untracked": "Twalk’s Sensor is there and this browser does not yet know its encryption keys, so a message sent to it now would arrive empty. Reloading this page later retries it.",
+	"handover.problem.failed": "Your server refused: {detail}",
+	"handover.problem.after": "Everything else works. What this stops is Twalk replying on your behalf, which nothing does yet in this version.",
 
 	"recover.title": "Your keys are not on this device",
 	"recover.intro": "This is normal, not a failure. Twalk keeps your encryption keys in this browser alone, and a browser can throw them away — iOS deletes them after seven days without opening the app, and clearing your browsing data does it too.",
