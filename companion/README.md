@@ -333,13 +333,69 @@ serves, and it is dropped in `$lib/dashboard/load.ts`, at the seam, rather than
 carried into a component where a later row could render it. The chip is
 therefore a number by construction and not by discipline.
 
-It leads nowhere, and says so: the searchable consent inbox is v0.2, and the
-copy points at the one decision v0.1 does offer — granting or revoking a whole
-network, which decides for everyone on it at once. A chip linking to a screen
-that does not exist would be worse than one that explains itself.
+Since #170 it leads to `/consent`, which is where that array is read and acted
+on. The reduction stays exactly where it was, for the reason the approval chip
+gives: a home screen is what gets unlocked on a train, so this one carries a
+number and a link and nothing else.
 
 `null` (the deployment projects no inbound stream, or the read failed) and `0`
 (nobody is waiting) are different facts and both draw nothing.
+
+### The consent screen shows three states, because the model has three (#170)
+
+`/consent` and `$lib/consent/` are the screen the product's central promise had
+no interface for. Four decisions in it are the ones to argue with.
+
+**`pending` is not `revoked`, and never-decided is neither.** `$lib/consent/model.ts`
+carries `state` (`granted`, `pending`, `revoked`) and `decidedBy` (`contact`,
+`network`, `nothing`) as two facts, because ADR 0010 is explicit that an absent
+subject means no decision was ever recorded and never a revoked one. `awaiting`
+is `decidedBy === 'nothing'` and is deliberately *not* a synonym for
+`state === 'pending'` — the Gateway draws the same line, since
+`GET /api/contacts/pending` lists exactly the rows whose `decided_by` is `null`
+and a contact the owner deliberately left `pending` is not in it. Most of a real
+list is never-decided (eighteen conversations appeared on the reference
+deployment in one day), so a screen with two states where the model has three
+teaches the user a wrong picture of their own deployment.
+
+**Only `revoked` withholds content, and the legend says so.** `granted` lets a
+persona read; `pending` publishes the message in full and consumers refuse it by
+convention; only `revoked` reduces what is published (ADR 0012). `withholds` is
+a function in the model rather than an adjective in a catalogue, because copy
+implying that undecided means unseen would be a comforting untrue thing.
+
+**None of it is retroactive, said twice.** The label is stamped by the Sensor at
+publication, so a decision taken now reaches nothing already on the bus. It is
+in the legend and again against the decision the user has just taken, because a
+user who grants a contact and sees nothing happen would otherwise conclude the
+product is broken.
+
+**The bulk control is scoped to the filter, and asks twice.** #137's rule with
+higher stakes: `bulkDecisions(shown, state)` takes the rows on screen and
+nothing else, the number on the button is that array's length, and there is no
+function in the module that takes the whole list. Two presses, because "grant
+all" over a list containing a 246-member association is the affordance this
+screen exists to avoid. Answering for a whole *network* is not offered here at
+all — it decides for people who have not written yet, and #122 is the open
+question about how it should be.
+
+The owner is **labelled, not filtered**. ADR 0018 and ADR 0021 say the owner has
+no consent state on any event; a row about them is #149's Gateway half showing
+through, and hiding it would hide the only symptom a user can see. What this
+browser can recognise is the owner's canonical Matrix ID, from the session — the
+network ghosts #149 is actually about cannot be recognised here, because the
+Gateway does not know them either.
+
+The journey (`tests/e2e/consent/`) is the only Companion suite that starts a
+**real Sensor**, and `tests/e2e/consent/sensor.ts` says why: the consent label is
+stamped by the Sensor, so a test that published the label itself would assert its
+own string. That Sensor runs with **no Gateway snapshot configured**, so its cache
+starts cold and everything is `pending`; a `granted` label can only have come
+from the decision the browser took, through the Gateway's outbox, onto the bus,
+into the Sensor's cache. It is also the one shape of this journey no other suite
+covers — `sensor/tests/consent.rs` proves relabelling on WhatsApp from a decision
+the test published, and this proves it on `matrix` from a decision a user took in
+a browser.
 
 ### The approval screen cannot name the contact, and says so (#160)
 
@@ -563,6 +619,29 @@ without knowing a second port.
 
 The bridge is stubbed for the reason spec #47 gives: a real mautrix-whatsapp
 needs a live WhatsApp account and a human with a phone. Nothing else is stubbed.
+
+### The consent journey runs a real Sensor, and it is the only one that does
+
+`tests/e2e/consent/` starts the actual `twalk-sensor` binary beside the bridge
+origin's stack (`tests/e2e/consent/sensor.ts`), because #170's keystone
+criterion is a fact about a *label* and the Sensor is what stamps it. It logs in
+to the real Synapse, joins a real room on the owner's invitation, reads real
+messages and publishes to the real JetStream the Gateway's outbox publishes the
+decision to. `SENSOR_GATEWAY_URL` is left unset on purpose: the cache then starts
+cold, everything is `pending`, and the consent consumer is still created — so a
+`granted` label is evidence about the decision and about nothing else.
+
+Two costs worth knowing. A cold `cargo build` of the Sensor is minutes
+(matrix-sdk and its crypto stack), which is why that project's timeout is
+generous. And the Sensor's consent consumer is a **durable with a constant
+name**, so two Sensors on one bus split the consent stream between them: this
+project runs one worker, reaps the process in `afterAll` whether it passed or
+not, and must not run beside `sensor/`'s own Cargo suites.
+
+The `consent` project depends on `approvals` (and so on `dashboard` and
+`networks`) for the reason those depend on each other: one Gateway, one consent
+journal, one pending-contact projection. It writes decisions and makes a contact
+pending, which is state the dashboard's counts are asserted against.
 
 ### Screen 3d learns the rooms, and the Gateway learns the selection
 

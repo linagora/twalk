@@ -28,9 +28,10 @@
 	inbound stream answers `GET /api/contacts/pending`, and the chip reads its
 	`total`. Its `contacts` array — the list of who has written and not been
 	decided about — is dropped in `$lib/dashboard/load.ts` and never reaches
-	this file. What it has no destination for yet is the tap: the consent inbox
-	is v0.2, so the chip says where the decisions are not, instead of pretending
-	to lead somewhere.
+	this file. Since #170 the tap has a destination — `/consent`, where that list
+	is read and decided about one person at a time — and the reduction stays
+	exactly where it was, for the reason the approval chip gives below: a home
+	screen is what gets unlocked on a train.
 
 	The approval chip (#100) is the same idea one more time: `GET /api/suggestions`
 	answers with every proposed reply in full, and this screen is allowed a
@@ -262,10 +263,18 @@
 				<Icon name="consent" size="dense" />
 				{$t('dashboard.chip.pending', { count: pending })}
 			</p>
-			<!-- A count, and where to act on it: nowhere yet. The searchable
-			     consent inbox is v0.2, and a chip that led to a screen that does
-			     not exist would be worse than one that says so. -->
-			<p class="small muted" data-testid="pending-no-inbox">{$t('dashboard.chip.noInbox')}</p>
+			<!-- A count, and — since #170 — somewhere to act on it. The identities
+			     are still dropped at the seam (`$lib/dashboard/load.ts`): this
+			     chip carries a number and a link, and the list of who has
+			     written lives on the consent screen, opened deliberately, for
+			     the same reason the approval queue does. -->
+			<p class="small muted" data-testid="pending-inbox">{$t('dashboard.chip.inbox')}</p>
+			<p>
+				<a class="button button--primary" href="/consent" data-testid="to-consent">
+					<Icon name="consent" size="dense" />
+					{$t('dashboard.chip.inboxLink')}
+				</a>
+			</p>
 		</div>
 	{/if}
 
