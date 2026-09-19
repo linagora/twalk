@@ -227,6 +227,10 @@ mod tests {
         };
         let body = register_json(&register, 20);
         assert_eq!(body["summary"]["total"], 3);
+        assert_eq!(
+            body["crowd_threshold"], 20,
+            "the threshold is served, not assumed by the screen (#252)"
+        );
         assert_eq!(body["summary"]["observing"], 1);
         assert_eq!(body["summary"]["absent"], 2);
         assert_eq!(body["summary"]["invited"], 0);

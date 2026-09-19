@@ -100,10 +100,10 @@ test.describe('the conversation chooser', () => {
 
 		// The threshold the crowds are drawn from is the Gateway's, served with
 		// the register, and not a number of this screen's (#252): the stack
-		// starts its Gateway with 21, which no default would produce.
+		// starts its Gateway with a value no default would produce.
 		await expect(page.getByTestId('screen-conversations')).toHaveAttribute(
 			'data-crowd-threshold',
-			'21'
+			String((stack as PortalStack).portals.crowdThreshold)
 		);
 
 		// One person, because `…@s.whatsapp.net` says one person. Not because it

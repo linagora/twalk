@@ -42,6 +42,8 @@ export interface PortalStack {
 		ghost: string;
 		/** Enough accounts to make a group a crowd. */
 		crowd: string[];
+		/** `GATEWAY_CROWD_THRESHOLD` the stack's Gateway was started with (#252). */
+		crowdThreshold: number;
 		/** The account the register watches for, and the one the Sensor logs in as. */
 		sensorId: string;
 	};

@@ -28,7 +28,6 @@
 
 import type { ConversationRow } from './conversations';
 
-
 /** One conversation, reduced to what a consequence needs to name it. */
 export interface Named {
 	readonly label: string;

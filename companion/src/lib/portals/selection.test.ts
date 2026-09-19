@@ -25,10 +25,10 @@ function portal(
 	};
 }
 
-/** maria, already observed; a team; and the 246-member association. */
 /** The default the Gateway serves, as the reference deployment measured it (#143). */
 const CROWD_THRESHOLD = 20;
 
+/** maria, already observed; a team; and the 246-member association. */
 const ACCOUNT = rows([
 	portal('maria (WA)', '33612345678@s.whatsapp.net', 2, 'observing'),
 	portal('Linagora : Team Clean', '120363123412341234@g.us', 7),
@@ -62,7 +62,11 @@ describe('consequence', () => {
 	});
 
 	it('states how many people a tick covers, before it is applied', () => {
-		const one = consequence(ACCOUNT, new Set([id('maria (WA)'), id('Échecs en Yvelines')]), CROWD_THRESHOLD);
+		const one = consequence(
+			ACCOUNT,
+			new Set([id('maria (WA)'), id('Échecs en Yvelines')]),
+			CROWD_THRESHOLD
+		);
 		expect(one.starting).toBe(1);
 		expect(one.people).toBe(246);
 		expect(one.largest).toEqual({ label: 'Échecs en Yvelines', members: 246 });
@@ -82,11 +86,19 @@ describe('consequence', () => {
 	});
 
 	it('asks to be acknowledged once any conversation is a crowd', () => {
-		const team = consequence(ACCOUNT, new Set([id('maria (WA)'), id('Linagora : Team Clean')]), CROWD_THRESHOLD);
+		const team = consequence(
+			ACCOUNT,
+			new Set([id('maria (WA)'), id('Linagora : Team Clean')]),
+			CROWD_THRESHOLD
+		);
 		expect(team.people).toBe(7);
 		expect(team.acknowledgementNeeded).toBe(false);
 
-		const association = consequence(ACCOUNT, new Set([id('Échecs en Yvelines')]), CROWD_THRESHOLD);
+		const association = consequence(
+			ACCOUNT,
+			new Set([id('Échecs en Yvelines')]),
+			CROWD_THRESHOLD
+		);
 		expect(association.acknowledgementNeeded).toBe(true);
 	});
 
