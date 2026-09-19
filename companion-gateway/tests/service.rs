@@ -295,6 +295,131 @@ async fn the_crypto_webassembly_is_served_as_application_wasm() -> Result<()> {
     Ok(())
 }
 
+/// Issue #222: the Gateway states its cache policy, and the two halves of the
+/// export get opposite ones.
+///
+/// Without a `Cache-Control` a browser applies heuristic freshness and reuses
+/// the HTML — which names the old content-hashed chunks, which it also holds
+/// — so a redeployed Companion is invisible to an open browser and nothing
+/// says so. That is how three fixes to #221 were "verified" against a browser
+/// that had never fetched them. So: the entry document is revalidated every
+/// time and answers `304` when unchanged; the content-hashed assets, whose
+/// name changes when their content does, are cached hard and for ever.
+#[tokio::test]
+async fn the_companion_states_its_cache_policy_and_revalidates_the_shell() -> Result<()> {
+    let (gateway, base) = start("cache").await?;
+    poll_until(
+        || async {
+            reqwest::get(format!("{base}/health"))
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()
+        },
+        "the gateway health endpoint",
+    )
+    .await?;
+    let header = |response: &reqwest::Response, name: &str| -> Option<String> {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let client = reqwest::Client::new();
+
+    // The shell, by its prerendered spelling and by a client-side route that
+    // falls back to 200.html: both are the document that names the current
+    // chunks, so both are the one thing never to be reused blind.
+    for path in ["/", "/onboarding/signal/", "/networks/sms"] {
+        let shell = client.get(format!("{base}{path}")).send().await?;
+        assert_eq!(shell.status(), reqwest::StatusCode::OK, "{path}");
+        assert_eq!(
+            header(&shell, "cache-control").as_deref(),
+            Some("no-cache"),
+            "{path}: the HTML is revalidated on every load"
+        );
+        let etag = header(&shell, "etag").unwrap_or_else(|| panic!("{path}: no ETag"));
+        assert!(
+            etag.starts_with('"') || etag.starts_with("W/\""),
+            "{path}: {etag}"
+        );
+
+        let revalidated = client
+            .get(format!("{base}{path}"))
+            .header("if-none-match", &etag)
+            .send()
+            .await?;
+        assert_eq!(
+            revalidated.status(),
+            reqwest::StatusCode::NOT_MODIFIED,
+            "{path}: an unchanged shell costs a 304, not a re-download"
+        );
+        assert_eq!(
+            header(&revalidated, "etag").as_deref(),
+            Some(etag.as_str()),
+            "{path}"
+        );
+        assert_eq!(
+            header(&revalidated, "cache-control").as_deref(),
+            Some("no-cache"),
+            "{path}"
+        );
+        assert!(
+            revalidated.bytes().await?.is_empty(),
+            "{path}: a 304 carries no body"
+        );
+
+        let changed = client
+            .get(format!("{base}{path}"))
+            .header("if-none-match", "\"something-else\"")
+            .send()
+            .await?;
+        assert_eq!(
+            changed.status(),
+            reqwest::StatusCode::OK,
+            "{path}: a stale tag is re-sent"
+        );
+    }
+
+    // The content-hashed half: the `immutable` in the path is a promise the
+    // header now keeps. Whichever encoding goes out, the policy is the same.
+    for accept in ["identity", "br"] {
+        let asset = client
+            .get(format!("{base}/_app/immutable/crypto.wasm"))
+            .header("accept-encoding", accept)
+            .send()
+            .await?;
+        assert_eq!(asset.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            header(&asset, "cache-control").as_deref(),
+            Some("public, max-age=31536000, immutable"),
+            "accept-encoding: {accept}"
+        );
+        assert!(
+            header(&asset, "etag").is_some(),
+            "accept-encoding: {accept}"
+        );
+    }
+    // Two encodings are two representations, so they must not share a tag —
+    // a cache that held the brotli bytes under the identity tag would hand
+    // compressed bytes to a client that cannot decode them.
+    let plain = client
+        .get(format!("{base}/_app/immutable/crypto.wasm"))
+        .header("accept-encoding", "identity")
+        .send()
+        .await?;
+    let brotli = client
+        .get(format!("{base}/_app/immutable/crypto.wasm"))
+        .header("accept-encoding", "br")
+        .send()
+        .await?;
+    assert_ne!(header(&plain, "etag"), header(&brotli, "etag"));
+
+    gateway.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_unknown_app_path_loads_the_companion_and_the_api_answers_as_an_api() -> Result<()> {
     let (gateway, base) = start("client-routing").await?;

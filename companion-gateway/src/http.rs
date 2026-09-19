@@ -470,12 +470,13 @@ async fn companion(State(gateway): State<Gateway>, request: Request) -> Response
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
+    let cache = CachePolicy::for_path(request.uri().path());
     match gateway.companion.resolve(request.uri().path()).await {
-        Resolution::File { path, content_type } => serve(&path, content_type, request).await,
+        Resolution::File { path, content_type } => serve(&path, content_type, cache, request).await,
         Resolution::Fallback { path } => {
             // 200, not a redirect and not a 404: the route exists, in the
             // client-side router.
-            serve(&path, "text/html; charset=utf-8", request).await
+            serve(&path, "text/html; charset=utf-8", cache, request).await
         }
         Resolution::Redirect { location } => (
             StatusCode::TEMPORARY_REDIRECT,
@@ -498,18 +499,115 @@ async fn companion(State(gateway): State<Gateway>, request: Request) -> Response
     }
 }
 
-/// Serves one file, with the content type the path calls for.
+/// What a browser may do with one of the Companion's files once it has it
+/// (issue #222).
 ///
-/// `ServeFile` brings the parts worth not hand-rolling — conditional
-/// requests, byte ranges — and, when a pre-compressed sibling exists next to
-/// the file (`crypto.wasm.br`, `crypto.wasm.gz`) and the client accepts that
-/// encoding, serves it with the matching `Content-Encoding`. The Matrix
-/// crypto WebAssembly is ~7.5 MB raw and ~1.3 MB brotli-compressed, which on
-/// a phone is the difference between a usable onboarding and a broken one.
-/// The content type is then overwritten with the one the *original*
-/// extension calls for, which is what makes `.wasm` exactly
-/// `application/wasm` whichever encoding went out.
-async fn serve(path: &std::path::Path, content_type: &'static str, request: Request) -> Response {
+/// Stated, never left to the browser's heuristics: with no `Cache-Control` a
+/// browser reuses a response for a fraction of its age without asking, so an
+/// open Companion kept running the previous build after a redeploy — the HTML
+/// it held named the previous chunks, which it also held, and nothing was
+/// requested. The server reported itself current and the screen rendered fine,
+/// and the two disagreed about what the code was; three fixes to #221 were
+/// "verified" against that screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachePolicy {
+    /// `/_app/immutable/*`: the file's name is a hash of its content, so the
+    /// name changes when the content does and the bytes under one name never
+    /// do. Cached hard, for a year, and marked so the browser does not even
+    /// revalidate.
+    Immutable,
+    /// Everything else, the HTML first: the entry document is what names the
+    /// current chunks, so it is the one thing that must never be reused blind.
+    /// Revalidated on every load; unchanged costs a 304.
+    Revalidate,
+}
+
+impl CachePolicy {
+    fn for_path(path: &str) -> Self {
+        if path.starts_with("/_app/immutable/") {
+            Self::Immutable
+        } else {
+            Self::Revalidate
+        }
+    }
+
+    fn header(self) -> HeaderValue {
+        HeaderValue::from_static(match self {
+            Self::Immutable => "public, max-age=31536000, immutable",
+            Self::Revalidate => "no-cache",
+        })
+    }
+}
+
+/// A validator for one representation of one file: its modification time and
+/// size, and the encoding it went out in.
+///
+/// Metadata and not a digest of the bytes, because it is computed on every
+/// request and the crypto module is megabytes; a build writes every file
+/// afresh, so a redeploy moves the time. The encoding is part of it because
+/// the brotli sibling and the raw file are two representations of one path,
+/// and a cache handed the one under the other's tag would serve compressed
+/// bytes to a client that cannot decode them.
+fn etag(metadata: &std::fs::Metadata, encoding: Option<&HeaderValue>) -> Option<HeaderValue> {
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let encoding = encoding
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("identity");
+    HeaderValue::from_str(&format!(
+        "\"{:x}-{:x}-{:x}-{encoding}\"",
+        modified.as_secs(),
+        modified.subsec_nanos(),
+        metadata.len()
+    ))
+    .ok()
+}
+
+/// Whether an `If-None-Match` names this representation, so the answer can be
+/// a 304. `*` matches anything that exists, per RFC 9110 §13.1.2; a weak
+/// prefix on the client's side is ignored, since the comparison is weak.
+fn if_none_match(request: &axum::http::HeaderMap, etag: &HeaderValue) -> bool {
+    let Some(candidates) = request
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(etag) = etag.to_str() else {
+        return false;
+    };
+    candidates.split(',').map(str::trim).any(|candidate| {
+        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+    })
+}
+
+/// Serves one file, with the content type the path calls for and the cache
+/// policy its half of the export gets.
+///
+/// `ServeFile` brings the parts worth not hand-rolling — `If-Modified-Since`,
+/// byte ranges — and, when a pre-compressed sibling exists next to the file
+/// (`crypto.wasm.br`, `crypto.wasm.gz`) and the client accepts that encoding,
+/// serves it with the matching `Content-Encoding`. The Matrix crypto
+/// WebAssembly is ~7.5 MB raw and ~1.3 MB brotli-compressed, which on a phone
+/// is the difference between a usable onboarding and a broken one. The content
+/// type is then overwritten with the one the *original* extension calls for,
+/// which is what makes `.wasm` exactly `application/wasm` whichever encoding
+/// went out.
+///
+/// What `ServeFile` does not bring is an `ETag` or `Cache-Control`, so those
+/// are set here, and an `If-None-Match` that names the representation about
+/// to go out turns the answer into a 304 before its body is read.
+async fn serve(
+    path: &std::path::Path,
+    content_type: &'static str,
+    cache: CachePolicy,
+    request: Request,
+) -> Response {
+    let metadata = tokio::fs::metadata(path).await.ok();
+    let request_headers = request.headers().clone();
     let served = ServeFile::new(path)
         .precompressed_br()
         .precompressed_gzip()
@@ -517,11 +615,31 @@ async fn serve(path: &std::path::Path, content_type: &'static str, request: Requ
         .await
         .expect("serving a file is infallible");
     let mut response = served.map(Body::new);
-    if response.status().is_success() {
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if !response.status().is_success() {
+        return response;
     }
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, cache.header());
+    let Some(etag) = metadata
+        .as_ref()
+        .and_then(|metadata| etag(metadata, response.headers().get(header::CONTENT_ENCODING)))
+    else {
+        return response;
+    };
+    if if_none_match(&request_headers, &etag) {
+        let mut not_modified = Response::new(Body::empty());
+        *not_modified.status_mut() = StatusCode::NOT_MODIFIED;
+        not_modified.headers_mut().insert(header::ETAG, etag);
+        not_modified
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, cache.header());
+        return not_modified;
+    }
+    response.headers_mut().insert(header::ETAG, etag);
     response
 }
 
