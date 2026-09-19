@@ -52,7 +52,8 @@ use anyhow::Result;
 use harness::gateway::{contact_entry, network_entry, sensor_env_granting};
 use harness::{
     ensure_stack, make_native_room, make_signal_portal, make_whatsapp_portal, poll_until,
-    validate_against_contract, Bot, Bus, SensorProc, StoredMessage, SENSOR_USER_ID,
+    toggle_presence_one_account_at_a_time, validate_against_contract, Bot, Bus, SensorProc,
+    StoredMessage, SENSOR_USER_ID,
 };
 use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -218,14 +219,19 @@ async fn a_presence_events_network_is_the_subjects_and_never_a_sort() -> Result<
     // routing that follows a join is simply retried. The two subjects that
     // *must* produce an event are what the poll waits for, so the absence
     // asserted afterwards is an absence and not a "not yet".
+    //
+    // One account at a time, which matters most here of anywhere: the
+    // homeserver reports a subject's current presence rather than each
+    // transition, so accounts that change inside one of the Sensor's sync
+    // cycles can cost each other their transitions outright (issue #197,
+    // `toggle_presence_one_account_at_a_time`) — and this is the only suite
+    // that staged three at once, with the two the poll waits for at the back
+    // of the queue.
     poll_until(
         || async {
-            for state in ["offline", "online"] {
-                for bot in [&native, &ambiguous, &ghost] {
-                    bot.set_presence(state).await.ok()?;
-                }
-                sleep(Duration::from_millis(250)).await;
-            }
+            toggle_presence_one_account_at_a_time(&[&native, &ambiguous, &ghost])
+                .await
+                .ok()?;
             let native_events = presence_of(
                 &bus,
                 &native_home,

@@ -51,17 +51,15 @@
 mod harness;
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 use anyhow::Result;
 use harness::gateway::{contact_entry, network_entry, sensor_env_granting};
 use harness::{
     contract_type_allows_consent, contract_types_about_a_person, ensure_stack,
-    make_whatsapp_portal, poll_until, validate_against_contract, Bot, Bus, SensorProc,
-    StoredMessage, SENSOR_USER_ID,
+    make_whatsapp_portal, poll_until, toggle_presence_one_account_at_a_time,
+    validate_against_contract, Bot, Bus, SensorProc, StoredMessage, SENSOR_USER_ID,
 };
 use serde_json::Value;
-use tokio::time::sleep;
 
 const STREAM: &str = "twalk";
 
@@ -334,13 +332,23 @@ async fn a_bridge_bot_is_dropped_and_a_contact_in_the_same_room_is_published() -
     // what the poll waits for — which is the point of pairing them. If the
     // Sensor had dropped presence wholesale rather than the bot's, this test
     // would time out here rather than pass quietly.
+    //
+    // The two accounts are toggled **one at a time**, and that is load-bearing
+    // rather than tidy (issue #197): toggling them in the same instant made the
+    // homeserver report the bot's transitions and swallow the contact's
+    // `online` one, every round, so this test timed out having proved exactly
+    // the half that is not the point. `toggle_presence_one_account_at_a_time`
+    // carries the mechanism. What has not changed is that both accounts do the
+    // same thing in the same room in the same round — their messages and
+    // reactions are still simultaneous above, which is the controlled
+    // comparison ADR 0026 asks for; only the presence transitions are
+    // serialised, because presence is the one thing here that is not
+    // room-scoped and is delivered as a current state rather than as an event.
     let presence = poll_until(
         || async {
-            for state in ["offline", "online"] {
-                bot.set_presence(state).await.ok()?;
-                contact.set_presence(state).await.ok()?;
-                sleep(Duration::from_millis(250)).await;
-            }
+            toggle_presence_one_account_at_a_time(&[&bot, &contact])
+                .await
+                .ok()?;
             let stored = events_for(&bus, "inbound.presence.updated", &room_id)
                 .await
                 .ok()?;

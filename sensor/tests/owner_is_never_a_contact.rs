@@ -57,17 +57,16 @@
 mod harness;
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 use anyhow::Result;
 use harness::gateway::{network_entry, sensor_env_granting};
 use harness::{
     contract_schema, contract_type_allows_consent, contract_types_about_a_person, ensure_stack,
-    make_whatsapp_portal, poll_until, sha256_hex, validate_against_contract, Bot, Bus, SensorProc,
-    StoredMessage, MATRIX_USER_ID_SUBJECT_PATTERN, SENSOR_USER_ID,
+    make_whatsapp_portal, poll_until, sha256_hex, toggle_presence_one_account_at_a_time,
+    validate_against_contract, Bot, Bus, SensorProc, StoredMessage, MATRIX_USER_ID_SUBJECT_PATTERN,
+    SENSOR_USER_ID,
 };
 use serde_json::Value;
-use tokio::time::sleep;
 
 const STREAM: &str = "twalk";
 
@@ -460,13 +459,18 @@ async fn the_owners_own_presence_is_not_published_and_a_contacts_still_is() -> R
     // what the poll waits for — which is the point of pairing them. If the
     // Sensor had dropped presence wholesale rather than the owner's, this
     // test would time out here rather than pass quietly.
+    //
+    // One account at a time: two accounts whose presence changes inside one of
+    // the Sensor's sync cycles cost the homeserver one of the two transitions,
+    // and it is the second account's that goes — which here is the contact's,
+    // the half that matters (issue #197,
+    // `toggle_presence_one_account_at_a_time`). This suite had the same shape
+    // as the one the defect was found in and had not yet been seen to fail.
     let contact_events = poll_until(
         || async {
-            for state in ["offline", "online"] {
-                owner_ghost.set_presence(state).await.ok()?;
-                contact.set_presence(state).await.ok()?;
-                sleep(Duration::from_millis(250)).await;
-            }
+            toggle_presence_one_account_at_a_time(&[&owner_ghost, &contact])
+                .await
+                .ok()?;
             let stored = events_for(&bus, "inbound.presence.updated", &room_id)
                 .await
                 .ok()?;

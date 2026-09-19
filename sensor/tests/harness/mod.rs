@@ -507,6 +507,64 @@ impl Bot {
     }
 }
 
+/// How long one presence transition needs before the next one may be caused.
+///
+/// Measured on a stack created seconds earlier (issue #197), with the Sensor
+/// running and nothing else changing presence: a transition reaches the bus in
+/// 45–120 ms when the Sensor is idle, and in 924–1026 ms when it is issued the
+/// instant the Sensor finished delivering the previous one. 1.5 s is that
+/// worst case with margin.
+///
+/// It is not a timeout and it is not a wait-it-out: a transition that is late
+/// still arrives, and one that is *lost* never does — see
+/// [`toggle_presence_one_account_at_a_time`] for why losing one is the failure
+/// this interval exists to prevent.
+pub const PRESENCE_SETTLE: Duration = Duration::from_millis(1500);
+
+/// Drives each account in turn through an `offline` → `online` presence
+/// transition, **one account at a time and one transition at a time**.
+///
+/// Every suite that needs a contact's presence on the bus must stage it this
+/// way, and the reason is not politeness about load. Matrix presence reaches a
+/// client as a **current-state** stream rather than as events: a sync response
+/// carries the present state of each user who changed since the client's
+/// token, and the presence key in its `next_batch` is the head of the
+/// homeserver's presence stream — not the position of the last update the
+/// response actually carried. So when two accounts change presence inside one
+/// of the client's sync cycles, the response can carry one of them while
+/// acknowledging both positions. The observable consequence, and the one this
+/// helper exists for, is that the other account's transition is **never
+/// reported and never corrected**: a current state that is already current is
+/// not redelivered, and that account's state does not change again.
+///
+/// Issue #197 is what that cost. `bridge_bots_are_not_contacts.rs` toggled the
+/// bridge bot and the contact back to back — the bot first — 250 ms apart, and
+/// retried the pair. The Sensor's presence cycle is about a second (the
+/// measurement is on [`PRESENCE_SETTLE`]), so every round it delivered both of
+/// the bot's transitions and the contact's `offline`, and swallowed the
+/// contact's `online`: 41 rounds, 41 `offline` events on the bus, no `online`
+/// at all, and a 60-second timeout that had proved the bot dropped and nothing
+/// whatever about the contact. Which half survived was decided by nothing but
+/// which account the fixture PUT first.
+///
+/// Three suites had that shape (`bridge_bots_are_not_contacts.rs`,
+/// `owner_is_never_a_contact.rs`, `presence_network.rs`) and `presence.rs`,
+/// which toggles a single account, is the control that never flaked. Hence one
+/// helper rather than four rhythms: the hazard is "more than one account's
+/// presence changed at once", and it is not visible from a call site.
+///
+/// `offline` first, because Synapse broadcasts transitions and an account left
+/// `online` by an earlier run would otherwise produce none at all.
+pub async fn toggle_presence_one_account_at_a_time(bots: &[&Bot]) -> Result<()> {
+    for bot in bots {
+        for state in ["offline", "online"] {
+            bot.set_presence(state).await?;
+            tokio::time::sleep(PRESENCE_SETTLE).await;
+        }
+    }
+    Ok(())
+}
+
 fn chunk_extract(response: &Value) -> Result<Vec<Value>> {
     let chunk = response
         .get("chunk")
