@@ -51,7 +51,7 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 | `sensor-deployment` | advisory | 61 s, 3 tests | small | 634 MB | **warm images** |
 | `gateway-deployment` | advisory | 56 s, 4 tests | small | 305 MB | **warm images** |
 | `hermes-full-loop` | advisory | 39 s | small | 153 MB | **warm images**; +10 containers |
-| `companion-e2e-stack` | advisory | COMPANION_E2E_DOC | +654 MB Chromium | — | builds a Gateway and a Sensor |
+| `companion-e2e-stack` | advisory | **277 s** — 98 passed, 1 flaky, **1 failed** | +4.9 GB (Gateway and Sensor builds) | 3 869 MB | builds a Gateway *and* a Sensor from cold |
 
 **A full required run is about 11½ minutes**, warm, when a change to `contracts/` or `tests/harness/` selects all three stack suites and they run one at a time: 383 + 163 + 132 s, with the hosted suites finishing inside 30 s alongside. A change to one component alone is 2–6½ minutes.
 
@@ -63,7 +63,7 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 
 **One required-tier test currently needs a warm stack.** `sensor/tests/bridge_bots_are_not_contacts.rs::a_bridge_bot_is_dropped_and_a_contact_in_the_same_room_is_published` times out waiting for a contact's presence event on a Synapse that has just been created (twice) and passes in 11 s on one that has already served a suite (four times). That is why `stack-teardown.sh` takes the deployment projects down with `down -v` and **leaves the shared test stack up**: tearing it down every run would make a required check red for a reason that is not the change under test. The comment in that script labels it as a workaround, and it stops being one when the test's ticket closes.
 
-**One flake seen in the advisory tier while measuring**, and it is what the retry policy looks like in practice: the `consent` Playwright project's "a contact who has written appears as awaiting a decision" failed and passed on its retry, so Playwright recorded it as *flaky* rather than *passed* — which is the outcome the required tier deliberately does not accept.
+**The advisory tier is red today, and that is the reason it is advisory.** One full `companion-e2e-stack` run, 277 s: 98 passed, one *flaky* and one *failed*. The flaky one is the `consent` project's "a contact who has written appears as awaiting a decision", which failed and passed on Playwright's one CI retry — recorded as flaky rather than passed, which is the outcome the required tier deliberately does not accept. The failed one is the same project's "returning a contact to undecided is a decision, not an erasure", which failed on both attempts (`expect(received).toBe(false)`, received `true`) and so is a candidate defect rather than a flake. Eight later specs in that project did not run at all once it failed. If you are reading this because that suite is red, that is the state it was in when CI was built — check the ticket before assuming your change caused it.
 
 ## Adding a suite
 
