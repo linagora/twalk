@@ -551,11 +551,7 @@ impl MatrixUser {
     /// quietly act as the wrong account — the mistake #171 was.
     fn url(&self, path: &str) -> String {
         match &self.masquerade {
-            Some(user_id) => format!(
-                "{}{path}?user_id={}",
-                synapse_url(),
-                path_segment(user_id)
-            ),
+            Some(user_id) => format!("{}{path}?user_id={}", synapse_url(), path_segment(user_id)),
             None => format!("{}{path}", synapse_url()),
         }
     }
@@ -711,6 +707,20 @@ impl MatrixUser {
         Ok(())
     }
 
+    /// Leaves a room.
+    pub async fn leave(&self, room_id: &str) -> Result<()> {
+        self.http
+            .post(self.url(&format!("/_matrix/client/v3/rooms/{room_id}/leave")))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("failed to leave a room")?
+            .error_for_status()
+            .context("the homeserver refused the leave")?;
+        Ok(())
+    }
+
     /// Joins a room this account was invited to — what the Sensor does on its
     /// own, played here by a test account.
     pub async fn join(&self, room_id: &str) -> Result<()> {
@@ -759,8 +769,16 @@ impl MatrixUser {
     /// knows not to count the bot as somebody in the conversation.
     pub async fn make_portal(&self, name: &str, protocol_id: &str) -> Result<String> {
         let room_id = self.create_room(name).await?;
+        self.mark_as_portal(&room_id, protocol_id, name).await?;
+        Ok(room_id)
+    }
+
+    /// Writes the `m.bridge` marker into a room that already exists — what a
+    /// bridge does to a successor it re-creates after a migration, since the
+    /// homeserver's room upgrade copies no custom state.
+    pub async fn mark_as_portal(&self, room_id: &str, protocol_id: &str, name: &str) -> Result<()> {
         self.send_state_event(
-            &room_id,
+            room_id,
             "m.bridge",
             &format!("test.twalk/{protocol_id}"),
             serde_json::json!({
@@ -769,8 +787,37 @@ impl MatrixUser {
                 "channel": { "id": format!("{protocol_id}-{name}"), "displayname": name },
             }),
         )
-        .await?;
-        Ok(room_id)
+        .await
+    }
+
+    /// Replaces a room with a new one, as the homeserver does it: the old
+    /// room gets an `m.room.tombstone` naming the successor, the successor's
+    /// `m.room.create` names its predecessor. Returns the successor's id.
+    ///
+    /// This is a Matrix room upgrade and not a bridge's migration, on
+    /// purpose: `m.room.tombstone` predates every bridge, and ADR 0029 wants
+    /// what follows from it to hold for a native room exactly as for a
+    /// portal. The homeserver copies the room's name and power levels but
+    /// **not** its `m.bridge` marker and not its members — a bridge re-marks
+    /// and re-invites, so a test that wants a portal successor does the same.
+    pub async fn upgrade_room(&self, room_id: &str) -> Result<String> {
+        let body: serde_json::Value = self
+            .http
+            .post(self.url(&format!("/_matrix/client/v3/rooms/{room_id}/upgrade")))
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({ "new_version": "10" }))
+            .send()
+            .await
+            .context("failed to upgrade a room")?
+            .error_for_status()
+            .context("the homeserver refused the room upgrade")?
+            .json()
+            .await
+            .context("the upgrade answer is not JSON")?;
+        body["replacement_room"]
+            .as_str()
+            .map(str::to_owned)
+            .context("the upgrade answer names no replacement_room")
     }
 
     /// The accounts joined to a room, as this account can read them.
@@ -994,8 +1041,7 @@ pub fn gateway_env_with_bridges_and_consent(
 /// #206). Long enough to pass the Gateway's own minimum, which is the point:
 /// a suite that used a short one would be testing a Gateway that refuses to
 /// start.
-pub const HERMES_ANSWER_SECRET: &str =
-    "a-throwaway-hermes-answer-secret-for-the-test-stack-only";
+pub const HERMES_ANSWER_SECRET: &str = "a-throwaway-hermes-answer-secret-for-the-test-stack-only";
 
 /// The domain the Gateway names a published suggestion's persona under
 /// (`GATEWAY_HERMES_DOMAIN`), and therefore the authority of every `source`

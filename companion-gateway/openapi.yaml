@@ -4444,12 +4444,18 @@ components:
           network_conversation_id,
           members,
           observation,
+          moved_from,
+          unreadable,
         ]
       additionalProperties: false
       properties:
         room_id:
           type: string
-          description: The portal room on this deployment's homeserver.
+          description: |
+            The portal room on this deployment's homeserver — the room that
+            is **alive**. A room replaced by another (`m.room.tombstone`) is
+            never a row: its conversation appears once, at the successor,
+            with `moved_from` saying where it came from (ADR 0029).
         bridge_id:
           type: string
           description: |
@@ -4496,7 +4502,7 @@ components:
             the room.
         observation:
           type: string
-          enum: [observing, invited, absent]
+          enum: [observing, invited, absent, moved]
           description: |
             `observing` — the Sensor has joined, and this conversation
             reaches the bus.
@@ -4505,21 +4511,44 @@ components:
             name this bridge's bot.
             `absent` — the Sensor is not in the room and has not been asked
             to be. The default for every portal a bridge builds.
+            `moved` — the conversation's room was replaced while the Sensor
+            was in it, and the Sensor is not in the successor (ADR 0029). A
+            decision is on record about this conversation and has silently
+            stopped meaning anything; this state is what makes it a sentence
+            instead of a zero. `moved_from` names the dead room.
+        moved_from:
+          type: [string, "null"]
+          description: |
+            The room this conversation lived in before it was replaced —
+            the immediate predecessor, out of the homeserver's own tombstone
+            chain — or `null` for a room that was never replaced. Present
+            whatever the observation: a conversation nobody chose moves too,
+            and stays `absent`.
+        unreadable:
+          type: [string, "null"]
+          description: |
+            `null` normally. A reason when this row stands for a successor
+            the register **could not read** — the bridge bot is not in it —
+            and was built from the tombstone that names it: the name, network
+            and count are the dead room's, the room id is the successor's. A
+            tombstone that points into the dark is a fact, not a reason to
+            fold the conversation into nothing.
 
     PortalSummary:
       type: object
       description: |
         The counts the deployment states rather than leaving a client to
         derive: the same numbers `/metrics` carries.
-      required: [total, observing, invited, absent]
+      required: [total, observing, invited, absent, moved]
       additionalProperties: false
       properties:
         total:
           type: integer
           minimum: 0
           description: |
-            Portal rooms across every **readable** bridge. Read it together
-            with `bridges`.
+            Conversations across every **readable** bridge, each counted
+            once whatever its history of rooms. Read it together with
+            `bridges`.
         observing:
           type: integer
           minimum: 0
@@ -4529,6 +4558,13 @@ components:
         absent:
           type: integer
           minimum: 0
+        moved:
+          type: integer
+          minimum: 0
+          description: |
+            Conversations that moved while the Sensor was in them and whose
+            successor it is not in — decisions on record that no longer
+            hold (ADR 0029, #253).
 
     PortalBridgeReading:
       type: object

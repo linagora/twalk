@@ -40,7 +40,9 @@ function portal(
 		name,
 		network_conversation_id: networkConversationId,
 		members,
-		observation
+		observation,
+		moved_from: null,
+		unreadable: null
 	};
 }
 

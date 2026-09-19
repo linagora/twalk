@@ -28,9 +28,8 @@ mod harness;
 use anyhow::{Context, Result};
 use harness::{
     companion_build, ensure_stack, gateway_env_with_portals, parse_exposition,
-    signed_in_device_token, GatewayProc, MatrixUser, OWNER_LOCALPART, PORTAL_BRIDGE_ID,
-    PORTAL_SENDER_BRIDGE_ID, PORTAL_TOKENLESS_BRIDGE_ID, PORTALS_APPSERVICE_SENDER,
-    SENSOR_USER_ID,
+    signed_in_device_token, GatewayProc, MatrixUser, OWNER_LOCALPART, PORTALS_APPSERVICE_SENDER,
+    PORTAL_BRIDGE_ID, PORTAL_SENDER_BRIDGE_ID, PORTAL_TOKENLESS_BRIDGE_ID, SENSOR_USER_ID,
 };
 use serde_json::{json, Value};
 
@@ -82,6 +81,22 @@ impl Running {
             member.join(&room_id).await?;
         }
         Ok(room_id)
+    }
+
+    /// A bridge migrating a conversation to a new room, as mautrix does on a
+    /// Telegram supergroup migration and as a homeserver does on a room
+    /// upgrade: the old room is tombstoned, the successor re-marked as a
+    /// portal, and the conversation's members pulled back in. Nobody invites
+    /// the Sensor anywhere — that is the register's decision (#255), not the
+    /// bridge's.
+    async fn replace_portal(&self, old: &str, name: &str) -> Result<String> {
+        let new = self.bridge_bot.upgrade_room(old).await?;
+        self.bridge_bot
+            .mark_as_portal(&new, "whatsapp", name)
+            .await?;
+        self.bridge_bot.invite(&new, &self.owner.user_id).await?;
+        self.owner.join(&new).await?;
+        Ok(new)
     }
 
     async fn register(&self) -> Result<Value> {
@@ -280,6 +295,166 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
         ),
         Some(1),
         "and the gauge says how many bridges the first number does not cover: {metrics:?}"
+    );
+
+    running.stop().await;
+    Ok(())
+}
+
+/// Issue #253 / ADR 0029: a conversation outlives its room, but the room stays
+/// the key — and the tombstone chain is what reconciles the two.
+///
+/// A room the Sensor was observing is replaced. The register follows
+/// `m.room.tombstone` to the successor and lists the conversation **once**,
+/// there, saying where it came from. The Sensor is not in the successor, and
+/// that is the fourth observation state, `moved`: distinct from a portal
+/// nobody chose, so the deployment can say *"this conversation moved and the
+/// Sensor is not in the new room"* instead of a silent zero — which is #105's
+/// failure happening to a decision already on record. A room the Sensor was
+/// never in moves too, and stays what it was: `absent`.
+#[tokio::test]
+async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() -> Result<()> {
+    let running = Running::start("portals-moved").await?;
+
+    let chosen = running.build_portal("Maria (moves)").await?;
+    let ignored = running.build_portal("Chess club (moves)").await?;
+    // The user chose one of them: the Gateway invites the Sensor, which joins.
+    running.set_observation(&[&chosen], true).await?;
+    running.sensor.join(&chosen).await?;
+    let before = running.register().await?;
+    assert_eq!(
+        observation_of(&before, &chosen).as_deref(),
+        Some("observing")
+    );
+    assert_eq!(observation_of(&before, &ignored).as_deref(), Some("absent"));
+
+    // Both rooms are replaced — a supergroup migration, a room upgrade. The
+    // bridge re-marks the successors and pulls the conversation's members
+    // back in; nobody invites the Sensor anywhere.
+    let mut successors = Vec::new();
+    for old in [&chosen, &ignored] {
+        successors.push(running.replace_portal(old, "moved").await?);
+    }
+    let (chosen_successor, ignored_successor) = (&successors[0], &successors[1]);
+
+    let register = running.register().await?;
+    // Once, at the successor: two rows would make "the Sensor is outside 30
+    // of your 32 conversations" false by one at every migration.
+    assert!(
+        portal(&register, &chosen).is_none(),
+        "the dead room is not a row: {register}"
+    );
+    assert!(
+        portal(&register, &ignored).is_none(),
+        "the dead room is not a row: {register}"
+    );
+    let moved = portal(&register, chosen_successor).context("the successor is listed")?;
+    assert_eq!(moved["observation"], json!("moved"), "{moved}");
+    assert_eq!(moved["moved_from"], json!(chosen), "{moved}");
+    assert_eq!(
+        moved["members"],
+        json!(1),
+        "the owner, and nobody else: {moved}"
+    );
+    let untouched = portal(&register, ignored_successor).context("the successor is listed")?;
+    assert_eq!(
+        untouched["observation"],
+        json!("absent"),
+        "a conversation the Sensor was never in moves and stays absent: {untouched}"
+    );
+    assert_eq!(untouched["moved_from"], json!(ignored), "{untouched}");
+    assert_eq!(register["summary"]["moved"], json!(1), "{register}");
+
+    // The fact is a number too.
+    let metrics = running.metrics().await?;
+    assert_eq!(
+        sample(
+            &metrics,
+            "twalk_companion_gateway_portal_rooms{observation=\"moved\"}"
+        ),
+        Some(1),
+        "{metrics:?}"
+    );
+
+    // The homeserver agrees about where the Sensor is, which is the only
+    // thing the register was allowed to derive `moved` from.
+    assert_eq!(
+        running.sensor_membership(&chosen).await?.as_deref(),
+        Some("join")
+    );
+    assert_eq!(running.sensor_membership(chosen_successor).await?, None);
+
+    // And a moved conversation can be decided again where it now lives: a
+    // tick on the successor invites the Sensor there, rather than answering
+    // "already observed" about a room it is not in.
+    let answer = running.set_observation(&[chosen_successor], true).await?;
+    assert_eq!(
+        outcome_for(&answer, chosen_successor).as_deref(),
+        Some("invited"),
+        "{answer}"
+    );
+    assert_eq!(
+        running
+            .sensor_membership(chosen_successor)
+            .await?
+            .as_deref(),
+        Some("invite")
+    );
+
+    running.stop().await;
+    Ok(())
+}
+
+/// A chain of two replacements resolves to the last room, and a successor the
+/// bridge bot cannot read is still named — a tombstone that points into the
+/// dark is a fact, not a reason to fold the conversation into nothing.
+#[tokio::test]
+async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_named() -> Result<()>
+{
+    let running = Running::start("portals-moved-chain").await?;
+
+    let first = running.build_portal("Maria (chain)").await?;
+    running.set_observation(&[&first], true).await?;
+    running.sensor.join(&first).await?;
+
+    // First → second → third, each re-marked as the bridge would.
+    let second = running.bridge_bot.upgrade_room(&first).await?;
+    running
+        .bridge_bot
+        .mark_as_portal(&second, "whatsapp", "chain-2")
+        .await?;
+    let third = running.replace_portal(&second, "chain-3").await?;
+
+    let register = running.register().await?;
+    assert!(portal(&register, &first).is_none(), "{register}");
+    assert!(portal(&register, &second).is_none(), "{register}");
+    let last = portal(&register, &third).context("the last room is the row")?;
+    assert_eq!(last["observation"], json!("moved"), "{last}");
+    assert_eq!(
+        last["moved_from"],
+        json!(second),
+        "the immediate predecessor: {last}"
+    );
+    assert_eq!(register["summary"]["moved"], json!(1), "{register}");
+
+    // A successor the bridge bot is not in: the bot leaves it, so the register
+    // can read the tombstone but not the room it points at.
+    let dark = running.build_portal("Maria (dark)").await?;
+    running.set_observation(&[&dark], true).await?;
+    running.sensor.join(&dark).await?;
+    let beyond = running.bridge_bot.upgrade_room(&dark).await?;
+    running.bridge_bot.leave(&beyond).await?;
+
+    let register = running.register().await?;
+    assert!(portal(&register, &dark).is_none(), "{register}");
+    let named = portal(&register, &beyond).context("the unreadable successor is still a row")?;
+    assert_eq!(named["observation"], json!("moved"), "{named}");
+    assert_eq!(named["moved_from"], json!(dark), "{named}");
+    assert!(
+        named["unreadable"]
+            .as_str()
+            .is_some_and(|why| !why.is_empty()),
+        "the row says the successor could not be read: {named}"
     );
 
     running.stop().await;
