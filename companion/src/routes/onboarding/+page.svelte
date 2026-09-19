@@ -39,11 +39,24 @@
 	} from '$lib/onboarding/account';
 	import { createAccount, RegistrationError } from '$lib/onboarding/register';
 	import type { BootstrapStep } from '$lib/crypto/bootstrap';
+	import type { HandoverOutcome } from '$lib/matrix/handover';
 
 	type Stage = 'account' | 'working' | 'key' | 'done';
 
 	let stage = $state<Stage>('account');
-	let step = $state<BootstrapStep | 'creating' | 'signing-in'>('creating');
+	let step = $state<BootstrapStep | 'creating' | 'signing-in' | 'handover'>('creating');
+
+	/**
+	 * How the handover room ended (#226): the one encrypted room this account
+	 * shares with the Sensor, without which the browser cannot later hand the
+	 * Sensor a credential at all (ADR 0034). `null` until the step has run.
+	 *
+	 * It is reported and never assumed. A send to a user the crypto machine does
+	 * not track resolves successfully having sent nothing, so a Companion that
+	 * treated "the room was created" as "the handover will work" would be the
+	 * defect this step exists to close.
+	 */
+	let handover = $state<HandoverOutcome | null>(null);
 
 	let username = $state('');
 	let password = $state('');
@@ -117,11 +130,32 @@
 			// fails to sign in.
 			step = 'signing-in';
 			const { signInToGateway } = await import('$lib/session/signin');
-			await signInToGateway({
+			const signedIn = await signInToGateway({
 				baseUrl,
 				userId: session.userId,
 				accessToken: session.accessToken
 			});
+
+			// The one encrypted room this account shares with the Sensor (#226).
+			// Last, because it needs the Gateway session to learn which Sensor
+			// this deployment runs, and it needs the crypto stack the bootstrap
+			// above brought up. It never costs the user their account: every way
+			// it can end is an outcome stated on the next screen.
+			step = 'handover';
+			const { ensureHandoverRoom } = await import('$lib/matrix/handover');
+			const { handoverCrypto } = await import('$lib/crypto/bootstrap');
+			const crypto = handoverCrypto();
+			handover =
+				crypto === null
+					? { kind: 'failed', detail: 'the crypto stack is not running in this tab' }
+					: await ensureHandoverRoom({
+							baseUrl,
+							accessToken: session.accessToken,
+							userId: session.userId,
+							sensorUserId: signedIn.sensor,
+							roomName: $t('handover.roomName'),
+							crypto
+						});
 
 			stage = 'key';
 		} catch (cause) {
@@ -199,6 +233,44 @@
 			<h1>{$t('done.title')}</h1>
 			<p class="subtitle" data-testid="account-id">{$t('done.body', { id: accountId })}</p>
 		</header>
+		<!--
+			What happened to the room this account shares with the Sensor (#226).
+			Stated on the way out rather than left to the logs: without it Twalk
+			cannot later hand the Sensor the credential it needs to reply on the
+			user's behalf (ADR 0034), and the symptom of not saying so is a reply
+			that never arrives for a reason nobody can trace.
+		-->
+		{#if handover !== null}
+			<p
+				class="small muted"
+				data-testid="handover"
+				data-kind={handover.kind}
+				data-sensor-devices={handover.kind === 'ready' ? handover.sensorDevices : 0}
+				hidden={handover.kind !== 'ready'}
+			>
+				{$t('handover.ready')}
+			</p>
+			{#if handover.kind !== 'ready'}
+				<div class="card card--warning" role="status" data-testid="handover-problem">
+					<p class="card__title">
+						<Icon name="error" size="dense" />
+						{$t('handover.problem.title')}
+					</p>
+					<p>
+						{#if handover.kind === 'no-sensor'}
+							{$t('handover.problem.noSensor')}
+						{:else if handover.kind === 'sensor-did-not-join'}
+							{$t('handover.problem.didNotJoin')}
+						{:else if handover.kind === 'sensor-untracked'}
+							{$t('handover.problem.untracked')}
+						{:else}
+							{$t('handover.problem.failed', { detail: handover.detail })}
+						{/if}
+					</p>
+					<p class="small muted">{$t('handover.problem.after')}</p>
+				</div>
+			{/if}
+		{/if}
 		<!--
 			The way on, and it is a real one. This card said the network screens
 			"are not built yet" — true when #67 wrote it, false since #68 merged

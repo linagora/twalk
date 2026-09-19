@@ -46,6 +46,15 @@ export interface SignedIn {
 	deviceId: string;
 	/** Seconds until the device token expires. */
 	expiresIn: number;
+	/**
+	 * The Sensor this deployment runs (`GATEWAY_SENSOR_USER_ID`), and `null`
+	 * when the operator configured none.
+	 *
+	 * Carried out of the sign-in because onboarding's next step creates a room
+	 * with that account (#226, `$lib/matrix/handover.ts`), and a browser cannot
+	 * derive it: `@sensor:<server>` is a deployment's convention and not a fact.
+	 */
+	sensor: string | null;
 }
 
 /**
@@ -80,7 +89,8 @@ export async function signInToGateway(options: {
 			owner: result.data.owner,
 			homeserver: result.data.homeserver,
 			deviceId: result.data.device.id,
-			expiresIn: result.data.expires_in
+			expiresIn: result.data.expires_in,
+			sensor: result.data.sensor
 		};
 	}
 

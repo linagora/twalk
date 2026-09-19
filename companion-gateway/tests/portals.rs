@@ -576,3 +576,96 @@ async fn nothing_but_a_portal_is_offered_and_nothing_else_is_entered() -> Result
     running.stop().await;
     Ok(())
 }
+
+/// The handover room the Companion creates during onboarding (ticket #226) is
+/// **not** a conversation, and the register's observed count says so even
+/// though the Sensor is a joined member of it.
+///
+/// This is the assertion the ticket cares most about, and it is not the same as
+/// `nothing_but_a_portal_is_offered_and_nothing_else_is_entered`'s: that test's
+/// private room has no Sensor in it, so it could pass on a register that
+/// counted any room the Sensor is in. Consent in Twalk is a membership fact
+/// (ADR 0024) — the register answers "is this observed?" with the Sensor's own
+/// `m.room.member` event — so a room the Sensor joined that this count included
+/// would be consent nobody granted, for a conversation that does not exist.
+///
+/// Three things are asserted here, each against the homeserver's own state:
+///
+/// 1. the Sensor really is joined to the handover room, so the test is about
+///    the dangerous case and not about an absence;
+/// 2. it is in neither the portal list nor `observing`, while the one
+///    conversation that *is* observed still counts — a zero would pass by
+///    accident;
+/// 3. **nobody can post in it**, the room's own creator included, which is what
+///    makes "nothing is ever published on the bus from it" a fact about the
+///    deployment rather than a promise about the Sensor's code. The Sensor
+///    publishes what it reads in the rooms it is in, and would read this one as
+///    native Matrix traffic (`sensor/src/network.rs` resolves a room with no
+///    `m.bridge` to `matrix`); the reason it never publishes anything from here
+///    is that no event it could publish can exist.
+#[tokio::test]
+async fn the_room_the_sensor_shares_with_the_owner_is_not_a_conversation() -> Result<()> {
+    let running = Running::start("portals-handover").await?;
+    let chess = running.build_portal("Échecs en Yvelines").await?;
+
+    // One real conversation, really observed, so the count under test is a
+    // number rather than a zero that any bug would also produce.
+    running.set_observation(&[&chess], true).await?;
+    running.sensor.join(&chess).await?;
+
+    // And the handover room: the owner's own session creates it, exactly as the
+    // Companion's does in the browser, and the Sensor accepts the invitation as
+    // it accepts any from the owner (`SENSOR_ALLOWED_INVITERS`).
+    let handover = running
+        .owner
+        .make_handover_room("Twalk — internal", SENSOR_USER_ID)
+        .await?;
+    running.sensor.join(&handover).await?;
+    assert_eq!(
+        running.owner.membership(&handover, SENSOR_USER_ID).await?,
+        Some("join".to_owned()),
+        "the premise: the Sensor is a joined member, which is what makes this test worth having"
+    );
+
+    let register = running.register().await?;
+    assert!(
+        portal(&register, &handover).is_none(),
+        "the handover room is not offered as a conversation: {register}"
+    );
+    assert_eq!(
+        register["summary"]["total"], 1,
+        "the deployment has one conversation, not two: {register}"
+    );
+    assert_eq!(
+        register["summary"]["observing"], 1,
+        "and the count of observed conversations is the one the user chose: {register}"
+    );
+
+    // Asking to observe it is refused without the appservice credential being
+    // used anywhere: a room id in a request is never a reason to widen its
+    // reach (ADR 0024).
+    let answer = running.set_observation(&[&handover], true).await?;
+    assert_eq!(
+        outcome_for(&answer, &handover).as_deref(),
+        Some("unknown_portal"),
+        "{answer}"
+    );
+
+    // And nobody can put an event in it. Both members are tried, because the
+    // property is about the room and not about a permission one account lacks:
+    // the owner holds power level 100 and the Sensor 0, and `events_default` is
+    // 101.
+    assert_eq!(
+        running.owner.refusal_to_send(&handover, "hello").await?,
+        Some("M_FORBIDDEN".to_owned()),
+        "the room's own creator cannot post in it"
+    );
+    assert_eq!(
+        running.sensor.refusal_to_send(&handover, "hello").await?,
+        Some("M_FORBIDDEN".to_owned()),
+        "and neither can the Sensor"
+    );
+
+    running.stop().await;
+    Ok(())
+}
