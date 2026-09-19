@@ -110,7 +110,13 @@ describe('the catalogues', () => {
 			bridge: 'mautrix-whatsapp',
 			account: '@whatsappbot:twalk.localhost',
 			reason: 'M_FORBIDDEN',
-			name: 'Échecs en Yvelines'
+			name: 'Échecs en Yvelines',
+			// The login renderer (ticket #175). `field` is one field's own name
+			// as its bridge gave it, and `found` what a step asks for now
+			// against the `expected` an explanation was written for — the two
+			// halves of a step whose shape has drifted from its copy (ADR 0030).
+			field: 'Phone number',
+			found: 'password'
 		};
 		for (const key of Object.keys(en) as (keyof typeof en)[]) {
 			expect(translate('en', key, values), key).toBeTruthy();

@@ -15,7 +15,11 @@
 //     what says a fresh code arrived. So the countdown is decoration and
 //     [`qrKey`] — the generation — is what a renderer keys off.
 //   - **Branch on `error.code`, never on `detail`.** `detail` is an operator's
-//     sentence; the codes are the stable contract.
+//     sentence; the codes are the stable contract. Two places *show* a
+//     `detail` without branching on it — the concurrent-login refusal, whose
+//     two facts live nowhere else, and a refused answer, which is the
+//     network's own reason — and both degrade to a screen that still says
+//     what happened when the wording moves.
 
 import type { components } from '$lib/api/schema';
 
@@ -23,29 +27,108 @@ export type BridgeLogin = components['schemas']['BridgeLogin'];
 export type BridgeLoginStep = components['schemas']['BridgeLoginStep'];
 export type LoginErrorCode = NonNullable<BridgeLogin['error']>['code'];
 
-/** A `user_input` step's fields, as bridgev2 describes them. */
+/**
+ * One field a step asks for, from either of the two shapes bridgev2 declares.
+ *
+ * The two are not the same document, which is the thing to know before reading
+ * the parse below (`mautrix/go`, `bridgev2/login.go`):
+ *
+ *   - a `user_input` step's field is a `LoginInputDataField`, whose `type` sits
+ *     on the field itself;
+ *   - a `cookies` step's field is a `LoginCookieField`, which has **no type**:
+ *     it carries `sources`, a *list* of `LoginCookieFieldSource`, each with its
+ *     own `type`, the `name` the value goes by in the browser, and a
+ *     `cookie_domain`. It also carries `required`.
+ *
+ * Reading only the field's own `type` therefore refuses every real bridgev2
+ * cookie step as "the bridge declared no type" — the failure mode this file's
+ * `null` was introduced to make *visible*, arrived at from the other side.
+ */
 export interface InputField {
+	/** What the answer is submitted under. Never what is shown to the user. */
 	readonly id: string;
 	readonly name: string;
 	readonly description: string | null;
-	/** bridgev2's own field types: `phone_number`, `email`, `username`, `password`, `token`. */
-	readonly type: string;
+	/**
+	 * bridgev2's own field type, and `null` when the bridge declared none.
+	 *
+	 * For a `user_input` field it is `type`; for a `cookies` field it is the
+	 * first source's `type`, since that is where a cookie field's type lives.
+	 * The set of values this Companion draws is `step-fields.ts`'s, taken from
+	 * bridgev2's own enumerations rather than from what this repository has
+	 * happened to meet.
+	 *
+	 * `null` rather than a default, because the type is what decides how the
+	 * field is drawn (ADR 0030): this used to become `username`, so a password
+	 * field whose type a bridge had not declared would have been drawn as a
+	 * plain text input with its value on screen. An absent type is refused and
+	 * named, exactly as an unknown one is.
+	 */
+	readonly type: string | null;
 	readonly pattern: string | null;
+	/**
+	 * What the value is called **where the user will find it** — a cookie's or
+	 * a header's own name (`sources[].name`), which is not always the `id` the
+	 * answer is submitted under.
+	 *
+	 * `null` when the bridge named no source, and then the id is the best guess
+	 * available.
+	 */
+	readonly sourceName: string | null;
+	/**
+	 * The domain a grouped field's source names, when it names one.
+	 *
+	 * Read because it is what a jar can say about itself: the bridge stating
+	 * that these values belong to one origin is worth putting on screen.
+	 */
+	readonly cookieDomain: string | null;
+	/**
+	 * Whether the bridge says the login needs this one — `LoginCookieField`'s
+	 * `required`, and `true` for every `user_input` field, which has no such
+	 * member.
+	 *
+	 * It decides whether a field this build cannot collect stops the step:
+	 * refusing a *required* field means the step cannot be answered, and
+	 * refusing an optional one must not.
+	 */
+	readonly required: boolean;
+	/** The choices of a `select` field (`LoginInputDataField.options`). */
+	readonly options: readonly string[];
 }
 
-/** A `cookies` step: the page to sign in on, and what to bring back. */
+/**
+ * A `cookies` step's own members, beside its fields: where to sign in, and the
+ * two extraction hints a browser extension would use.
+ *
+ * What to bring back is **not** here: it is the step's `fields`, read by the
+ * same parser a `user_input` step's are, because "collect these together" is a
+ * signal from the field type and not a special case for one network
+ * (ADR 0030).
+ */
 export interface CookieRequest {
 	readonly url: string | null;
-	readonly fields: readonly string[];
 	readonly extractJs: string | null;
+	/** bridgev2's `wait_for_url_pattern`; a regular expression, not a URL. */
 	readonly waitForUrl: string | null;
 }
 
 /**
- * The state screen 3a/3b/3c renders. A closed union: a screen that handles
- * every member handles every state the Gateway can report, and adding one to
- * the Gateway makes the screens fail to compile rather than fall through to a
- * blank page.
+ * The state one bridge login is in, as a screen draws it.
+ *
+ * A closed union, and the discriminant a **dispatch table** is typed over
+ * (`login-panels.ts`): a kind added here and drawn by nobody is a missing
+ * property in that table, which is a compile error.
+ *
+ * This comment used to claim that adding a state to the Gateway would make the
+ * screens fail to compile rather than fall through to a blank page. That was
+ * false and expensive. A Svelte `{#if}` chain receives no exhaustiveness check
+ * of any kind, `QrLogin.svelte` had no `{:else}`, and an `input`, `cookies` or
+ * `emoji` step therefore drew an empty seventeen-rem box that the session
+ * polled once a second for ever — reached in production by any Telegram QR
+ * login on an account with two-factor authentication. A comment claiming a
+ * guarantee the language does not give is worse than no comment: the table is
+ * what makes the sentence true, and [`unknown_step`] is what happens when the
+ * *Gateway* is newer than this build, which no type can prevent.
  */
 export type LoginView =
 	| { kind: 'idle' }
@@ -74,10 +157,37 @@ export type LoginView =
 	  }
 	/** Scanned, or a blocking step with nothing to draw: "verifying your session…". */
 	| { kind: 'verifying'; instructions: string | null }
+	/** A question with fields to answer. The fields' types decide the controls. */
 	| { kind: 'input'; stepId: string; instructions: string | null; fields: readonly InputField[] }
-	| { kind: 'cookies'; stepId: string; instructions: string | null; request: CookieRequest }
+	/**
+	 * A jar of cookies to bring back from another origin — the same question
+	 * with fields of one grouped type, plus the page to fetch them from.
+	 */
+	| {
+			kind: 'cookies';
+			stepId: string;
+			instructions: string | null;
+			fields: readonly InputField[];
+			request: CookieRequest;
+	  }
 	| { kind: 'complete'; loginId: string | null; userId: string | null }
 	| { kind: 'failed'; code: LoginErrorCode }
+	/**
+	 * The network would not accept the answer. Its own outcome and not a
+	 * banner over the step, because the bridge **drops the login process** when
+	 * it refuses a value: there is nothing left to resubmit to, so the step
+	 * goes and the only way on is a fresh login (ADR 0030).
+	 *
+	 * `detail` is the Gateway's own sentence, which names the network's code
+	 * and says the process is gone. Shown, never branched on.
+	 */
+	| { kind: 'refused'; stepId: string; detail: string | null }
+	/**
+	 * A step type this build has no panel for: a Gateway newer than this
+	 * Companion. The residual case the dispatch table cannot remove, because
+	 * the wire is not the type system.
+	 */
+	| { kind: 'unknown_step'; stepId: string; stepType: string; instructions: string | null }
 	| { kind: 'cancelled' };
 
 /**
@@ -109,6 +219,17 @@ export type TroubleCode =
 	| 'too_many_logins'
 	| 'bridge_unreachable'
 	| 'bridge_refused'
+	/**
+	 * The Gateway would not take the request (`invalid_request`). On the submit
+	 * path this is the network refusing a value and becomes the `refused`
+	 * *view*; everywhere else it is this Companion sending something the
+	 * Gateway will not parse, which is a defect here and not on the server.
+	 *
+	 * It is in this union because its absence was the bug: the code fell to
+	 * `unexpected`, and the user was told "something went wrong on your Twalk
+	 * server" when nothing had.
+	 */
+	| 'refused'
 	| 'network'
 	| 'unexpected';
 
@@ -173,13 +294,14 @@ function stepView(step: BridgeLoginStep | null): LoginView {
 				kind: 'input',
 				stepId: step.step_id,
 				instructions: step.instructions,
-				fields: inputFields(step)
+				fields: inputFields(step, null)
 			};
 		case 'cookies':
 			return {
 				kind: 'cookies',
 				stepId: step.step_id,
 				instructions: step.instructions,
+				fields: inputFields(step, 'cookie'),
 				request: cookieRequest(step)
 			};
 		case 'complete':
@@ -192,6 +314,28 @@ function stepView(step: BridgeLoginStep | null): LoginView {
 		case 'client_http':
 			return { kind: 'failed', code: 'unsupported_step' };
 	}
+	// Unreachable through the generated type and reachable in fact: `type` is
+	// a string on the wire, and a Gateway that learned a seventh step type
+	// answers one. The residual panel names it rather than drawing nothing.
+	const unknown: string = step.type;
+	return {
+		kind: 'unknown_step',
+		stepId: step.step_id,
+		stepType: unknown,
+		instructions: step.instructions
+	};
+}
+
+/**
+ * A refused answer, as its own outcome.
+ *
+ * Built where the refusal arrives (`login-session.ts`) rather than polled: the
+ * bridge has already destroyed the login process, so the next poll would answer
+ * `no_login_in_flight` and the screen would go blank on the one question the
+ * user most needs answered.
+ */
+export function refusedView(stepId: string, detail: string | null): LoginView {
+	return { kind: 'refused', stepId, detail };
 }
 
 /** The polled document as the whole screen state, generation included. */
@@ -241,12 +385,40 @@ function displayPayload(step: BridgeLoginStep, wanted: 'qr' | 'emoji'): string |
 	return typeof data === 'string' && data.length > 0 ? data : null;
 }
 
-function inputFields(step: BridgeLoginStep): InputField[] {
+/**
+ * A step's field list, from either of the two shapes bridgev2 declares — see
+ * [`InputField`], which says why they differ.
+ *
+ * `bare` is the type a field named as a **bare string** has. bridgev2 declares
+ * every field as an object, and a `cookies` step whose payload listed names
+ * only would still be naming cookies — the step type is the only thing that
+ * payload says about them, which is not the same as a default type for a field
+ * that declared one badly. A `user_input` step passes `null`, so a bare string
+ * there is not a field at all rather than a field of some guessed type.
+ */
+function inputFields(step: BridgeLoginStep, bare: string | null): InputField[] {
 	const raw = step.payload?.['fields'];
 	if (!Array.isArray(raw)) {
 		return [];
 	}
 	return raw.flatMap((entry): InputField[] => {
+		if (typeof entry === 'string') {
+			return entry !== '' && bare !== null
+				? [
+						{
+							id: entry,
+							name: entry,
+							description: null,
+							type: bare,
+							pattern: null,
+							sourceName: null,
+							cookieDomain: null,
+							required: true,
+							options: []
+						}
+					]
+				: [];
+		}
 		if (entry === null || typeof entry !== 'object') {
 			return [];
 		}
@@ -255,40 +427,70 @@ function inputFields(step: BridgeLoginStep): InputField[] {
 		if (id === null) {
 			return [];
 		}
+		// The first source, which is where a `cookies` field's type lives.
+		// Several are allowed — one value obtainable from a cookie *or* from a
+		// request header — and the first is the one the bridge prefers.
+		const source = firstSource(field['sources']);
 		return [
 			{
 				id,
-				name: typeof field['name'] === 'string' ? field['name'] : id,
+				name: typeof field['name'] === 'string' ? field['name'] : (source?.name ?? id),
 				description: typeof field['description'] === 'string' ? field['description'] : null,
-				type: typeof field['type'] === 'string' ? field['type'] : 'username',
-				pattern: typeof field['pattern'] === 'string' ? field['pattern'] : null
+				// The field's own type, then its first source's. `null`, never a
+				// default: see [`InputField.type`].
+				type: text(field['type']) ?? source?.type ?? null,
+				pattern: typeof field['pattern'] === 'string' ? field['pattern'] : null,
+				sourceName: source?.name ?? null,
+				// `cookie_domain` on the source, which is where bridgev2 puts it;
+				// the field-level spelling is read too, because the stub bridges
+				// that stand in for a real one used to invent it there.
+				cookieDomain: source?.cookieDomain ?? text(field['cookie_domain']) ?? null,
+				// Absent means required: a field a bridge said nothing about is
+				// one this Companion must not quietly leave out of the answer.
+				required: field['required'] !== false,
+				options: Array.isArray(field['options'])
+					? field['options'].filter((option): option is string => typeof option === 'string')
+					: []
 			}
 		];
 	});
 }
 
+/** A non-empty string, or `null`. */
+function text(value: unknown): string | null {
+	return typeof value === 'string' && value !== '' ? value : null;
+}
+
+/**
+ * The first of a cookie field's `sources`, read for its type, its browser-side
+ * name and its domain.
+ */
+function firstSource(
+	raw: unknown
+): { type: string | null; name: string | null; cookieDomain: string | null } | null {
+	if (!Array.isArray(raw)) {
+		return null;
+	}
+	for (const entry of raw) {
+		if (entry === null || typeof entry !== 'object') {
+			continue;
+		}
+		const source = entry as Record<string, unknown>;
+		return {
+			type: text(source['type']),
+			name: text(source['name']),
+			cookieDomain: text(source['cookie_domain'])
+		};
+	}
+	return null;
+}
+
 function cookieRequest(step: BridgeLoginStep): CookieRequest {
 	const payload = step.payload ?? {};
-	const fields = payload['fields'];
-	const names: string[] = Array.isArray(fields)
-		? fields.flatMap((entry) => {
-				if (typeof entry === 'string') {
-					return [entry];
-				}
-				if (entry !== null && typeof entry === 'object') {
-					const id = (entry as Record<string, unknown>)['id'];
-					if (typeof id === 'string') {
-						return [id];
-					}
-				}
-				return [];
-			})
-		: [];
 	return {
 		url: typeof payload['url'] === 'string' ? payload['url'] : null,
-		fields: names,
 		extractJs: typeof payload['extract_js'] === 'string' ? payload['extract_js'] : null,
-		waitForUrl: typeof payload['wait_for_url'] === 'string' ? payload['wait_for_url'] : null
+		waitForUrl: text(payload['wait_for_url_pattern']) ?? text(payload['wait_for_url'])
 	};
 }
 

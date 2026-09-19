@@ -53,18 +53,28 @@ test('a whole cookie login: the cookies, the emoji, the connection', async ({ pa
 	await expect(names).toBeVisible();
 	await expect(names).toContainText('SID');
 
-	// The two settings that otherwise make the copy useless.
+	// #57's four requirements, all of them, after the migration onto the shared
+	// renderer (ADR 0030): which cookies (above), where to get them, why a
+	// private window, and that Device Bound Session Credentials must be off.
+	// Asserted as four because losing any one of them fails that ticket, and a
+	// migration is exactly where prose goes missing without anyone noticing.
 	const screen = page.getByTestId('screen-sms');
+	await expect(
+		screen.getByRole('link', { name: /messages\.google\.com/ }).first()
+	).toBeVisible();
 	await expect(screen).toContainText(/private window|fenêtre de navigation privée/);
 	await expect(screen).toContainText(/Device Bound Session Credentials/);
+	// And the sentence that lets someone decide not to: what holding the whole
+	// jar means.
+	await expect(screen).toContainText(/act as you on Google Messages Web|agir en votre nom/);
 
 	// A paste that is not cookies is named as such, and nothing is sent.
 	await page.getByTestId('cookie-paste').fill('I could not find them');
-	await page.getByTestId('submit-cookies').click();
+	await page.getByTestId('submit-step').click();
 	await expect(page.getByRole('alert')).toContainText(/could not be read|Impossible d’y lire|Impossible d'y lire/);
 
 	await page.getByTestId('cookie-paste').fill(PASTE);
-	await page.getByTestId('submit-cookies').click();
+	await page.getByTestId('submit-step').click();
 
 	// The emoji pairing step: the same blocking step the QR screens poll, with
 	// an emoji instead of a code, and nothing to submit.
@@ -72,12 +82,27 @@ test('a whole cookie login: the cookies, the emoji, the connection', async ({ pa
 	await expect(emoji).toBeVisible();
 	await expect(emoji).toContainText('🐢');
 
-	// The cookies reached the bridge, unchanged and whole.
+	// The cookies reached the bridge unchanged — and **only the ones it asked
+	// for**. The user pastes whatever their browser gave them, which is their
+	// whole Google session; the bridge's own field list is what leaves this
+	// origin, so the five it did not ask for are not relayed anywhere (ADR 0011).
+	// The paste is still checked against the same list, so nothing is silently
+	// dropped: a name the bridge wants and the paste lacks is named on screen.
 	const stats = await bridge.stats();
 	const relayed = stats.submits?.find((submit) => submit.step_type === 'cookies');
 	expect(relayed, JSON.stringify(stats.submits)).toBeDefined();
 	expect(relayed?.body?.cookies?.['SID']).toBe('value-for-SID');
-	expect(Object.keys(relayed?.body?.cookies ?? {})).toHaveLength(NAMES.length);
+	expect(relayed?.body?.cookies).toEqual({
+		SID: 'value-for-SID',
+		SAPISID: 'value-for-SAPISID'
+	});
+	// By key, not by substring: `APISID` is inside `SAPISID`, and an absence
+	// test that can be satisfied by a coincidence is not an absence test.
+	const sent = Object.keys(relayed?.body?.cookies ?? {});
+	const unasked = NAMES.filter((name) => name !== 'SID' && name !== 'SAPISID');
+	for (const name of unasked) {
+		expect(sent, `${name} was not asked for`).not.toContain(name);
+	}
 
 	// And they are in no browser store, nor left on screen.
 	await expect(page.getByTestId('cookie-paste')).toHaveCount(0);

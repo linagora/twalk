@@ -21,6 +21,7 @@ import { get, writable, type Readable } from 'svelte/store';
 import { gateway } from '$lib/api/client';
 import {
 	conflictFrom,
+	refusedView,
 	stateOf,
 	IDLE,
 	type LoginState,
@@ -54,7 +55,20 @@ export function pickFlow(
 	return flows[0]?.id ?? null;
 }
 
-/** A Gateway refusal, read as the banner the screen shows. */
+/**
+ * A Gateway refusal, read as the banner the screen shows.
+ *
+ * `invalid_request` is in here because its absence was a defect with a
+ * sentence: the code fell to `unexpected`, and the screen told the user
+ * *"something went wrong on your Twalk server"* when what had happened was a
+ * **network** declining a value the user typed. Nothing was wrong with their
+ * server, and the Gateway's own carefully-worded detail — which names the
+ * network's code and says the login must be started again — was never shown.
+ *
+ * On the submit path that refusal is not a banner at all but its own outcome
+ * ([`LoginSession.submit`]); this mapping is the floor under every other path,
+ * so no code can reach the user as a lie about their deployment.
+ */
 function troubleOf(code: unknown): TroubleCode {
 	switch (code) {
 		case 'unauthenticated':
@@ -68,6 +82,8 @@ function troubleOf(code: unknown): TroubleCode {
 			return 'bridge_unreachable';
 		case 'bridge_refused':
 			return 'bridge_refused';
+		case 'invalid_request':
+			return 'refused';
 		default:
 			return 'unexpected';
 	}
@@ -163,14 +179,34 @@ export class LoginSession {
 		this.#schedule();
 	}
 
-	/** Answers the step the login is waiting on. */
+	/**
+	 * Answers the step the login is waiting on.
+	 *
+	 * A **refused** answer is its own outcome rather than a banner over the
+	 * step. The bridge destroys the login process when it declines a value —
+	 * every later call against it answers `404`, the cancels included — so
+	 * leaving the step on screen would be inviting a resubmit that can only
+	 * fail, and polling on would replace the one explanation the user needs
+	 * with an empty screen. The step goes, the Gateway's own sentence stays,
+	 * and the way on is a fresh login (ADR 0030).
+	 */
 	async submit(stepId: string, data: Record<string, unknown>) {
 		const answered = await gateway.POST('/api/bridges/{bridge_id}/login/submit', {
 			params: { path: { bridge_id: this.#bridgeId } },
 			body: { step_id: stepId, data }
 		});
 		if (answered.error !== undefined) {
-			this.#trouble(troubleOf(errorCode(answered.error)));
+			const code = errorCode(answered.error);
+			if (code === 'invalid_request') {
+				this.#clearTimer();
+				this.#state.set({
+					view: refusedView(stepId, errorDetail(answered.error)),
+					conflict: null,
+					trouble: null
+				});
+				return;
+			}
+			this.#trouble(troubleOf(code));
 			return;
 		}
 		this.#state.set(stateOf(answered.data));

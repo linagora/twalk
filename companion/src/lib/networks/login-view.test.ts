@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	conflictFrom,
 	qrPayload,
+	refusedView,
 	secondsLeft,
 	stateOf,
 	viewOf,
@@ -117,7 +118,25 @@ describe('the login view', () => {
 		});
 	});
 
-	it('reads a cookies step as the page to visit and the names to bring back', () => {
+	it('leaves a field the bridge gave no type as having none', () => {
+		// The defect this replaces substituted `username`, so a password field
+		// whose type a bridge had not declared would have been drawn as a plain
+		// text input with the value on screen. `null` is what lets the renderer
+		// refuse it and name it instead (ADR 0030).
+		const state = viewOf(
+			login({
+				state: 'awaiting_input',
+				step: step({
+					type: 'user_input',
+					step_id: 'phone',
+					payload: { fields: [{ id: 'secret', name: 'Secret' }, { id: 'blank', type: '' }] }
+				})
+			})
+		);
+		expect(state).toMatchObject({ kind: 'input', fields: [{ type: null }, { type: null }] });
+	});
+
+	it('reads a cookies step as the page to visit and the cookies to bring back', () => {
 		const state = viewOf(
 			login({
 				state: 'awaiting_input',
@@ -127,8 +146,10 @@ describe('the login view', () => {
 					payload: {
 						url: 'https://messages.google.com/web/authentication',
 						fields: [
-							{ type: 'cookie', id: 'SID' },
+							{ type: 'cookie', cookie_domain: '.google.com', id: 'SID' },
 							{ type: 'cookie', id: 'SAPISID' },
+							// A bare name: not bridgev2's shape, and in a step whose
+							// whole payload is cookies it can be nothing else.
 							'HSID'
 						]
 					}
@@ -137,8 +158,95 @@ describe('the login view', () => {
 		);
 		expect(state).toMatchObject({
 			kind: 'cookies',
-			request: { url: 'https://messages.google.com/web/authentication', fields: ['SID', 'SAPISID', 'HSID'] }
+			request: { url: 'https://messages.google.com/web/authentication' },
+			fields: [
+				{ id: 'SID', type: 'cookie', cookieDomain: '.google.com' },
+				{ id: 'SAPISID', type: 'cookie', cookieDomain: null },
+				{ id: 'HSID', type: 'cookie' }
+			]
 		});
+	});
+
+	it('reads a cookie field’s type out of its sources, which is where bridgev2 puts it', () => {
+		// A `LoginCookieField` has **no type of its own**: it carries `sources`,
+		// each with the type, the name the value goes by in the browser and the
+		// domain (`mautrix/go`, `bridgev2/login.go`). Reading only the field's own
+		// `type` refused every real bridgev2 cookie step as "the bridge declared
+		// none" — the same defect as the old `username` default, from the other
+		// side.
+		const state = viewOf(
+			login({
+				state: 'awaiting_input',
+				step: step({
+					type: 'cookies',
+					step_id: 'fi.mau.linkedin.login.cookies',
+					payload: {
+						url: 'https://www.linkedin.com/login',
+						wait_for_url_pattern: '^https://www\\.linkedin\\.com/feed',
+						fields: [
+							{
+								id: 'cookie',
+								required: true,
+								sources: [{ type: 'request_header', name: 'Cookie' }]
+							},
+							{
+								id: 'csrf',
+								required: false,
+								sources: [{ type: 'request_header', name: 'Csrf-Token' }]
+							}
+						]
+					}
+				})
+			})
+		);
+		expect(state).toMatchObject({
+			kind: 'cookies',
+			request: { waitForUrl: '^https://www\\.linkedin\\.com/feed' },
+			fields: [
+				// The id is what the answer is submitted under; the source name is
+				// what the user will see in their browser. They differ here.
+				{ id: 'cookie', type: 'request_header', sourceName: 'Cookie', required: true },
+				{ id: 'csrf', type: 'request_header', sourceName: 'Csrf-Token', required: false }
+			]
+		});
+	});
+
+	it('names a step type it has no panel for rather than drawing nothing', () => {
+		// The residual case: a Gateway newer than this build. The generated type
+		// says this cannot happen, and the wire is not the type system — which is
+		// the whole reason `unknown_step` exists.
+		const state = viewOf(
+			login({
+				state: 'awaiting_input',
+				step: step({
+					type: 'fi.mau.something.new' as BridgeLoginStep['type'],
+					step_id: 'fi.mau.telegram.login.something',
+					instructions: 'Do the new thing'
+				})
+			})
+		);
+		expect(state).toEqual({
+			kind: 'unknown_step',
+			stepId: 'fi.mau.telegram.login.something',
+			stepType: 'fi.mau.something.new',
+			instructions: 'Do the new thing'
+		});
+	});
+});
+
+describe('a refused answer', () => {
+	it('is its own outcome, carrying the Gateway’s own sentence', () => {
+		// Not a banner over the step: the bridge destroys the login process when
+		// it refuses a value, so the step is gone and a resubmit could only 404.
+		expect(refusedView('fi.mau.whatsapp.login.phone', 'the network would not accept it')).toEqual({
+			kind: 'refused',
+			stepId: 'fi.mau.whatsapp.login.phone',
+			detail: 'the network would not accept it'
+		});
+	});
+
+	it('still says what happened when the Gateway said nothing', () => {
+		expect(refusedView('step', null)).toEqual({ kind: 'refused', stepId: 'step', detail: null });
 	});
 });
 

@@ -132,6 +132,7 @@
 	"networks.trouble.bridgeAnswerUnusable": "The bridge for this network is running and answered your Twalk server — Twalk could not make sense of the answer. Nothing is wrong with your server, your bridge or your connection, so there is nothing for you to fix: this is a defect in Twalk. Please report it, and include what your Twalk server logged.",
 	"networks.trouble.network": "The connection to your Twalk server dropped. Retrying…",
 	"networks.trouble.unexpected": "Something went wrong on your Twalk server. Try again, and open the diagnostics if it persists.",
+	"networks.trouble.refused": "Your Twalk server answered and would not accept that request. Nothing is wrong with your server or your connection: this is a defect in Twalk. Please report it, and include what your Twalk server logged.",
 
 	"networks.failed.loginLost": "The login was lost: your Twalk server or its bridge restarted while it was running. Nothing about a login in progress survives a restart. Start again.",
 	"networks.failed.expired": "The network ended this login: the code timed out, or it was already used. Start again.",
@@ -144,6 +145,47 @@
 	"networks.state.sessionExpired": "Sign in again",
 	"networks.state.disconnected": "Not connected",
 	"networks.state.unknown": "Cannot tell",
+
+	"networks.qrAlt": "A code to scan with the network’s own app.",
+	"networks.cookies.wanted": "{count, plural, one {The cookie your bridge asked for} other {The # cookies your bridge asked for}}:",
+	"networks.cookies.domain": "Your bridge says they belong to {domain}.",
+	"networks.cookies.label": "Paste the cookies here",
+	"networks.cookies.unreadable": "That could not be read as cookies. Paste either “name=value; name=value”, or the JSON your cookie extension exports.",
+	"networks.cookies.missing": "These are missing: {names}. Check you copied every row, including the ones your browser hides behind a scroll.",
+
+	"networks.jar.wanted": "{count, plural, one {The value your bridge asked for} other {The # values your bridge asked for}}, as your browser sends them:",
+	"networks.jar.label": "Paste them here as JSON",
+
+
+	"networks.field.empty": "Fill this in before sending it.",
+	"networks.field.pattern": "That is not the shape this network accepts for this field. Check it before sending: a value the network refuses ends the login, and you would have to start again.",
+	"networks.field.blockedTitle": "This step cannot be answered here",
+	"networks.field.blockedBody": "Sending part of it would not get you a correction: the network ends the login when it refuses an answer, and you would have to start over anyway. Update Twalk if an update is available, or finish this login in the network’s own app.",
+	"networks.field.refusedNoType": "Twalk will not draw “{field}”: your bridge did not say what kind of value it is, and guessing could put a password on screen in plain text.",
+	"networks.field.refusedUnknownType": "Twalk will not draw “{field}”: this version does not know the field type “{type}”, and guessing could put a password on screen in plain text.",
+	"networks.field.choose": "Choose one…",
+	"networks.field.refusedNoOptions": "Twalk will not draw “{field}”: your bridge asked for a choice and listed nothing to choose from, and picking for you is worse than saying so.",
+	"networks.field.leftOut": "“{field}” is not being sent: this version cannot collect it, and your bridge says the login does not need it.",
+
+	"networks.step.submit": "Send this to my Twalk server",
+	"networks.step.neverStored": "Nothing on this screen is saved in your browser. Close the tab and what you typed is gone.",
+	"networks.step.driftTitle": "Twalk’s own instructions no longer match this question",
+	"networks.step.driftBody": "Twalk has its own explanation for this step, written for {expected}, and your bridge now asks for {found} instead. Only your bridge’s own words are shown above, because a confident explanation of the wrong question is worse than none. This is a defect in Twalk — please report it with the step name below.",
+	"networks.step.noExplanationTitle": "Twalk has no instructions for this step",
+	"networks.step.noExplanationBody": "This step hands a credential to your Twalk server, and only your bridge’s own words are shown above — they may not be enough to tell you what you are handing over. Please report it with the step name below.",
+
+	"networks.refused.title": "The network would not accept that",
+	"networks.refused.body": "This is the network refusing what was sent, not a problem with your Twalk server. The network ends the login when it refuses an answer, so there is nothing to correct here: start a new login. If a code was sent to you, you will need a fresh one.",
+	"networks.refused.reported": "What your Twalk server reported:",
+	"networks.refused.startAgain": "Start a new login",
+
+	"networks.unknownStep.title": "This login asks for something this version cannot draw",
+	"networks.unknownStep.body": "Your Twalk server knows a kind of login step (“{type}”) that this app does not. That happens when the two halves of a deployment are not the same version: the server was updated and this app was not. Reload this page to pick up the current app, or finish this login in the network’s own app.",
+	"networks.unknownStep.bridgeSays": "What your bridge asks for:",
+
+	"networks.emoji.body": "Your phone is showing an emoji. Check that it is this one, then confirm the pairing on the phone.",
+	"networks.emoji.alt": "The pairing emoji is {emoji}. Check that your phone shows the same one, then confirm on the phone.",
+	"networks.emoji.waiting": "Waiting for you to confirm on your phone…",
 
 	"manage.title": "Your {network} link",
 	"manage.caption": "The account this Twalk server is linked to, and what you can do with it.",
@@ -288,18 +330,10 @@
 	"sms.step2.b": "Pair that browser with your phone by scanning the code Google shows, so the session is a working one.",
 	"sms.step2.c": "Open the developer tools, go to Application then Cookies, and copy the cookies listed below — or paste the whole Cookie header from the Network tab.",
 
-	"sms.cookies.wanted": "{count, plural, one {The cookie your bridge asked for} other {The # cookies your bridge asked for}}:",
 	"sms.cookies.whatTheyAre": "Together, these are your Google sign-in session: anything holding them can act as you on Google Messages Web for as long as they last. Google documents no lifetime for them, so Twalk promises none — expect to do this again one day. They go to your own Twalk server, which passes them to the bridge and keeps no copy; this browser writes them nowhere. You can end them at any time from your Google account's security settings.",
-	"sms.cookies.label": "Paste the cookies here",
 	"sms.cookies.submit": "Send them to my Twalk server",
 	"sms.cookies.neverStored": "Nothing on this screen is saved in your browser. Close the tab and the paste is gone.",
-	"sms.cookies.empty": "Paste the cookies first.",
-	"sms.cookies.unreadable": "That could not be read as cookies. Paste either “name=value; name=value”, or the JSON your cookie extension exports.",
-	"sms.cookies.missing": "These are missing: {names}. Check you copied every row, including the ones your browser hides behind a scroll.",
 
-	"sms.emoji.body": "Your phone is showing an emoji. Check that it is this one, then confirm the pairing on the phone.",
-	"sms.emoji.alt": "The pairing emoji is {emoji}. Check that your phone shows the same one, then confirm on the phone.",
-	"sms.emoji.waiting": "Waiting for you to confirm on your phone…",
 
 	"sms.success": "SMS is connected through Google Messages.",
 	"sms.migration": "This network migrates to the sovereign path on its own when v0.2 ships. Nothing to do now.",
