@@ -80,6 +80,9 @@ describe('the catalogues', () => {
 			// The deployment's own address, as /recover reports it when nothing
 			// answered there (ticket #115).
 			url: 'http://twalk.example:8009',
+			// The account the Sensor posted a reply as, in its report of what the
+			// reply reached (#216).
+			postedAs: '@you:example.com',
 			// The two homeservers a refused Matrix connection names (#138):
 			// the one the user asked for, and the one this deployment drives.
 			wanted: 'linagora.com',

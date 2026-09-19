@@ -20,6 +20,7 @@ function portal(
 		network_conversation_id: id,
 		members,
 		observation,
+		owner_membership: 'invite',
 		moved_from: null,
 		unreadable: null
 	};
