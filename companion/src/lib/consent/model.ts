@@ -356,9 +356,15 @@ export function bulkDecisions(
 /**
  * The owner rows this screen found, which should not exist (ADR 0018, ADR 0021).
  *
- * Reported rather than removed. Silently filtering them would hide the one
- * symptom of #149 a user can actually see, and the screen's own copy names the
- * defect instead of rendering the user as somebody to decide about.
+ * Reported rather than removed, and **kept now that #149 has landed**: a
+ * Gateway of that version or later serves no such row — not from the consent
+ * state, not from the snapshot, not from the pending list, including a row it
+ * inherited from before #109 — so on a current deployment this function
+ * returns nothing. It stays because a partially upgraded deployment is exactly
+ * the situation #149 exists for: an older Gateway behind a newer Companion
+ * still serves the row, and silently filtering it here would hide the one
+ * symptom of that a user can actually see. Its own unit tests are what keep
+ * the defence exercised, since no Gateway response can produce it any more.
  */
 export function ownerRows(rows: readonly Row[]): Row[] {
 	return rows.filter((row) => row.isOwner);

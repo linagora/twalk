@@ -749,6 +749,7 @@
 	"consent.refusal.unknown_value": "Your server did not recognise a value this app sent — a network, or an answer. This app built the request, so this is a defect in the app.",
 	"consent.refusal.unsupported_subject_type": "Your server does not accept a decision about this kind of subject. This app built the request, so this is a defect in the app.",
 	"consent.refusal.scope_contradicts_subject": "Your server refused the perimeter this app asked for. This app built the request, so this is a defect in the app.",
+	"consent.refusal.subject_is_the_owner": "That identity is your own. You are never one of your own contacts, so there is nothing to decide about yourself — and nothing was recorded.",
 	"consent.refusal.unauthenticated": "Your server answered, and would not accept this session. Nothing is wrong with your deployment.",
 	"consent.refusal.store_unavailable": "Your server could not read or write its record of decisions. Nothing was recorded and nothing was announced — which is why you are being shown a failure instead of being told it worked.",
 	"consent.refusal.consent_not_configured": "This deployment records no decisions at all: it has no event bus, so it refuses to record one it could not announce. Your session and the rest of the app are unaffected.",

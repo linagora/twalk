@@ -105,6 +105,29 @@
 //! observed?" is the Sensor's own membership event, asked of the homeserver
 //! on every read.
 //!
+//! Ticket #149 made the invariant `CONTEXT.md` states plainly true here too
+//! ([`owner`]): the owner is never a contact and never has a consent state, on
+//! any event (ADR 0018, ADR 0021). #109 and #147 stopped the Sensor
+//! *producing* events that said otherwise; neither could reach the row a
+//! deployment upgraded across #109 still holds, because before ADR 0018 the
+//! user's own messages were published as a contact's and fed the
+//! pending-contact projection. So this Gateway now knows which Matrix IDs are
+//! the owner's (`GATEWAY_OWNER_IDENTITIES`, beside the `GATEWAY_OWNER` it
+//! always contains — a set that is configured because the mautrix
+//! provisioning API exposes no ghost Matrix ID at all, and that grows when a
+//! network starts using a new addressing scheme), refuses a decision about one
+//! of them with a code of its own, and serves none of them from any read of
+//! its store — including a row recorded before this landed. The refusal is
+//! **at the writer** ([`outbox::Outbox::record`]) and the exclusions are **in
+//! the store's own SQL** ([`store`]), which is where the `persona` exclusion
+//! already lives: an endpoint added later cannot forget either. Nothing is
+//! deleted — the journal is append-only by design and is the audit trail of a
+//! confidentiality promise — so the rows stay, withheld, counted on
+//! `/metrics` and named in a startup warning. And because the set cannot be
+//! derived, the Gateway **serves** it on the snapshot it already serves the
+//! Sensor, so that the second component needing it reads the single writer's
+//! list instead of maintaining its own.
+//!
 //! Ticket #63 wrote that surface down: `companion-gateway/openapi.yaml` is
 //! an OpenAPI 3.1 description of every answer the origin gives, served by
 //! the origin itself ([`openapi`]) and checked against the running binary by
@@ -134,6 +157,7 @@ pub mod matrix_openid;
 pub mod metrics;
 pub mod openapi;
 pub mod outbox;
+pub mod owner;
 pub mod portals;
 pub mod portals_http;
 pub mod session;

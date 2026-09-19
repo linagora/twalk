@@ -748,6 +748,7 @@
 	"consent.refusal.unknown_value": "Votre serveur n’a pas reconnu une valeur envoyée par cette application — un réseau, ou une réponse. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
 	"consent.refusal.unsupported_subject_type": "Votre serveur n’accepte pas de décision sur ce type de sujet. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
 	"consent.refusal.scope_contradicts_subject": "Votre serveur a refusé le périmètre demandé par cette application. C’est cette application qui a construit la requête : il s’agit d’un défaut de l’application.",
+	"consent.refusal.subject_is_the_owner": "Cette identité est la vôtre. Vous n’êtes jamais l’un de vos propres contacts : il n’y a donc rien à décider à votre sujet, et rien n’a été enregistré.",
 	"consent.refusal.unauthenticated": "Votre serveur a répondu, et n’a pas accepté cette session. Votre déploiement n’a rien d’anormal.",
 	"consent.refusal.store_unavailable": "Votre serveur n’a pas pu lire ou écrire son registre de décisions. Rien n’a été enregistré et rien n’a été annoncé — c’est pourquoi on vous montre un échec au lieu de vous dire que c’est fait.",
 	"consent.refusal.consent_not_configured": "Ce déploiement n’enregistre aucune décision : il n’a pas de bus d’événements, et refuse d’enregistrer une décision qu’il ne pourrait pas annoncer. Votre session et le reste de l’application ne sont pas affectés.",

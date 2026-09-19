@@ -52,7 +52,7 @@
 //! an id, an owner, a boolean and a position.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
@@ -62,6 +62,7 @@ use crate::bridge_status::ContractState;
 use crate::consent::{
     Decision, Effective, Network, OldState, Recorded, State, Subject, SubjectType,
 };
+use crate::owner::Owner;
 
 /// The store's file inside the Gateway's state directory. A companion `-wal`
 /// and `-shm` sit next to it: the journal is opened in WAL mode, so a reader
@@ -406,6 +407,20 @@ pub const MIGRATIONS: [&str; 5] = [
 pub struct Store {
     connection: Mutex<Connection>,
     path: PathBuf,
+    /// Who this deployment's owner is, and under which Matrix IDs their own
+    /// traffic arrives (ticket #149, [`crate::owner`]).
+    ///
+    /// Held by the store rather than passed to each read, and that is the
+    /// point: the owner is never a contact and never has a consent state, so
+    /// "the read that forgot to exclude them" must not be expressible. A
+    /// caller cannot supply the wrong set, omit it, or add a read that does
+    /// not ask — the same reason the `persona` exclusion lives in the
+    /// `consent_snapshot` view's own SQL rather than in a Rust filter over it.
+    ///
+    /// It is configuration, and immutable for the life of the process: the
+    /// operator adds a ghost to `GATEWAY_OWNER_IDENTITIES` and the deployment
+    /// restarts the Gateway.
+    owner: Arc<Owner>,
 }
 
 /// A decision as committed: the journal position it took, the event the
@@ -568,7 +583,7 @@ impl Store {
     /// timestamps (who the user decided about, on which network, when), and
     /// nothing in the reference deployment encrypts it at rest — see
     /// `docs/architecture/security-model.md`.
-    pub fn open(state_dir: &Path) -> Result<Self> {
+    pub fn open(state_dir: &Path, owner: Arc<Owner>) -> Result<Self> {
         std::fs::create_dir_all(state_dir)
             .with_context(|| format!("failed to create {}", state_dir.display()))?;
         restrict_to_owner(state_dir, 0o700);
@@ -591,9 +606,59 @@ impl Store {
         let store = Self {
             connection: Mutex::new(connection),
             path,
+            owner,
         };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// This deployment's owner and their confirmed identities: who no read of
+    /// this store will serve a consent state for (ticket #149).
+    pub fn owner(&self) -> &Owner {
+        &self.owner
+    }
+
+    /// The SQL that keeps the owner's own rows out of a read of the consent
+    /// state, and the parameters it binds.
+    ///
+    /// A clause built here and bound as parameters, rather than folded into
+    /// the `consent_state` and `consent_snapshot` views: a view cannot take a
+    /// parameter, and the alternative — writing the configured identities into
+    /// a table for the views to join against — would make this file a second
+    /// holder of a truth that lives in the environment, with a stale copy the
+    /// first time a Gateway started with a different one.
+    ///
+    /// Scoped to `contact` rows on purpose. A `network` subject's id is a
+    /// network value and a `persona` subject's id is a persona's name; neither
+    /// is a Matrix user ID, so a collision there is not the owner (see
+    /// [`Decision::refuse_if_owner`]).
+    fn owner_exclusion(&self) -> (String, Vec<&str>) {
+        let identities = self.owner.as_sql_params();
+        if identities.is_empty() {
+            return (String::new(), identities);
+        }
+        let placeholders = vec!["?"; identities.len()].join(", ");
+        (
+            format!("WHERE NOT (subject_type = 'contact' AND subject_id IN ({placeholders}))"),
+            identities,
+        )
+    }
+
+    /// The mirror image of [`Self::owner_exclusion`]: only the owner's own
+    /// rows. What [`Self::owner_entries`] reads, so that a row this Gateway
+    /// withholds is still a row an operator can be told about.
+    fn owner_only(&self) -> (String, Vec<&str>) {
+        let identities = self.owner.as_sql_params();
+        if identities.is_empty() {
+            // No identity can match, and `IN ()` is not SQL. A predicate that
+            // is false for every row says the same thing and stays one query.
+            return (String::from("WHERE 0"), identities);
+        }
+        let placeholders = vec!["?"; identities.len()].join(", ");
+        (
+            format!("WHERE subject_type = 'contact' AND subject_id IN ({placeholders})"),
+            identities,
+        )
     }
 
     pub fn path(&self) -> &Path {
@@ -646,6 +711,13 @@ impl Store {
     /// that network, and for a multi-network scope it is the last thing the
     /// user decided about that perimeter. `unset` means no decision had ever
     /// covered it.
+    ///
+    /// A decision about the owner is refused here as well as at
+    /// [`crate::outbox::Outbox::record`], which is where the caller gets a code
+    /// and a sentence for it. This one is the floor: the store is the only
+    /// thing in this process that can append to the journal, so a route added
+    /// later that reached for it directly would fail loudly instead of writing
+    /// a row every read then has to withhold (ticket #149).
     pub fn record(
         &self,
         decision: &Decision,
@@ -654,6 +726,12 @@ impl Store {
         domain: &str,
         produced_at: &str,
     ) -> Result<Committed> {
+        if let Err(refusal) = decision.refuse_if_owner(&self.owner) {
+            anyhow::bail!(
+                "refusing to append a consent decision about the owner to the journal: {}",
+                refusal.message()
+            );
+        }
         let mut connection = self.connection();
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -765,18 +843,56 @@ impl Store {
 
     /// The current state: one entry per (subject, network), as recorded.
     /// Network entries are the defaults; contact entries override them. This
-    /// is the projection #50 will serve as a snapshot alongside the stream
+    /// is the projection #50 serves as a snapshot alongside the stream
     /// position it reflects.
+    ///
+    /// The owner's own rows are not in it (ticket #149): the owner is never a
+    /// contact and never has a consent state, so this read serves none —
+    /// including a row recorded before that was enforced. The rows themselves
+    /// are still there, and [`Self::owner_entries`] is what says so.
     pub fn entries(&self) -> Result<Vec<Entry>> {
+        let (exclusion, identities) = self.owner_exclusion();
+        self.state_rows(&exclusion, &identities)
+    }
+
+    /// The consent rows this store holds **about the owner** — the ones every
+    /// other read withholds (ticket #149).
+    ///
+    /// Nothing serves these to a consumer. They exist so that withholding a
+    /// row is not the same thing as hiding it: the Gateway counts them at
+    /// startup and on every snapshot read, names them in a warning, and
+    /// publishes the number on `/metrics`. A deployment upgraded across #109
+    /// can hold one — before ADR 0018 the user's own messages were published
+    /// as a contact's and fed the pending-contact projection — and an operator
+    /// is entitled to know that their journal has one rather than discovering
+    /// it in a SQL client.
+    ///
+    /// They are not deleted, and this is the deliberate half of the answer:
+    /// `consent_decision` is append-only, enforced by its own triggers,
+    /// because it is the audit trail of a confidentiality promise. A migration
+    /// would also only ever catch the identities configured on the day it ran,
+    /// and the set grows after the fact — a LID appeared mid-conversation on
+    /// the reference deployment — so an identity confirmed next month would
+    /// need another migration, while a read-time exclusion covers it the
+    /// moment the operator confirms it.
+    pub fn owner_entries(&self) -> Result<Vec<Entry>> {
+        let (only, identities) = self.owner_only();
+        self.state_rows(&only, &identities)
+    }
+
+    /// One read of the `consent_state` view under a caller-built predicate.
+    /// The two callers above are its whole vocabulary: everything, minus the
+    /// owner; or the owner's alone.
+    fn state_rows(&self, predicate: &str, params: &[&str]) -> Result<Vec<Entry>> {
         let connection = self.connection();
         let mut statement = connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT subject_type, subject_id, network, state, decided_at, decision_sequence \
-                 FROM consent_state ORDER BY subject_type, subject_id, network",
-            )
+                 FROM consent_state {predicate} ORDER BY subject_type, subject_id, network"
+            ))
             .context("failed to prepare the current-state query")?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -840,6 +956,17 @@ impl Store {
     /// [`SnapshotRefusal::TooLarge`] rather than truncated. The query asks
     /// for one row more than the cap, so a refusal costs one extra row and
     /// never materialises a state nobody may have.
+    ///
+    /// # The owner is not in it
+    ///
+    /// Not as a subject, not as a state, not even as a row this query reads
+    /// (ticket #149, ADR 0018, ADR 0021). The owner is never a contact and
+    /// never has a consent state, and a snapshot that served one would tell
+    /// every consumer otherwise — which is the whole defect, since a consumer
+    /// without the Sensor's own filter (#147) would apply it. A row recorded
+    /// before this was enforced is covered too, because the exclusion is at
+    /// read time; [`Self::owner_entries`] is what reports that such a row
+    /// exists.
     pub fn snapshot(&self, max_entries: usize) -> Result<Snapshot, SnapshotRefusal> {
         let mut connection = self.connection();
         // Deferred: the whole of this is a read, and in WAL mode the first
@@ -864,18 +991,32 @@ impl Store {
             .context("failed to read the snapshot's stream position")
             .map_err(SnapshotRefusal::Store)?;
 
+        // The owner's own rows are excluded here, in the snapshot's own SQL
+        // and before the cap, exactly as `persona` rows are excluded in the
+        // view (ticket #149): this is the projection a consumer's whole cold
+        // start rests on, and the invariant is that it never *reads* a row
+        // about the owner rather than that it remembers to drop one.
+        let (exclusion, identities) = self.owner_exclusion();
         let mut statement = transaction
-            .prepare(
+            .prepare(&format!(
                 "SELECT subject_type, subject_id, network, state, decided_at, decision_sequence \
-                 FROM consent_snapshot ORDER BY subject_type, subject_id, network LIMIT ?1",
-            )
+                 FROM consent_snapshot {exclusion} \
+                 ORDER BY subject_type, subject_id, network LIMIT ?"
+            ))
             .context("failed to prepare the snapshot query")
             .map_err(SnapshotRefusal::Store)?;
         // One more than the cap: enough to know the state is over it, and
-        // never the whole of an oversized state.
+        // never the whole of an oversized state. Counted over the rows this
+        // snapshot would serve, so a withheld owner row never pushes a state
+        // over the cap it is not part of.
         let ceiling = i64::try_from(max_entries.saturating_add(1)).unwrap_or(i64::MAX);
+        let mut bound: Vec<rusqlite::types::Value> = identities
+            .iter()
+            .map(|identity| rusqlite::types::Value::from((*identity).to_owned()))
+            .collect();
+        bound.push(rusqlite::types::Value::from(ceiling));
         let rows = statement
-            .query_map([ceiling], |row| {
+            .query_map(rusqlite::params_from_iter(bound.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -910,7 +1051,20 @@ impl Store {
     /// The effective consent state of a contact on one network, with the
     /// precedence applied: the contact's own decision if it has one, the
     /// network's default otherwise, and `pending` when neither exists.
+    ///
+    /// An owner identity resolves to `pending` with no decision named, and no
+    /// row is read for it — not the owner's own, and not the network's default
+    /// either, because a default is a default *for contacts* and the owner is
+    /// not one (ticket #149). That is the safe internal answer: the approval
+    /// path reads this to ask "is this sender granted, now?" and must never be
+    /// told yes about a subject that cannot be decided. The question itself is
+    /// refused at the HTTP surface with its own code, so a caller who asks it
+    /// is told why rather than handed a `pending` it would read as "not yet
+    /// decided".
     pub fn effective(&self, contact: &str, network: Network) -> Result<Effective> {
+        if self.owner.is_owner(contact) {
+            return Ok(Effective::resolve(contact, network, None, None));
+        }
         let connection = self.connection();
         let mut statement = connection
             .prepare(
@@ -1383,16 +1537,26 @@ impl Store {
     /// Ordered by `first_seen` because that is the order the user met them
     /// in, and because a stable order is what lets the Companion render a
     /// list that does not jump between polls.
+    ///
+    /// The owner is never in it (ticket #149). [`crate::contacts`] does not
+    /// even record a sighting of them, so for anything this build observed
+    /// there is nothing to exclude; the exclusion here is for the rows a
+    /// deployment upgraded across #109 already holds, because the user's own
+    /// messages used to arrive as a contact's. Offering somebody a decision
+    /// about their own ghost is the visible half of the defect, and a
+    /// `revoked` taken on it would silence their own traffic for any consumer
+    /// without the Sensor's filter.
     pub fn pending_contacts(&self) -> Result<Vec<SeenContact>> {
+        let (exclusion, identities) = self.pending_owner_exclusion();
         let connection = self.connection();
         let mut statement = connection
-            .prepare(
+            .prepare(&format!(
                 "SELECT contact_id, network, first_seen, last_seen FROM pending_contact \
-                 ORDER BY first_seen, contact_id, network",
-            )
+                 {exclusion} ORDER BY first_seen, contact_id, network"
+            ))
             .context("failed to prepare the pending-contact query")?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(rusqlite::params_from_iter(identities.iter()), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1417,13 +1581,34 @@ impl Store {
     }
 
     /// How many contacts are waiting for a decision — the dashboard's one
-    /// number, and the operator's gauge.
+    /// number, and the operator's gauge. The owner is excluded exactly as in
+    /// [`Self::pending_contacts`], so the number and the list cannot disagree.
     pub fn pending_contact_count(&self) -> Result<u64> {
+        let (exclusion, identities) = self.pending_owner_exclusion();
         let count: i64 = self
             .connection()
-            .query_row("SELECT COUNT(*) FROM pending_contact", [], |row| row.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM pending_contact {exclusion}"),
+                rusqlite::params_from_iter(identities.iter()),
+                |row| row.get(0),
+            )
             .context("failed to count the pending contacts")?;
         Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    /// [`Self::owner_exclusion`] for the pending list, whose view names its
+    /// subject `contact_id` and holds contacts only — so there is no subject
+    /// type to qualify.
+    fn pending_owner_exclusion(&self) -> (String, Vec<&str>) {
+        let identities = self.owner.as_sql_params();
+        if identities.is_empty() {
+            return (String::new(), identities);
+        }
+        let placeholders = vec!["?"; identities.len()].join(", ");
+        (
+            format!("WHERE contact_id NOT IN ({placeholders})"),
+            identities,
+        )
     }
 
     fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -1492,8 +1677,19 @@ mod tests {
             "twalk-consent-store-{test_name}-{}-{unique}",
             std::process::id()
         ));
-        Store::open(&dir).expect("the store opens")
+        Store::open(&dir, Arc::new(test_owner())).expect("the store opens")
     }
+
+    /// The owner every store in these tests belongs to: their Matrix ID, and
+    /// the WhatsApp LID ghost the reference deployment's own messages arrive
+    /// under (#109). Every read of a store excludes them, so a test that wants
+    /// to prove it names one of these.
+    pub(super) fn test_owner() -> Owner {
+        Owner::new(OWNER, [OWNER_GHOST.to_owned()])
+    }
+
+    /// The one ghost these deployments have confirmed as the owner's.
+    const OWNER_GHOST: &str = "@whatsapp_lid-115332874281144:example.com";
 
     fn decision(kind: SubjectType, id: &str, state: State, networks: &[Network]) -> Decision {
         Decision {
@@ -1513,6 +1709,163 @@ mod tests {
             .expect("the decision records")
     }
 
+    /// Ticket #149, the hard half: a row that already exists.
+    ///
+    /// Built the way a real deployment built its own — by a Gateway for which
+    /// that ghost was an ordinary contact, which is exactly what every Gateway
+    /// before #109 was — and then read by one that has been told whose ghost it
+    /// is. Nothing migrates and nothing is deleted: the journal is append-only,
+    /// and the exclusion is at read time, so the row is served to nobody from
+    /// the moment the operator confirms the identity.
+    #[test]
+    fn a_consent_row_about_the_owner_is_kept_and_served_to_nobody() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "twalk-consent-store-owner-row-{}-{unique}",
+            std::process::id()
+        ));
+
+        // A Gateway that has not been told about the ghost: it is a contact,
+        // and the user's decision about them is recorded like anybody's.
+        let before = Store::open(&dir, Arc::new(Owner::new(OWNER, []))).expect("the store opens");
+        let owners_row = record(
+            &before,
+            &decision(
+                SubjectType::Contact,
+                OWNER_GHOST,
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:00:00.000Z",
+        );
+        let contacts_row = record(
+            &before,
+            &decision(
+                SubjectType::Contact,
+                "@whatsapp_33612345678:example.com",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T10:01:00.000Z",
+        );
+        // Published, so both are inside the snapshot's horizon — otherwise the
+        // assertion below that the owner's row is not in the snapshot would
+        // hold for the wrong reason.
+        for (position, committed) in [owners_row, contacts_row].iter().enumerate() {
+            before
+                .mark_published(
+                    committed.sequence,
+                    "2026-09-17T10:05:00.000Z",
+                    41 + position as u64,
+                )
+                .expect("the outbox marks it published");
+        }
+        before
+            .observe_contact(OWNER_GHOST, Network::Signal, "2026-09-17T10:02:00.000Z")
+            .expect("a sighting an older build recorded");
+        assert!(
+            before
+                .entries()
+                .unwrap()
+                .iter()
+                .any(|entry| entry.subject.id == OWNER_GHOST),
+            "the row exists: this is the deployment #149 is about"
+        );
+        drop(before);
+
+        // The same file, opened by a Gateway whose operator has confirmed that
+        // ghost as their own.
+        let after = Store::open(&dir, Arc::new(test_owner())).expect("the store reopens");
+        for id in after
+            .entries()
+            .unwrap()
+            .iter()
+            .map(|entry| &entry.subject.id)
+        {
+            assert_ne!(
+                id, OWNER_GHOST,
+                "GET /api/consent/state serves no owner row"
+            );
+        }
+        let snapshot = after.snapshot(100).unwrap();
+        assert!(
+            !snapshot.entries.is_empty(),
+            "the snapshot has reached the published rows, so its silence about the \
+             owner means something"
+        );
+        for id in snapshot.entries.iter().map(|entry| &entry.subject.id) {
+            assert_ne!(id, OWNER_GHOST, "and neither does the snapshot");
+        }
+        assert!(
+            after
+                .pending_contacts()
+                .unwrap()
+                .iter()
+                .all(|seen| seen.contact != OWNER_GHOST),
+            "and the user is not offered a decision about their own ghost"
+        );
+        assert_eq!(
+            after.pending_contact_count().unwrap(),
+            after.pending_contacts().unwrap().len() as u64,
+            "the number and the list cannot disagree"
+        );
+        // The precedence question has no answer about the owner, and the
+        // network's default is not one either: `granted` on WhatsApp for
+        // everybody would otherwise become `granted` for the user's own ghost.
+        record(
+            &after,
+            &decision(
+                SubjectType::Network,
+                "whatsapp",
+                State::Granted,
+                &[Network::Whatsapp],
+            ),
+            "2026-09-17T11:00:00.000Z",
+        );
+        let effective = after.effective(OWNER_GHOST, Network::Whatsapp).unwrap();
+        assert_eq!(effective.state, State::Pending);
+        assert_eq!(effective.decided_by, None);
+        assert_eq!(
+            after
+                .effective("@whatsapp_33612345678:example.com", Network::Whatsapp)
+                .unwrap()
+                .state,
+            State::Granted,
+            "a real contact is unaffected: this is an exclusion, not a switch"
+        );
+
+        // Nothing was destroyed, and the one read that says so is the
+        // operator's.
+        let withheld = after.owner_entries().unwrap();
+        assert_eq!(withheld.len(), 1);
+        assert_eq!(withheld[0].subject.id, OWNER_GHOST);
+        assert_eq!(withheld[0].state, State::Granted);
+
+        // And the writer refuses to add another: the store is the floor under
+        // `Outbox::record`, so a caller that reached past it fails loudly.
+        let refused = after.record(
+            &decision(
+                SubjectType::Contact,
+                OWNER_GHOST,
+                State::Revoked,
+                &[Network::Whatsapp],
+            ),
+            OWNER,
+            "2026-09-17T12:00:00.000Z",
+            DOMAIN,
+            "2026-09-17T12:00:00.000Z",
+        );
+        assert!(refused.is_err(), "the journal refuses the append");
+        assert_eq!(
+            after.owner_entries().unwrap().len(),
+            1,
+            "and nothing was appended"
+        );
+    }
+
     #[test]
     fn a_fresh_store_is_migrated_to_the_current_schema_and_reopens_unchanged() {
         let store = store("migrations");
@@ -1525,7 +1878,7 @@ mod tests {
         drop(store);
         // Reopening applies nothing and loses nothing: the migrations are
         // idempotent against an already-migrated file.
-        let reopened = Store::open(&path).expect("the store reopens");
+        let reopened = Store::open(&path, Arc::new(test_owner())).expect("the store reopens");
         let version: i64 = reopened
             .connection()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -1733,7 +2086,7 @@ mod tests {
         );
         let dir = store.path().parent().unwrap().to_path_buf();
         drop(store);
-        let reopened = Store::open(&dir).unwrap();
+        let reopened = Store::open(&dir, Arc::new(test_owner())).unwrap();
         assert_eq!(
             reopened
                 .effective("@someone:example.com", Network::Matrix)
@@ -2349,6 +2702,7 @@ mod tests {
 
 #[cfg(test)]
 mod bridge_status_tests {
+    use super::tests::test_owner;
     use super::*;
     use crate::bridge_status::Transition;
 
@@ -2363,7 +2717,7 @@ mod bridge_status_tests {
             "twalk-bridge-status-store-{test_name}-{}-{unique}",
             std::process::id()
         ));
-        Store::open(&dir).expect("the store opens")
+        Store::open(&dir, Arc::new(test_owner())).expect("the store opens")
     }
 
     fn transition(from: ContractState, to: ContractState, occurred_at: &str) -> Transition {
@@ -2484,7 +2838,7 @@ mod bridge_status_tests {
             std::process::id()
         ));
         {
-            let store = Store::open(&dir).expect("the store opens");
+            let store = Store::open(&dir, Arc::new(test_owner())).expect("the store opens");
             store
                 .record_bridge_status(
                     &transition(
@@ -2500,7 +2854,7 @@ mod bridge_status_tests {
         // This is what makes de-duplication survive a Gateway restart: the
         // state a push is compared with comes back from disk, so the first
         // push after a restart does not become a transition out of nowhere.
-        let reopened = Store::open(&dir).expect("the store reopens");
+        let reopened = Store::open(&dir, Arc::new(test_owner())).expect("the store reopens");
         assert_eq!(
             reopened.bridge_status("bridge-whatsapp").unwrap(),
             Some(ContractState::Connected)

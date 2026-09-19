@@ -31,8 +31,9 @@ use anyhow::{Context, Result};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
-use crate::consent::{self, Decision};
+use crate::consent::{self, Decision, Invalid};
 use crate::metrics::Metrics;
+use crate::owner::Owner;
 use crate::session::Device;
 use crate::store::{Committed, Store};
 
@@ -55,11 +56,17 @@ pub struct Outbox {
     /// The domain the Gateway's events name themselves by:
     /// `gateway://<domain>/consent`.
     domain: String,
-    /// The Matrix ID of the deployment's single owner, stamped on every
-    /// event as `data.actor`. One owner per Gateway (ADR 0011), so the
-    /// device a decision arrives from is the owner's by construction — the
-    /// device identifies which of their devices, not which human.
-    owner: String,
+    /// The deployment's single owner: the Matrix ID stamped on every event as
+    /// `data.actor`, and every identity their own traffic arrives under. One
+    /// owner per Gateway (ADR 0011), so the device a decision arrives from is
+    /// the owner's by construction — the device identifies which of their
+    /// devices, not which human.
+    ///
+    /// The identities are here, at the writer, because this is the one place a
+    /// consent row can be created: the owner is never a contact and never has
+    /// a consent state (ADR 0018, ADR 0021), so the writer is what refuses one
+    /// (ticket #149).
+    owner: Arc<Owner>,
     /// The clock, injected as everywhere else in this crate so the
     /// timestamps are testable.
     now: fn() -> std::time::SystemTime,
@@ -67,12 +74,29 @@ pub struct Outbox {
     awake: Notify,
 }
 
+/// Why the writer refused a decision (ticket #149).
+///
+/// Two failures that must not be answered the same way. [`Self::Invalid`] is
+/// the decision itself: the store was never asked, nothing is wrong with this
+/// Gateway, and the caller gets a 4xx with a code it can branch on.
+/// [`Self::Store`] is this Gateway failing to keep a decision the user took,
+/// which is a 500 and an operator's problem.
+#[derive(Debug)]
+pub enum Refused {
+    /// The decision cannot be recorded, whoever asks and however often —
+    /// today, only a subject that is one of the owner's own identities. It is
+    /// not a transient failure and retrying it changes nothing.
+    Invalid(Invalid),
+    /// The journal could not be written.
+    Store(anyhow::Error),
+}
+
 impl Outbox {
     pub fn new(
         store: Arc<Store>,
         metrics: Arc<Metrics>,
         domain: String,
-        owner: String,
+        owner: Arc<Owner>,
         now: fn() -> std::time::SystemTime,
     ) -> Self {
         Self {
@@ -83,6 +107,12 @@ impl Outbox {
             now,
             awake: Notify::new(),
         }
+    }
+
+    /// This deployment's owner and their confirmed identities: who this writer
+    /// refuses to record a decision about (ticket #149, [`crate::owner`]).
+    pub fn owner(&self) -> &Owner {
+        &self.owner
     }
 
     pub fn store(&self) -> &Store {
@@ -97,12 +127,39 @@ impl Outbox {
     /// the Gateway produced the event. They are the same instant on the first
     /// publication and differ on a republish, which is why only the first is
     /// in the id.
-    pub fn record(&self, decision: &Decision, device: &Device) -> Result<Committed> {
+    /// A decision whose subject is one of the owner's own identities is
+    /// refused here, before the journal is touched: the owner is never a
+    /// contact and never has a consent state (ADR 0018, ADR 0021), so there is
+    /// nothing to record, and saying so is the point — a decision silently
+    /// dropped would leave the user's screen claiming a state that no store
+    /// holds. The refusal carries its own code, `subject_is_the_owner`, which
+    /// is deliberately not "no such subject" (ticket #149).
+    ///
+    /// It is checked at the writer rather than at the route, because a route
+    /// is something a later ticket adds: `consent.state.changed` is never
+    /// emitted about an owner identity because no owner identity ever reaches
+    /// the journal the outbox drains.
+    pub fn record(
+        &self,
+        decision: &Decision,
+        device: &Device,
+    ) -> std::result::Result<Committed, Refused> {
+        if let Err(invalid) = decision.refuse_if_owner(&self.owner) {
+            warn!(
+                subject = %decision.subject.id,
+                code = invalid.code(),
+                "refused a consent decision about the owner: the owner is never a contact and \
+                 has no consent state, so there is nothing to decide"
+            );
+            self.metrics.record_owner_decision_refused();
+            return Err(Refused::Invalid(invalid));
+        }
         let at = consent::rfc3339_millis((self.now)());
         let committed = self
             .store
-            .record(decision, &self.owner, &at, &self.domain, &at)
-            .context("failed to record the consent decision")?;
+            .record(decision, self.owner.matrix_id(), &at, &self.domain, &at)
+            .context("failed to record the consent decision")
+            .map_err(Refused::Store)?;
         if committed.replayed {
             debug!(
                 event_id = %committed.event_id,

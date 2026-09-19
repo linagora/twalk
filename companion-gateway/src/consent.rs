@@ -211,6 +211,16 @@ pub enum Invalid {
     /// A network subject whose scope does not name exactly that network, which
     /// the contract forbids.
     ScopeContradictsSubject { subject: String, scope: Vec<String> },
+    /// The subject is one of the owner's own identities (ticket #149, ADR
+    /// 0018, ADR 0021). The only variant [`Decision::parse`] never produces:
+    /// it takes knowing who the owner is, which is
+    /// [`Decision::refuse_if_owner`]'s question.
+    ///
+    /// Its own code, and its own status, because the one thing this refusal
+    /// must not be confusable with is "there is no such subject": a client
+    /// that read them as one signal would retry, or offer the user the
+    /// decision again, on a subject that can never have one.
+    SubjectIsTheOwner { id: String },
 }
 
 impl Invalid {
@@ -221,6 +231,23 @@ impl Invalid {
             Invalid::UnsupportedSubjectType(_) => "unsupported_subject_type",
             Invalid::Unknown { .. } => "unknown_value",
             Invalid::ScopeContradictsSubject { .. } => "scope_contradicts_subject",
+            Invalid::SubjectIsTheOwner { .. } => "subject_is_the_owner",
+        }
+    }
+
+    /// The HTTP status the refusal is answered with, as a number so that this
+    /// module stays free of the HTTP stack.
+    ///
+    /// `400` for a request the contract does not allow; `409` for the owner,
+    /// because the request is well-formed and its subject is a perfectly good
+    /// Matrix ID — what refuses it is a rule about who that Matrix ID is. A
+    /// `404` would say "no such subject", which is the conflation this
+    /// refusal exists to avoid, and a `400` would invite a client to go and
+    /// look for the malformed field.
+    pub fn status(&self) -> u16 {
+        match self {
+            Invalid::SubjectIsTheOwner { .. } => 409,
+            _ => 400,
         }
     }
 
@@ -237,6 +264,12 @@ impl Invalid {
             }
             Invalid::ScopeContradictsSubject { subject, scope } => format!(
                 "a network subject must be scoped to exactly its own network: subject {subject:?} against scope {scope:?}"
+            ),
+            Invalid::SubjectIsTheOwner { id } => format!(
+                "{id:?} is one of this deployment's owner identities, and the owner is never a \
+                 contact and never has a consent state: there is nothing to decide, and no \
+                 decision about them can be recorded (ADR 0018, ADR 0021). This is not \
+                 \"no such subject\": the identity is known, and it is yours"
             ),
         }
     }
@@ -326,6 +359,32 @@ impl Decision {
             networks,
             reason,
         })
+    }
+
+    /// Refuses a decision whose subject is one of the owner's own identities
+    /// (ticket #149).
+    ///
+    /// Separate from [`Decision::parse`] because it is a different kind of
+    /// question: `parse` asks whether the contract allows this document, and
+    /// this asks who the subject is — which needs the deployment's own
+    /// configuration ([`crate::owner::Owner`]). Called by
+    /// [`crate::outbox::Outbox::record`], which is the Gateway's single writer
+    /// of consent state, so no route added later can write such a row by
+    /// forgetting to ask.
+    ///
+    /// Only a `contact` subject is checked, and deliberately: a `network`
+    /// subject's id is a network value, and a `persona` subject's id is a
+    /// persona name chosen by whoever ships it. Neither is a Matrix user ID,
+    /// so an id that collides with one of the owner's identities there is not
+    /// a decision about the owner — and refusing it would refuse a persona
+    /// over the shape of its name.
+    pub fn refuse_if_owner(&self, owner: &crate::owner::Owner) -> Result<(), Invalid> {
+        if self.subject.kind == SubjectType::Contact && owner.is_owner(&self.subject.id) {
+            return Err(Invalid::SubjectIsTheOwner {
+                id: self.subject.id.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// The scope as the id recipe renders it: the networks in ascending
@@ -721,6 +780,74 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ok.networks, vec![Network::Whatsapp]);
+    }
+
+    #[test]
+    fn a_decision_about_an_owner_identity_is_refused_with_its_own_code() {
+        let owner = crate::owner::Owner::new(
+            "@michel:example.com",
+            ["@whatsapp_lid-115332874281144:example.com".to_owned()],
+        );
+        for id in [
+            // The ghost a deployment upgraded across #109 can already hold a
+            // row about…
+            "@whatsapp_lid-115332874281144:example.com",
+            // …and the owner's own account, which is always an identity and
+            // is the one a browser can name (#170).
+            "@michel:example.com",
+        ] {
+            let decision = request(json!({
+                "subject": { "type": "contact", "id": id },
+                "new_state": "revoked",
+                "scope": { "networks": ["whatsapp"] }
+            }))
+            .expect("the document is well formed: what refuses it is who the subject is");
+            let refusal = decision.refuse_if_owner(&owner).unwrap_err();
+            assert_eq!(refusal.code(), "subject_is_the_owner");
+            assert_eq!(
+                refusal.status(),
+                409,
+                "never 404: \"no such subject\" and \"that subject is you\" are two facts"
+            );
+            let message = refusal.message();
+            assert!(
+                message.contains(id) && message.contains("never has a consent state"),
+                "the refusal says why, and about whom: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_contact_the_deployment_has_not_confirmed_is_still_a_subject() {
+        // Unknown is not the owner: one digit apart from a confirmed ghost is
+        // a contact, and the user decides about them as usual.
+        let owner = crate::owner::Owner::new(
+            "@michel:example.com",
+            ["@whatsapp_lid-115332874281144:example.com".to_owned()],
+        );
+        let decision = request(json!({
+            "subject": { "type": "contact", "id": "@whatsapp_lid-115332874281145:example.com" },
+            "new_state": "granted",
+            "scope": { "networks": ["whatsapp"] }
+        }))
+        .unwrap();
+        assert!(decision.refuse_if_owner(&owner).is_ok());
+    }
+
+    #[test]
+    fn a_persona_or_a_network_named_like_the_owner_is_not_the_owner() {
+        // The check is a `contact` subject's alone. A persona id is not a
+        // Matrix user ID, so a collision there is a name and not a decision
+        // about the user — refusing it would refuse a persona over the shape
+        // of its name.
+        let owner = crate::owner::Owner::new("@michel:example.com", []);
+        let persona = request(json!({
+            "subject": { "type": "persona", "id": "@michel:example.com" },
+            "new_state": "granted",
+            "scope": { "networks": ["whatsapp"] }
+        }))
+        .unwrap();
+        assert!(persona.refuse_if_owner(&owner).is_ok());
     }
 
     #[test]

@@ -23,8 +23,26 @@
 //! `detail` for an operator's logs — never a sentence to match on, and never
 //! for display. The codes are
 //! `malformed_request`, `unknown_value`, `unsupported_subject_type`,
-//! `scope_contradicts_subject`, `consent_not_configured` and
-//! `store_unavailable`; `unauthenticated` comes from the guard.
+//! `scope_contradicts_subject`, `subject_is_the_owner`,
+//! `consent_not_configured` and `store_unavailable`; `unauthenticated` comes
+//! from the guard.
+//!
+//! # The owner is not a subject
+//!
+//! `subject_is_the_owner` is ticket #149's, and it is a `409` rather than a
+//! `400` or a `404`: the request is well formed and its subject is a perfectly
+//! good Matrix ID, and what refuses it is a rule about who that Matrix ID is
+//! (ADR 0018, ADR 0021). A `404` would say "no such subject", and this project
+//! has closed a dozen defects whose whole cause was two situations sharing one
+//! signal. The same code answers `GET /api/consent/effective` about an owner
+//! identity, for the same reason: `pending` with `decided_by: null` means "no
+//! decision was ever recorded", which is a contact's state and not an
+//! invitation to take one about yourself.
+//!
+//! `GET /api/consent/state` does not refuse anything — it lists — so it simply
+//! does not serve the owner's rows. That exclusion is the store's
+//! ([`crate::store`]), not this module's, so every read of the consent state
+//! has it whether or not a handler remembered.
 
 use std::collections::HashMap;
 
@@ -36,8 +54,9 @@ use axum::{Extension, Router};
 use serde_json::{json, Value};
 use tracing::{debug, error};
 
-use crate::consent::{Decision, Effective, Network, Subject};
+use crate::consent::{Decision, Effective, Invalid, Network, Subject};
 use crate::http::Gateway;
+use crate::outbox::Refused;
 use crate::session::Device;
 use crate::store::Entry;
 
@@ -102,6 +121,23 @@ async fn record_decision(
         }
     };
     match consent.record(&decision, &device) {
+        // The owner is not a subject (ticket #149, ADR 0018, ADR 0021). The
+        // writer refused, and the caller is told which subject and why — never
+        // a silent 2xx, which would leave a screen claiming a decision no
+        // store holds, and never a `404`, which would say the subject does not
+        // exist when in fact it is the user themselves.
+        Err(Refused::Invalid(invalid)) => {
+            debug!(
+                code = invalid.code(),
+                device = %device.id,
+                "refused a consent decision"
+            );
+            api_error(
+                StatusCode::from_u16(invalid.status()).unwrap_or(StatusCode::BAD_REQUEST),
+                invalid.code(),
+                &invalid.message(),
+            )
+        }
         Ok(committed) => {
             let recorded = &committed.recorded;
             let status = if committed.replayed {
@@ -125,7 +161,7 @@ async fn record_decision(
             )
                 .into_response()
         }
-        Err(error) => {
+        Err(Refused::Store(error)) => {
             // The decision was not recorded, so the honest answer is a
             // failure: a 2xx here would tell the user their consent is
             // stored when it is not.
@@ -145,9 +181,14 @@ async fn record_decision(
 /// Network entries are that network's default and contact entries override
 /// them; the resolution is [`effective_consent`]. Revocations are as
 /// explicit as grants, and an absent subject means "never decided" — never
-/// "revoked" (ADR 0010). This is the projection #50 will serve as a snapshot
+/// "revoked" (ADR 0010). This is the projection #50 serves as a snapshot
 /// alongside the stream position it reflects; it names no position, and has
 /// no cap, because both are that ticket's.
+///
+/// The owner's own rows are not in it (ticket #149) — a row about the owner is
+/// a row that should not exist, and this read is the one the Companion's
+/// consent screen draws from, where until now it appeared as a decision the
+/// user was invited to take about themselves.
 async fn consent_state(State(gateway): State<Gateway>) -> Response {
     let Some(consent) = gateway.consent() else {
         return not_configured();
@@ -199,6 +240,23 @@ async fn effective_consent(
             &format!("network has the unknown value {network:?}"),
         );
     };
+    // "What consent applies to the owner?" has no answer, and the honest reply
+    // is to say so rather than to hand back `pending` with `decided_by: null`
+    // (ticket #149). That document means "no decision was ever recorded",
+    // which is a *contact's* state and the one thing ADR 0010 is emphatic
+    // about keeping distinct; about the owner it would read as an invitation
+    // to go and take the decision.
+    if consent.owner().is_owner(contact) {
+        let refusal = Invalid::SubjectIsTheOwner {
+            id: contact.clone(),
+        };
+        debug!(code = refusal.code(), "refused an effective-consent read");
+        return api_error(
+            StatusCode::from_u16(refusal.status()).unwrap_or(StatusCode::CONFLICT),
+            refusal.code(),
+            &refusal.message(),
+        );
+    }
     match consent.store().effective(contact, network) {
         Ok(effective) => Json(effective_json(contact, network, &effective)).into_response(),
         Err(error) => {

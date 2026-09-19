@@ -82,14 +82,17 @@
 
 	# The owner, who is not a contact
 
-	ADR 0018 and ADR 0021: the owner has no consent state, on any event. If this
-	screen finds one, that is #149's Gateway half showing through — a row
-	recorded before #109 stopped the Sensor producing it. It is **labelled, not
-	filtered**: hiding it would hide the only symptom of that defect a user can
-	see, and offering a decision on it would let the user revoke their own
-	traffic. What this browser can recognise is the owner's canonical Matrix ID;
-	their network ghosts (`@whatsapp_lid-…`) are what #149 is actually about, and
-	nothing here can know one — the Gateway does not know them either.
+	ADR 0018 and ADR 0021: the owner has no consent state, on any event. Since
+	#149 the Gateway serves no row about them — not here, not in the snapshot,
+	not in the pending list, and not one recorded before #109 stopped the Sensor
+	producing it — so on a current deployment this screen finds none. The label
+	stays anyway, and deliberately: an older Gateway behind this Companion still
+	serves such a row, which is the situation #149's own premise describes, and
+	hiding it would hide the only symptom of that a user can see while offering
+	a decision on it would let them revoke their own traffic. What this browser
+	can recognise is the owner's canonical Matrix ID; their network ghosts
+	(`@whatsapp_lid-…`) are what #149 is about, and nothing here can know one —
+	those the Gateway now holds as configuration and keeps to itself.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';

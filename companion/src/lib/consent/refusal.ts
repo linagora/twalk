@@ -64,6 +64,15 @@ const TABLE: Record<string, Row> = {
 		remedy: 'diagnostics'
 	},
 
+	// Not a defect and not a deployment problem: the subject is the user's own
+	// identity, and they are never one of their own contacts (#149, ADR 0018,
+	// ADR 0021). The remedy is `none` because there is genuinely nothing to do
+	// — the Gateway refusing is the system being right — and the sentence says
+	// what the subject *is* rather than what went wrong. A Gateway from before
+	// #149 can still serve such a row, which is why the screen keeps a label
+	// for one, and this is what it answers if the user acts on it.
+	subject_is_the_owner: { cause: 'consent.refusal.subject_is_the_owner', remedy: 'none' },
+
 	// The session. Never described as a deployment problem (#116, #141).
 	unauthenticated: { cause: 'consent.refusal.unauthenticated', remedy: 'sign-in' },
 
