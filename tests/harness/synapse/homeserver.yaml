@@ -78,3 +78,11 @@ rc_invites:
   per_user:
     per_second: 10000
     burst_count: 10000
+  # The limiter on the *sender* of the invitations, which the two above do not
+  # cover (Synapse 1.63+). A test bot playing a bridge builds several portal
+  # rooms in a burst and invites the Sensor and the members into each: the
+  # default burst of 10 is reached in one setup, and the eleventh invite comes
+  # back 429 in the middle of arranging a fixture.
+  per_issuer:
+    per_second: 10000
+    burst_count: 10000

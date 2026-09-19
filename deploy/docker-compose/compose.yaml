@@ -175,6 +175,13 @@ services:
       # contact's, which is the behaviour #109 is about.
       SENSOR_OWNER: ${SENSOR_OWNER:-${GATEWAY_OWNER:-}}
       SENSOR_OWNER_IDENTITIES: ${SENSOR_OWNER_IDENTITIES:-}
+      # The bridges' own bots (issue #152, ADR 0026): the accounts that are
+      # not people, so nothing is published about them. The same ids as in
+      # SENSOR_ALLOWED_INVITERS minus your own account — deliberately named a
+      # second time rather than derived from that list, which also names you:
+      # see the .env.example entry. Empty: a bridge bot is published as a
+      # contact, which on the reference deployment was 95% of the bus.
+      SENSOR_BRIDGE_BOTS: ${SENSOR_BRIDGE_BOTS:-}
       # The consent snapshot (ticket #51, ADR 0010): where the Sensor reads
       # the whole consent state at startup, and the token it reads it with.
       # Both derive from the one secret GATEWAY_SERVICE_TOKEN, so setting that

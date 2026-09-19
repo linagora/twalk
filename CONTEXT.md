@@ -10,6 +10,10 @@ Twalk is a sovereign, self-hosted event hub that turns fragmented personal messa
 A service that connects one external messaging network to Matrix, landing each conversation in a portal room. Implementations (mautrix-whatsapp, mautrix-gmessages, …) are identified by `bridge_id` and are never network values.
 _Avoid_: connector
 
+**Bridge bot**:
+A bridge's **own** Matrix account — mautrix's `sender_localpart`, `@whatsappbot`, `@signalbot` — as distinct from the *ghosts* it materialises for people. It creates portal rooms, puppets ghosts, invites the user, and is a member of every portal room of its network. It is neither the owner nor a contact and has no consent state, so nothing is published about it on any event type and no decision about it enters the consent model (ADR 0026). Which accounts they are is handed to the Sensor by the deployment, never inferred: every inference available can suppress a real person instead, and an account that was not named stays a contact.
+_Avoid_: "bot" unqualified (a persona is never a bot), or "bridge user" when the ghost is what is meant
+
 **Portal room**:
 An end-to-end encrypted Matrix room, maintained by a bridge, that holds exactly one external conversation. Built **lazily**, when that conversation becomes active, and not once at login: the set grows all day, which is why observing it is a continuous mechanism and not a step (ADR 0024).
 
@@ -48,7 +52,7 @@ The versioned CloudEvents 1.0 envelope shared by every component, with type name
 _Avoid_: API, spec
 
 **Network**:
-A messaging service a conversation comes from, as the user experiences it: WhatsApp, Signal, Telegram, Discord, SMS, or Matrix itself for native rooms (the bring-your-own-account channel, ADR 0009). A network outlives its transports: SMS is `sms` whether it transits through mautrix-gmessages or the SMS Companion.
+A messaging service a conversation comes from, as the user experiences it: WhatsApp, Signal, Telegram, Discord, SMS, or Matrix itself for native rooms (the bring-your-own-account channel, ADR 0009). A network outlives its transports: SMS is `sms` whether it transits through mautrix-gmessages or the SMS Companion. On every event but one it is the network of the room the traffic arrived in; on `inbound.presence.updated` it is the network **the subject is on**, because presence is not room-scoped and a room's answer would be somebody else's (ADR 0027).
 _Avoid_: channel (user-facing copy only), gmessages (a bridge, not a network)
 
 **Consent**:

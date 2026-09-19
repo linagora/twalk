@@ -222,6 +222,12 @@ impl ConsentChange {
 /// The Sensor can only refuse to *use* such a row; removing it from the
 /// Gateway's store is the Gateway's half, and the dropped entry is logged at
 /// `warn` so an operator can see that their Gateway still holds one.
+///
+/// A **bridge's own bot** is refused on exactly the same terms (issue #152).
+/// It is not hypothetical either, and for the same reason: until #152 a bot
+/// reaching a handler was resolved as a subject and fed the Gateway's
+/// pending-contact projection, so a deployment can already hold a row about
+/// `@whatsappbot` and offer the user a decision about a robot.
 #[derive(Clone, Debug, Default)]
 pub struct ConsentCache {
     states: Arc<RwLock<States>>,
@@ -229,6 +235,10 @@ pub struct ConsentCache {
     /// that has not been told who its owner is: every subject is a contact,
     /// which is the behaviour that existed before ADR 0018.
     owner: Option<crate::owner::Owner>,
+    /// The bridges' own bots, as the deployment named them. Empty is a
+    /// deployment that has not named any: every bot is then a contact, which
+    /// is the behaviour that existed before issue #152.
+    bridge_bots: crate::bridge_bot::BridgeBots,
 }
 
 #[derive(Debug, Default)]
@@ -238,23 +248,36 @@ struct States {
 }
 
 impl ConsentCache {
-    /// A cache that knows who the operator is, and therefore that no
-    /// decision about them may enter it.
-    pub fn for_owner(owner: Option<crate::owner::Owner>) -> Self {
+    /// A cache that knows who the operator is and which accounts are the
+    /// bridges' own bots, and therefore that no decision about either may
+    /// enter it: neither is a person with a consent state.
+    pub fn for_people_only(
+        owner: Option<crate::owner::Owner>,
+        bridge_bots: crate::bridge_bot::BridgeBots,
+    ) -> Self {
         Self {
             states: Arc::default(),
             owner,
+            bridge_bots,
         }
     }
 
-    /// Whether this subject is one the cache refuses to hold a decision
-    /// about: a confirmed identity of the operator's, and nothing else. An
-    /// unconfirmed identity is a contact, so failing safe here means
-    /// keeping the decision.
-    fn is_owner(&self, subject_id: &str) -> bool {
-        self.owner
+    /// Why this subject is not a person the cache may hold a decision about —
+    /// or `None` when it is one. An exact match against what the deployment
+    /// confirmed, and nothing else: an identity it did not name is a contact,
+    /// so failing safe here means keeping the decision.
+    fn not_a_person(&self, subject_id: &str) -> Option<&'static str> {
+        if self
+            .owner
             .as_ref()
             .is_some_and(|owner| owner.is_owner(subject_id))
+        {
+            return Some("the operator");
+        }
+        if self.bridge_bots.contains(subject_id) {
+            return Some("a bridge's own bot");
+        }
+        None
     }
 
     /// The consent state that applies to a subject on a network: its own
@@ -300,22 +323,23 @@ impl ConsentCache {
     }
 
     /// Whether this entry is refused entry to the cache — a decision about
-    /// one of the operator's confirmed identities — and says so once, at
-    /// `warn`, because the row it names should not exist at the Gateway
-    /// either.
+    /// somebody who is not a person: one of the operator's confirmed
+    /// identities (ADR 0021), or a bridge's own bot (issue #152) — and says
+    /// so once, at `warn`, because the row it names should not exist at the
+    /// Gateway either.
     fn refuse(&self, entry: &ConsentEntry) -> bool {
         let ConsentSubject::Contact(id) = &entry.subject else {
             return false; // a network default is about a network, not a person
         };
-        if !self.is_owner(id) {
+        let Some(who) = self.not_a_person(id) else {
             return false;
-        }
+        };
         tracing::warn!(
             subject = %id,
             network = %entry.network.as_str(),
             state = %entry.state.as_str(),
-            "refusing a consent decision about the operator: the owner is not a contact and has \
-             no consent state (ADR 0021). The Companion Gateway should not be holding this row"
+            "refusing a consent decision about {who}: it is not a contact and has no consent \
+             state (ADR 0021, issue #152). The Companion Gateway should not be holding this row"
         );
         true
     }
@@ -532,12 +556,19 @@ mod tests {
     }
 
     /// A cache belonging to a deployment whose operator is `@michel`, with
-    /// one confirmed WhatsApp ghost.
+    /// one confirmed WhatsApp ghost, and which runs the two bridges of the
+    /// reference deployment.
     fn cache_with_an_owner() -> ConsentCache {
-        ConsentCache::for_owner(Some(crate::owner::Owner::new(
-            "@michel:example.com",
-            ["@whatsapp_33660469852:example.com".to_owned()],
-        )))
+        ConsentCache::for_people_only(
+            Some(crate::owner::Owner::new(
+                "@michel:example.com",
+                ["@whatsapp_33660469852:example.com".to_owned()],
+            )),
+            crate::bridge_bot::BridgeBots::new([
+                "@whatsappbot:example.com".to_owned(),
+                "@signalbot:example.com".to_owned(),
+            ]),
+        )
     }
 
     #[test]
@@ -603,6 +634,82 @@ mod tests {
             "and a real contact in the same snapshot is unaffected: this refuses one subject, \
              not the snapshot"
         );
+    }
+
+    #[test]
+    fn a_decision_about_a_bridge_bot_is_refused_entry() {
+        // A bridge bot is not a person, so there is no decision to hold about
+        // it, on the stream or in the snapshot (issue #152). The row is not
+        // hypothetical: until #152 a bot reaching a handler was resolved as a
+        // subject and fed the Gateway's pending-contact projection, so a
+        // deployment can be holding one and offering the user a decision
+        // about a robot.
+        let cache = cache_with_an_owner();
+        cache.apply(&contact_change(
+            "@whatsappbot:example.com",
+            Consent::Granted,
+            &[Network::Whatsapp],
+        ));
+        cache.apply_snapshot(&ConsentSnapshot {
+            entries: vec![
+                ConsentEntry {
+                    subject: ConsentSubject::Contact("@signalbot:example.com".to_owned()),
+                    network: Network::Signal,
+                    state: Consent::Granted,
+                },
+                ConsentEntry {
+                    subject: ConsentSubject::Contact(
+                        "@signal_75af9e9a-b173-4fa0-9228-03d4a03a1e2c:example.com".to_owned(),
+                    ),
+                    network: Network::Signal,
+                    state: Consent::Granted,
+                },
+            ],
+            next_stream_sequence: 12,
+        });
+        assert_eq!(
+            cache.state("@whatsappbot:example.com", Network::Whatsapp),
+            Consent::Pending,
+            "nothing was stored about the bot the stream named"
+        );
+        assert_eq!(
+            cache.state("@signalbot:example.com", Network::Signal),
+            Consent::Pending,
+            "nor about the one the snapshot named"
+        );
+        assert_eq!(
+            cache.state(
+                "@signal_75af9e9a-b173-4fa0-9228-03d4a03a1e2c:example.com",
+                Network::Signal
+            ),
+            Consent::Granted,
+            "and a ghost of the same bridge — a person the bridge stands in for — keeps its \
+             decision: this refuses one subject, not a network"
+        );
+    }
+
+    #[test]
+    fn an_unnamed_account_that_looks_like_a_bot_keeps_its_decision() {
+        // Unknown is not a bot, exactly as unknown is not the operator. The
+        // failure to avoid here is the other one: a contact suppressed on a
+        // resemblance vanishes from the bus in silence.
+        let cache = cache_with_an_owner();
+        for lookalike in [
+            "@whatsappbot2:example.com",
+            "@whatsappbot:evil.example",
+            "@telegrambot:example.com",
+        ] {
+            cache.apply(&contact_change(
+                lookalike,
+                Consent::Granted,
+                &[Network::Whatsapp],
+            ));
+            assert_eq!(
+                cache.state(lookalike, Network::Whatsapp),
+                Consent::Granted,
+                "{lookalike} is not one of the bots the deployment named"
+            );
+        }
     }
 
     #[test]

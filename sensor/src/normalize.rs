@@ -138,9 +138,11 @@ pub enum QuotedAuthor {
     /// them on the network the quoted message arrived on — the state of the
     /// user's decision about that contact.
     Contact(Consent),
-    /// Nobody the Sensor can name: a message older than what it can fetch or
-    /// decrypt, an author it cannot attribute to a network. Unknown is not
-    /// consent.
+    /// Nobody the Sensor can name, or nobody there is a decision to consult:
+    /// a message older than what it can fetch or decrypt, an author it cannot
+    /// attribute to a network, or a **bridge's own bot**, which is a service
+    /// identity rather than a person and has no consent state (ADR 0026).
+    /// Unknown is not consent, and neither is "not a person": both withhold.
     Unknown,
 }
 

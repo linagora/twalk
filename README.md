@@ -127,7 +127,9 @@ git clone https://github.com/linagora/twalk.git
 cd twalk/deploy/docker-compose
 cp .env.example .env
 # Edit .env: set MATRIX_DOMAIN, the Synapse secrets, the Sensor account credentials.
-# SENSOR_ALLOWED_INVITERS must name the bridge bot accounts and your own account.
+# SENSOR_ALLOWED_INVITERS must name the bridge bot accounts and your own account,
+# and SENSOR_BRIDGE_BOTS the same bot accounts without yours: those are the
+# service identities nothing is published about (ADR 0026).
 # GATEWAY_OWNER must be your own Matrix ID: it is the only identity allowed to
 # sign in to the Companion (one owner per deployment).
 docker compose up -d

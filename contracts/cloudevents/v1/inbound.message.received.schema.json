@@ -50,7 +50,7 @@
     "subject": {
       "type": "string",
       "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
-      "description": "Matrix user ID of the observed sender, as materialized by the bridge (e.g. @whatsapp_33612345678:example.com). Used for routing and for consent evaluation.",
+      "description": "Matrix user ID of the observed sender, as materialized by the bridge (e.g. @whatsapp_33612345678:example.com). Used for routing and for consent evaluation. Always a person the bridge stands in for — a ghost, or a native Matrix account (ADR 0009) — and never the deployment owner (ADR 0021) nor a bridge's own bot, the appservice service identity named by its sender_localpart (ADR 0026): neither is a contact, neither has a consent state, and nothing is published about a bridge bot on any type.",
       "examples": [
         "@whatsapp_33612345678:example.com",
         "@telegram_987654321:example.com"

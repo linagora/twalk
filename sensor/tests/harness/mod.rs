@@ -548,12 +548,38 @@ pub fn whatsapp_bridge_state(bridge_user_id: &str, chat_id: &str) -> (String, Va
 /// A mautrix-style portal room: the bridge identifies the network through a
 /// keyed m.bridge state event.
 pub async fn make_whatsapp_portal(bridge: &Bot, name: &str) -> Result<String> {
+    make_portal(bridge, name, "whatsapp", "whatsapp").await
+}
+
+/// [`make_whatsapp_portal`] for a mautrix-signal portal. A second network on
+/// one stack is what makes a subject's *own* attribution assertable: a subject
+/// in two portals of different networks is issue #150's case, and it cannot be
+/// staged with one bridge.
+pub async fn make_signal_portal(bridge: &Bot, name: &str) -> Result<String> {
+    make_portal(bridge, name, "signal", "signal").await
+}
+
+/// A mautrix-style portal room of any bridge: the network is identified by a
+/// keyed `m.bridge` state event, as [`bridge_state`] shapes it.
+pub async fn make_portal(
+    bridge: &Bot,
+    name: &str,
+    appservice_id: &str,
+    protocol_id: &str,
+) -> Result<String> {
     let room_id = bridge.create_room(name, false).await?;
-    let (state_key, content) = whatsapp_bridge_state(bridge.user_id(), name);
+    let (state_key, content) = bridge_state(bridge.user_id(), appservice_id, protocol_id, name);
     bridge
         .send_state_event(&room_id, "m.bridge", &state_key, content)
         .await?;
     Ok(room_id)
+}
+
+/// A room **no bridge marked**: native Matrix traffic, the
+/// bring-your-own-account channel (ADR 0009). Deliberately just a room with no
+/// `m.bridge` state event, because that absence is the whole definition.
+pub async fn make_native_room(creator: &Bot, name: &str) -> Result<String> {
+    creator.create_room(name, false).await
 }
 
 /// The Sensor under test, running as the real binary it ships as — the

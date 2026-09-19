@@ -32,7 +32,7 @@
       "type": "string",
       "format": "uri-reference",
       "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
-      "description": "URI identifying the Matrix portal room through which the presence update was observed. Format: matrix://<homeserver>/<room_id>.",
+      "description": "URI identifying one Matrix portal room the subject shares with the Sensor. Format: matrix://<homeserver>/<room_id>. Matrix presence is NOT room-scoped — the update is a fact about an account and arrives with no room attached — so this names a room the subject is observed in and never the room 'the presence happened in'. The Sensor names the first, in room-id order, of the rooms that resolve to the network already decided from the subject's own identity: an ordering may break a tie between rooms that agree, and never decides the network (see ADR 0027).",
       "examples": [
         "matrix://matrix.example.com/!abcXYZ123:example.com"
       ]
@@ -50,7 +50,7 @@
     "subject": {
       "type": "string",
       "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
-      "description": "Matrix user ID of the contact whose presence changed, as materialized by the bridge. Used for routing and for consent evaluation.",
+      "description": "Matrix user ID of the contact whose presence changed, as materialized by the bridge. Used for routing and for consent evaluation. Always a person the bridge stands in for — a ghost, or a native Matrix account (ADR 0009) — and never the deployment owner (ADR 0021) nor a bridge's own bot, the appservice service identity named by its sender_localpart (ADR 0026): neither is a contact, neither has a consent state, and nothing is published about a bridge bot on any type.",
       "examples": [
         "@whatsapp_33612345678:example.com"
       ]
@@ -76,7 +76,7 @@
     "network": {
       "type": "string",
       "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
-      "description": "Twalk extension. Identifies the external network the presence update originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic: a room with no m.bridge state event and no ghost-prefixed sender, reached through the user's own Matrix account instead of through a bridge (see ADR 0009)."
+      "description": "Twalk extension. Identifies the network the SUBJECT is on, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. Unlike every other event type, this one is not about traffic in a room, so the value is derived from something that identifies the subject — a bridge ghost's localpart, or the fact that they share a room no bridge marked — and never from an ordering over the rooms they happen to be in (ADR 0027). The value matrix is a native Matrix account, reached through the user's own homeserver instead of through a bridge (ADR 0009); a native Matrix contact who is also a member of a bridged portal room is still matrix, because that membership is an invitation and not an identity on that network. A subject the Sensor cannot attribute to exactly one network produces no event at all rather than an event under a guessed network, since consent is looked up by (subject, network)."
     },
     "consent": {
       "type": "string",
