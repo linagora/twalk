@@ -2,7 +2,7 @@
 
 **A sovereign, open source event hub for personal multi-channel messaging.**
 
-Twalk turns your fragmented messaging landscape (WhatsApp, Telegram, Signal, Discord, SMS/RCS, and eventually email) into a single, auditable stream of typed events that agents can observe, reason about, and respond to under human control.
+Twalk turns your fragmented messaging landscape (WhatsApp, Telegram, Signal, Discord, SMS/RCS, and eventually email, calendars and contacts) into a single, auditable stream of typed events that agents can observe, reason about, and respond to under human control.
 
 Unlike push notification services or unified inbox products, Twalk is not a SaaS. It is an infrastructure you self-host, whose contract with the outside world is a versioned CloudEvents 1.0 schema. Everything is open source, replayable and portable.
 
@@ -163,7 +163,7 @@ Twalk is designed to compose with adjacent open source projects rather than rein
 
 ### Pimalaya Carillon (personal information management)
 
-Twalk currently focuses on real-time messaging networks. As we extend the Sensor to email, calendaring, contacts, notes and RSS, we intend to **build on top of the [Pimalaya](https://pimalaya.org) sans-I/O Rust crates** rather than rewrite them. In particular:
+Twalk currently focuses on real-time messaging networks. As we extend the Sensor to email, calendaring and contacts — not notes or RSS, which name no third party and so gain nothing from passing through Twalk (ADR 0033) — we intend to **build on top of the [Pimalaya](https://pimalaya.org) sans-I/O Rust crates** rather than rewrite them. In particular:
 
 - [`io-imap`](https://github.com/pimalaya/core), [`io-jmap`](https://github.com/pimalaya/core), [`io-webdav`](https://github.com/pimalaya/core), [`io-oauth`](https://github.com/pimalaya/core), [`io-maildir`](https://github.com/pimalaya/core) provide protocol logic decoupled from any concrete I/O runtime, dual-licensed MIT and Apache 2.0.
 - The Pimalaya [Carillon](https://github.com/pimalaya/carillon) CLI already implements event-driven PIM watching (email, calendar, contacts, RSS) with a plugin architecture. When our roadmap reaches these channels, our first move will be to **integrate the Sensor as a downstream consumer of the same primitives**, and to contribute back the Matrix and CloudEvents bindings we develop for our own needs.
