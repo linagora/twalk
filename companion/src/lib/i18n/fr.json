@@ -208,6 +208,7 @@
 	"network.matrix.name": "Compte Matrix existant",
 	"network.matrix.subtitle": "Relier un compte Matrix que vous possédez déjà",
 	"network.telegram.name": "Telegram",
+	"network.telegram.subtitle": "Vos conversations Telegram, comme une session de plus",
 	"network.discord.name": "Discord",
 	"network.comingSoon": "Arrive en v0.2",
 
@@ -369,6 +370,20 @@
 	"qr.signal.success": "Signal est connecté. Twalk observe désormais vos nouveaux messages Signal.",
 	"qr.signal.trouble1": "Votre téléphone doit rester connecté pour que les messages Signal parviennent à Twalk.",
 	"qr.signal.trouble2": "Si le code est refusé, vérifiez que Signal est à jour sur votre téléphone, puis affichez un nouveau code.",
+
+	"qr.telegram.title": "Connecter Telegram",
+	"qr.telegram.caption": "Twalk devient une session de votre compte Telegram, comme Telegram Desktop. Contrairement à WhatsApp et Signal, votre téléphone n'a pas besoin de rester allumé : une session Telegram vit par elle-même.",
+	"qr.telegram.step1": "Ouvrez Telegram sur votre téléphone.",
+	"qr.telegram.step2": "Allez dans Paramètres, puis Appareils.",
+	"qr.telegram.step3": "Touchez Associer un ordinateur.",
+	"qr.telegram.step4": "Scannez ce code.",
+	"qr.telegram.note": "Telegram prend officiellement en charge plusieurs sessions : aucun risque de bannissement. Vous verrez celle-ci dans Paramètres puis Appareils, et vous pourrez la révoquer de là à tout moment, sans passer par Twalk.",
+	"qr.telegram.alt": "Scannez ce code depuis Telegram, dans Paramètres puis Appareils.",
+	"qr.telegram.success": "Telegram est connecté. Twalk observe désormais vos nouvelles conversations Telegram.",
+	"qr.telegram.successNote": "Vos conversations n'apparaîtront pas toutes d'un coup : Twalk n'observe que celles que vous choisissez.",
+	"qr.telegram.trouble1": "Si la vérification en deux étapes est activée sur votre compte, Telegram demandera votre mot de passe après le scan. C'est celui de Telegram, pas celui de Twalk.",
+	"qr.telegram.trouble2": "Un code refusé ne se corrige pas : Telegram met fin à la tentative. Recommencez une connexion pour en obtenir un nouveau.",
+	"qr.telegram.trouble3": "Telegram limite le nombre de sessions par compte. Si l'association échoue sans raison visible, retirez une ancienne session dans Paramètres puis Appareils.",
 
 	"matrix.title": "Connecter votre compte Matrix",
 	"matrix.caption": "Si vous utilisez déjà Matrix, Twalk peut veiller sur le compte que vous avez plutôt que d'en créer un autre. Twalk invite son Sensor dans les salons que vous choisissez, et ne change rien à vos autres sessions Matrix.",

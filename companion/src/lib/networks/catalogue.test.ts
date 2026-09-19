@@ -74,19 +74,29 @@ function card(network: string, options: Parameters<typeof gridFor>[0]) {
 }
 
 describe('the network grid', () => {
-	it('offers the four v0.1 networks and shows the two v0.2 ones', () => {
+	it('offers the five reachable networks and shows the one that is not', () => {
 		const active = NETWORK_CARDS.filter((entry) => entry.milestone === 'v0.1').map(
 			(entry) => entry.network
 		);
-		expect(active).toEqual(['whatsapp', 'signal', 'sms', 'matrix']);
+		expect(active).toEqual(['whatsapp', 'signal', 'sms', 'matrix', 'telegram']);
 
 		const grid = gridFor({ bridges: configured, bridgesKnown: true, ios: false });
 		expect(grid.map((state) => state.card.network)).toContain('telegram');
-		expect(card('telegram', { bridges: configured, bridgesKnown: true, ios: false }).blockedBy).toBe(
-			'coming-soon'
-		);
 		expect(card('discord', { bridges: configured, bridgesKnown: true, ios: false }).blockedBy).toBe(
 			'coming-soon'
+		);
+	});
+
+	it('blocks Telegram on a missing bridge, not on "coming soon"', () => {
+		// The distinction is the whole point of moving this card. "Coming soon"
+		// is a statement about Twalk and cannot be acted on; "not configured" is
+		// a statement about *this deployment* and an operator can fix it. The
+		// card said the first while the bridge was up and serving four login
+		// flows.
+		const withTelegram = [...configured, bridge('mautrix-telegram', 'telegram')];
+		expect(card('telegram', { bridges: withTelegram, bridgesKnown: true, ios: false }).blockedBy).toBeNull();
+		expect(card('telegram', { bridges: configured, bridgesKnown: true, ios: false }).blockedBy).toBe(
+			'no-bridge'
 		);
 	});
 
@@ -263,4 +273,30 @@ describe('the iOS hint', () => {
 		expect(looksLikeIos('Mozilla/5.0 (Linux; Android 14; Pixel 8)', 5, 'Linux armv8l')).toBe(false);
 		expect(looksLikeIos('Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 0, 'Win32')).toBe(false);
 	});
+});
+
+describe('every route the catalogue can produce is served', () => {
+	// The Telegram login screen shipped without its manage screen, and nothing
+	// caught it: `manageRouteFor` derives `<route>/manage` for every card that
+	// needs a bridge, so *Manage* appeared the moment the account linked and
+	// led to a route that did not exist. A card is not allowed to offer a
+	// destination the app cannot serve — that is the defect this file exists to
+	// keep out, one directory up from the data it already checks.
+	const pages = import.meta.glob('/src/routes/**/+page.svelte');
+	const served = new Set(
+		Object.keys(pages).map((path) =>
+			path.replace('/src/routes', '').replace('/+page.svelte', '')
+		)
+	);
+
+	it.each(NETWORK_CARDS.filter((card) => card.route !== null))(
+		'serves $network',
+		(card) => {
+			expect(served, `no page for ${card.route}`).toContain(card.route!);
+			const manage = manageRouteFor(card);
+			if (manage !== null) {
+				expect(served, `no page for ${manage}`).toContain(manage);
+			}
+		}
+	);
 });

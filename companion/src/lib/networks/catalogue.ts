@@ -106,12 +106,18 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		network: 'telegram',
 		icon: 'telegram',
 		titleKey: 'network.telegram.name',
-		subtitleKey: 'network.comingSoon',
-		milestone: 'v0.2',
+		subtitleKey: 'network.telegram.subtitle',
+		// Was a v0.2 card leading nowhere, which stopped being true the day the
+		// reference deployment started running `mautrix-telegram`: the bridge
+		// was up, healthy and advertising four login flows while the card still
+		// said "coming soon". A deployment that *can* connect a network and a
+		// Companion that says it cannot are two states behind one appearance,
+		// and the card is what the user reads.
+		milestone: 'v0.1',
 		preview: false,
 		needsBridge: true,
 		androidOnly: false,
-		route: null
+		route: '/networks/telegram'
 	},
 	{
 		network: 'discord',
