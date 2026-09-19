@@ -345,7 +345,19 @@ export function answerOf(
 					jar[field.id] = found;
 				}
 			}
-			data[JAR_MEMBER] = jar;
+			// bridgev2's `cookies` member is a **string**, not a map — the bridge
+			// parses the blob itself, which is why its own instructions offer a
+			// cURL command as well as a JSON object. Submitting the map is a type
+			// error the bridge answers with `cannot unmarshal object into Go
+			// struct field .cookies of type string`, and the login process dies
+			// with it (#221).
+			//
+			// What goes over is the JSON object spelling the bridge names, built
+			// from the fields it asked for — not the user's paste. Relaying the
+			// paste verbatim would also satisfy the bridge and would hand it the
+			// user's whole Google session, which is more credential than the
+			// login needs (ADR 0011) and is the property the test below holds.
+			data[JAR_MEMBER] = JSON.stringify(jar);
 			continue;
 		}
 		// The raw value, not the trimmed one: a credential's own whitespace is

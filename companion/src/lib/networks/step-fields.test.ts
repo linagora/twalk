@@ -102,7 +102,7 @@ describe('the controls a step draws', () => {
 		// The paste is keyed by the browser's names; the answer by the ids.
 		expect(answerOf(controls, { jar: '{"li_at": "one", "Csrf-Token": "two"}' })).toEqual({
 			ok: true,
-			data: { cookies: { li_at: 'one', csrf: 'two' } }
+			data: { cookies: '{"li_at":"one","csrf":"two"}' }
 		});
 	});
 
@@ -127,7 +127,7 @@ describe('the controls a step draws', () => {
 		]);
 		expect(answerOf(controls, { jar: 'SID=one' })).toEqual({
 			ok: true,
-			data: { cookies: { SID: 'one' } }
+			data: { cookies: '{"SID":"one"}' }
 		});
 	});
 
@@ -197,8 +197,24 @@ describe('the answer a step is submitted with', () => {
 		]);
 		expect(answerOf(controls, { 'jar': 'SID=one; HSID=two' })).toEqual({
 			ok: true,
-			data: { cookies: { SID: 'one', HSID: 'two' } }
+			data: { cookies: '{"SID":"one","HSID":"two"}' }
 		});
+	});
+
+	it('submits the jar as a string, because the bridge’s member is one', () => {
+		// #221: bridgev2 declares `cookies` as a string and parses the blob
+		// itself. A map here is answered with `cannot unmarshal object into Go
+		// struct field .cookies of type string` — a 400 that destroys the login
+		// process, reported to the user as the *network* refusing them. The type
+		// is the whole of the defect, so it is asserted on its own.
+		const controls = controlsOf([field({ id: 'SID', type: 'cookie' })]);
+		const answer = answerOf(controls, { jar: 'SID=one' });
+		expect(answer.ok).toBe(true);
+		if (!answer.ok) {
+			return;
+		}
+		expect(typeof answer.data['cookies']).toBe('string');
+		expect(JSON.parse(answer.data['cookies'] as string)).toEqual({ SID: 'one' });
 	});
 
 	it('sends only the values the bridge asked for, whatever the paste held', () => {
@@ -209,7 +225,7 @@ describe('the answer a step is submitted with', () => {
 		const controls = controlsOf([field({ id: 'SID', type: 'cookie' })]);
 		expect(
 			answerOf(controls, { jar: 'SID=wanted; NID=unrelated; __Secure-3PSID=also-unrelated' })
-		).toEqual({ ok: true, data: { cookies: { SID: 'wanted' } } });
+		).toEqual({ ok: true, data: { cookies: '{"SID":"wanted"}' } });
 	});
 
 	it('names the cookies a paste is missing rather than saying “invalid”', () => {
