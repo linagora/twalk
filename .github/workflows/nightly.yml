@@ -1,0 +1,132 @@
+# Everything, on `main`, once a night.
+#
+# The pull-request workflow selects what a change needs and leaves the
+# deployment tier advisory, because measured on this project's own reference host
+# that tier is where the wall clock goes and where the flakes are. This is the
+# other half of that decision: what a pull request does not have to run, `main`
+# runs anyway, so the gap between "the components pass" and "the deployment
+# works" is at most one day wide rather than open-ended.
+#
+# Deliberately not a required check on anything. A nightly failure is a ticket,
+# and that is the point: a red check people learn to ignore is worse than no
+# check, so the checks that block a merge stay the ones that mean something.
+
+name: nightly
+
+on:
+  schedule:
+    # 02:30 UTC — after the day's merges, before the morning.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      all: ${{ steps.pick.outputs.all }}
+      any_all: ${{ steps.pick.outputs.any_all }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the routing table against the repository
+        working-directory: .github/ci
+        run: python3 -m unittest discover -s . -p 'test_*.py' -v
+
+      - name: every suite
+        id: pick
+        run: |
+          git ls-files >changed.txt
+          python3 .github/ci/plan.py changed.txt
+
+  everything:
+    name: ${{ matrix.id }}
+    needs: plan
+    if: needs.plan.outputs.any_all == 'true'
+    runs-on: ${{ vars.TWALK_STACK_RUNNER || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      # One at a time. The host is somebody's server: five concurrent Rust builds
+      # took this project's reference host to a load average of 939 with 30 GB of
+      # swap exhausted, and it runs the owner's production services.
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.plan.outputs.all) }}
+    env:
+      SUITE_ID: ${{ matrix.id }}
+      SUITE_RUN: ${{ matrix.run }}
+      HAVE_RUNNER: ${{ vars.TWALK_STACK_RUNNER != '' }}
+    steps:
+      - name: no stack runner is configured
+        if: vars.TWALK_STACK_RUNNER == ''
+        run: |
+          printf '::warning title=%s was not run::no stack runner configured (repository variable TWALK_STACK_RUNNER)\n' "$SUITE_ID"
+          printf '`%s` needs a Docker host. Set `TWALK_STACK_RUNNER`.\n' "$SUITE_ID" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+        if: env.HAVE_RUNNER == 'true'
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.HAVE_RUNNER == 'true' && contains(matrix.needs, 'rust')
+
+      - uses: actions/setup-node@v4
+        if: env.HAVE_RUNNER == 'true' && contains(matrix.needs, 'node')
+        with:
+          node-version: 22
+
+      - name: ports and compose projects for this run
+        if: env.HAVE_RUNNER == 'true'
+        run: bash .github/ci/stack-env.sh >>"$GITHUB_ENV"
+
+      - name: run
+        if: env.HAVE_RUNNER == 'true'
+        working-directory: ${{ matrix.workdir }}
+        env:
+          CARGO_BUILD_JOBS: '4'
+          CARGO_TERM_COLOR: always
+          CI: '1'
+        run: bash -eo pipefail -c "$SUITE_RUN"
+
+      - uses: actions/upload-artifact@v4
+        if: env.HAVE_RUNNER == 'true' && failure()
+        with:
+          name: nightly-${{ matrix.id }}
+          path: |
+            companion/playwright-report
+            companion/test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: leave nothing behind
+        if: env.HAVE_RUNNER == 'true' && always()
+        run: bash .github/ci/stack-teardown.sh
+
+  # A nightly failure has to be seen by somebody in the morning, and a red run in
+  # a list of runs is not that. One issue, reopened and commented rather than
+  # duplicated, so a suite that fails five nights running is one thread and not
+  # five.
+  report:
+    name: report
+    needs: [plan, everything]
+    if: always() && needs.everything.result == 'failure' && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: open or update the nightly issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          title='Nightly run failed'
+          existing=$(gh issue list --repo "$REPO" --state open --search "$title in:title" --json number --jq '.[0].number // empty')
+          body=$(printf 'The nightly run of every suite failed.\n\n%s\n\nIf it is a known flake (#148, #186), say which and how many re-runs it took. If it is not, it is a defect that the required checks on a pull request do not cover — which is worth knowing on its own.\n' "$RUN_URL")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body" --label needs-triage
+          fi
