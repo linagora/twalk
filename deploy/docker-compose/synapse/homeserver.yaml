@@ -67,9 +67,9 @@ registration_shared_secret: "{{ MATRIX_REGISTRATION_SHARED_SECRET }}"
 # such, and throttling a *correct* password defends against nothing here, so
 # they are loosened to a rate a human and a diagnosing operator cannot
 # realistically exhaust. `failed_attempts` is the limiter that actually
-# carries the brute-force argument, and it stays tight — twice the default
-# rate, with a burst that a person mistyping a password reaches and a machine
-# guessing one does not.
+# carries the brute-force argument, and it is loosened the least: 0.2/s with
+# a burst of 10 against Synapse's 0.17/s and 3 — a burst a person mistyping a
+# password reaches, and a fraction of what a machine guessing one needs.
 rc_login:
   address:
     per_second: 1
