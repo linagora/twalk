@@ -4,7 +4,11 @@ Verification that runs on a pull request and is a condition of merging it, rathe
 
 ## What a contributor should expect
 
-Open a pull request and it gets a verdict without anybody running anything by hand. **`verified`** is the check that decides: it is green when every suite your change selected passed, and it always reports, including on a change that legitimately selects nothing.
+Open a pull request and it gets a verdict without anybody running anything by hand. Three checks decide it, and there are three rather than one because two facts must not share one signal:
+
+- **`routing`** — the routing table checked against the repository. Always runs, hosted, under a second.
+- **`verified`** — every selected suite that needs no Docker: the Python SDK, the shared harness's units, the Companion's Node-only suite. Always reports, including on a change that selects nothing.
+- **`verified-stack`** — every selected suite that needs a Docker host: the Sensor, the Gateway, Hermes. It **fails** when such suites were selected and `vars.TWALK_STACK_RUNNER` names no runner, because a green tick that meant "those never ran" would be the defect this project keeps shipping.
 
 Running the suites locally is still the fastest way to find out whether your change works, and `AGENTS.md` holds the commands. What changed is that it is no longer the *verification*: a local run says the suites passed in your worktree, and `verified` says they passed on the change as it will land.
 
@@ -27,7 +31,7 @@ A path nothing claims selects **every** suite. Wrong in the expensive direction 
 Two kinds of runner, because the suites are not one kind of thing.
 
 - **GitHub-hosted**, free and maintained by nobody here: the routing check, the Python SDK's units, the shared harness's units, and the Companion's Node-only suite. These need no Docker and no stack.
-- **`vars.TWALK_STACK_RUNNER`**, a self-hosted label: everything that raises a Synapse and a NATS. Until that repository variable is set, those jobs report that they did not run, name the command to type instead, and do not block `verified` by hanging. One job at a time, `CARGO_BUILD_JOBS=4`, ports in 18300–18499, and `stack-teardown.sh` after every run whether it passed or failed.
+- **`vars.TWALK_STACK_RUNNER`**, a self-hosted label: everything that raises a Synapse and a NATS. Until that repository variable is set, those jobs say what they did not run and print the command to type instead, and `verified-stack` goes red so nothing reads as verified that was not. One job at a time, `CARGO_BUILD_JOBS=4`, ports in 18300–18499, and `stack-teardown.sh` after every run whether it passed or failed — which takes the deployment stacks down with `down -v` and deliberately leaves the shared test stack up, because one Sensor suite fails against a Synapse that has just been created.
 
 `.github/ci/stack-env.sh` is the single place the per-stack ports and compose projects are set. If you add a suite that raises a stack, its variables go there — and `AGENTS.md` already documents which variable moves which stack aside.
 

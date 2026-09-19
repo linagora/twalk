@@ -73,7 +73,7 @@ The Sensor and Hermes suites bring up the same test stack (one Synapse, one NATS
 
 ## Continuous integration
 
-A pull request is verified by `.github/workflows/pull-request.yml` and the check to look at is **`verified`**. Three things to know before reading a red one, with the rest in `docs/agents/continuous-integration.md`:
+A pull request is verified by `.github/workflows/pull-request.yml`, and three checks decide it: **`routing`** (the routing table against the repository), **`verified`** (every selected suite that needs no Docker) and **`verified-stack`** (every selected suite that does — red until `vars.TWALK_STACK_RUNNER` names a runner, deliberately, so a green tick never means "those never ran"). Three things to know before reading a red one, with the rest in `docs/agents/continuous-integration.md`:
 
 - **What runs is a function of what changed**, and it is decided by `.github/ci/suites.json` — never by a `paths:` filter in a workflow. A change to `contracts/`, `tests/harness/` or `companion-gateway/openapi.yaml` runs the **consumers'** suites, and `.github/ci/test_selection.py` derives those consumers from the repository's own dependency graph rather than trusting the table, so a fourth consumer of the harness fails the routing check until it is routed. Adding a suite, or a Rust test file, means editing that table; the same test fails if you do not.
 - **The deployment suites are advisory.** `sensor-deployment`, `gateway-deployment`, `hermes-full-loop` and `companion-e2e-stack` do not block a merge: they run nightly on `main`, and on a pull request only when it carries the **`ci:deployment`** label. Add the label when you touch `deploy/docker-compose/` or `bridges/`.

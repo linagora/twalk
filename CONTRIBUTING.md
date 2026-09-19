@@ -12,7 +12,7 @@ Work reaches `main` through a pull request whose body carries `Closes #N`, a sum
 
 ## What verifies your pull request
 
-Opening a pull request gets you a verdict without anybody running anything by hand. The check that decides is **`verified`**, and it is green when every suite your change selected passed. `docs/agents/continuous-integration.md` is the full account; four things are worth knowing before you open one.
+Opening a pull request gets you a verdict without anybody running anything by hand. Three checks decide it — **`routing`**, **`verified`** and **`verified-stack`** — and there are three rather than one because "the suites passed" and "the suites never ran" must not share a tick. `docs/agents/continuous-integration.md` is the full account; four things are worth knowing before you open one.
 
 **Running the suites locally is no longer the verification, and it is still the fastest way to find out whether your change works.** The difference matters because it is what two red-`main` incidents cost: both were a change to a shared path merged on the strength of "I ran the suites", where the suite that broke belonged to a different component. So keep pasting the output — a reviewer reads it — but `verified` is what says the change is sound.
 
