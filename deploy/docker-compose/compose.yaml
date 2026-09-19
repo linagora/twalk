@@ -187,6 +187,17 @@ services:
       # see the .env.example entry. Empty: a bridge bot is published as a
       # contact, which on the reference deployment was 95% of the bus.
       SENSOR_BRIDGE_BOTS: ${SENSOR_BRIDGE_BOTS:-}
+      # The device of YOUR OWN account that Twalk acts through (#123, ADR 0025,
+      # ADR 0034). A mautrix bridge relays to its network only what the
+      # logged-in user's own Matrix account sends, so an approved reply posted
+      # by @sensor: is ignored — without a log line. This credential is what
+      # makes the reply really be yours. It is write-only: it joins the portals
+      # of the bridges SENSOR_BRIDGE_BOTS names and posts approved replies, it
+      # reads no history, and it needs no cross-signing and no recovery key.
+      # Empty (the default): unchanged behaviour, and the Sensor says per reply
+      # on twalk.persona.reply.approved.v1.posted that it reached nobody.
+      SENSOR_OWNER_DEVICE_ACCESS_TOKEN: ${SENSOR_OWNER_DEVICE_ACCESS_TOKEN:-}
+      SENSOR_OWNER_DEVICE_ID: ${SENSOR_OWNER_DEVICE_ID:-}
       # The consent snapshot (ticket #51, ADR 0010): where the Sensor reads
       # the whole consent state at startup, and the token it reads it with.
       # Both derive from the one secret GATEWAY_SERVICE_TOKEN, so setting that

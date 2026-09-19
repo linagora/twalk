@@ -27,8 +27,51 @@ pub fn dead_letter_subject() -> String {
     format!("{}.dead", normalize::bus_subject(REPLY_APPROVED_TYPE))
 }
 
-/// Header carrying the original event id on a dead-letter copy.
-pub const DEAD_LETTER_EVENT_ID_HEADER: &str = "event-id";
+/// Header carrying the original event id on a copy of an approved reply the
+/// Sensor publishes of its own accord — the dead-letter copy, and the reach
+/// report below. The copy's own `Nats-Msg-Id` has to be derived (see
+/// [`dead_letter_msg_id`]), so the event id needs somewhere to stay visible.
+pub const EVENT_ID_HEADER: &str = "event-id";
+
+/// The subject the Sensor reports **what a posted reply reached** on
+/// (issue #216): `<source subject>.posted`, inside the twalk stream like the
+/// dead-letter subject beside it.
+///
+/// Why a subject of the Sensor's own rather than a field: the answer is not a
+/// property of the approval, it is a property of the *send*, and every v1
+/// schema is `additionalProperties: false` — there is no attribute in the
+/// contract that could carry it and no type for "a reply was posted". The
+/// dead-letter subject is the precedent this copies exactly: a Sensor-defined
+/// subject in the twalk stream, carrying the contract event **unchanged**, with
+/// the new facts in headers. So no schema moves, `validate_against_contract`
+/// keeps passing on the payload, and a consumer reads the answer off
+/// [`POSTED_REACH_HEADER`].
+///
+/// Published on **every** successful post, not only on the ones that reached
+/// nobody. A signal that exists only in the bad case makes the good case a
+/// silence, and two situations behind one silence is the defect #216 is about.
+pub fn posted_subject() -> String {
+    format!("{}.posted", normalize::bus_subject(REPLY_APPROVED_TYPE))
+}
+
+/// `Nats-Msg-Id` of the reach report, derived for the reason
+/// [`dead_letter_msg_id`] is: the report shares the twalk stream with the
+/// approval it copies, which was published under the event id. Stable, so a
+/// redelivered approval reposted (and deduplicated by the homeserver on its
+/// transaction id) is reported once.
+pub fn posted_msg_id(event_id: &str) -> String {
+    format!("{event_id}:posted")
+}
+
+/// Header carrying what the posted reply reached: `contact`, or `nobody`. See
+/// `crate::owner_device::Reach`.
+pub const POSTED_REACH_HEADER: &str = "reach";
+
+/// Header carrying the Matrix ID the reply was posted **by** — the owner's own
+/// account, or the Sensor's. The `reach` header is the answer; this is the
+/// reason for it, so an operator reading one message does not have to infer
+/// which identity spoke.
+pub const POSTED_AS_HEADER: &str = "posted-as";
 
 /// `Nats-Msg-Id` of the dead-letter copy of an event. The bus de-duplicates
 /// per stream, and the dead-letter subject shares the twalk stream with the
@@ -123,6 +166,21 @@ mod tests {
             dead_letter_subject(),
             "twalk.persona.reply.approved.v1.dead"
         );
+    }
+
+    #[test]
+    fn the_reach_report_is_a_sibling_subject_of_the_approval_and_of_the_dead_letter() {
+        // One subject per answer, all three derived from the contract type, so
+        // nothing here can drift from `persona.reply.approved.v1` on its own.
+        assert_eq!(posted_subject(), "twalk.persona.reply.approved.v1.posted");
+        assert_ne!(posted_subject(), dead_letter_subject());
+        assert_ne!(
+            posted_msg_id("abc123"),
+            dead_letter_msg_id("abc123"),
+            "one approval may be posted and later dead-lettered on a redelivery: the two copies \
+             must not deduplicate each other out of the stream"
+        );
+        assert_eq!(posted_msg_id("abc123"), posted_msg_id("abc123"));
     }
 
     #[test]

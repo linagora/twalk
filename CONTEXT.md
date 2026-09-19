@@ -37,7 +37,15 @@ The user's decision that Twalk may watch **one conversation** — the third unit
 _Avoid_: "monitoring"; and never "observation" for what a persona is allowed to read, which is consent
 
 **Sensor**:
-The Matrix client that decrypts portal-room events, enriches them with contact and channel context, and publishes them as typed CloudEvents.
+The Matrix client that decrypts portal-room events, enriches them with contact and channel context, and publishes them as typed CloudEvents. It holds **two** Matrix identities and never confuses them: its own `@sensor:` account, which observes, and the *owner device*, which acts.
+
+**Owner device**:
+A device of the **user's own Matrix account**, created during onboarding and held by the Sensor, through which Twalk *acts* as the user rather than observing them (ADR 0025, ADR 0034). It exists because a bridge relays to its network only what the logged-in user's own account sends, so a reply from `@sensor:` is ignored without a log line. It is **write-only**: it joins the portal rooms of the bridges the deployment named — and only those, since everything in an invitation except its sender is chosen by whoever sent it — and posts approved replies; it reads no history, so it needs neither cross-signing nor a recovery key, and the user's recovery key is something no Twalk component ever asks for. It appears in the user's device list and revoking it from any Matrix client stops Twalk replying. It is never what the portal register reads as `observing`: observation is the Sensor's own membership, and ADR 0024's mechanism is untouched by it.
+_Avoid_: "puppet" or "double puppeting", which is a bridge acting as the user and is the alternative ADR 0025 rejected; "the Sensor's device", which is the other identity
+
+**Reach**:
+What a posted reply actually got to, as distinct from where it was published: the **contact**, or **nobody**. A reply posted by the owner device into a portal room it has joined reaches the contact, because the bridge relays it; one posted by `@sensor:` into a portal room reaches nobody, and used to be reported as sent (#216). Said per reply on the bus and counted, because "published on your bus", "posted into a room" and "delivered to your contact" are three facts and only the last is what a user means by *sent*.
+_Avoid_: "delivered" for a message that merely reached Matrix
 
 **Bus**:
 The durable event stream that stores every Twalk event, with replay, filtering, and at-least-once delivery.
