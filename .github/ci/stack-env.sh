@@ -34,8 +34,17 @@
 # Gateway's; TWALK_BRIDGES_TEST_* is the same deployment with the four bridges
 # up; TWALK_NO_BRIDGES_TEST_* is it with no bridge variable set at all (#172);
 # TWALK_PORTALS_TEST_* is the portal register over it; TWALK_LOOP_TEST_* is the
-# whole loop. The `_TEARDOWN` flags are off by default because a developer wants
-# a warm stack between runs; CI wants the host back.
+# whole loop.
+#
+# The `_TEARDOWN` flags are deliberately **not** set, even though CI does want
+# the host back afterwards. `companion-gateway/tests/deployment.rs` calls its own
+# `teardown()` at the end of two of its three tests, and that teardown runs
+# `compose rm -sfv companion-gateway sensor` — while the third test is still
+# talking to the Gateway. With the flag on, measured: `Connection reset by peer
+# (os error 104)` on `POST /api/bootstrap/rooms`. So the job cleans up instead:
+# `stack-teardown.sh` takes the whole compose project down with `down -v` after
+# every run, passing or failing, which is strictly more thorough and races with
+# nothing.
 #
 # TWALK_TEST_PORT and the two after it are the Companion's origins. 4319 and
 # +1/+2 are the defaults, and a `serve-like-gateway.mjs` left on 4319 from a
@@ -53,7 +62,6 @@ TWALK_DEPLOY_TEST_STACK=twalk-ci-deploy
 TWALK_DEPLOY_TEST_SYNAPSE_PORT=18310
 TWALK_DEPLOY_TEST_NATS_PORT=18311
 TWALK_DEPLOY_TEST_GATEWAY_PORT=18312
-TWALK_DEPLOY_TEST_TEARDOWN=1
 TWALK_BRIDGES_TEST_STACK=twalk-ci-bridges
 TWALK_BRIDGES_TEST_SYNAPSE_PORT=18320
 TWALK_BRIDGES_TEST_NATS_PORT=18321
@@ -62,7 +70,6 @@ TWALK_BRIDGES_TEST_WHATSAPP_PORT=18323
 TWALK_BRIDGES_TEST_SIGNAL_PORT=18324
 TWALK_BRIDGES_TEST_GMESSAGES_PORT=18325
 TWALK_BRIDGES_TEST_TELEGRAM_PORT=18326
-TWALK_BRIDGES_TEST_TEARDOWN=1
 TWALK_NO_BRIDGES_TEST_STACK=twalk-ci-nobridges
 TWALK_NO_BRIDGES_TEST_SYNAPSE_PORT=18330
 TWALK_NO_BRIDGES_TEST_NATS_PORT=18331
