@@ -83,6 +83,7 @@
 	"network.matrix.name": "Existing Matrix account",
 	"network.matrix.subtitle": "Connect a Matrix account you already own",
 	"network.telegram.name": "Telegram",
+	"network.telegram.subtitle": "Your Telegram conversations, as one more session",
 	"network.discord.name": "Discord",
 	"network.comingSoon": "Coming in v0.2",
 
@@ -244,6 +245,20 @@
 	"qr.signal.success": "Signal is connected. Twalk is now observing your new Signal messages.",
 	"qr.signal.trouble1": "Your phone must stay online for Signal messages to reach Twalk.",
 	"qr.signal.trouble2": "If the code is refused, check that Signal on your phone is up to date, then show a new code.",
+
+	"qr.telegram.title": "Connect Telegram",
+	"qr.telegram.caption": "Twalk becomes a session of your Telegram account, like Telegram Desktop. Unlike WhatsApp and Signal, your phone does not have to stay on: a Telegram session lives on its own.",
+	"qr.telegram.step1": "Open Telegram on your phone.",
+	"qr.telegram.step2": "Go to Settings, then Devices.",
+	"qr.telegram.step3": "Tap Link Desktop Device.",
+	"qr.telegram.step4": "Scan this code.",
+	"qr.telegram.note": "Telegram officially supports several sessions: there is no ban risk. You will see this one under Settings then Devices, and you can revoke it from there at any time, without going through Twalk.",
+	"qr.telegram.alt": "Scan this code from Telegram, under Settings then Devices.",
+	"qr.telegram.success": "Telegram is connected. Twalk now observes your new Telegram conversations.",
+	"qr.telegram.successNote": "Your conversations will not all appear at once: Twalk observes only the ones you choose.",
+	"qr.telegram.trouble1": "If two-step verification is on for your account, Telegram will ask for your password after the scan. That is your Telegram password, not your Twalk one.",
+	"qr.telegram.trouble2": "A refused code cannot be corrected: Telegram ends the attempt. Start a new login to get a fresh one.",
+	"qr.telegram.trouble3": "Telegram caps how many sessions an account may have. If linking fails with no visible reason, remove an old session under Settings then Devices.",
 
 	"matrix.title": "Connect your Matrix account",
 	"matrix.caption": "If you already use Matrix, Twalk can watch over the account you have rather than create a new one. Twalk invites its Sensor into the rooms you choose, and changes nothing about your other Matrix sessions.",
