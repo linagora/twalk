@@ -30,6 +30,16 @@ pub const DEFAULT_STREAM: &str = "twalk";
 pub const DEFAULT_SUBJECT_PREFIX: &str = "twalk";
 pub const DEFAULT_NATS_URL: &str = "nats://localhost:4222";
 
+/// The interface languages the Companion ships, which are the five the
+/// Companion Gateway stores a preference among
+/// (`companion-gateway/src/settings.rs`, `companion/src/lib/i18n/`) and the
+/// five the SDK knows the English name of (`sdk/python/twalk_sdk/language.py`).
+///
+/// The runtime validates against them for the same reason it requires a
+/// model: a value only a persona would refuse would refuse it once per
+/// spawn, on its first line, for ever (ADR 0016).
+pub const USER_LANGUAGES: [&str; 5] = ["en", "fr", "it", "es", "de"];
+
 /// `data.persona_id` and the last segment of `source` in every `persona.*`
 /// schema: the runtime validates a persona id against the contract's own
 /// pattern, so a misconfigured id fails at startup instead of producing
@@ -207,6 +217,20 @@ pub struct Config {
     /// #22). Operator configuration like the model, so it is held here and
     /// injected; unset leaves the SDK's own default.
     pub suggestion_ttl_seconds: Option<String>,
+    /// The **user's own** language, one of [`USER_LANGUAGES`]: what a persona
+    /// falls back to when it cannot tell what language the message it is
+    /// answering was written in, and nothing else (ADR 0016, ticket #164).
+    ///
+    /// A user preference rather than an operator's setting, which is why it
+    /// is held by the Gateway and travels the injection channel the model
+    /// configuration travels: a persona runs in a container and has no
+    /// browser to read it from. `None` is a supported state — the personas
+    /// then answer in each message's own language and say in their logs what
+    /// happens to a message whose language they cannot tell. The runtime does
+    /// not refuse to start over it: the fallback is the ambiguous case, and a
+    /// deployment that suggests replies correctly for every readable message
+    /// is not an outage.
+    pub user_language: Option<String>,
     pub restart: RestartPolicy,
     /// How long a persona is given to exit after SIGTERM before it is
     /// killed.
@@ -239,6 +263,7 @@ impl Config {
             persona_log_level: optional("HERMES_PERSONA_LOG_LEVEL")
                 .unwrap_or_else(|| "info".to_owned()),
             suggestion_ttl_seconds: optional("HERMES_SUGGESTION_TTL_SECONDS"),
+            user_language: optional("HERMES_USER_LANGUAGE"),
             restart: RestartPolicy {
                 base_backoff: millis("HERMES_RESTART_BACKOFF_BASE_MS", 1_000)?,
                 max_backoff: millis("HERMES_RESTART_BACKOFF_MAX_MS", 60_000)?,
@@ -302,6 +327,17 @@ impl Config {
                  hosted persona's source URI), got {:?}",
                 self.hermes_domain
             );
+        }
+        if let Some(language) = &self.user_language {
+            if !USER_LANGUAGES.contains(&language.as_str()) {
+                bail!(
+                    "HERMES_USER_LANGUAGE is the user's own language — the one a persona falls \
+                     back to when it cannot tell what language it is answering (ADR 0016) — and \
+                     must be one of {}, spelled as the Companion writes it; got {:?}",
+                    USER_LANGUAGES.join(", "),
+                    language
+                );
+            }
         }
         if let Some(params) = &self.llm.params {
             let parsed: Value = serde_json::from_str(params)
@@ -472,6 +508,7 @@ mod tests {
             log_level: "info".to_owned(),
             persona_log_level: "info".to_owned(),
             suggestion_ttl_seconds: None,
+            user_language: None,
             restart: RestartPolicy::default(),
             shutdown_grace: Duration::from_secs(10),
             env_passthrough: vec!["PATH".to_owned()],
@@ -512,6 +549,34 @@ mod tests {
             .expect_err("there is no process to spawn")
             .to_string();
         assert!(error.contains("empty command"), "got {error:?}");
+    }
+
+    /// The Gateway refuses a tag outside the five on the way in, so one here
+    /// was typed into `.env` by hand. Refusing it at startup is the only
+    /// place it can be refused once: injected, it would be refused by every
+    /// persona, on its first line, at every spawn (ADR 0016, ticket #164).
+    #[test]
+    fn a_language_that_is_not_one_of_the_companions_five_is_refused_at_startup() {
+        let mut config = config_with(vec![spec("assistant")]);
+        for refused in ["fr-FR", "FR", "pt", "français"] {
+            config.user_language = Some(refused.to_owned());
+            let error = config
+                .validate()
+                .expect_err("a tag outside the five must not start")
+                .to_string();
+            assert!(error.contains("en, fr, it, es, de"), "got {error:?}");
+            assert!(error.contains(refused), "got {error:?}");
+        }
+        for accepted in USER_LANGUAGES {
+            config.user_language = Some(accepted.to_owned());
+            config
+                .validate()
+                .expect("each of the Companion's five is a preference a persona can be handed");
+        }
+        config.user_language = None;
+        config
+            .validate()
+            .expect("no preference is a supported state: the fallback is the ambiguous case alone");
     }
 
     #[test]

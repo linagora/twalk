@@ -70,7 +70,7 @@ use serde_json::{json, Value};
 use tokio::process::Command;
 use twalk_test_harness::{Bus, StoredMessage, StubLlm};
 
-use super::{CONSENT_CHANGED_TYPE, INBOUND_TYPE, LLM_API_KEY, MODEL, PERSONA_ID};
+use super::{CONSENT_CHANGED_TYPE, INBOUND_TYPE, LLM_API_KEY, MODEL, PERSONA_ID, USER_LANGUAGE};
 
 /// The Matrix server name this deployment answers for. Deliberately not the
 /// test stack's `test.twalk` nor the other deployment suites' `deploy.twalk`:
@@ -1118,6 +1118,7 @@ fn write_env_file(llm_base_url: &str, persona_container: &str) -> Result<PathBuf
          HERMES_LLM_BASE_URL={llm_base_url}\n\
          HERMES_LLM_MODEL={MODEL}\n\
          HERMES_LLM_API_KEY={LLM_API_KEY}\n\
+         HERMES_USER_LANGUAGE={USER_LANGUAGE}\n\
          HERMES_PERSONA_LOG_LEVEL=debug\n\
          HERMES_RESTART_BACKOFF_BASE_MS=200\n\
          HERMES_RESTART_BACKOFF_MAX_MS=1000\n\

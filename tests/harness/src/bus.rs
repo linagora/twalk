@@ -343,6 +343,36 @@ impl Bus {
         Ok(())
     }
 
+    /// What a durable consumer still owes: how many messages it has not been
+    /// handed yet, how many it has been handed and not acked, and how many it
+    /// has been handed more than once.
+    ///
+    /// This is the bus's own account of a consumer, not a component's, and it
+    /// is the only way to tell "this trigger was dealt with" from "this
+    /// trigger is in flight and will come back" — the difference a persona
+    /// that cannot produce a suggestion has to make visible rather than
+    /// leaving an event apparently unprocessed for ever (issue #162).
+    pub async fn consumer_state(&self, stream: &str, consumer: &str) -> Result<ConsumerState> {
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        let mut consumer = stream
+            .get_consumer::<async_nats::jetstream::consumer::pull::Config>(consumer)
+            .await
+            .map_err(|error| anyhow::anyhow!("failed to get consumer: {error}"))?;
+        let info = consumer
+            .info()
+            .await
+            .context("failed to read consumer info")?;
+        Ok(ConsumerState {
+            pending: info.num_pending,
+            awaiting_ack: info.num_ack_pending,
+            redelivered: info.num_redelivered,
+        })
+    }
+
     /// Subscribes to a subject with core NATS, bypassing JetStream dedup:
     /// the returned receiver observes EVERY publish, including a republish
     /// that the stream later deduplicates on storage. This is how tests
@@ -368,6 +398,17 @@ impl Bus {
         });
         Ok(rx)
     }
+}
+
+/// A durable consumer's outstanding work, as the bus sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumerState {
+    /// Messages matching its filter that it has not been handed yet.
+    pub pending: u64,
+    /// Messages it has been handed and has neither acked nor terminated.
+    pub awaiting_ack: usize,
+    /// Messages it has been handed more than once.
+    pub redelivered: usize,
 }
 
 /// A message as stored on the bus: payload plus NATS headers, and the stream

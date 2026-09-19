@@ -42,15 +42,17 @@ Two consequences, stated rather than discovered later:
 
 A run shorter than `HERMES_PERSONA_HEALTHY_AFTER_MS` never really started. After `HERMES_PERSONA_START_FAILURES` of those in a row, the runtime logs `persona failed to start` at error level — once per failure episode, not once per attempt — and keeps retrying at the capped backoff, so an operator who fixes the image does not also have to restart Hermes. A persona that ran, worked and then crashed is a different thing: its backoff resets and it comes straight back.
 
-### Three causes, three messages
+### Five causes, five messages
 
-A persona that cannot reason fails for one of three reasons, and they need three different answers from an operator. They are told apart, and they are told apart in three different places:
+A persona that cannot reason fails for one of five reasons, and they need five different answers from an operator. They are told apart, and they are told apart in different places:
 
 | Cause | Who says it | What it says |
 | --- | --- | --- |
 | No model configured | the runtime, at startup | `missing required environment variable HERMES_LLM_BASE_URL` — it refuses to start, because there is no default (ADR 0015) |
 | The endpoint cannot be reached | the SDK's client, in the persona's log | `the chat-completions endpoint at … is unreachable: …`, and the event is retried |
 | The endpoint refused the request | the SDK's client, in the persona's log | `the chat-completions endpoint answered HTTP 401: …`, with the endpoint's own message |
+| The model answered nothing | the SDK, in the persona's log | `the model answered nothing: it stopped on its own …` — the endpoint and the budget are not the problem, and the event is retried |
+| The model spent its budget thinking | the SDK, in the persona's log | `the model spent its whole 2000-token budget on reasoning and never answered …` — `HTTP 200`, `finish_reason: "length"`, no content, and the event is **not** retried, because the same request gets the same non-answer and each one is billed. The message names the remedy: a larger budget in `HERMES_LLM_PARAMS` ([#162](https://github.com/linagora/twalk/issues/162)) |
 
 One case sits between them and the runtime is the only component that can see it: an endpoint on **this host's loopback**. `http://127.0.0.1:4000/v1` is a perfectly good address — an operator's LiteLLM proxy published on loopback is the reference deployment's shape — and a persona in a container of its own network namespace dials itself. The runtime holds the URL, so it warns at startup and names the two fixes (host networking for the persona's command, or an address its container can resolve) rather than letting the first message arrive and time out.
 
@@ -75,6 +77,7 @@ Environment variables, like every other Twalk component.
 | `HERMES_LLM_PARAMS` | | A JSON object of provider parameters, passed to the persona untouched. A parameter set to `null` removes a field the request would otherwise carry, which is how a provider that rejects one is made to work. |
 | `HERMES_LLM_TIMEOUT_SECONDS` | | Passed through to the persona. |
 | `HERMES_SUGGESTION_TTL_SECONDS` | | How long a suggestion stays approvable (#22). Operator configuration like the model, so it travels the same way; unset leaves the SDK's own default of an hour. |
+| `HERMES_USER_LANGUAGE` | | The **user's own** language, one of `en`, `fr`, `it`, `es`, `de`, injected into each persona as `TWALK_USER_LANGUAGE` (#164). It is what a persona falls back to when it cannot tell what language the message it is answering was written in, and nothing else (ADR 0016). A user preference rather than an operator's setting, which is why the Gateway holds it and this variable carries it: a persona runs in a container and cannot read a browser's language. Unset is supported — the personas then answer in each message's own language and say in their logs what happens to a message whose language they cannot tell. A tag outside the five is refused **here**, at startup: injected, it would be refused by every persona, on its first line, at every spawn. |
 | `HERMES_NATS_URL` | | Default `nats://localhost:4222`. |
 | `HERMES_BUS_STREAM` | | Default `twalk`. |
 | `HERMES_BUS_SUBJECT_PREFIX` | | Default `twalk`. |

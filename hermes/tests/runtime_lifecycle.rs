@@ -29,7 +29,7 @@ use anyhow::Result;
 use harness::{
     contract_fixture, sha256_hex, traceparent_for, validate_against_contract, PersonaFixture,
     RuntimeRun, GATEWAY_SERVICE_TOKEN, GATEWAY_SERVICE_TOKEN_VAR, MODEL, SUGGEST_TYPE,
-    THINKING_TYPE,
+    THINKING_TYPE, USER_LANGUAGE,
 };
 use serde_json::{json, Value};
 
@@ -96,6 +96,10 @@ async fn an_activated_persona_is_started_and_consumes() -> Result<()> {
         "TWALK_PERSONA_ID=assistant".to_owned(),
         "TWALK_PERSONA_CONSUMER=persona-assistant".to_owned(),
         format!("TWALK_BUS_STREAM={}", hermes.stream),
+        // ADR 0016's fallback needs a value, and this is the channel it
+        // arrives on: beside the model configuration, in the closed list, on
+        // the environment the runtime really built (ticket #164).
+        format!("TWALK_USER_LANGUAGE={USER_LANGUAGE}"),
     ] {
         assert!(
             environment.contains(&expected),

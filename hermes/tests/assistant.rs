@@ -22,6 +22,14 @@
 //! the same holds for the user's own reaction, `outbound.reaction.added`, and
 //! it needed no change to the gate: an allowlist excludes a new type by
 //! default, which is the property asserted alongside the absences.
+//!
+//! This suite configures **no** user language, which is the state ADR 0016's
+//! fallback did not exist in at all (issue #164) and still the state of a
+//! deployment whose user has not opened the settings screen. So the granted
+//! case asserts the absence too: the prompt names no language, nothing is
+//! invented, and the persona says at startup what will happen to a message
+//! whose language it cannot tell. The preference's own case is
+//! `language_fallback.rs`.
 
 mod harness;
 
@@ -196,6 +204,37 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
         request.body["messages"][0]["role"],
         json!("system"),
         "the persona frames the request with a system prompt"
+    );
+    // What this run configured no preference for, and what the prompt
+    // therefore must not say (ADR 0016, issue #164). A persona with no user
+    // language answers in the language of the message and invents no
+    // fallback: naming a language here — "probably English" — is the failure
+    // the ticket is about, arriving from the other direction.
+    let prompt = request.body["messages"][0]["content"]
+        .as_str()
+        .expect("the system prompt is text");
+    assert!(
+        prompt.contains("same language as the message"),
+        "the message's own language governs the reply: {prompt}"
+    );
+    for language in ["English", "French", "Italian", "Spanish", "German"] {
+        assert!(
+            !prompt.contains(language),
+            "no language is named in the prompt of a deployment whose user set no \
+             preference, {language} included: {prompt}"
+        );
+    }
+    // And the gap is stated rather than passed over: the operator reads it in
+    // the log, with the variable and where it is set, instead of discovering
+    // it in a suggestion sent to a contact.
+    let logs = run.logs().await?;
+    assert!(
+        logs.contains("no user language is configured"),
+        "a persona with no fallback must say so at startup; its logs were:\n{logs}"
+    );
+    assert!(
+        logs.contains("HERMES_USER_LANGUAGE"),
+        "and must name where it is set: \n{logs}"
     );
     assert_eq!(request.body["model"], json!(MODEL));
     assert_eq!(

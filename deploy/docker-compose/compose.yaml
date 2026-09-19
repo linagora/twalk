@@ -515,6 +515,13 @@ services:
       # How long a suggestion stays approvable (#22). Empty leaves the SDK's
       # own default of an hour; the Gateway refuses an expired one.
       HERMES_SUGGESTION_TTL_SECONDS: ${HERMES_SUGGESTION_TTL_SECONDS:-}
+      # The user's own language, injected into each persona as
+      # TWALK_USER_LANGUAGE (#164): what a persona falls back to when it
+      # cannot tell what language the message it is answering was written in,
+      # and nothing else (ADR 0016). Empty means the user has set none — the
+      # personas then answer in each message's own language and say so in
+      # their logs.
+      HERMES_USER_LANGUAGE: ${HERMES_USER_LANGUAGE:-}
       HERMES_LOG_LEVEL: ${HERMES_LOG_LEVEL:-info}
       # The personas' own level: debugging a persona should not make the
       # supervisor noisy too.
