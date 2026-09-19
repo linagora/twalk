@@ -12,9 +12,12 @@ written ``test``.
 
 So the preference is a **stored setting**, not an inference: a persona runs
 in a container and has no ``navigator.language`` to read. The Companion sets
-it, the Companion Gateway holds it, and the Hermes runtime injects it into
-each persona's environment beside the model configuration (ADR 0015) —
-``TWALK_USER_LANGUAGE`` here, ``HERMES_USER_LANGUAGE`` on the runtime.
+it, the Companion Gateway holds it, and the Hermes runtime **reads it from
+the Gateway** and injects it into each persona's environment beside the model
+configuration (ADR 0015, #184) — ``TWALK_USER_LANGUAGE`` here.
+``HERMES_USER_LANGUAGE`` on the runtime is an operator's override of the
+stored preference, and it wins; empty there, which is what the reference
+deployment ships, the value in force is the user's own.
 
 Two decisions are recorded here rather than left to a reader.
 

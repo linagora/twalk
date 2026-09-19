@@ -19,12 +19,20 @@
 //! [`persona_environment`] and the operator's named passthrough list, and
 //! from nothing else.
 //!
+//! Since ticket #184 the runtime really does read the Gateway with that token
+//! ([`crate::settings`]), which is what makes the property above load-bearing
+//! rather than hypothetical: what crosses into the list below is the
+//! **answer** — a model name, a language tag, an endpoint credential — and
+//! never the credential that fetched it. A persona's environment gains no new
+//! credential from that read, and it cannot, because this list is closed.
+//!
 //! The passthrough list exists because a child still has to be able to
 //! `exec`: it defaults to `PATH` alone. An operator who adds to it is
 //! making a deliberate, auditable decision — one name at a time, in a
 //! variable whose value shows up in `docker inspect`.
 
 use crate::config::{Config, PersonaSpec};
+use crate::settings::PersonaSettings;
 
 /// The environment variables the SDK reads
 /// (`sdk/python/twalk_sdk/config.py`, `sdk/python/README.md`). Listed here
@@ -56,7 +64,19 @@ pub const LOG_LEVEL: &str = "TWALK_LOG_LEVEL";
 /// the runtime creates the consumer (that is how a paused persona receives
 /// nothing — see [`crate::activation`]), so the persona must bind to the
 /// one the runtime made.
-pub fn persona_environment(config: &Config, persona: &PersonaSpec) -> Vec<(String, String)> {
+///
+/// `settings` is what the two voices resolved to
+/// ([`crate::settings::resolve`]): the model configuration and the user's
+/// language, whichever of `.env`, an operator's file or the Companion each
+/// field came from. A separate argument rather than a member of `config`
+/// because the two are answerable by different people — and because the
+/// list below must be handed a **complete** configuration, which is a
+/// property `PersonaSettings` has and a half-filled `.env` does not.
+pub fn persona_environment(
+    config: &Config,
+    settings: &PersonaSettings,
+    persona: &PersonaSpec,
+) -> Vec<(String, String)> {
     let mut environment = vec![
         (PERSONA_ID.to_owned(), persona.id.clone()),
         (HERMES_DOMAIN.to_owned(), config.hermes_domain.clone()),
@@ -64,21 +84,21 @@ pub fn persona_environment(config: &Config, persona: &PersonaSpec) -> Vec<(Strin
         (BUS_STREAM.to_owned(), config.stream.clone()),
         (BUS_SUBJECT_PREFIX.to_owned(), config.subject_prefix.clone()),
         (PERSONA_CONSUMER.to_owned(), persona.consumer_name()),
-        (LLM_BASE_URL.to_owned(), config.llm.base_url.clone()),
-        (LLM_MODEL.to_owned(), config.llm.model.clone()),
+        (LLM_BASE_URL.to_owned(), settings.llm.base_url.clone()),
+        (LLM_MODEL.to_owned(), settings.llm.model.clone()),
         (LOG_LEVEL.to_owned(), config.persona_log_level.clone()),
     ];
     // The three optional ones are left out entirely when unset, rather than
     // set to an empty string: the SDK treats an empty value as unset, and
     // an endpoint that needs no credential should show none in the
     // process's environment.
-    if let Some(api_key) = &config.llm.api_key {
+    if let Some(api_key) = &settings.llm.api_key {
         environment.push((LLM_API_KEY.to_owned(), api_key.clone()));
     }
-    if let Some(params) = &config.llm.params {
+    if let Some(params) = &settings.llm.params {
         environment.push((LLM_PARAMS.to_owned(), params.clone()));
     }
-    if let Some(timeout) = &config.llm.timeout_seconds {
+    if let Some(timeout) = &settings.llm.timeout_seconds {
         environment.push((LLM_TIMEOUT_SECONDS.to_owned(), timeout.clone()));
     }
     // How long a suggestion stays approvable (ticket #22). Operator
@@ -91,7 +111,7 @@ pub fn persona_environment(config: &Config, persona: &PersonaSpec) -> Vec<(Strin
     // than passed as an empty string, like the optional ones above: a persona
     // handed no preference writes in each message's own language and says so,
     // which is a different state from one handed a preference it cannot read.
-    if let Some(language) = &config.user_language {
+    if let Some(language) = &settings.user_language {
         environment.push((USER_LANGUAGE.to_owned(), language.clone()));
     }
     environment
@@ -111,7 +131,7 @@ pub fn passthrough(config: &Config) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LlmConfig, PersonaSpec, RestartPolicy};
+    use crate::config::{LlmConfig, OperatorLlm, PersonaSpec, RestartPolicy};
     use std::time::Duration;
 
     fn config() -> Config {
@@ -121,6 +141,24 @@ mod tests {
             nats_url: "nats://bus:4222".to_owned(),
             stream: "twalk".to_owned(),
             subject_prefix: "twalk".to_owned(),
+            llm: OperatorLlm::default(),
+            gateway_url: Some("http://companion-gateway:8080".to_owned()),
+            gateway_service_token: Some("a-service-token-no-persona-may-hold".to_owned()),
+            log_level: "info".to_owned(),
+            persona_log_level: "debug".to_owned(),
+            suggestion_ttl_seconds: Some("900".to_owned()),
+            user_language: None,
+            restart: RestartPolicy::default(),
+            shutdown_grace: Duration::from_secs(10),
+            env_passthrough: vec!["PATH".to_owned()],
+        }
+    }
+
+    /// What the two voices resolved to — here, everything from the Companion,
+    /// which is the reference deployment's shape and the one this module had
+    /// no way of being handed before ticket #184.
+    fn settings() -> PersonaSettings {
+        PersonaSettings {
             llm: LlmConfig {
                 base_url: "https://endpoint.example.org/v1".to_owned(),
                 model: "a-model-the-operator-named".to_owned(),
@@ -128,13 +166,7 @@ mod tests {
                 params: Some(r#"{"top_p": 0.9, "temperature": null}"#.to_owned()),
                 timeout_seconds: Some("45".to_owned()),
             },
-            log_level: "info".to_owned(),
-            persona_log_level: "debug".to_owned(),
-            suggestion_ttl_seconds: Some("900".to_owned()),
             user_language: Some("fr".to_owned()),
-            restart: RestartPolicy::default(),
-            shutdown_grace: Duration::from_secs(10),
-            env_passthrough: vec!["PATH".to_owned()],
         }
     }
 
@@ -154,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_persona_is_handed_the_model_the_operator_named() {
-        let environment = persona_environment(&config(), &persona());
+        let environment = persona_environment(&config(), &settings(), &persona());
         assert_eq!(
             value(&environment, LLM_BASE_URL),
             Some("https://endpoint.example.org/v1")
@@ -177,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_persona_is_handed_the_consumer_the_runtime_created() {
-        let environment = persona_environment(&config(), &persona());
+        let environment = persona_environment(&config(), &settings(), &persona());
         assert_eq!(
             value(&environment, PERSONA_CONSUMER),
             Some("persona-assistant"),
@@ -207,7 +239,7 @@ mod tests {
     /// hold the token that would let it ask the Gateway.
     #[test]
     fn a_persona_is_handed_the_language_to_fall_back_to() {
-        let environment = persona_environment(&config(), &persona());
+        let environment = persona_environment(&config(), &settings(), &persona());
         assert_eq!(
             value(&environment, USER_LANGUAGE),
             Some("fr"),
@@ -237,7 +269,7 @@ mod tests {
             USER_LANGUAGE,
             LOG_LEVEL,
         ];
-        for (name, _) in persona_environment(&config(), &persona()) {
+        for (name, _) in persona_environment(&config(), &settings(), &persona()) {
             assert!(
                 known.contains(&name.as_str()),
                 "{name} is not a variable the SDK reads: a persona must be handed nothing it \
@@ -254,12 +286,13 @@ mod tests {
     #[test]
     fn an_endpoint_that_needs_no_credential_shows_none() {
         let mut config = config();
-        config.llm.api_key = None;
-        config.llm.params = None;
-        config.llm.timeout_seconds = None;
         config.suggestion_ttl_seconds = None;
-        config.user_language = None;
-        let environment = persona_environment(&config, &persona());
+        let mut settings = settings();
+        settings.llm.api_key = None;
+        settings.llm.params = None;
+        settings.llm.timeout_seconds = None;
+        settings.user_language = None;
+        let environment = persona_environment(&config, &settings, &persona());
         for absent in [
             LLM_API_KEY,
             LLM_PARAMS,

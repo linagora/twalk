@@ -65,7 +65,7 @@ What it deliberately does **not** do: send anything. A persona produces suggesti
 
 Everything is an environment variable, so a persona joins the compose deployment the way the Sensor does. Four are required; the rest have deployment defaults.
 
-Twalk ships no LLM and names no model of its own: a persona **refuses to start** without an endpoint and a model the operator chose (ADR 0015). In a deployment that configuration is held by the Companion Gateway, set from the Companion and injected into the persona's environment by the Hermes runtime when it spawns it (#23, #98) — the persona never fetches it, because the Gateway's service token also opens the consent snapshot. From the SDK's side that is invisible: it reads its environment.
+Twalk ships no LLM and names no model of its own: a persona **refuses to start** without an endpoint and a model the operator chose (ADR 0015). In a deployment that configuration is held by the Companion Gateway, set from the Companion, read from it by the Hermes runtime and injected into the persona's environment when it spawns it ([#23](https://github.com/linagora/twalk/issues/23), [#98](https://github.com/linagora/twalk/issues/98), [#184](https://github.com/linagora/twalk/issues/184)) — the persona never fetches it, because the Gateway's service token also opens the consent snapshot. From the SDK's side that is invisible: it reads its environment, and it needed no change for the Gateway's half to arrive, which is what "the runtime injects it" was supposed to mean all along.
 
 | Variable | Default | What it is |
 | --- | --- | --- |

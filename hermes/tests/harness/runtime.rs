@@ -55,13 +55,43 @@ pub const UNSTARTABLE_IMAGE: &str = "h23-no-such-persona-image:never";
 /// The Companion Gateway's service token, as the runtime's own environment
 /// holds it.
 ///
-/// It is the credential that reads the LLM configuration the operator set
-/// from the Companion — and the credential that opens the consent snapshot,
-/// the list of every contact (ADR 0010, ADR 0015). A persona must never
-/// hold it, and a test says so by looking for this exact string in the
-/// persona container's environment.
+/// It is the credential that reads the LLM configuration the user set from the
+/// Companion — and the credential that opens the consent snapshot, the list of
+/// every contact (ADR 0010, ADR 0015). A persona must never hold it, and a
+/// test says so by looking for this exact string in the persona container's
+/// environment.
+///
+/// Since ticket #184 the runtime **uses** it: `HERMES_GATEWAY_SERVICE_TOKEN`
+/// is the variable the settings read authenticates with, and the stub Gateway
+/// refuses a read without it. Until then this variable was in the runtime's
+/// environment as a decoy — a secret the runtime holds and a persona must not,
+/// so that the absence assertion had something to be about. It is both now,
+/// which is the stronger shape: the token is load-bearing *and* it does not
+/// cross.
 pub const GATEWAY_SERVICE_TOKEN_VAR: &str = "HERMES_GATEWAY_SERVICE_TOKEN";
 pub const GATEWAY_SERVICE_TOKEN: &str = "h23-gateway-service-token-no-persona-may-hold";
+
+/// Patches applied to the **runtime's own** environment, standing in for what
+/// an operator did or did not write into `.env`.
+///
+/// `None` removes the variable entirely, which is the state the reference
+/// deployment ships (`deploy/docker-compose/.env.example` leaves every one of
+/// them empty) and the one ticket #184 is about: nothing on the host, the
+/// Companion the only voice. A patch list rather than a growing set of
+/// booleans, because what the tests need to say is exactly "this variable is
+/// not set".
+pub type HostEnvironment = Vec<(&'static str, Option<String>)>;
+
+/// The runtime's operator-side model configuration, removed: `.env` empty.
+pub fn no_operator_model() -> HostEnvironment {
+    vec![
+        ("HERMES_LLM_BASE_URL", None),
+        ("HERMES_LLM_MODEL", None),
+        ("HERMES_LLM_API_KEY", None),
+        ("HERMES_LLM_PARAMS", None),
+        ("HERMES_USER_LANGUAGE", None),
+    ]
+}
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -171,6 +201,7 @@ pub struct RuntimeRun {
     child: Option<tokio::process::Child>,
     log_lines: Arc<Mutex<Vec<String>>>,
     decisions: std::sync::atomic::AtomicU32,
+    host: HostEnvironment,
     stopped: bool,
 }
 
@@ -180,6 +211,23 @@ impl RuntimeRun {
     /// (ADR 0013 — activation never spreads on its own).
     pub async fn start(test_name: &str, personas: Vec<PersonaFixture>) -> Result<Self> {
         Self::start_with(test_name, personas, &[], None).await
+    }
+
+    /// Starts the runtime against an **LLM the test already owns**, with an
+    /// explicit set of patches to the runtime's own environment.
+    ///
+    /// Two-phase on purpose (ticket #184): a test that configures a Companion
+    /// Gateway has to know the endpoint's URL *before* the runtime reads the
+    /// settings that name it, so the stub LLM is started by the test and handed
+    /// over rather than created here.
+    pub async fn start_configured(
+        test_name: &str,
+        personas: Vec<PersonaFixture>,
+        activated: &[&str],
+        llm: StubLlm,
+        host: HostEnvironment,
+    ) -> Result<Self> {
+        Self::bring_up(test_name, personas, activated, llm, host).await
     }
 
     /// Starts the runtime with the given personas already activated on
@@ -203,6 +251,20 @@ impl RuntimeRun {
         activated: &[&str],
         canned_reply: Option<&str>,
     ) -> Result<Self> {
+        let llm = match canned_reply {
+            Some(reply) => StubLlm::start_with_reply(reply).await?,
+            None => StubLlm::start().await?,
+        };
+        Self::bring_up(test_name, personas, activated, llm, Vec::new()).await
+    }
+
+    async fn bring_up(
+        test_name: &str,
+        personas: Vec<PersonaFixture>,
+        activated: &[&str],
+        llm: StubLlm,
+        host: HostEnvironment,
+    ) -> Result<Self> {
         ensure_stack().await?;
         if personas.iter().any(|p| p.image == PERSONA_IMAGE) {
             ensure_persona_image().await?;
@@ -211,11 +273,6 @@ impl RuntimeRun {
         let id = run_id(test_name);
         let bus = Bus::connect().await?;
         bus.ensure_stream(&id, &[&format!("{id}.>")]).await?;
-
-        let llm = match canned_reply {
-            Some(reply) => StubLlm::start_with_reply(reply).await?,
-            None => StubLlm::start().await?,
-        };
 
         let mut run = Self {
             bus,
@@ -226,6 +283,7 @@ impl RuntimeRun {
             child: None,
             log_lines: Arc::new(Mutex::new(Vec::new())),
             decisions: std::sync::atomic::AtomicU32::new(0),
+            host,
             stopped: false,
         };
         for persona_id in activated {
@@ -247,7 +305,7 @@ impl RuntimeRun {
             .iter()
             .map(|persona| json!({ "id": persona.id, "command": persona.command() }))
             .collect::<Vec<_>>();
-        Ok(vec![
+        let mut environment = vec![
             (
                 "HERMES_PERSONAS".to_owned(),
                 Value::Array(personas).to_string(),
@@ -293,7 +351,18 @@ impl RuntimeRun {
                 GATEWAY_SERVICE_TOKEN_VAR.to_owned(),
                 GATEWAY_SERVICE_TOKEN.to_owned(),
             ),
-        ])
+        ];
+        // What the test said the operator did — or did not — write into
+        // `.env` (ticket #184). Applied last, and a `None` **removes** the
+        // variable: "this is not set on the host" is the state the reference
+        // deployment ships and cannot be expressed by adding variables.
+        for (name, value) in &self.host {
+            environment.retain(|(key, _)| key != name);
+            if let Some(value) = value {
+                environment.push(((*name).to_owned(), value.clone()));
+            }
+        }
+        Ok(environment)
     }
 
     async fn spawn_runtime(&mut self) -> Result<()> {

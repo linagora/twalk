@@ -488,6 +488,15 @@ services:
       # can simply not have.
       persona-assistant-image:
         condition: service_completed_successfully
+      # The runtime reads the model and the language the user chose from the
+      # Gateway, once, at startup (#184). It starts anyway if that read fails
+      # and says so at ERROR — but on a cold `docker compose up` the two
+      # services would otherwise race, and the deployment would come up with
+      # the user's preference not in force for no better reason than boot
+      # order. This is not the runtime depending on the Gateway to run: it is
+      # the stack starting them in the order that makes the first read succeed.
+      companion-gateway:
+        condition: service_healthy
     network_mode: host
     # tini as pid 1: a persona's wrapper leaves short-lived `docker` clients
     # behind, and the runtime reaps only the children it spawned.
@@ -523,10 +532,32 @@ services:
       # runtime is in the host's network namespace and so are its personas,
       # and both are handed this one URL.
       HERMES_NATS_URL: ${HERMES_NATS_URL:-nats://127.0.0.1:${NATS_PORT:-4222}}
-      # The LLM the operator named. There is no default, for either of them
-      # (ADR 0015): left empty, this service starts, states the refusal in
-      # its log and hosts nothing, rather than sending the user's messages to
-      # a model nobody chose.
+      # The Companion Gateway's runtime settings (ticket #184): where the
+      # runtime reads the model and the language the **user** chose, and the
+      # token it reads them with. Both derive from the one secret
+      # GATEWAY_SERVICE_TOKEN, exactly as the Sensor's snapshot pair above
+      # does, so setting that one variable lights up both halves of the
+      # hand-off: the Gateway serves GET /api/settings/runtime, and the
+      # runtime injects the answer into each persona (ADR 0015, ADR 0016).
+      # The Gateway is reached on the host's loopback because this service is
+      # in the host's network namespace (ADR 0023), so it cannot use the
+      # service name the Sensor uses — GATEWAY_HTTP_PORT is the Gateway's
+      # published port on that loopback. Leave GATEWAY_SERVICE_TOKEN empty and
+      # these are empty too: the runtime then has only the variables below, and
+      # nothing set in the Companion reaches a persona, which it says at
+      # startup. A URL without a token is refused on startup; a token without a
+      # URL is not, and is reported as a credential that reads nothing.
+      HERMES_GATEWAY_URL: ${HERMES_GATEWAY_URL:-${GATEWAY_SERVICE_TOKEN:+http://127.0.0.1:${GATEWAY_HTTP_PORT:-8080}}}
+      HERMES_GATEWAY_SERVICE_TOKEN: ${HERMES_GATEWAY_SERVICE_TOKEN:-${GATEWAY_SERVICE_TOKEN:-}}
+      # The LLM the **operator** named, which wins over what the Companion
+      # holds (ADR 0015 — a value supplied on the host beats one set from the
+      # browser, and .env is the host's other voice). There is no default for
+      # either of them: with these empty and no Gateway above, this service
+      # starts, states the refusal in its log and hosts nothing, rather than
+      # sending the user's messages to a model nobody chose. With the Gateway
+      # above configured, leaving these empty is the ordinary shape — the
+      # model comes from the Companion — and the runtime logs which value came
+      # from where.
       HERMES_LLM_BASE_URL: ${HERMES_LLM_BASE_URL:-}
       HERMES_LLM_MODEL: ${HERMES_LLM_MODEL:-}
       HERMES_LLM_API_KEY: ${HERMES_LLM_API_KEY:-}

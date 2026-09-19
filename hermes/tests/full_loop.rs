@@ -134,6 +134,28 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
          beside the stack"
     );
 
+    // And the deployment's Hermes reads the deployment's Gateway (#184).
+    // `compose.yaml` derives HERMES_GATEWAY_URL and
+    // HERMES_GATEWAY_SERVICE_TOKEN from the one GATEWAY_SERVICE_TOKEN this
+    // run sets, exactly as it derives the Sensor's snapshot pair, and the
+    // wiring is only real if the runtime says it read something. What the
+    // Gateway holds here is `llm: null` — nobody has named a model in this
+    // deployment's Companion — so the model in force is the one this run put
+    // in the environment file, which is what `sources=…=operator` says. The
+    // test that the *Gateway's* value reaches a persona is
+    // `tests/runtime_settings.rs`, at the runtime's own process boundary.
+    let hermes_logs = stack.hermes_logs().await;
+    assert!(
+        hermes_logs.contains("read the Companion Gateway's runtime settings"),
+        "the deployment's runtime must read the deployment's Gateway, or a preference set in \
+         the Companion reaches nothing; its logs were:\n{hermes_logs}"
+    );
+    assert!(
+        hermes_logs.contains("model=operator") && hermes_logs.contains("language=operator"),
+        "and it must attribute each value, because an operator who pinned one in .env is the \
+         only person who can tell why the browser's is not in force:\n{hermes_logs}"
+    );
+
     // The Sensor labels a message with the consent state it holds, which it
     // learns from the Gateway's snapshot at startup and from the bus after
     // that. A decision taken a moment ago may not have reached it yet, so

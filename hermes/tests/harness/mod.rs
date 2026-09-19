@@ -39,7 +39,13 @@ mod runtime;
 /// because only that stack can answer whether a reply reached the contact.
 mod deployment;
 
+/// A stub Companion Gateway serving `GET /api/settings/runtime` (ticket
+/// #184): the one read the runtime makes of the Gateway, and the credential
+/// it makes it with.
+mod gateway;
+
 pub use deployment::*;
+pub use gateway::*;
 pub use runtime::*;
 pub use twalk_test_harness::*;
 
