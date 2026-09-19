@@ -83,6 +83,12 @@ pub struct Metrics {
     owner_device_invites_joined: AtomicU64,
     owner_device_invites_refused: AtomicU64,
     owner_device_invites_failed: AtomicU64,
+    owner_device_invites_unjoinable: AtomicU64,
+    /// Portal rooms the owner's device holds an invitation to and can never
+    /// join (issue #237). Each is a conversation the user chose in which an
+    /// approved reply cannot be delivered as the user — the fact #216 needs —
+    /// and until this gauge it lived in a log line and nowhere else.
+    owner_device_unjoinable_portals: AtomicU64,
     /// Approved replies the Sensor posted, by what they reached (issue #216).
     ///
     /// This is the count behind the sentence the approval screen was getting
@@ -124,8 +130,16 @@ pub enum OwnerDeviceInvite {
     /// Not a portal of a configured bridge — the inviter is somebody else, or
     /// the deployment named no bridge bots at all.
     Refused,
-    /// A portal invitation the join request itself failed on.
+    /// A portal invitation the join request failed on for a reason that can
+    /// clear — a throttle, a server error, no answer. Counted per attempt, so
+    /// it climbs while the cause lasts and stops when it clears.
     Failed,
+    /// A portal invitation the homeserver refused in a way that will not
+    /// change (issue #237): the room is gone or unreachable, the invitation is
+    /// no longer valid. Counted **once per room**, like a refusal, because a
+    /// permanent answer repeated at sync frequency is noise that hides the
+    /// next real failure.
+    Unjoinable,
 }
 
 impl OwnerDeviceInvite {
@@ -135,6 +149,7 @@ impl OwnerDeviceInvite {
             Self::Joined => "joined",
             Self::Refused => "refused",
             Self::Failed => "failed",
+            Self::Unjoinable => "unjoinable",
         }
     }
 }
@@ -167,6 +182,8 @@ impl Metrics {
             owner_device_invites_joined: AtomicU64::new(0),
             owner_device_invites_refused: AtomicU64::new(0),
             owner_device_invites_failed: AtomicU64::new(0),
+            owner_device_invites_unjoinable: AtomicU64::new(0),
+            owner_device_unjoinable_portals: AtomicU64::new(0),
             replies_reaching_contact: AtomicU64::new(0),
             replies_reaching_nobody: AtomicU64::new(0),
         }
@@ -264,8 +281,16 @@ impl Metrics {
             OwnerDeviceInvite::Joined => &self.owner_device_invites_joined,
             OwnerDeviceInvite::Refused => &self.owner_device_invites_refused,
             OwnerDeviceInvite::Failed => &self.owner_device_invites_failed,
+            OwnerDeviceInvite::Unjoinable => &self.owner_device_invites_unjoinable,
         };
         counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// How many portals the owner's device has been invited to and given up
+    /// joining, because the homeserver's answer cannot change (issue #237).
+    pub fn record_owner_device_unjoinable_portals(&self, rooms: u64) {
+        self.owner_device_unjoinable_portals
+            .store(rooms, Ordering::Relaxed);
     }
 
     /// What one posted approved reply reached (issue #216).
@@ -371,6 +396,10 @@ impl Metrics {
                 &self.owner_device_invites_refused,
             ),
             (OwnerDeviceInvite::Failed, &self.owner_device_invites_failed),
+            (
+                OwnerDeviceInvite::Unjoinable,
+                &self.owner_device_invites_unjoinable,
+            ),
         ] {
             out.push_str(&format!(
                 "twalk_sensor_owner_device_invites_total{{outcome=\"{}\"}} {}\n",
@@ -406,6 +435,12 @@ impl Metrics {
             out.push_str(&format!(
                 "twalk_sensor_owner_device_rooms {}\n",
                 self.owner_device_rooms.load(Ordering::Relaxed)
+            ));
+            out.push_str("# HELP twalk_sensor_owner_device_unjoinable_portals Portal rooms the owner's own device was invited to and can never join, so an approved reply there cannot be delivered as the user.\n");
+            out.push_str("# TYPE twalk_sensor_owner_device_unjoinable_portals gauge\n");
+            out.push_str(&format!(
+                "twalk_sensor_owner_device_unjoinable_portals {}\n",
+                self.owner_device_unjoinable_portals.load(Ordering::Relaxed)
             ));
         }
         // The sync age only exists once a sync has completed; a Sensor that
@@ -549,6 +584,19 @@ mod tests {
                 .contains("twalk_sensor_owner_device_rooms 0\n"),
             "a configured device that has joined nothing yet still renders"
         );
+        // The same absence rule for the portals it gave up on (issue #237):
+        // no device, no sample; a device, a zero that means "none".
+        assert!(!Metrics::new()
+            .render(1_000)
+            .contains("twalk_sensor_owner_device_unjoinable_portals"),);
+        metrics.record_owner_device_unjoinable_portals(1);
+        assert!(
+            metrics
+                .render(1_000)
+                .contains("twalk_sensor_owner_device_unjoinable_portals 1\n"),
+            "{}",
+            metrics.render(1_000)
+        );
     }
 
     #[test]
@@ -565,7 +613,7 @@ mod tests {
                 "{body}"
             );
         }
-        for outcome in ["joined", "refused", "failed"] {
+        for outcome in ["joined", "refused", "failed", "unjoinable"] {
             assert!(
                 body.contains(&format!(
                     "twalk_sensor_owner_device_invites_total{{outcome=\"{outcome}\"}} 0\n"

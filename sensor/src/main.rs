@@ -1,7 +1,7 @@
 //! The Twalk Sensor binary. All the decision logic lives in the library
 //! modules; this file only wires them to matrix-sdk and NATS JetStream.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1472,13 +1472,13 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
     // counter would otherwise repeat forever. Each room is decided once per
     // process; the bounded memory cost is one room id per invitation the owner
     // holds, which is the same order as the number the homeserver already keeps.
-    let mut already_refused: HashSet<matrix_sdk::ruma::OwnedRoomId> = HashSet::new();
+    let mut decided = Decided::default();
     loop {
         match client.sync_once(settings.clone()).await {
             Ok(_) => {
-                join_portal_invitations(&client, &bridge_bots, &metrics, &mut already_refused)
-                    .await;
+                join_portal_invitations(&client, &bridge_bots, &metrics, &mut decided).await;
                 metrics.record_owner_device_rooms(client.joined_rooms().len() as u64);
+                metrics.record_owner_device_unjoinable_portals(decided.unjoinable.len() as u64);
             }
             Err(error) => {
                 warn!(
@@ -1492,19 +1492,62 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
     }
 }
 
+/// What the owner-device loop has already decided about the invitations it
+/// holds, so that nothing is said twice and nothing permanent is retried.
+///
+/// Per process, like the homeserver's own list of pending invitations it
+/// mirrors: a restart re-decides each room once, which is one log line per
+/// room per restart and not one per sync (issue #237).
+#[derive(Default)]
+struct Decided {
+    /// Invitations refused on their inviter: decided once, never looked at again.
+    refused: HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    /// Portals the homeserver refused to let the device join, in a way that
+    /// will not change. Given up on, once. Their count is the gauge
+    /// `twalk_sensor_owner_device_unjoinable_portals`.
+    unjoinable: HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    /// Portals whose join failed transiently: how many times, and when the
+    /// next attempt may be made. Removed on success, or when the failure
+    /// turns out to be permanent.
+    retrying: HashMap<matrix_sdk::ruma::OwnedRoomId, (u32, tokio::time::Instant)>,
+}
+
+/// Reduces a failed join to what the homeserver answered, for
+/// `owner_device::join_failure` to decide on.
+fn join_answer(error: &matrix_sdk::Error) -> owner_device::JoinAnswer {
+    let api_error = error.as_client_api_error();
+    owner_device::JoinAnswer {
+        status: api_error.map(|error| error.status_code.as_u16()),
+        errcode: api_error
+            .and_then(|error| error.error_kind())
+            .map(|kind| kind.errcode().to_string()),
+    }
+}
+
 /// Accepts the pending invitations that are portals of a configured bridge, and
 /// refuses every other one.
 ///
 /// The policy — and the reason a room id in an invitation may not be trusted —
-/// is `twalk_sensor::owner_device::invitation`, which is where to argue with it.
-/// What is here is the I/O and what gets said about it.
+/// is `twalk_sensor::owner_device::invitation`, which is where to argue with it;
+/// whether a failed join is worth another try is
+/// `twalk_sensor::owner_device::join_failure`. What is here is the I/O and what
+/// gets said about it.
 async fn join_portal_invitations(
     client: &Client,
     bridge_bots: &BridgeBots,
     metrics: &Metrics,
-    already_refused: &mut HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    decided: &mut Decided,
 ) {
     for room in client.invited_rooms() {
+        let room_id = room.room_id().to_owned();
+        if decided.refused.contains(&room_id) || decided.unjoinable.contains(&room_id) {
+            continue;
+        }
+        if let Some((_, not_before)) = decided.retrying.get(&room_id) {
+            if tokio::time::Instant::now() < *not_before {
+                continue;
+            }
+        }
         let inviter = match room.invite_details().await {
             Ok(invite) => invite.inviter_id.to_string(),
             Err(error) => {
@@ -1528,6 +1571,7 @@ async fn join_portal_invitations(
                     .map(|network| network.as_str());
                 match room.join().await {
                     Ok(()) => {
+                        decided.retrying.remove(&room_id);
                         let joined = metrics.record_owner_device_invite(OwnerDeviceInvite::Joined);
                         info!(
                             room = %room.room_id(),
@@ -1538,19 +1582,46 @@ async fn join_portal_invitations(
                              posted here are relayed to the network as the user's own"
                         );
                     }
-                    Err(error) => {
-                        metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
-                        warn!(
-                            room = %room.room_id(),
-                            %inviter,
-                            %error,
-                            "the owner's device failed to join a portal; retrying on the next sync"
-                        );
-                    }
+                    Err(error) => match owner_device::join_failure(&join_answer(&error)) {
+                        owner_device::JoinFailure::Permanent => {
+                            decided.retrying.remove(&room_id);
+                            decided.unjoinable.insert(room_id);
+                            let unjoinable =
+                                metrics.record_owner_device_invite(OwnerDeviceInvite::Unjoinable);
+                            warn!(
+                                room = %room.room_id(),
+                                %inviter,
+                                network,
+                                %error,
+                                unjoinable,
+                                "this portal can never be joined by the owner's device — the \
+                                 homeserver's answer will not change — so an approved reply in \
+                                 this conversation cannot be delivered as the user. Not retrying; \
+                                 twalk_sensor_owner_device_unjoinable_portals counts it"
+                            );
+                        }
+                        owner_device::JoinFailure::Transient => {
+                            let attempt = decided.retrying.get(&room_id).map_or(1, |(n, _)| n + 1);
+                            let delay = owner_device::retry_delay(attempt);
+                            decided
+                                .retrying
+                                .insert(room_id, (attempt, tokio::time::Instant::now() + delay));
+                            metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
+                            warn!(
+                                room = %room.room_id(),
+                                %inviter,
+                                %error,
+                                attempt,
+                                retry_in_secs = delay.as_secs(),
+                                "the owner's device failed to join a portal for a reason that can \
+                                 clear; retrying"
+                            );
+                        }
+                    },
                 }
             }
             owner_device::Invitation::Refuse(reason) => {
-                if !already_refused.insert(room.room_id().to_owned()) {
+                if !decided.refused.insert(room_id) {
                     continue;
                 }
                 let refused = metrics.record_owner_device_invite(OwnerDeviceInvite::Refused);
