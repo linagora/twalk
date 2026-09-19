@@ -1,6 +1,7 @@
 //! The Twalk Sensor binary. All the decision logic lives in the library
 //! modules; this file only wires them to matrix-sdk and NATS JetStream.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -13,6 +14,11 @@ use matrix_sdk::authentication::matrix::MatrixSession;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
 use matrix_sdk::encryption::{BackupDownloadStrategy, EncryptionSettings};
+use matrix_sdk::ruma::api::client::filter::{
+    Filter as EventTypeFilter, FilterDefinition, RoomEventFilter, RoomFilter,
+};
+use matrix_sdk::ruma::api::client::state::get_state_events;
+use matrix_sdk::ruma::api::client::sync::sync_events;
 use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::OriginalSyncReactionEvent;
@@ -26,13 +32,16 @@ use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, SyncMessageLikeEvent,
 };
+use matrix_sdk::ruma::presence::PresenceState;
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, UInt};
 use matrix_sdk::{Client, LoopCtrl, Room, RoomState};
 use tracing::{error, info, warn};
+use twalk_sensor::bridge_bot::BridgeBots;
 use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
-use twalk_sensor::metrics::{DropReason, Metrics};
-use twalk_sensor::{consent, network, normalize, outbound};
+use twalk_sensor::metrics::{DropReason, Metrics, OwnerDeviceInvite};
+use twalk_sensor::owner_device::Reach;
+use twalk_sensor::{consent, network, normalize, outbound, owner_device};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -293,6 +302,31 @@ async fn main() -> Result<()> {
             bridge_bots = ?bridge_bots.ids(),
             "recognising these accounts as the bridges' own bots and publishing nothing about them"
         );
+    }
+
+    // The owner's own device (ADR 0025, ADR 0034, issue #123): the identity
+    // Twalk *acts* as, beside the `@sensor:` identity it observes with. One
+    // observes, one acts, and nothing below confuses them — the client built
+    // here registers no event handler, publishes nothing, and is never what
+    // `client.joined_rooms()` answers, so ADR 0024's membership-is-consent
+    // property and the consent gate stay exactly as they were.
+    //
+    // Brought up after the bridge bots because it depends on them: a portal
+    // invitation is recognised by its *inviter*, and that list is the only
+    // authenticated way to tell a portal from a room a stranger built (see
+    // `twalk_sensor::owner_device::invitation`).
+    //
+    // Failing to bring it up is fatal, unlike a failed consent snapshot. A
+    // Sensor that starts without its consent snapshot publishes degraded
+    // labels and recovers; a Sensor that starts with a token for the wrong
+    // account writes into other people's conversations under a Matrix ID that
+    // is not the one it was told to act as, and nothing downstream can undo
+    // that.
+    let owner_device = bring_up_owner_device(&config, owner.as_ref(), &metrics).await?;
+    if let Some(device) = owner_device.clone() {
+        let bridge_bots = bridge_bots.clone();
+        let metrics = metrics.clone();
+        tokio::spawn(async move { run_owner_device(device, bridge_bots, metrics).await });
     }
 
     // Consent labelling (ticket 05): every published event carries the
@@ -977,12 +1011,21 @@ async fn main() -> Result<()> {
     // the room knowledge the send path needs.
     {
         let client = client.clone();
+        let owner_device = owner_device.clone();
         let jetstream = jetstream.clone();
         let retry_base = config.send_retry_base;
         let max_attempts = config.send_retry_max_attempts;
         let metrics = metrics.clone();
         tokio::spawn(async move {
-            consume_approved_replies(client, jetstream, retry_base, max_attempts, metrics).await;
+            consume_approved_replies(
+                client,
+                owner_device,
+                jetstream,
+                retry_base,
+                max_attempts,
+                metrics,
+            )
+            .await;
         });
     }
 
@@ -1184,6 +1227,346 @@ async fn access_token_revoked(homeserver_url: &str, access_token: &str) -> bool 
     serde_json::from_str::<serde_json::Value>(&body)
         .ok()
         .is_some_and(|error| error["errcode"] == "M_UNKNOWN_TOKEN")
+}
+
+/// What the homeserver says an access token belongs to.
+struct WhoAmI {
+    user_id: String,
+    /// The device the token was issued for. Synapse answers it for a device
+    /// token; the specification makes it optional, so its absence is not an
+    /// error.
+    device_id: Option<String>,
+}
+
+/// Asks the homeserver whose token this is
+/// (`GET /_matrix/client/v3/account/whoami`).
+///
+/// Deliberately raw HTTP and deliberately *before* any client is built: the
+/// answer decides whether the Sensor may start at all, and building a client
+/// first would open — and possibly create — a crypto store for a session that
+/// is about to be refused.
+async fn whoami(homeserver_url: &str, access_token: &str) -> Result<WhoAmI> {
+    let url = format!(
+        "{}/_matrix/client/v3/account/whoami",
+        homeserver_url.trim_end_matches('/')
+    );
+    let response = matrix_sdk::reqwest::Client::new()
+        .get(url)
+        .bearer_auth(access_token)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .context("the whoami request failed")?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("the homeserver answered whoami with {status}: {body}");
+    }
+    let answer: serde_json::Value =
+        serde_json::from_str(&body).context("the whoami answer is not JSON")?;
+    Ok(WhoAmI {
+        user_id: answer["user_id"]
+            .as_str()
+            .context("the whoami answer carries no user_id")?
+            .to_owned(),
+        device_id: answer["device_id"].as_str().map(str::to_owned),
+    })
+}
+
+/// Builds the **second** Matrix client: a device of the owner's own account,
+/// which is what a bridge relays to its network (ADR 0025, ADR 0034, #123).
+///
+/// `None` — no credential configured — is the behaviour every deployment has
+/// today: approved replies are posted by `@sensor:`, and on a bridged
+/// conversation the contact receives nothing. That is said once, here, at
+/// startup, and named after the issue, because a degradation nobody is told
+/// about is the failure this product has shipped repeatedly.
+///
+/// Three things this client deliberately does **not** have.
+///
+/// Its own **store subdirectory** (`owner_device::STORE_SUBDIR`), never the
+/// Sensor's: a crypto store belongs to one device, and matrix-sdk refuses to
+/// open one belonging to another (`CryptoStoreError::MismatchedAccount`).
+///
+/// `EncryptionSettings::default()`, which is to say **no cross-signing
+/// bootstrap, no key backup and no backup download** — the opposite of the
+/// Sensor's own settings a few dozen lines above. That is not an omission: all
+/// four configured bridges carry `verification_levels.send: unverified`, so an
+/// unverified device's messages are relayed like any other; cross-signing is
+/// what a device needs to *read* encrypted history, and this one reads none.
+/// It follows that this device needs no recovery key, which is the step ADR
+/// 0025 called "the hard part" and which no automation may shortcut.
+///
+/// No **session file**. The Sensor persists its own session because a fresh
+/// password login would mint a new device each start; this credential arrives
+/// from configuration every start and names its device, so there is nothing to
+/// remember — and one fewer copy of the user's token on the volume.
+async fn bring_up_owner_device(
+    config: &Config,
+    owner: Option<&twalk_sensor::owner::Owner>,
+    metrics: &Metrics,
+) -> Result<Option<Client>> {
+    let Some((access_token, device_id)) = config.owner_device() else {
+        info!(
+            "no device of the owner's account configured (SENSOR_OWNER_DEVICE_ACCESS_TOKEN): \
+             approved replies are posted by the Sensor's own account, which a mautrix bridge does \
+             not relay to its network — on a bridged conversation the contact receives nothing, \
+             and the Sensor says so per reply on \
+             twalk.persona.reply.approved.v1.posted (reach=nobody). This is issue #123's defect, \
+             degraded on purpose rather than silently; a deployment that has provisioned the \
+             owner's device sets the variable"
+        );
+        return Ok(None);
+    };
+    let owner = owner.expect("config validation guarantees an owner beside the owner's device");
+
+    // Whose token is this? Asked before anything else, because a token for the
+    // wrong account is a configuration error whose natural discovery is a
+    // contact receiving a reply from a stranger — and because a device of
+    // somebody else's account joining portal rooms is worse than not starting.
+    let identity = whoami(&config.homeserver_url, access_token)
+        .await
+        .context("could not ask the homeserver whose SENSOR_OWNER_DEVICE_ACCESS_TOKEN this is")?;
+    if identity.user_id != owner.matrix_id() {
+        anyhow::bail!(
+            "SENSOR_OWNER_DEVICE_ACCESS_TOKEN belongs to {} and SENSOR_OWNER is {}: the device \
+             Twalk acts through must be a device of the owner's own account, because that is the \
+             only account a bridge relays. Refusing to start rather than writing into \
+             conversations as somebody else",
+            identity.user_id,
+            owner.matrix_id()
+        );
+    }
+    // The crypto store is bound to the device, so a mismatch here is the same
+    // class of error as pointing SENSOR_DEVICE_ID at another device's store —
+    // and the homeserver already knows the answer, so there is no reason to let
+    // matrix-sdk discover it later.
+    if let Some(reported) = &identity.device_id {
+        if reported != device_id {
+            anyhow::bail!(
+                "SENSOR_OWNER_DEVICE_ACCESS_TOKEN was issued for device {reported} and \
+                 SENSOR_OWNER_DEVICE_ID is {device_id}: the crypto store is bound to the device"
+            );
+        }
+    }
+
+    let store_dir = config
+        .state_dir
+        .as_ref()
+        .map(|dir| dir.join(owner_device::STORE_SUBDIR));
+    let builder = Client::builder()
+        .homeserver_url(&config.homeserver_url)
+        .with_encryption_settings(EncryptionSettings::default());
+    let client = match &store_dir {
+        Some(dir) => builder.sqlite_store(dir, None).build().await,
+        None => builder.build().await,
+    }
+    .context("failed to build the owner's device client")?;
+    client
+        .restore_session(MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: matrix_sdk::ruma::UserId::parse(owner.matrix_id())
+                    .context("SENSOR_OWNER is not a valid Matrix user ID")?,
+                device_id: device_id.into(),
+            },
+            tokens: matrix_sdk::SessionTokens {
+                access_token: access_token.to_owned(),
+                refresh_token: None,
+            },
+        })
+        .await
+        .context("failed to start from the configured owner device token")?;
+    metrics.record_owner_device_present();
+    info!(
+        acting_as = %identity.user_id,
+        device_id,
+        store = store_dir.as_ref().map(|dir| dir.display().to_string()),
+        "holding a device of the owner's own account: approved replies are posted by it, so a \
+         bridge relays them (ADR 0025). It observes nothing, publishes nothing, and reads no \
+         history — no cross-signing and no recovery key (ADR 0034)"
+    );
+    Ok(Some(client))
+}
+
+/// How long the owner-device's `/sync` may long-poll, and how long to wait
+/// before retrying a failed one.
+const OWNER_DEVICE_SYNC_TIMEOUT: Duration = Duration::from_secs(30);
+const OWNER_DEVICE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// The **minimum** sync that makes `room.send` work with Megolm, and why it is
+/// the minimum.
+///
+/// matrix-sdk's send path is almost self-sufficient for encryption: for an
+/// encrypted room, `Room::send` runs `ensure_room_encryption_ready`, which
+/// fetches the member list over `/members` if it is stale, issues its own
+/// `/keys/query` for members whose devices are untracked or dirty, claims
+/// one-time keys and shares the Megolm session by sending the to-device
+/// requests itself. None of that needs a sync loop.
+///
+/// Two things do. The Olm machine's **own** outgoing requests — chiefly the
+/// upload of this device's identity keys, without which no recipient (the
+/// bridge included) can make sense of the room keys it sends — are dispatched
+/// by `Client::sync_once`, before and after the `/sync` call. And an
+/// **invitation** only becomes visible in a sync response. So the loop is one
+/// `sync_once` after another, and nothing more.
+///
+/// What the filter takes away is what a write-only device has no business
+/// reading. `timeline.limit = 0`: no message events at all, which is ADR 0034's
+/// "it never reads history" as a request parameter rather than as a promise —
+/// and it costs nothing, because an invitation arrives as room *state*, not as
+/// timeline. Presence and ephemeral events are dropped for the same reason
+/// nothing subscribes to them here. Room **state** is kept, because it is what
+/// makes a room known, joined and known-to-be-encrypted.
+///
+/// `set_presence: offline` is the one choice the ADRs do not settle, and it is
+/// deliberate: syncing as `online` would have Synapse broadcast the owner's
+/// account as online to everyone sharing a room with them — including, through
+/// a bridge that relays presence, their contacts on the network — which would
+/// make Twalk's own machinery visible as the user's presence. ADR 0021 already
+/// decided the owner's presence is nobody's news; creating some would be worse
+/// than not publishing it.
+///
+/// **No event handler is registered on this client.** That is the guarantee,
+/// stronger than the filter: whatever a sync response carries, there is nothing
+/// to dispatch it to and nothing that could publish it.
+fn owner_device_sync_settings() -> SyncSettings {
+    // ruma's filter types are `#[non_exhaustive]`, so each one starts from its
+    // own default and only the fields this device wants are set.
+    let nothing = || {
+        let mut filter = EventTypeFilter::default();
+        filter.not_types = vec!["*".to_owned()];
+        filter
+    };
+    let no_room_events = || {
+        let mut filter = RoomEventFilter::default();
+        filter.not_types = vec!["*".to_owned()];
+        filter
+    };
+    let mut timeline = RoomEventFilter::default();
+    timeline.limit = Some(UInt::from(0u8));
+    let mut room = RoomFilter::default();
+    room.timeline = timeline;
+    room.ephemeral = no_room_events();
+    room.account_data = no_room_events();
+    let mut filter = FilterDefinition::default();
+    filter.presence = nothing();
+    filter.account_data = nothing();
+    filter.room = room;
+    SyncSettings::default()
+        .filter(sync_events::v3::Filter::FilterDefinition(filter))
+        .timeout(OWNER_DEVICE_SYNC_TIMEOUT)
+        .set_presence(PresenceState::Offline)
+}
+
+/// Drives the owner's device for as long as the Sensor runs: sync, then accept
+/// whatever portal invitations arrived.
+///
+/// Never returns, and a failed sync is retried rather than fatal — the same
+/// shape the bus consumers have, and for the same reason: the owner has to keep
+/// being joined to portals as the bridges build them, one per conversation as it
+/// becomes active, which on the reference deployment was eighteen new rooms in
+/// one morning (ADR 0024, #105).
+async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<Metrics>) {
+    let settings = owner_device_sync_settings();
+    // A refused invitation is refused on every sync, so the log line and the
+    // counter would otherwise repeat forever. Each room is decided once per
+    // process; the bounded memory cost is one room id per invitation the owner
+    // holds, which is the same order as the number the homeserver already keeps.
+    let mut already_refused: HashSet<matrix_sdk::ruma::OwnedRoomId> = HashSet::new();
+    loop {
+        match client.sync_once(settings.clone()).await {
+            Ok(_) => {
+                join_portal_invitations(&client, &bridge_bots, &metrics, &mut already_refused)
+                    .await;
+                metrics.record_owner_device_rooms(client.joined_rooms().len() as u64);
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    "the owner's device could not sync; approved replies stay unsendable as the \
+                     user until it does, and are retried rather than reported as sent. Retrying"
+                );
+                tokio::time::sleep(OWNER_DEVICE_RETRY_DELAY).await;
+            }
+        }
+    }
+}
+
+/// Accepts the pending invitations that are portals of a configured bridge, and
+/// refuses every other one.
+///
+/// The policy — and the reason a room id in an invitation may not be trusted —
+/// is `twalk_sensor::owner_device::invitation`, which is where to argue with it.
+/// What is here is the I/O and what gets said about it.
+async fn join_portal_invitations(
+    client: &Client,
+    bridge_bots: &BridgeBots,
+    metrics: &Metrics,
+    already_refused: &mut HashSet<matrix_sdk::ruma::OwnedRoomId>,
+) {
+    for room in client.invited_rooms() {
+        let inviter = match room.invite_details().await {
+            Ok(invite) => invite.inviter_id.to_string(),
+            Err(error) => {
+                // No `m.room.member` invite event for us in the stripped state:
+                // there is no authenticated inviter to check, so there is
+                // nothing that could make this a portal.
+                warn!(
+                    room = %room.room_id(),
+                    %error,
+                    "cannot read who invited the owner's device, leaving the invitation alone"
+                );
+                continue;
+            }
+        };
+        match owner_device::invitation(&inviter, bridge_bots) {
+            owner_device::Invitation::JoinPortal => {
+                // The `m.bridge` marker is read *after* the decision and only
+                // to name the network in the log line. It is the inviter's to
+                // write, so it corroborates and never decides.
+                let network = network::resolve(&room_bridge_contents(&room).await, "")
+                    .map(|network| network.as_str());
+                match room.join().await {
+                    Ok(()) => {
+                        let joined = metrics.record_owner_device_invite(OwnerDeviceInvite::Joined);
+                        info!(
+                            room = %room.room_id(),
+                            %inviter,
+                            network,
+                            joined,
+                            "the owner's device joined a portal of a configured bridge: replies \
+                             posted here are relayed to the network as the user's own"
+                        );
+                    }
+                    Err(error) => {
+                        metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
+                        warn!(
+                            room = %room.room_id(),
+                            %inviter,
+                            %error,
+                            "the owner's device failed to join a portal; retrying on the next sync"
+                        );
+                    }
+                }
+            }
+            owner_device::Invitation::Refuse(reason) => {
+                if !already_refused.insert(room.room_id().to_owned()) {
+                    continue;
+                }
+                let refused = metrics.record_owner_device_invite(OwnerDeviceInvite::Refused);
+                warn!(
+                    room = %room.room_id(),
+                    %inviter,
+                    reason = reason.as_str(),
+                    refused,
+                    "not joining the owner's device to this room: only a portal invited by a \
+                     bridge bot SENSOR_BRIDGE_BOTS names is joined, because everything else in an \
+                     invitation — the room id, its name, its m.bridge marker — is chosen by \
+                     whoever sent it"
+                );
+            }
+        }
+    }
 }
 
 /// The crypto store matrix-sdk's sqlite backend keeps in the state
@@ -1645,14 +2028,22 @@ const CONSUMER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// for as long as the Sensor runs.
 async fn consume_approved_replies(
     client: Client,
+    owner_device: Option<Client>,
     jetstream: async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
     metrics: Arc<Metrics>,
 ) {
     loop {
-        match run_approved_reply_consumer(&client, &jetstream, retry_base, max_attempts, &metrics)
-            .await
+        match run_approved_reply_consumer(
+            &client,
+            owner_device.as_ref(),
+            &jetstream,
+            retry_base,
+            max_attempts,
+            &metrics,
+        )
+        .await
         {
             Ok(()) => error!("the approved-reply message stream ended; rebuilding the consumer"),
             Err(error) => error!(%error, "the approved-reply consumer failed; rebuilding it"),
@@ -1665,6 +2056,7 @@ async fn consume_approved_replies(
 /// consumer and processes its messages until the stream ends.
 async fn run_approved_reply_consumer(
     client: &Client,
+    owner_device: Option<&Client>,
     jetstream: &async_nats::jetstream::Context,
     retry_base: Duration,
     max_attempts: i64,
@@ -1727,17 +2119,45 @@ async fn run_approved_reply_consumer(
                 continue;
             }
         };
-        match post_approved_reply(&client, &job).await {
-            Ok(()) => {
+        match post_approved_reply(client, owner_device, &job).await {
+            Ok(posted) => {
+                metrics.record_reply_reach(posted.reach);
+                // Reported before the ack, like the dead-letter copy is, so the
+                // answer is on the bus before the work is called done. If the
+                // report itself fails it is logged and the original is acked all
+                // the same: the reply *was* posted, and leaving it unacked would
+                // repost it on every redelivery for as long as the report keeps
+                // failing.
+                report_posted_reply(jetstream, &message, &job, &posted).await;
                 if let Err(error) = message.ack().await {
                     warn!(id = %job.event_id, %error, "ack failed after a successful post");
                 }
-                info!(
-                    id = %job.event_id,
-                    room = %job.room_id,
-                    traceparent = job.traceparent.as_deref(),
-                    "posted approved reply"
-                );
+                // One line, and it says which identity spoke and what that
+                // reached. Before this the line said "posted approved reply" for
+                // both the case where the contact received it and the case where
+                // the bridge silently ignored it (#216).
+                if posted.reach.reaches_the_contact() {
+                    info!(
+                        id = %job.event_id,
+                        room = %job.room_id,
+                        posted_as = %posted.posted_as,
+                        reach = posted.reach.as_str(),
+                        traceparent = job.traceparent.as_deref(),
+                        "posted approved reply"
+                    );
+                } else {
+                    warn!(
+                        id = %job.event_id,
+                        room = %job.room_id,
+                        posted_as = %posted.posted_as,
+                        reach = posted.reach.as_str(),
+                        traceparent = job.traceparent.as_deref(),
+                        "posted approved reply into a portal room as the Sensor's own account: a \
+                         mautrix bridge relays only the logged-in user's own account, so the \
+                         contact receives nothing. Configure the owner's device \
+                         (SENSOR_OWNER_DEVICE_ACCESS_TOKEN, issue #123)"
+                    );
+                }
             }
             Err(PostError::Permanent(error)) => {
                 metrics.record_outbound_send_failure();
@@ -2065,14 +2485,10 @@ async fn dead_letter(
             async_nats::header::NATS_MESSAGE_ID,
             outbound::dead_letter_msg_id(id).as_str(),
         );
-        headers.insert(outbound::DEAD_LETTER_EVENT_ID_HEADER, id.as_str());
+        headers.insert(outbound::EVENT_ID_HEADER, id.as_str());
     }
     if let Some(event) = &event {
-        for extension in ["network", "consent", "traceparent"] {
-            if let Some(value) = event.get(extension).and_then(serde_json::Value::as_str) {
-                headers.insert(extension, value);
-            }
-        }
+        duplicate_extensions(event, &mut headers);
     }
     match jetstream
         .publish_with_headers(subject.to_owned(), headers, message.message.payload.clone())
@@ -2114,12 +2530,46 @@ enum PostError {
     Transient(anyhow::Error),
 }
 
+/// One posted approved reply: which identity posted it, and what that reached.
+struct Posted {
+    /// What the message reached — the contact, or nobody (issue #216).
+    reach: Reach,
+    /// The Matrix ID that posted it: the owner's own account, or the Sensor's.
+    posted_as: OwnedUserId,
+}
+
 /// Posts one approved reply into its target room, as a native reply to the
-/// original message when the approval names one.
+/// original message when the approval names one, **as the owner's own account
+/// wherever that is what the conversation needs** (ADR 0025, issue #123).
+///
+/// Which identity sends is the whole of this function's judgement, and it is
+/// three cases rather than two.
+///
+/// The owner's device is a **joined member** of the target room: it sends. That
+/// is the case the product is for — the reply really is the user's, so the
+/// bridge relays it to the network, and the contact receives a message from the
+/// person they were writing to.
+///
+/// The owner's device exists but has not joined the room, **and the room is a
+/// portal**: nothing is sent, and the send fails *transiently*. It is not a
+/// fallback case: posting as `@sensor:` there produces an event id, a stream
+/// position and total silence on the contact's phone, which is exactly the
+/// outcome #123 calls the worst possible answer. Transient rather than permanent
+/// because the owner's device joins portals as the bridges build them, so the
+/// next attempt may well succeed; and when it never does, the retry schedule
+/// dead-letters the approval, which is a reply an operator can find.
+///
+/// There is no owner's device, or there is one and the room is **not a portal**:
+/// the Sensor's own account sends, exactly as it did before any of this existed.
+/// For native Matrix traffic (ADR 0009) that is not a degradation at all — no
+/// bridge stands between the room and the person reading it — and for a portal
+/// with no owner device configured it is the behaviour this deployment already
+/// has, kept unchanged and now *reported* rather than passed off as sent.
 async fn post_approved_reply(
-    client: &Client,
+    sensor: &Client,
+    owner_device: Option<&Client>,
     job: &outbound::ApprovedReply,
-) -> Result<(), PostError> {
+) -> Result<Posted, PostError> {
     // Deliberate v1 limitation, mirroring the inbound text-only skeleton:
     // only text/plain is posted; markdown and HTML dead-letter as permanent
     // failures until rich formatting is specced for outbound.
@@ -2131,16 +2581,33 @@ async fn post_approved_reply(
     }
     let room_id = matrix_sdk::ruma::RoomId::parse(&job.room_id)
         .map_err(|error| PostError::Permanent(anyhow!(error).context("invalid target room id")))?;
-    let Some(room) = client.get_room(&room_id) else {
-        return Err(PostError::Transient(anyhow!(
-            "the sensor is not a member of the target room"
-        )));
-    };
-    if room.state() != RoomState::Joined {
-        return Err(PostError::Transient(anyhow!(
-            "the sensor has not joined the target room"
-        )));
-    }
+
+    let the_room_is_a_portal = the_room_is_a_portal(sensor, &room_id).await;
+
+    let (room, by_the_owners_device) =
+        match owner_device.and_then(|device| joined_room(device, &room_id)) {
+            Some(room) => (room, true),
+            None if owner_device.is_some() && the_room_is_a_portal => {
+                return Err(PostError::Transient(anyhow!(
+                    "the owner's device has not joined this portal room: a mautrix bridge relays \
+                     only the logged-in user's own account, so posting as the Sensor would return \
+                     an event id and reach nobody. The device joins a portal when that bridge's \
+                     own bot invites it — check SENSOR_BRIDGE_BOTS"
+                )))
+            }
+            None => (
+                joined_room(sensor, &room_id).ok_or_else(|| {
+                    PostError::Transient(anyhow!("the sensor has not joined the target room"))
+                })?,
+                false,
+            ),
+        };
+    let posted_as = room
+        .client()
+        .user_id()
+        .expect("a restored session always has a user id")
+        .to_owned();
+
     let mut content = RoomMessageEventContent::text_plain(job.body.clone());
     if let Some(reply_to) = &job.reply_to_event_id {
         let event_id = matrix_sdk::ruma::EventId::parse(reply_to).map_err(|error| {
@@ -2159,7 +2626,120 @@ async fn post_approved_reply(
         .with_transaction_id(transaction_id)
         .await
         .map_err(classify_send_error)?;
-    Ok(())
+    Ok(Posted {
+        reach: owner_device::reach(by_the_owners_device, the_room_is_a_portal),
+        posted_as,
+    })
+}
+
+/// Whether a bridge stands between this room and the contact, asked of the
+/// **homeserver** rather than of the SDK's state store.
+///
+/// The store is the wrong source here and the difference is not academic. A
+/// room the Sensor has just joined is in the store as joined — `room_joined`
+/// marks it so immediately — while its state arrives only with the next sync
+/// response, so `get_state_events("m.bridge")` answers "no marker" for a real
+/// portal during that window. Believing it would make the Sensor report a reply
+/// as having reached the contact when the bridge ignored it, which is precisely
+/// the wrong answer issue #216 exists to stop, produced by the machinery meant
+/// to prevent it.
+///
+/// One GET per approved reply, on a path a human walks a few times a minute at
+/// most, and an unreadable answer counts as a portal: the cautious reading is
+/// the one that refuses to claim delivery.
+async fn the_room_is_a_portal(sensor: &Client, room_id: &matrix_sdk::ruma::RoomId) -> bool {
+    match sensor
+        .send(get_state_events::v3::Request::new(room_id.to_owned()))
+        .await
+    {
+        Ok(response) => response.room_state.iter().any(|raw| {
+            raw.get_field::<String>("type").ok().flatten().as_deref() == Some("m.bridge")
+        }),
+        Err(error) => {
+            warn!(
+                room = %room_id,
+                %error,
+                "cannot read this room's state to tell a portal from native Matrix traffic;                  treating it as a portal, so a reply the Sensor posts is not claimed to have                  reached anybody"
+            );
+            true
+        }
+    }
+}
+
+/// The room, only when this client has **joined** it. An invited-but-not-joined
+/// room is exactly the state #123 found the owner's account in on all 33 of the
+/// reference deployment's portals, and it is worth nothing to a bridge.
+fn joined_room(client: &Client, room_id: &matrix_sdk::ruma::RoomId) -> Option<Room> {
+    client
+        .get_room(room_id)
+        .filter(|room| room.state() == RoomState::Joined)
+}
+
+/// Reports what a posted reply reached, on the Sensor's own
+/// `twalk.persona.reply.approved.v1.posted` subject (issue #216).
+///
+/// The payload is the approval **unchanged** — the same bytes the bus delivered
+/// — so it stays a contract event and nothing about `persona.reply.approved.v1`
+/// moves; the two new facts, what it reached and which identity posted it, are
+/// headers. See `outbound::posted_subject` for why this is a subject rather than
+/// a field.
+///
+/// A failure here is logged and nothing more. The reply was posted; a missing
+/// diagnosis must not turn that into a redelivery.
+async fn report_posted_reply(
+    jetstream: &async_nats::jetstream::Context,
+    message: &async_nats::jetstream::Message,
+    job: &outbound::ApprovedReply,
+    posted: &Posted,
+) {
+    let mut headers = async_nats::header::HeaderMap::new();
+    headers.insert(
+        async_nats::header::NATS_MESSAGE_ID,
+        outbound::posted_msg_id(&job.event_id).as_str(),
+    );
+    headers.insert(outbound::EVENT_ID_HEADER, job.event_id.as_str());
+    headers.insert(outbound::POSTED_REACH_HEADER, posted.reach.as_str());
+    headers.insert(outbound::POSTED_AS_HEADER, posted.posted_as.as_str());
+    let event = serde_json::from_slice::<serde_json::Value>(&message.message.payload).ok();
+    if let Some(event) = &event {
+        duplicate_extensions(event, &mut headers);
+    }
+    match jetstream
+        .publish_with_headers(
+            outbound::posted_subject(),
+            headers,
+            message.message.payload.clone(),
+        )
+        .await
+    {
+        Ok(ack) => match ack.await {
+            Ok(_) => {}
+            Err(error) => warn!(
+                id = %job.event_id,
+                %error,
+                "the reach report's publish ack failed; the reply was posted and its reach is in \
+                 the log line only"
+            ),
+        },
+        Err(error) => warn!(
+            id = %job.event_id,
+            %error,
+            "could not report what the posted reply reached; the reply was posted and its reach \
+             is in the log line only"
+        ),
+    }
+}
+
+/// Copies an event's message-flow extensions into the headers of a copy the
+/// Sensor publishes of it, for the server-side filtering the inbound path's
+/// headers exist for. Shared by the dead-letter copy and the reach report so the
+/// two cannot drift.
+fn duplicate_extensions(event: &serde_json::Value, headers: &mut async_nats::header::HeaderMap) {
+    for extension in ["network", "consent", "traceparent"] {
+        if let Some(value) = event.get(extension).and_then(serde_json::Value::as_str) {
+            headers.insert(extension, value);
+        }
+    }
 }
 
 /// Maps a failed Matrix send onto the outbound retry policy. Only errors
