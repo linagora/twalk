@@ -58,6 +58,10 @@ The user's decision that a persona may read a given network, recorded as a conse
 **Suggestion**:
 A reply a persona proposes and never sends: it exists to be read, edited or refused by a human. Written in the language of the message it answers, not the user's (ADR 0016). Read from the bus, never kept: the listing the Companion Gateway serves is a projection of the stream and holds no copy, so a replay and the list cannot disagree — and what it says about the message being answered is that message's identity, never its words, because an excerpt belongs to the author of the quoted message and not to whoever sent the event carrying it (ADR 0012). Contract type: `persona.suggest.produced`.
 
+**Disclosure**:
+The line a persona-drafted reply carries to the contact receiving it, saying the message was drafted with the user's AI assistant. On by default; removable only for every conversation at once, never for one message, and the removal recorded as a dated act rather than kept as a preference (ADR 0019, ADR 0031). Written in the language of the reply and not the user's (ADR 0016), which is why the persona chooses it and neither the model nor the Gateway composes it. It states how *this* message was produced, so a message the user wrote themselves carries none — attaching it to everything would make it mean nothing. Distinct from whether a contact is told the conversation is observed at all, which is open (#122).
+_Avoid_: "watermark", "notice"; and the word is also used in this repository for warnings shown to the **user** about a network's own risks, which is a different thing
+
 **Approval**:
 The human act that turns a suggestion into an outbound reply, carrying the identity of whoever approved it. Deliberate by construction — an explicit call, never a default, never a batch — and refused if the sender's consent is no longer `granted` at that moment. Served and published by the Companion Gateway, because that last clause is a read of the consent state and the Gateway is its single writer (ADR 0022); the event's `source` names the persona whose suggestion was approved, not the publisher. Contract type: `persona.reply.approved`.
 
