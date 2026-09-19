@@ -65,6 +65,7 @@ pub struct Metrics {
     /// bus.
     dropped_bridge_bot: AtomicU64,
     dropped_unattributable_subject: AtomicU64,
+    dropped_tombstoned_room: AtomicU64,
     /// The owner's own device (ADR 0025, issue #123): whether the deployment
     /// has one at all, how many portal rooms it is joined to, and what became
     /// of the invitations it was sent.
@@ -103,6 +104,11 @@ pub enum DropReason {
     /// would name one on a guess — and consent is looked up by
     /// `(subject, network)` (issue #150).
     UnattributableSubject,
+    /// The room carries an `m.room.tombstone`: it was replaced, and what
+    /// still arrives in it is stray (issue #254, ADR 0029). Publishing it
+    /// would attribute a conversation to a room the register no longer
+    /// lists.
+    TombstonedRoom,
 }
 
 impl DropReason {
@@ -111,6 +117,7 @@ impl DropReason {
         match self {
             Self::BridgeBot => "bridge_bot",
             Self::UnattributableSubject => "unattributable_subject",
+            Self::TombstonedRoom => "tombstoned_room",
         }
     }
 }
@@ -162,6 +169,7 @@ impl Metrics {
             invites_failed: AtomicU64::new(0),
             dropped_bridge_bot: AtomicU64::new(0),
             dropped_unattributable_subject: AtomicU64::new(0),
+            dropped_tombstoned_room: AtomicU64::new(0),
             owner_device_present: AtomicBool::new(false),
             owner_device_rooms: AtomicU64::new(0),
             owner_device_invites_joined: AtomicU64::new(0),
@@ -178,6 +186,7 @@ impl Metrics {
         let counter = match reason {
             DropReason::BridgeBot => &self.dropped_bridge_bot,
             DropReason::UnattributableSubject => &self.dropped_unattributable_subject,
+            DropReason::TombstonedRoom => &self.dropped_tombstoned_room,
         };
         counter.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -355,6 +364,7 @@ impl Metrics {
                 DropReason::UnattributableSubject,
                 &self.dropped_unattributable_subject,
             ),
+            (DropReason::TombstonedRoom, &self.dropped_tombstoned_room),
         ] {
             out.push_str(&format!(
                 "twalk_sensor_events_dropped_total{{reason=\"{}\"}} {}\n",
@@ -519,7 +529,7 @@ mod tests {
         // absent sample would read as "no bots on this deployment", which is
         // the misreading that leaves the defect in place.
         let body = Metrics::new().render(1_000);
-        for reason in ["bridge_bot", "unattributable_subject"] {
+        for reason in ["bridge_bot", "unattributable_subject", "tombstoned_room"] {
             assert!(
                 body.contains(&format!(
                     "twalk_sensor_events_dropped_total{{reason=\"{reason}\"}} 0\n"

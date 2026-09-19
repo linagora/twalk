@@ -23,6 +23,7 @@ use matrix_sdk::ruma::api::error::ErrorKind;
 use matrix_sdk::ruma::events::presence::PresenceEvent;
 use matrix_sdk::ruma::events::reaction::OriginalSyncReactionEvent;
 use matrix_sdk::ruma::events::relation::Reply;
+use matrix_sdk::ruma::events::room::create::OriginalSyncRoomCreateEvent;
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::member::{MembershipState, StrippedRoomMemberEvent};
 use matrix_sdk::ruma::events::room::message::{
@@ -402,6 +403,44 @@ async fn main() -> Result<()> {
         );
     }
 
+    // A room replaced another one (ADR 0029, issue #254): its `m.room.create`
+    // names the predecessor. If the Sensor is still in that predecessor, it
+    // leaves it — the register reads its membership there as `observing`,
+    // and `observed_rooms` counts it, so a dead room kept would be one
+    // conversation counted twice and reported observed where nothing can
+    // arrive any more. The create event comes with the join's own state, so
+    // this runs once per successor joined, and again harmlessly after a
+    // restart's initial sync if the predecessor is somehow still held.
+    {
+        client.add_event_handler(move |event: OriginalSyncRoomCreateEvent, room: Room, client: Client| {
+            async move {
+                let Some(predecessor) = event.content.predecessor else {
+                    return;
+                };
+                let Some(dead) = client.get_room(&predecessor.room_id) else {
+                    return;
+                };
+                if dead.state() != RoomState::Joined {
+                    return;
+                }
+                match dead.leave().await {
+                    Ok(()) => info!(
+                        room = %room.room_id(),
+                        predecessor = %predecessor.room_id,
+                        "joined a room that replaced another the Sensor was in, so it left the room it \
+                         replaced: one conversation, one membership, one room counted"
+                    ),
+                    Err(error) => warn!(
+                        room = %room.room_id(),
+                        predecessor = %predecessor.room_id,
+                        %error,
+                        "could not leave the room this one replaced; it stays counted until it can"
+                    ),
+                }
+            }
+        });
+    }
+
     // Inbound messages: normalize and publish. Text, media (image, video,
     // audio, file), sticker (relayed by some bridges as an m.room.message
     // msgtype) and location shapes produce events; other msgtypes (notices,
@@ -425,6 +464,9 @@ async fn main() -> Result<()> {
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
+                }
+                if dropped_as_a_dead_room(&room, "message", &metrics).await {
+                    return;
                 }
                 // A bridge's own bot posts into the portal rooms it maintains
                 // (issue #152). Most of what it says is an `m.notice`, which
@@ -636,6 +678,9 @@ async fn main() -> Result<()> {
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
+                }
+                if dropped_as_a_dead_room(&room, "reaction", &metrics).await {
+                    return;
                 }
                 // A bridge's own bot reacts: mautrix answers a command with
                 // ✅ or ❌, and several bridges mark a message it could not
@@ -1732,6 +1777,29 @@ fn dropped_as_a_bridge_bot(
         %sender,
         dropped,
         "dropping a bridge bot's {what}: a bridge's own bot is neither the owner nor a contact"
+    );
+    true
+}
+
+/// A room carrying an `m.room.tombstone` is dead: it was replaced, the bridge
+/// posts to the successor, and what still arrives here is stray — a notice
+/// the bot left behind, a client that did not follow. Publishing it would
+/// attribute a conversation to a room the register no longer lists (ADR 0029,
+/// issue #254). Counted under its own reason, so the silence has a number.
+async fn dropped_as_a_dead_room(room: &Room, what: &str, metrics: &Metrics) -> bool {
+    let tombstoned = room
+        .get_state_events("m.room.tombstone".into())
+        .await
+        .map(|events| !events.is_empty())
+        .unwrap_or(false);
+    if !tombstoned {
+        return false;
+    }
+    let dropped = metrics.record_dropped(DropReason::TombstonedRoom);
+    tracing::debug!(
+        room = %room.room_id(),
+        dropped,
+        "dropping a {what} in a room that was replaced: the conversation lives in its successor"
     );
     true
 }
