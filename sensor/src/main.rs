@@ -31,7 +31,7 @@ use matrix_sdk::{Client, LoopCtrl, Room, RoomState};
 use tracing::{error, info, warn};
 use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
-use twalk_sensor::metrics::Metrics;
+use twalk_sensor::metrics::{DropReason, Metrics};
 use twalk_sensor::{consent, network, normalize, outbound};
 
 #[tokio::main]
@@ -269,13 +269,43 @@ async fn main() -> Result<()> {
         ),
     }
 
+    // The bridges' own bots (issue #152). A bridge materialises ghosts for
+    // people and one bot for itself — mautrix's `sender_localpart` — and the
+    // bot is neither the owner nor a contact: it creates portals, puppets
+    // ghosts and sits in every portal room of its network. Nothing is
+    // published about it, on any type.
+    //
+    // Named by the deployment for the same reason the operator's identities
+    // are: the alternatives infer it, and every inference here can suppress a
+    // real person (see `twalk_sensor::bridge_bot`). Logged at startup because
+    // the set is the whole of what makes the suppression correct, and because
+    // a silent empty set is how this defect survives a release.
+    let bridge_bots = config.bridge_bots();
+    if bridge_bots.is_empty() {
+        info!(
+            "no bridge bots configured (SENSOR_BRIDGE_BOTS): a bridge's own bot is published as \
+             a contact, which on the reference deployment was 95% of the bus (issue #152). A \
+             deployment that runs bridges names their bots here — the same accounts \
+             SENSOR_ALLOWED_INVITERS already lists"
+        );
+    } else {
+        info!(
+            bridge_bots = ?bridge_bots.ids(),
+            "recognising these accounts as the bridges' own bots and publishing nothing about them"
+        );
+    }
+
     // Consent labelling (ticket 05): every published event carries the
     // sender's current consent state from this cache. It is filled from the
     // Companion Gateway's snapshot and then from the durable
     // consent.state.changed consumer, in that order and without overlap
     // (ticket #51, ADR 0010) — see `bring_up_consent`. The Sensor never
     // writes consent state (ADR 0006).
-    let consent_cache = ConsentCache::for_owner(owner.clone());
+    //
+    // Built around the two identities that have no consent state: the
+    // operator (ADR 0021) and the bridges' bots (issue #152). A decision
+    // about either is refused entry rather than filtered at every read.
+    let consent_cache = ConsentCache::for_people_only(owner.clone(), bridge_bots.clone());
     let snapshot_source = match config.consent_snapshot() {
         Some((url, token)) => Some(consent::GatewaySnapshot::new(url, token)?),
         None => None,
@@ -346,6 +376,7 @@ async fn main() -> Result<()> {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
         let owner = owner.clone();
+        let bridge_bots = bridge_bots.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -353,12 +384,22 @@ async fn main() -> Result<()> {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
             let owner = owner.clone();
+            let bridge_bots = bridge_bots.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
+                }
+                // A bridge's own bot posts into the portal rooms it maintains
+                // (issue #152). Most of what it says is an `m.notice`, which
+                // has no v1 shape and is skipped below anyway — but not all of
+                // it is, and the point is not the msgtype: the bot is a
+                // service identity, so it must not reach the consent cache or
+                // acquire a `contact` object, whatever it sends.
+                if dropped_as_a_bridge_bot(&bridge_bots, &event.sender, "message", &metrics) {
+                    return;
                 }
                 if let Some(Relation::Replacement(replacement)) = &event.content.relates_to {
                     // An edit is a new event (`* new text` fallback body)
@@ -407,6 +448,7 @@ async fn main() -> Result<()> {
                                 &parent_id,
                                 &own_user,
                                 Some(owner),
+                                &bridge_bots,
                                 &consent_cache,
                             )
                             .await,
@@ -469,7 +511,7 @@ async fn main() -> Result<()> {
                         quoted: if consent.reduces_publication() {
                             None
                         } else {
-                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &consent_cache).await
+                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache).await
                         },
                     }),
                     None => None,
@@ -545,6 +587,7 @@ async fn main() -> Result<()> {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
         let owner = owner.clone();
+        let bridge_bots = bridge_bots.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -552,12 +595,19 @@ async fn main() -> Result<()> {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
             let owner = owner.clone();
+            let bridge_bots = bridge_bots.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
             async move {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
+                }
+                // A bridge's own bot reacts: mautrix answers a command with
+                // ✅ or ❌, and several bridges mark a message it could not
+                // relay (issue #152). Same rule as a message.
+                if dropped_as_a_bridge_bot(&bridge_bots, &event.sender, "reaction", &metrics) {
+                    return;
                 }
                 let reactor: OwnedUserId = event.sender.clone();
                 let Some(network) = resolve_network(&room, &reactor).await else {
@@ -588,6 +638,7 @@ async fn main() -> Result<()> {
                         &target_event_id,
                         &own_user,
                         Some(owner),
+                        &bridge_bots,
                         &consent_cache,
                     )
                     .await;
@@ -638,7 +689,7 @@ async fn main() -> Result<()> {
                 let excerpt = if consent.reduces_publication() {
                     None
                 } else {
-                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &consent_cache).await
+                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache).await
                 };
                 let input = normalize::InboundReaction {
                     matrix_event_id: event.event_id.to_string(),
@@ -672,21 +723,33 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Bridge-puppet presence. Presence updates in Matrix are NOT
-    // room-scoped: they arrive in the sync response's presence list for
-    // every user sharing a room with the Sensor (matrix-sdk dispatches
-    // them as `PresenceEvent`s with no room context). The contract's
-    // `source` is a portal room URI, so one observed room is picked
-    // deterministically: the lexicographically first joined room the user
-    // is also joined to. As for messages, only users attributable to a
-    // network (portal `m.bridge` state or ghost prefix) are published —
-    // never the Sensor itself. Presence is best-effort: every failure mode
-    // logs and returns, so a bridge without presence support can neither
-    // break nor slow the rest of the pipeline.
+    // A contact's presence. Presence updates in Matrix are NOT room-scoped:
+    // they arrive in the sync response's presence list for every user sharing
+    // a room with the Sensor (matrix-sdk dispatches them as `PresenceEvent`s
+    // with no room context). Two consequences, and issue #150 is the second.
+    //
+    // The contract's `source` is a portal room URI, so one observed room has
+    // to be named: the first, in room-id order, of the rooms that resolve to
+    // the subject's own network — a tie-break among rooms that already agree,
+    // which is all an ordering may ever decide here.
+    //
+    // The **network** is the subject's, from something that identifies them
+    // (`network::subject_network`), and no longer the first bridged room in id
+    // order. That sort was a fabrication with consequences: consent is looked
+    // up by `(subject, network)`, so a native Matrix contact who is a member
+    // of a bridged portal had their presence published as `whatsapp` and the
+    // decision the user took about them *on Matrix* did not govern it. A
+    // subject the Sensor cannot attribute to one network is not published at
+    // all rather than published under a guess.
+    //
+    // Presence is best-effort: every failure mode logs and returns, so a
+    // bridge without presence support can neither break nor slow the rest of
+    // the pipeline.
     {
         let jetstream = jetstream.clone();
         let own_user = own_user.clone();
         let owner = owner.clone();
+        let bridge_bots = bridge_bots.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -694,6 +757,7 @@ async fn main() -> Result<()> {
             let jetstream = jetstream.clone();
             let own_user = own_user.clone();
             let owner = owner.clone();
+            let bridge_bots = bridge_bots.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -701,6 +765,14 @@ async fn main() -> Result<()> {
                 let sender: OwnedUserId = event.sender.clone();
                 if sender == own_user {
                     return; // never loop on our own presence
+                }
+                // A bridge's own bot, which is online for as long as the
+                // bridge runs (issue #152). This is the path that produced
+                // 1,150 of the reference deployment's 1,216 presence events —
+                // two service accounts, two a minute, forever — and told
+                // nobody anything: a robot is online.
+                if dropped_as_a_bridge_bot(&bridge_bots, &sender, "presence", &metrics) {
+                    return;
                 }
                 // The user's own presence is not published at all — no type
                 // of its own, no event (ADR 0021). Unlike their message or
@@ -755,37 +827,109 @@ async fn main() -> Result<()> {
                         shared_room_ids.push(room.room_id().to_owned());
                     }
                 }
+                if shared_room_ids.is_empty() {
+                    return; // not an observed contact: shares no observed room
+                }
                 shared_room_ids.sort_unstable();
-                // Pick the first shared room attributed to a bridged
-                // network; a room the contact shares as themselves (no
-                // m.bridge state, no ghost prefix) is native Matrix traffic
-                // and is the fallback, so it cannot shadow a real portal
-                // room further down the list.
-                let mut resolved = None;
-                let mut native = None;
+                // Every shared room that resolves to a network, in room-id
+                // order. A room that resolves to nothing — a portal of a
+                // bridge this version does not support — is left out, exactly
+                // as it was before, and contributes nothing to the answer.
+                let mut attributed: Vec<(Room, network::Network)> = Vec::new();
                 for room_id in &shared_room_ids {
                     let Some(candidate) = client.get_room(room_id) else {
                         continue;
                     };
-                    let Some(network) = resolve_network(&candidate, &sender).await else {
-                        continue;
-                    };
-                    if network == network::Network::Matrix {
-                        if native.is_none() {
-                            native = Some((candidate, network));
-                        }
-                        continue;
+                    if let Some(network) = resolve_network(&candidate, &sender).await {
+                        attributed.push((candidate, network));
                     }
-                    resolved = Some((candidate, network));
-                    break;
                 }
-                let Some((room, network)) = resolved.or(native) else {
-                    if shared_room_ids.is_empty() {
-                        return; // not a portal contact: shares no observed room
-                    }
-                    warn!(%sender, "cannot determine the network in any shared room, skipping event");
+                if attributed.is_empty() {
+                    // Rooms the subject shares, none of which any bridge this
+                    // version supports marked: the answer before #150 and the
+                    // answer now. Counted as well as warned, because it is a
+                    // subject the bus never hears about.
+                    let dropped = metrics.record_dropped(DropReason::UnattributableSubject);
+                    warn!(
+                        %sender,
+                        dropped,
+                        "cannot determine the network in any shared room, skipping event"
+                    );
                     return;
+                }
+                let networks: Vec<network::Network> =
+                    attributed.iter().map(|(_, network)| *network).collect();
+                let network = match network::subject_network(sender.localpart(), &networks) {
+                    network::SubjectNetwork::One(network) => network,
+                    // Portals of several networks holding a subject that is a
+                    // ghost of none of them, and which shares no unbridged
+                    // room either: the honest answer is that the Sensor does
+                    // not know. Publishing an arbitrary one would make the
+                    // consent model read the row of a network this person may
+                    // not be on (issue #150). At `warn` and counted, because a
+                    // real person behind this is a person missing from the bus.
+                    network::SubjectNetwork::Ambiguous(networks) => {
+                        let dropped = metrics.record_dropped(DropReason::UnattributableSubject);
+                        warn!(
+                            %sender,
+                            networks = ?networks.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+                            dropped,
+                            "not publishing presence: this subject is a member of portals of \
+                             several networks and is a ghost of none of them, so naming one would \
+                             be a guess — and consent is looked up by (subject, network)"
+                        );
+                        return;
+                    }
+                    // Unreachable from here: the shared-room list is not empty
+                    // above, so a subject with no ghost prefix has at least one
+                    // network and one with a prefix answers from it. Kept as an
+                    // arm rather than an `unwrap` so that a future rule cannot
+                    // turn it into a panic inside an event handler.
+                    network::SubjectNetwork::Unattributable => {
+                        let dropped = metrics.record_dropped(DropReason::UnattributableSubject);
+                        warn!(
+                            %sender,
+                            dropped,
+                            "cannot determine the network for this subject, skipping event"
+                        );
+                        return;
+                    }
                 };
+                // The room to name as `source`: the first, in room-id order,
+                // that resolves to the network already decided. The ordering is
+                // a tie-break among rooms that agree and no longer decides
+                // anything a consumer can read.
+                //
+                // Falling back to the first shared room when none of them
+                // agrees is deliberate, and it is the rule about failing safe
+                // rather than an oversight. It is reachable in one shape only —
+                // a ghost of one bridge that shares nothing but another
+                // bridge's portals, which is a misconfigured deployment — and
+                // the alternative would be to drop a person for it. The
+                // network stays the subject's own, which is the answer this
+                // ticket is about; `source` names a room the subject shares,
+                // which is all the contract claims of it, and the disagreement
+                // is warned so it is not a silence.
+                let Some((room, room_network)) = attributed
+                    .iter()
+                    .find(|(_, candidate)| *candidate == network)
+                    .or_else(|| attributed.first())
+                else {
+                    return; // unreachable: the list is not empty above
+                };
+                if *room_network != network {
+                    warn!(
+                        %sender,
+                        network = %network.as_str(),
+                        room = %room.room_id(),
+                        room_network = %room_network.as_str(),
+                        "publishing presence with a source room of another network: no observed \
+                         room this subject shares resolves to their own network, so the event \
+                         names one they do share. A ghost that is only in another bridge's \
+                         portals is a misconfigured deployment, and dropping the person would be \
+                         worse than naming the room"
+                    );
+                }
                 let display_name = room
                     .get_member(&sender)
                     .await
@@ -1181,6 +1325,34 @@ async fn room_bridge_contents(room: &Room) -> Vec<serde_json::Value> {
     markers.into_iter().map(|(_, content)| content).collect()
 }
 
+/// Whether this sender is one of the bridges' own bots, and therefore an
+/// observed event to drop before anything resolves it as a subject (issue
+/// #152): no consent lookup, no display name, no `contact` object, no event.
+///
+/// Counted as well as logged. Both facts an operator needs are in the count:
+/// that the suppression is happening at all (a flat zero on a deployment with
+/// bridges means `SENSOR_BRIDGE_BOTS` names an account that does not exist),
+/// and how much of the stream it was. `debug` rather than `warn` for the line
+/// itself, because on a healthy deployment this is the most frequent thing the
+/// Sensor does.
+fn dropped_as_a_bridge_bot(
+    bridge_bots: &twalk_sensor::bridge_bot::BridgeBots,
+    sender: &OwnedUserId,
+    what: &str,
+    metrics: &Metrics,
+) -> bool {
+    if !bridge_bots.contains(sender.as_str()) {
+        return false;
+    }
+    let dropped = metrics.record_dropped(DropReason::BridgeBot);
+    tracing::debug!(
+        %sender,
+        dropped,
+        "dropping a bridge bot's {what}: a bridge's own bot is neither the owner nor a contact"
+    );
+    true
+}
+
 /// Defers to the pure attribution policy in `network::resolve`.
 async fn resolve_network(room: &Room, sender: &OwnedUserId) -> Option<network::Network> {
     network::resolve(&room_bridge_contents(room).await, sender.localpart())
@@ -1354,6 +1526,7 @@ async fn quoted_message(
     event_id: &EventId,
     own_user: &OwnedUserId,
     owner: Option<&twalk_sensor::owner::Owner>,
+    bridge_bots: &twalk_sensor::bridge_bot::BridgeBots,
     consent_cache: &ConsentCache,
 ) -> Option<normalize::QuotedExcerpt> {
     let timeline_event = room.event(event_id, None).await.ok()?;
@@ -1367,6 +1540,15 @@ async fn quoted_message(
         || owner.is_some_and(|owner| owner.is_owner(message.sender.as_str()))
     {
         normalize::QuotedAuthor::Owner
+    } else if bridge_bots.contains(message.sender.as_str()) {
+        // A bridge's own bot wrote the quoted message (issue #152). There is
+        // no decision about it to consult, and asking the consent cache would
+        // be asking about a robot — so it takes the same answer as an author
+        // the Sensor cannot attribute: the excerpt is withheld, the event
+        // still publishes with its relation intact. The general rule holds
+        // here rather than #152's inversion of it: withholding an excerpt
+        // costs a line of service output, not a person's visibility.
+        normalize::QuotedAuthor::Unknown
     } else {
         match resolve_network(room, &message.sender).await {
             Some(network) => normalize::QuotedAuthor::Contact(

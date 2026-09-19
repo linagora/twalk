@@ -101,6 +101,92 @@ pub fn resolve(bridge_contents: &[Value], sender_localpart: &str) -> Option<Netw
     }
 }
 
+/// Which network a **subject** is on, as opposed to which network a **room's
+/// traffic** belongs to ([`resolve`]).
+///
+/// The distinction is issue #150. A message or a reaction happens *in* a room,
+/// so the room answers for it and there is nothing else to ask. Presence in
+/// Matrix is not room-scoped: it is a fact about an account, and it arrives
+/// with no room at all. The handler used to pick the lexicographically first
+/// joined room the subject shared with the Sensor that resolved to a bridged
+/// network — so the answer came from a **sort over room ids**, which is not a
+/// property of the subject.
+///
+/// For a ghost that was harmless: a bridge materialises only its own ghosts and
+/// puts them only in its own portals, so every shared room gives the same
+/// answer and the sort chooses nothing. For a **native Matrix contact**
+/// (ADR 0009's bring-your-own-account path) it was not: their own rooms carry
+/// no `m.bridge` state, but if they are a member of a bridged portal —
+/// invited by hand, or a bridge in relay mode — that portal's `protocol.id`
+/// answered instead, and their presence was published as `whatsapp` on the
+/// strength of an ordering. Consent is looked up by `(subject, network)`, so
+/// that is the consent model reading the wrong row: a decision the user made
+/// about that person **on Matrix** does not govern an event labelled
+/// `whatsapp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubjectNetwork {
+    /// The subject is attributable to exactly one network, by something that
+    /// identifies *them* rather than by an ordering over rooms.
+    One(Network),
+    /// Nothing attributes the subject to a single network: they are a member
+    /// of portals of several networks and are a ghost of none of them. The
+    /// caller publishes nothing — a guessed network reads the wrong consent
+    /// row — and says which networks it saw.
+    Ambiguous(Vec<Network>),
+    /// No shared room attributes the subject at all: they share no observed
+    /// room, or only portals of a bridge this version does not support.
+    Unattributable,
+}
+
+/// Attributes a subject to a network from their own identity first, and from
+/// the rooms they share with the Sensor only when their identity says nothing.
+///
+/// `shared_room_networks` is [`resolve`]'s answer for each joined room the
+/// subject is also joined to, in any order — rooms that resolve to nothing are
+/// simply left out. The order is deliberately irrelevant: that is the defect.
+///
+/// The precedence, and why each step is a property of the subject:
+///
+/// 1. **A ghost of a known network.** The localpart
+///    `@<network>_<id>` *is* the subject's identifier on that network — the
+///    same string [`ghost_network_identifier`] mints the contact's phone
+///    number from. Nothing about which rooms they are in can improve on it.
+/// 2. **A member of a room no bridge marked.** A bridge puts only its own
+///    ghosts in only its own portals, so a subject sharing an *unbridged* room
+///    with the Sensor is a Matrix account in its own right; `matrix` is the
+///    network they are on (ADR 0009), and their membership of somebody's
+///    portal is an invitation rather than an identity on that network. This
+///    inverts [`resolve`]'s precedence on purpose: for a room's traffic a
+///    portal wins over the native fallback, and for a *subject* it must not.
+/// 3. **One network across every portal they share.** A puppet whose bridge
+///    does not use a `<network>_` localpart template (the `username_template`
+///    is each bridge's own) is attributed by the portals that hold it — and
+///    since a bridge only fills its own portals, they agree.
+/// 4. **Otherwise, nothing.** Portals of two networks holding a subject that
+///    is a ghost of neither: the Sensor cannot say, and says so.
+pub fn subject_network(localpart: &str, shared_room_networks: &[Network]) -> SubjectNetwork {
+    if let Some(network) = Network::from_ghost_localpart(localpart) {
+        return SubjectNetwork::One(network);
+    }
+    if shared_room_networks.contains(&Network::Matrix) {
+        return SubjectNetwork::One(Network::Matrix);
+    }
+    let mut distinct: Vec<Network> = Vec::new();
+    for network in shared_room_networks {
+        if !distinct.contains(network) {
+            distinct.push(*network);
+        }
+    }
+    match distinct.len() {
+        0 => SubjectNetwork::Unattributable,
+        1 => SubjectNetwork::One(distinct[0]),
+        _ => {
+            distinct.sort_unstable_by_key(|network| network.as_str());
+            SubjectNetwork::Ambiguous(distinct)
+        }
+    }
+}
+
 /// The contact's native network identifier, derived from a ghost localpart
 /// `@<network>_<id>:<server>` whose prefix matches the event's network.
 /// On phone-based networks (WhatsApp, SMS) mautrix mints the ghost from
@@ -279,6 +365,95 @@ mod tests {
         assert_eq!(
             resolve(&[], "whatsapp_33612345678"),
             Some(Network::Whatsapp)
+        );
+    }
+
+    #[test]
+    fn a_ghosts_network_is_its_own_localpart_whatever_rooms_it_is_in() {
+        // Issue #150's keystone: the answer comes from the identity, so no
+        // ordering over rooms can change it — not even a room whose m.bridge
+        // marker says otherwise, which is a portal a ghost has no business
+        // being in and is not a reason to relabel the ghost.
+        for rooms in [
+            vec![Network::Whatsapp],
+            vec![Network::Signal, Network::Whatsapp],
+            vec![Network::Whatsapp, Network::Signal],
+            vec![Network::Matrix, Network::Signal],
+            vec![],
+        ] {
+            assert_eq!(
+                subject_network("whatsapp_33612345678", &rooms),
+                SubjectNetwork::One(Network::Whatsapp),
+                "{rooms:?}"
+            );
+        }
+        // And a transport ghost folds into its network, as everywhere else.
+        assert_eq!(
+            subject_network("gmessages_33612345678", &[Network::Whatsapp]),
+            SubjectNetwork::One(Network::Sms)
+        );
+    }
+
+    #[test]
+    fn a_native_matrix_contact_in_a_portal_stays_on_matrix() {
+        // The defect #150 reports. A real Matrix user whose own rooms carry no
+        // m.bridge state, who is also a member of a bridged portal: `resolve`
+        // reads that portal's protocol id, and the old handler stopped at the
+        // first such room in id order. Sharing an unbridged room is positive
+        // evidence that the subject is an account in their own right — a
+        // bridge never puts its ghosts in one — so `matrix` wins here, the
+        // reverse of `resolve`'s precedence for a room's own traffic.
+        assert_eq!(
+            subject_network("alice", &[Network::Whatsapp, Network::Matrix]),
+            SubjectNetwork::One(Network::Matrix)
+        );
+        assert_eq!(
+            subject_network("alice", &[Network::Matrix, Network::Whatsapp]),
+            SubjectNetwork::One(Network::Matrix),
+            "and the order the rooms came in is not part of the answer"
+        );
+    }
+
+    #[test]
+    fn a_prefixless_puppet_is_attributed_by_the_portals_that_hold_it() {
+        // A bridge's `username_template` is its own, so a puppet's localpart
+        // need not carry a network prefix. Its portals still agree, because a
+        // bridge only fills its own.
+        assert_eq!(
+            subject_network("bot_beta", &[Network::Whatsapp, Network::Whatsapp]),
+            SubjectNetwork::One(Network::Whatsapp)
+        );
+    }
+
+    #[test]
+    fn two_networks_and_no_ghost_prefix_is_no_answer_rather_than_a_guess() {
+        // Consent is looked up by (subject, network): an arbitrary pick reads
+        // the wrong row, so the Sensor publishes nothing and names what it
+        // saw. Deterministic and sorted, so the log line and the test agree.
+        assert_eq!(
+            subject_network("alice", &[Network::Whatsapp, Network::Signal]),
+            SubjectNetwork::Ambiguous(vec![Network::Signal, Network::Whatsapp])
+        );
+        assert_eq!(
+            subject_network("alice", &[Network::Signal, Network::Whatsapp]),
+            SubjectNetwork::Ambiguous(vec![Network::Signal, Network::Whatsapp])
+        );
+    }
+
+    #[test]
+    fn a_subject_no_room_attributes_is_not_attributed() {
+        // No shared observed room, or only portals of a bridge this version
+        // does not know: the same answer as before #150, and the same
+        // behaviour — nothing is published.
+        assert_eq!(
+            subject_network("alice", &[]),
+            SubjectNetwork::Unattributable
+        );
+        assert_eq!(
+            subject_network("irc_alice", &[]),
+            SubjectNetwork::Unattributable,
+            "an `irc_` prefix is a ghost of a bridge this version cannot name, and calling it \
+             native Matrix traffic would mislabel bridged traffic"
         );
     }
 

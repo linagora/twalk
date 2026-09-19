@@ -97,6 +97,20 @@ pub struct Config {
     /// over; see `crate::owner`. An identity that is not in this set stays a
     /// contact, which is the safe failure.
     pub owner_identities: Vec<String>,
+    /// The Matrix IDs of the bridges' own bots (SENSOR_BRIDGE_BOTS,
+    /// comma-separated): each configured bridge's `sender_localpart` as a
+    /// full Matrix ID — `@whatsappbot:example.com`, `@signalbot:example.com`.
+    ///
+    /// A bridge bot is neither the owner nor a contact (issue #152): it is the
+    /// appservice's own service identity, and nothing is published about it on
+    /// any event type. The same accounts appear in `SENSOR_ALLOWED_INVITERS`,
+    /// which is how the Sensor accepts a portal invitation — but that list
+    /// answers a different question and also names the operator, so this one
+    /// is separate rather than inferred from it; see [`crate::bridge_bot`].
+    ///
+    /// Unset: every bridge bot stays a contact, which is the behaviour issue
+    /// #152 is about — so a deployment that runs a bridge sets it.
+    pub bridge_bots: Vec<String>,
     /// The Gateway's service token (SENSOR_GATEWAY_SERVICE_TOKEN), the same
     /// secret the Gateway holds as GATEWAY_SERVICE_TOKEN. The snapshot is the
     /// one Gateway route a service reads, and it takes this token as an
@@ -141,10 +155,12 @@ impl Config {
             gateway_service_token: optional_string("SENSOR_GATEWAY_SERVICE_TOKEN"),
             owner: optional_string("SENSOR_OWNER"),
             owner_identities: optional_list("SENSOR_OWNER_IDENTITIES"),
+            bridge_bots: optional_list("SENSOR_BRIDGE_BOTS"),
         };
         config.validate_credentials()?;
         config.validate_gateway()?;
         config.validate_owner()?;
+        config.validate_bridge_bots()?;
         Ok(config)
     }
 
@@ -156,6 +172,14 @@ impl Config {
         self.owner
             .as_ref()
             .map(|matrix_id| crate::owner::Owner::new(matrix_id, self.owner_identities.clone()))
+    }
+
+    /// The bridges' own bots: the service identities nothing is published
+    /// about (issue #152). Empty for a deployment that runs no bridge — and
+    /// for one whose operator has not named them, in which case each bot stays
+    /// a contact, which is the defect rather than a safe default.
+    pub fn bridge_bots(&self) -> crate::bridge_bot::BridgeBots {
+        crate::bridge_bot::BridgeBots::new(self.bridge_bots.clone())
     }
 
     /// Where the consent snapshot is read from, and with what: both halves or
@@ -226,6 +250,43 @@ impl Config {
         }
         Ok(())
     }
+
+    /// An identity cannot be both the operator and a bridge's bot: the two
+    /// answers are incompatible — the operator's own traffic is published as
+    /// `outbound.*` with their Matrix ID as the subject, and a bridge bot's is
+    /// not published at all — so picking one silently would make the other
+    /// configuration line a lie. Refused on startup, naming the identity, for
+    /// the same reason the two halves of the Gateway configuration are: half a
+    /// configuration degrades exactly like none, but silently.
+    fn validate_bridge_bots(&self) -> Result<()> {
+        let owned = also_the_operator(
+            self.owner.as_deref(),
+            &self.owner_identities,
+            &self.bridge_bots,
+        );
+        if !owned.is_empty() {
+            anyhow::bail!(
+                "SENSOR_BRIDGE_BOTS and SENSOR_OWNER/SENSOR_OWNER_IDENTITIES both name {owned:?}: \
+                 an identity is either the operator — whose own traffic is published as \
+                 outbound.* with their Matrix ID as the subject — or a bridge's own bot, about \
+                 which nothing is published at all. It cannot be both"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Which of the named bridge bots the deployment also claims as the operator:
+/// the contradiction [`Config::validate_bridge_bots`] refuses.
+fn also_the_operator<'a>(
+    owner: Option<&str>,
+    owner_identities: &[String],
+    bridge_bots: &'a [String],
+) -> Vec<&'a String> {
+    bridge_bots
+        .iter()
+        .filter(|bot| owner == Some(bot.as_str()) || owner_identities.contains(bot))
+        .collect()
 }
 
 /// An environment variable that is absent or empty is unset: an empty value
@@ -263,5 +324,40 @@ where
             .parse()
             .with_context(|| format!("environment variable {name} has an invalid value")),
         Err(_) => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::also_the_operator;
+
+    const OWNER: &str = "@michel:twalk.localhost";
+    const WHATSAPP_BOT: &str = "@whatsappbot:twalk.localhost";
+    const GHOST: &str = "@whatsapp_lid-115332874281144:twalk.localhost";
+
+    #[test]
+    fn a_bridge_bot_and_the_operator_are_disjoint_sets() {
+        let bots = vec![WHATSAPP_BOT.to_owned()];
+        assert!(
+            also_the_operator(Some(OWNER), &[GHOST.to_owned()], &bots).is_empty(),
+            "the ordinary deployment: an operator, their ghosts, and the bridges' bots"
+        );
+    }
+
+    #[test]
+    fn an_identity_claimed_as_both_is_named() {
+        // Two incompatible answers for one identity — published as
+        // outbound.* with the operator's Matrix ID, and not published at all
+        // — so the deployment is refused rather than one of them picked.
+        let bots = vec![WHATSAPP_BOT.to_owned(), GHOST.to_owned()];
+        assert_eq!(
+            also_the_operator(Some(OWNER), &[GHOST.to_owned()], &bots),
+            vec![&GHOST.to_owned()]
+        );
+        assert_eq!(
+            also_the_operator(Some(WHATSAPP_BOT), &[], &bots),
+            vec![&WHATSAPP_BOT.to_owned()],
+            "the operator's own Matrix ID counts, not only their confirmed ghosts"
+        );
     }
 }

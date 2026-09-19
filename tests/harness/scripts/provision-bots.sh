@@ -19,8 +19,22 @@ COMPOSE="docker compose -p ${TWALK_TEST_STACK:-twalk-sensor-test} -f $COMPOSE_FI
 # purpose: that is what the reference deployment answers for one WhatsApp
 # account — a phone-number ghost and a LID ghost — and the messages the owner
 # sent from their phone arrived under the LID one.
-for bot in bot_alpha bot_beta sensor whatsapp_33612345678 \
-           whatsapp_33660469852 whatsapp_lid-115332874281144; do
+# whatsappbot and signalbot play the *bridges' own bots* (#152, ADR 0026) —
+# mautrix's sender_localpart, the appservice's service identity, which is
+# neither the owner nor a contact. Two of them because the reference
+# deployment ran two bridges and a fix that recognised one would have halved
+# the defect rather than closed it.
+#
+# bot_gamma and bot_delta play native Matrix contacts (#150, ADR 0027): a real
+# Matrix user whose localpart carries no network prefix, and who can therefore
+# only be attributed to a network by the rooms they are in. whatsapp_33698765432
+# is the ghost of the same suite — attributed by its own localpart, whatever
+# rooms it is in. All three are separate accounts from bot_beta and from
+# whatsapp_33612345678, because the presence suites depend on exactly which
+# rooms a subject is joined to and must not have to share one.
+for bot in bot_alpha bot_beta bot_gamma bot_delta sensor whatsapp_33612345678 \
+           whatsapp_33660469852 whatsapp_lid-115332874281144 \
+           whatsapp_33698765432 whatsappbot signalbot; do
   output=$($COMPOSE exec -T synapse register_new_matrix_user \
       -u "$bot" -p "test-only-password-$bot" --no-admin \
       -c /config/homeserver.yaml http://localhost:8008 2>&1) || true

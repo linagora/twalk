@@ -215,13 +215,18 @@ fn write_env_file() -> Result<PathBuf> {
         .map(|bridge| format!("/registrations/{}.yaml", bridge.mautrix_id))
         .collect::<Vec<_>>()
         .join(",");
-    // The bridge bots, as an operator has to name them for portal rooms to be
-    // observed without manual steps.
-    let allowed_inviters = BRIDGES
+    // The bridge bots, as an operator has to name them **twice**: in
+    // SENSOR_ALLOWED_INVITERS, so portal rooms are observed without manual
+    // steps, and in SENSOR_BRIDGE_BOTS, so nothing is published about the bots
+    // themselves (#152, ADR 0026). Same value here because this stack has no
+    // other allowed inviter; on a real deployment the first list also names
+    // the operator and the second must not, which is why they are two lists.
+    let bridge_bots = BRIDGES
         .iter()
         .map(|bridge| bridge.bot_user_id.to_owned())
         .collect::<Vec<_>>()
         .join(",");
+    let allowed_inviters = bridge_bots.clone();
     let mut contents = format!(
         "MATRIX_DOMAIN={SERVER_NAME}\n\
          MATRIX_HTTP_PORT={synapse_port}\n\
@@ -233,6 +238,7 @@ fn write_env_file() -> Result<PathBuf> {
          SENSOR_USER_ID=@sensor:{SERVER_NAME}\n\
          SENSOR_PASSWORD=bridges-test-only-password-sensor\n\
          SENSOR_ALLOWED_INVITERS={allowed_inviters}\n\
+         SENSOR_BRIDGE_BOTS={bridge_bots}\n\
          SENSOR_STATE_DIR=/data\n\
          SENSOR_LOG_LEVEL=info\n\
          NATS_PORT={nats_port}\n\
@@ -515,7 +521,8 @@ async fn the_bridge_profile_brings_up_all_three_bridges_against_the_stack() -> R
         assert_eq!(
             body["bridge_bot"].as_str(),
             Some(bridge.bot_user_id),
-            "the {} bridge's bot must be the one SENSOR_ALLOWED_INVITERS names: {body}",
+            "the {} bridge's bot must be the one SENSOR_ALLOWED_INVITERS and \
+             SENSOR_BRIDGE_BOTS name: {body}",
             bridge.mautrix_id
         );
         // No login, and none attempted: that needs a phone.

@@ -51,6 +51,42 @@ pub struct Metrics {
     invites_joined: AtomicU64,
     invites_ignored: AtomicU64,
     invites_failed: AtomicU64,
+    /// Observed events the Sensor deliberately did not publish, by why.
+    ///
+    /// Counted rather than only logged, because both reasons are *silences*
+    /// and a silence is the one failure this product has repeatedly shipped
+    /// without noticing. `bridge_bot` climbs twice a minute per bridge on a
+    /// correctly configured deployment (issue #152) — which is also how an
+    /// operator sees that `SENSOR_BRIDGE_BOTS` is doing something, since the
+    /// alternative reading of a flat zero is that they misspelled a Matrix ID.
+    /// `unattributable_subject` is the one to watch: it means a subject was
+    /// dropped because the Sensor could not say which network they are on
+    /// (issue #150), and a real person behind it is a person missing from the
+    /// bus.
+    dropped_bridge_bot: AtomicU64,
+    dropped_unattributable_subject: AtomicU64,
+}
+
+/// Why an observed event was deliberately not published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropReason {
+    /// The subject is a bridge's own bot: a service identity, neither the
+    /// owner nor a contact (issue #152).
+    BridgeBot,
+    /// The Sensor cannot attribute the subject to one network, so publishing
+    /// would name one on a guess — and consent is looked up by
+    /// `(subject, network)` (issue #150).
+    UnattributableSubject,
+}
+
+impl DropReason {
+    /// The metric's label value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::BridgeBot => "bridge_bot",
+            Self::UnattributableSubject => "unattributable_subject",
+        }
+    }
 }
 
 impl Default for Metrics {
@@ -74,7 +110,19 @@ impl Metrics {
             invites_joined: AtomicU64::new(0),
             invites_ignored: AtomicU64::new(0),
             invites_failed: AtomicU64::new(0),
+            dropped_bridge_bot: AtomicU64::new(0),
+            dropped_unattributable_subject: AtomicU64::new(0),
         }
+    }
+
+    /// Counts an observed event the Sensor deliberately did not publish.
+    /// Returns the running total, for the log line.
+    pub fn record_dropped(&self, reason: DropReason) -> u64 {
+        let counter = match reason {
+            DropReason::BridgeBot => &self.dropped_bridge_bot,
+            DropReason::UnattributableSubject => &self.dropped_unattributable_subject,
+        };
+        counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     pub fn record_published(&self, event_type: &str) {
@@ -209,6 +257,21 @@ impl Metrics {
                 count.load(Ordering::Relaxed)
             ));
         }
+        out.push_str("# HELP twalk_sensor_events_dropped_total Observed events the Sensor deliberately did not publish, by why.\n");
+        out.push_str("# TYPE twalk_sensor_events_dropped_total counter\n");
+        for (reason, count) in [
+            (DropReason::BridgeBot, &self.dropped_bridge_bot),
+            (
+                DropReason::UnattributableSubject,
+                &self.dropped_unattributable_subject,
+            ),
+        ] {
+            out.push_str(&format!(
+                "twalk_sensor_events_dropped_total{{reason=\"{}\"}} {}\n",
+                reason.as_str(),
+                count.load(Ordering::Relaxed)
+            ));
+        }
         // The sync age only exists once a sync has completed; a Sensor that
         // never synced renders no sample rather than a misleading zero.
         let last_sync = self.last_sync_unix_seconds.load(Ordering::Relaxed);
@@ -240,6 +303,13 @@ mod tests {
         metrics.record_consent_snapshot_failure();
         metrics.record_consent_snapshot(3);
         metrics.record_sync(1_000);
+        assert_eq!(metrics.record_dropped(DropReason::BridgeBot), 1);
+        assert_eq!(
+            metrics.record_dropped(DropReason::BridgeBot),
+            2,
+            "the running total is what the log line names"
+        );
+        assert_eq!(metrics.record_dropped(DropReason::UnattributableSubject), 1);
 
         let body = metrics.render(1_030);
         assert!(
@@ -276,6 +346,13 @@ mod tests {
         );
         assert!(body.contains("twalk_sensor_observed_rooms 0\n"), "{body}");
         assert!(
+            body.contains("twalk_sensor_events_dropped_total{reason=\"bridge_bot\"} 2\n")
+                && body.contains(
+                    "twalk_sensor_events_dropped_total{reason=\"unattributable_subject\"} 1\n"
+                ),
+            "{body}"
+        );
+        assert!(
             body.contains("twalk_sensor_invites_total{outcome=\"ignored\"} 0\n"),
             "every outcome exists at zero, so a Sensor refusing every inviter is \
              distinguishable from one nobody ever invited: {body}"
@@ -297,6 +374,23 @@ mod tests {
                 .contains("twalk_sensor_last_sync_age_seconds"),
             "a Sensor that never synced renders no sync age"
         );
+    }
+
+    #[test]
+    fn every_drop_reason_exists_at_zero() {
+        // A Sensor that dropped nothing must be distinguishable from one
+        // whose SENSOR_BRIDGE_BOTS names an account that does not exist: an
+        // absent sample would read as "no bots on this deployment", which is
+        // the misreading that leaves the defect in place.
+        let body = Metrics::new().render(1_000);
+        for reason in ["bridge_bot", "unattributable_subject"] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_sensor_events_dropped_total{{reason=\"{reason}\"}} 0\n"
+                )),
+                "{body}"
+            );
+        }
     }
 
     #[test]
