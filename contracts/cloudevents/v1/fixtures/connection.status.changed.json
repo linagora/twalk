@@ -1,0 +1,20 @@
+{
+  "specversion": "1.0",
+  "id": "948d54d6415890b4e7e71c9e780b11b57cbb909a5f552fe47147729618b05e15",
+  "source": "collector://collector.example.com/connections/mail-linagora",
+  "type": "fr.linagora.twalk.connection.status.changed.v1",
+  "time": "2026-09-20T09:00:00Z",
+  "subject": "mail-linagora",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/connection.status.changed.schema.json",
+  "connection": "mail-linagora",
+  "data": {
+    "connection": "mail-linagora",
+    "kind": "email",
+    "from_state": "connected",
+    "to_state": "reconnect_required",
+    "occurred_at": "2026-09-20T09:00:00Z",
+    "service": "sso",
+    "hint": "The SSO refused to renew the grant for mail-linagora. Run `twalk-collector authorize --renew` on the host and sign in again; nothing is published from this connection until then."
+  }
+}

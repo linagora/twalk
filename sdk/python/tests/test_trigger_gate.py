@@ -97,6 +97,17 @@ class TriggerGateTest(unittest.TestCase):
         self.assertFalse(triggers_a_persona(event))
         self.assertFalse(is_granted(event), "and the consent gate could not have judged it")
 
+    def test_a_connections_state_change_names_nobody_and_wakes_no_persona(self) -> None:
+        # `connection.status.changed` (#274) is the collector saying whether
+        # it can reach a mailbox or a calendar: its subject is a connection,
+        # it carries no consent extension, and no persona is woken by it —
+        # by the allowlist, which cost the gate no edit.
+        event = fixture("connection.status.changed")
+        self.assertEqual(event["type"], "fr.linagora.twalk.connection.status.changed.v1")
+        self.assertNotIn("consent", event)
+        self.assertFalse(triggers_a_persona(event))
+        self.assertFalse(is_granted(event))
+
     def test_a_type_the_contract_adds_later_does_not_trigger_a_persona(self) -> None:
         # The forward-compatible default is "no". A tenth type must not start
         # waking personas because nobody thought to exclude it.
