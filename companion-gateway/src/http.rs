@@ -450,11 +450,17 @@ pub fn router(gateway: Gateway) -> Router {
 ///   left it holding a stale app shell.
 /// - `revision` (string, non-empty): the revision the binary was built from,
 ///   or `unknown`. Provenance for an operator, not part of the handshake.
-async fn health() -> Response {
+/// - `companion_build` (string or null): the build id of the Companion this
+///   origin serves, from the export's own `_app/version.json` (#222). The
+///   running app knows its own; the two differing means the browser holds a
+///   build this Gateway no longer ships, which is the version-skew nothing
+///   could name before. `null` when the export carries no id.
+async fn health(State(gateway): State<Gateway>) -> Response {
     Json(serde_json::json!({
         "status": "ok",
         "version": crate::VERSION,
         "revision": crate::REVISION,
+        "companion_build": gateway.companion.build_id(),
     }))
     .into_response()
 }

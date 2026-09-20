@@ -2381,6 +2381,16 @@ export interface components {
         };
         Health: {
             /**
+             * @description The build id of the Companion this origin serves, read from the
+             *     export's own `_app/version.json` — the value the running app
+             *     carries as its own build. The Companion compares the two (#222):
+             *     a browser running a build the Gateway no longer ships is holding
+             *     a stale shell, and reloads once, then says so — the version-skew
+             *     that used to be invisible while the server reported itself
+             *     current. `null` when the export carries no id.
+             */
+            companion_build: string | null;
+            /**
              * @description The revision the binary was built from, or `unknown`.
              *     Provenance, not part of the handshake.
              */

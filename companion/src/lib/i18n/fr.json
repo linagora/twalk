@@ -53,6 +53,8 @@
 	"version.mismatch.title": "Twalk a été mis à jour",
 	"version.mismatch.body": "Cette page a été compilée pour Twalk {expected}, et votre serveur exécute désormais {actual}. Rechargement pour récupérer la nouvelle version.",
 	"version.reload": "Recharger maintenant",
+	"version.staleShell.title": "Une version plus récente du Companion est prête",
+	"version.staleShell.body": "Votre serveur sert désormais la version {shipped}, et cette page exécute encore la version {running}. Rechargez pour la récupérer — d’ici là, ce que vous voyez n’est peut-être pas ce qui a été corrigé.",
 	"version.unreachable": "Votre serveur Twalk est injoignable : sa version est donc inconnue. L'application fonctionne, mais certains écrans ne fonctionneront pas.",
 
 	"diagnostics.title": "Diagnostics",
@@ -67,6 +69,7 @@
 	"diagnostics.expectedGateway": "Compilée pour la passerelle",
 	"diagnostics.gateway": "Passerelle",
 	"diagnostics.gatewayRevision": "Révision de la passerelle",
+	"diagnostics.shippedBuild": "Version servie par la passerelle",
 	"diagnostics.unknown": "inconnue",
 	"diagnostics.locale": "Langue",
 	"diagnostics.installed": "Installée sur l'écran d'accueil",

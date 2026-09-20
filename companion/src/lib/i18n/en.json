@@ -53,6 +53,8 @@
 	"version.mismatch.title": "Twalk has been updated",
 	"version.mismatch.body": "This page was built for Twalk {expected}, and your server now runs {actual}. Reloading to pick up the new version.",
 	"version.reload": "Reload now",
+	"version.staleShell.title": "A newer Twalk Companion is ready",
+	"version.staleShell.body": "Your server now serves build {shipped}, and this page is still running build {running}. Reload to pick it up — until then, what you see may not be what was fixed.",
 	"version.unreachable": "Your Twalk server could not be reached, so its version is unknown. The app still works; some screens will not.",
 
 	"diagnostics.title": "Diagnostics",
@@ -67,6 +69,7 @@
 	"diagnostics.expectedGateway": "Built for Gateway",
 	"diagnostics.gateway": "Gateway",
 	"diagnostics.gatewayRevision": "Gateway revision",
+	"diagnostics.shippedBuild": "Build the Gateway ships",
 	"diagnostics.unknown": "unknown",
 	"diagnostics.locale": "Language",
 	"diagnostics.installed": "Installed to home screen",
