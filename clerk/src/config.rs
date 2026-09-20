@@ -188,6 +188,20 @@ impl Config {
                  relay for no reason"
             );
         }
+        // Refused here and not discovered in the loop: a zero interval
+        // panics the decisions task on its first line, and a panic in a
+        // spawned task is a write half silently dead behind a green /health.
+        if self
+            .write_half
+            .as_ref()
+            .is_some_and(|write| write.decision < Duration::from_secs(1))
+        {
+            bail!(
+                "CLERK_DECISION_SECONDS must be at least 1: it is how often the clerk reads the \
+                 gestures on its posts, and a read tighter than a second would poll the relay \
+                 for no reason"
+            );
+        }
         Ok(())
     }
 }
@@ -503,6 +517,22 @@ mod tests {
         v.extend_from_slice(WRITE_HALF);
         let c = Config::from_vars(&vars(&v)).unwrap();
         assert_eq!(c.write_half().unwrap().decision, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn the_decision_interval_is_at_least_a_second() {
+        let mut v = FULL.to_vec();
+        v.extend_from_slice(WRITE_HALF);
+        v.push(("CLERK_DECISION_SECONDS", "0"));
+        assert!(Config::from_vars(&vars(&v))
+            .unwrap_err()
+            .to_string()
+            .contains("CLERK_DECISION_SECONDS"));
+        // Without a write half the variable is not read, so a zero there
+        // refuses nothing.
+        let mut v = FULL.to_vec();
+        v.push(("CLERK_DECISION_SECONDS", "0"));
+        assert!(Config::from_vars(&vars(&v)).unwrap().write_half().is_none());
     }
 
     #[test]

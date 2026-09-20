@@ -35,7 +35,7 @@ use axum::http::header;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use twalk_clerk::config::Config;
 use twalk_clerk::consumers::{self, Clerk};
 use twalk_clerk::gateway::{Gateway, SessionFile};
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
 
     let metrics = Arc::new(Metrics::new());
     let keys = load_keys(&config.nostr_key_file)?;
-    let relay = Relay::new(&config.relay_url, keys)?;
+    let relay = Relay::new(&config.relay_url, keys)?.with_metrics(metrics.clone());
     let (lang, fallback_to_english) = text::lang(&config.user_language);
     info!(
         relay = %config.relay_url,
@@ -70,6 +70,18 @@ async fn main() -> Result<()> {
     // reacting to a post never sends anything.
     let gateway = match config.write_half() {
         Some(write) => {
+            // The loop drops every event signed by the clerk's own key
+            // before it reads gestures (its thread answers are direct
+            // replies too), so an owner who is the clerk would be a clerk
+            // that answers and carries nothing, with no line saying why.
+            if write.owner_pubkey == relay.public_key_hex() {
+                anyhow::bail!(
+                    "CLERK_OWNER_PUBKEY is the clerk's own public key ({}): the owner signs \
+                     gestures with a key of their own, and the clerk's key (CLERK_NOSTR_KEY_FILE) \
+                     signs what it posts; the two must differ",
+                    write.owner_pubkey
+                );
+            }
             let session = SessionFile::open(&write.session_file).with_context(|| {
                 format!(
                     "the clerk's session file {} cannot be used; run \
@@ -132,12 +144,33 @@ async fn main() -> Result<()> {
         lang,
         gateway,
     });
-    if clerk.gateway.is_some() {
-        tokio::spawn(consumers::decisions(clerk.clone()));
-    }
+    // The decisions task's handle is kept: the loop never returns by
+    // design, so if it ends the write half is dead — a panic in a spawned
+    // task is printed once and otherwise swallowed — and a clerk that goes
+    // on serving a green /health with every ✅ deciding nothing is the
+    // silence this project keeps naming. It stops instead, loudly, so that
+    // the supervisor restarts it.
+    let decisions = clerk
+        .gateway
+        .is_some()
+        .then(|| tokio::spawn(consumers::decisions(clerk.clone())));
     tokio::spawn(consumers::run(clerk));
 
-    shutdown_signal().await;
+    tokio::select! {
+        _ = shutdown_signal() => {}
+        ended = async {
+            match decisions {
+                Some(handle) => handle.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            match ended {
+                Ok(()) => error!("the decisions loop returned; it never should"),
+                Err(error) => error!(%error, "the decisions loop ended"),
+            }
+            anyhow::bail!("the decisions loop ended; the clerk stops so that it is restarted");
+        }
+    }
 
     info!("clerk stopped");
     Ok(())

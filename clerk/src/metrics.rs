@@ -65,7 +65,8 @@ impl Deleted {
     }
 }
 
-/// Why an event the clerk read off the bus was not turned into a post.
+/// Why an event the clerk read — off the bus, or back off the relay — was
+/// not acted on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skipped {
     /// The suggestion had already expired by the time the clerk read it.
@@ -76,14 +77,28 @@ pub enum Skipped {
     /// event (the relay is the clerk's own memory — see `lib.rs` — and a
     /// redelivery must not double-post on any channel).
     Duplicate,
+    /// An event the relay served whose id or signature does not verify
+    /// (`relay::verified`): dropped before it can be a post of the clerk's,
+    /// an answer of the clerk's or a gesture of the owner's, because a
+    /// `pubkey` field is the relay's word and only the signature is the
+    /// key holder's. A number here that is not zero is a relay to look at.
+    Unverified,
 }
 
 impl Skipped {
+    pub const ALL: [Skipped; 4] = [
+        Skipped::Expired,
+        Skipped::Unreadable,
+        Skipped::Duplicate,
+        Skipped::Unverified,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Expired => "expired",
             Self::Unreadable => "unreadable",
             Self::Duplicate => "duplicate",
+            Self::Unverified => "unverified",
         }
     }
 }
@@ -161,6 +176,7 @@ pub struct Metrics {
     skipped_expired: AtomicU64,
     skipped_unreadable: AtomicU64,
     skipped_duplicate: AtomicU64,
+    skipped_unverified: AtomicU64,
     /// Failed writes to the relay — a post, a delete, a query that did not
     /// come back with a `2xx`.
     relay_failures: AtomicU64,
@@ -195,6 +211,7 @@ impl Metrics {
             skipped_expired: AtomicU64::new(0),
             skipped_unreadable: AtomicU64::new(0),
             skipped_duplicate: AtomicU64::new(0),
+            skipped_unverified: AtomicU64::new(0),
             relay_failures: AtomicU64::new(0),
             sweeps: AtomicU64::new(0),
             approvals: Mutex::new(
@@ -220,6 +237,7 @@ impl Metrics {
             Skipped::Expired => &self.skipped_expired,
             Skipped::Unreadable => &self.skipped_unreadable,
             Skipped::Duplicate => &self.skipped_duplicate,
+            Skipped::Unverified => &self.skipped_unverified,
         }
     }
 
@@ -301,10 +319,10 @@ impl Metrics {
         }
 
         out.push_str(
-            "# HELP twalk_clerk_skipped_total Events read off the bus that did not become a post, by why.\n",
+            "# HELP twalk_clerk_skipped_total Events read off the bus or back off the relay that were not acted on, by why (unverified counts every served-and-dropped occurrence).\n",
         );
         out.push_str("# TYPE twalk_clerk_skipped_total counter\n");
-        for why in [Skipped::Expired, Skipped::Unreadable, Skipped::Duplicate] {
+        for why in Skipped::ALL {
             out.push_str(&format!(
                 "twalk_clerk_skipped_total{{why=\"{}\"}} {}\n",
                 why.as_str(),
@@ -383,7 +401,7 @@ mod tests {
                 "why {why} should exist at zero: {body}"
             );
         }
-        for why in ["expired", "unreadable", "duplicate"] {
+        for why in ["expired", "unreadable", "duplicate", "unverified"] {
             assert!(
                 body.contains(&format!("twalk_clerk_skipped_total{{why=\"{why}\"}} 0\n")),
                 "why {why} should exist at zero: {body}"

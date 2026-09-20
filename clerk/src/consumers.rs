@@ -743,7 +743,7 @@ fn skip(clerk: &Clerk, why: Skipped, what: &str, detail: &str) {
             "skipped a {what} that was {}",
             why.as_str()
         ),
-        Skipped::Unreadable | Skipped::Duplicate => warn!(
+        Skipped::Unreadable | Skipped::Duplicate | Skipped::Unverified => warn!(
             why = why.as_str(),
             detail,
             total,
@@ -1061,9 +1061,11 @@ pub async fn decisions_once(clerk: &Clerk, session: &mut Session) -> DecisionsTi
     let now = now_unix();
     let approvals = clerk.config.channel_approvals.as_str();
 
-    // (1) The clerk's own posts still open. An expired one is the sweep's:
-    // the Companion Gateway would refuse its approval as `suggestion_expired`, and
-    // the post is about to go.
+    // (1) The clerk's own posts. An expired one is the sweep's to delete —
+    // the Companion Gateway would refuse its approval as
+    // `suggestion_expired` — but the owner may have decided on it in its
+    // last seconds, and that gesture is answered rather than swept in
+    // silence, so expired posts are read for gestures too.
     let posts = match clerk
         .relay
         .own_posts(approvals, KIND_FORUM_POST, OWN_POSTS_LIMIT)
@@ -1075,15 +1077,18 @@ pub async fn decisions_once(clerk: &Clerk, session: &mut Session) -> DecisionsTi
             return tick;
         }
     };
-    let open: Vec<&nostr::Event> = posts
+    let (expired, open): (Vec<&nostr::Event>, Vec<&nostr::Event>) = posts
         .iter()
-        .filter(|post| !post_has_expired(&post.content, now))
-        .collect();
+        .partition(|post| post_has_expired(&post.content, now));
     tick.posts = open.len();
-    if open.is_empty() {
+    if open.is_empty() && expired.is_empty() {
         return tick;
     }
-    let ids: Vec<String> = open.iter().map(|post| post.id.to_hex()).collect();
+    let ids: Vec<String> = open
+        .iter()
+        .chain(expired.iter())
+        .map(|post| post.id.to_hex())
+        .collect();
 
     // (2) The gestures on them, by anyone but the clerk: its own thread
     // answers are direct replies with text, and read as gestures they would
@@ -1131,6 +1136,51 @@ pub async fn decisions_once(clerk: &Clerk, session: &mut Session) -> DecisionsTi
         if let Some(act) = triage.act {
             let told = told_revoked.contains(&act.gesture_id);
             carry(clerk, gateway, write, session, &mut tick, post, act, told).await;
+        }
+    }
+    // (4) The expired posts: a stranger is answered as anywhere, and an
+    // owner's ✅ or edited reply that arrived too late is told so, once —
+    // the Companion's own sentence for `suggestion_expired`, counted under
+    // that code as if the Gateway had said it, which it would have. A ❌
+    // on an expired post asks for nothing: the sweep deletes it either way.
+    for post in expired {
+        let post_id = post.id.to_hex();
+        let decisions: Vec<Decision> =
+            decision::decisions_on(&post_id, &write.owner_pubkey, &gestures)
+                .into_iter()
+                .filter(|decision| !answered.contains(&decision.gesture_id))
+                .collect();
+        let triage = decision::triage(decisions);
+        for stranger in &triage.strangers {
+            answer_stranger(clerk, &mut tick, &post_id, stranger).await;
+        }
+        if let Some(act) = triage.act {
+            if act.gesture == Gesture::Refuse {
+                continue;
+            }
+            // Counted when the answer is written, as a stranger's is: the
+            // count is "answers written", and a relay that refused the
+            // comment sees the same gesture answered next tick.
+            if answer(
+                clerk,
+                &mut tick,
+                &post_id,
+                &act.gesture_id,
+                &text::thread_expired(clerk.lang),
+            )
+            .await
+            {
+                const CODE: &str = "suggestion_expired";
+                let total = clerk
+                    .metrics
+                    .record_approval(&ApprovalOutcome::Refused(CODE.to_owned()));
+                info!(
+                    post_id,
+                    gesture_id = %act.gesture_id,
+                    total,
+                    "the owner decided on a suggestion after it expired; answered in the thread"
+                );
+            }
         }
     }
     tick

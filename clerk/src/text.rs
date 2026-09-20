@@ -11,11 +11,13 @@
 //! *kind* of subject and the state and networks, never the subject's Matrix
 //! ID (`companion/src/lib/dashboard/model.ts` is the rule; ticket #265).
 //!
-//! One line this lot deliberately does not write is named in the post
-//! itself: the delivery line is a Companion Gateway read the clerk does not
-//! yet make (#284), and the post says so rather than leaving a blank the
-//! owner would read as a defect. The gesture line is now what it says:
-//! since #284 a ✅, a ❌ or a reply on the post is the decision.
+//! One line this component deliberately does not write is named in the
+//! post itself: delivery — where the owner's own account stands in the
+//! conversation (#216) — is a Companion Gateway read the clerk does not
+//! make, and the post says so plainly and says where it is read (the
+//! Approvals screen) rather than leaving a blank the owner would read as
+//! a defect, or citing a ticket as "to come". The gesture line is what it
+//! says: since #284 a ✅, a ❌ or a reply on the post is the decision.
 //!
 //! What the clerk answers in a post's **thread** (`thread_*`) is about the
 //! owner's gesture and never about the contact: a refusal is the Companion
@@ -101,16 +103,14 @@ pub fn approval_post(
         Lang::Fr => format!(
             "Réponse proposée · {network}{expiry}\n\
              « {body} »\n\
-             Livraison : pas encore connue — ce sera dit ici quand le greffier saura lire l’état \
-             de la conversation (#284).\n\
+             Livraison : non lue par le greffier (#300) — l’écran Approbations la connaît.\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
              {reference}"
         ),
         Lang::En => format!(
             "Proposed reply · {network}{expiry}\n\
              “{body}”\n\
-             Delivery: not yet known — it will be said here once the clerk can read the state of \
-             the conversation (#284).\n\
+             Delivery: not read by the clerk (#300) — the Approvals screen knows it.\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
              {reference}"
         ),
@@ -175,6 +175,19 @@ pub fn thread_revoked(l: Lang) -> String {
         Lang::En => "Not recorded — the “Buzz” device was revoked on the dashboard; run \
                      provision-clerk-device.sh again."
             .to_owned(),
+    }
+}
+
+/// The thread answer to an owner's ✅ or edited reply on a post whose
+/// suggestion had already expired when the clerk read the gesture: the
+/// decision came in the suggestion's last seconds, the Companion Gateway
+/// would refuse it as `suggestion_expired`, and the sweep is about to
+/// delete the post — so the owner is told, once, rather than left to read
+/// "expired undecided" in `activite` about a suggestion they decided.
+pub fn thread_expired(l: Lang) -> String {
+    match l {
+        Lang::Fr => "Non envoyée — la suggestion avait expiré.".to_owned(),
+        Lang::En => "Not sent — the suggestion had expired.".to_owned(),
     }
 }
 
@@ -437,7 +450,6 @@ mod tests {
             assert_eq!(post.lines().last(), Some(REFERENCE), "{post}");
             assert!(post.contains("WhatsApp"), "{post}");
             assert!(post.contains("11:00 UTC"), "{post}");
-            assert!(post.contains("#284"), "{post}");
             for marker in markers {
                 assert!(!post.contains(marker), "{marker} in {post}");
             }
@@ -456,7 +468,7 @@ mod tests {
         let expected = format!(
             "Réponse proposée · WhatsApp · expire à 21:41 UTC (heure locale non connue)\n\
              « Pas de problème, à 20h ! »\n\
-             Livraison : pas encore connue — ce sera dit ici quand le greffier saura lire l’état de la conversation (#284).\n\
+             Livraison : non lue par le greffier (#300) — l’écran Approbations la connaît.\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
              {REFERENCE}"
         );
@@ -475,7 +487,7 @@ mod tests {
         let expected = format!(
             "Proposed reply · Signal · expires at 21:41 UTC (local time not known)\n\
              “No problem, see you at 8!”\n\
-             Delivery: not yet known — it will be said here once the clerk can read the state of the conversation (#284).\n\
+             Delivery: not read by the clerk (#300) — the Approvals screen knows it.\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
              {REFERENCE}"
         );
@@ -664,9 +676,13 @@ mod tests {
             let post = approval_post(l, "Oui", "sms", None, REFERENCE);
             assert!(!post.contains("à venir"), "{post}");
             assert!(!post.contains("coming"), "{post}");
-            // The delivery line still names the ticket: that read is not
-            // made yet, and the post says so.
-            assert_eq!(post.matches("#284").count(), 1, "{post}");
+            // The delivery line says plainly that the clerk does not read
+            // delivery and where it is read, and names the ticket that will
+            // make it read it — #300, open — never #284, which shipped: a
+            // post that names the ticket that shipped it as a future one is
+            // wrong on every read.
+            assert!(!post.contains("#284"), "{post}");
+            assert!(post.contains("(#300)"), "{post}");
         }
     }
 
@@ -728,6 +744,14 @@ mod tests {
         assert_eq!(
             thread_revoked(Lang::En),
             "Not recorded — the “Buzz” device was revoked on the dashboard; run provision-clerk-device.sh again."
+        );
+        assert_eq!(
+            thread_expired(Lang::Fr),
+            "Non envoyée — la suggestion avait expiré."
+        );
+        assert_eq!(
+            thread_expired(Lang::En),
+            "Not sent — the suggestion had expired."
         );
     }
 

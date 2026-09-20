@@ -512,6 +512,44 @@ mod tests {
     }
 
     #[test]
+    fn a_strangers_check_served_under_the_owners_pubkey_is_not_a_decision() {
+        // What a compromised relay would serve: a stranger's signed ✅ with
+        // its `pubkey` field rewritten to the owner's. Read as the loop
+        // reads it — through `relay::verified` first — it is nothing, and
+        // read without that step it would be the owner's approval, which
+        // is why the step exists.
+        use nostr::JsonUtil;
+        let (_, owner) = owner();
+        let stranger = Keys::generate();
+        let post = post_id(0);
+        let genuine = reaction(&stranger, &post, "✅", 10);
+        let mut value: serde_json::Value = serde_json::from_str(&genuine.as_json()).unwrap();
+        value["pubkey"] = serde_json::Value::String(owner.clone());
+        // The intelligent forgery: the id recomputed over the owner's
+        // pubkey too, so only the signature gives it away.
+        let recomputed = nostr::EventId::new(
+            &nostr::PublicKey::from_hex(&owner).unwrap(),
+            &genuine.created_at,
+            &genuine.kind,
+            &genuine.tags,
+            &genuine.content,
+        );
+        value["id"] = serde_json::Value::String(recomputed.to_hex());
+        let forged = Event::from_json(value.to_string()).unwrap();
+        assert_eq!(forged.pubkey.to_hex(), owner);
+        assert!(forged.verify_id());
+
+        let unverified = decisions_on(&post, &owner, std::slice::from_ref(&forged));
+        assert_eq!(unverified.len(), 1);
+        assert!(unverified[0].by_owner, "without verification it passes");
+
+        let (served, rejected) = crate::relay::verified(vec![forged]);
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].error, nostr::event::Error::InvalidSignature);
+        assert!(decisions_on(&post, &owner, &served).is_empty());
+    }
+
+    #[test]
     fn a_decisions_debug_never_carries_the_owners_text() {
         let marker = "MARKER-the-owners-reply-4c1e";
         let decision = Decision {

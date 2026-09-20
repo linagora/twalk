@@ -56,7 +56,7 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 | `sensor-deployment` | advisory | 61 s, 3 tests | small | 634 MB | **warm images** |
 | `gateway-deployment` | advisory | 56 s, 4 tests | small | 305 MB | **warm images** |
 | `hermes-full-loop` | advisory | 39 s | small | 153 MB | **warm images**; +10 containers |
-| `clerk-deployment` | advisory | 47–61 s, 2 tests | small | — | **warm images** (the Gateway's and the clerk's), the clerk test relay warm; needs passwordless `sudo` on the runner (#284) |
+| `clerk-deployment` | advisory | 47–61 s, 1 test (2 scenarios) | small | — | **warm images** (the Gateway's and the clerk's), the clerk test relay warm; needs passwordless `sudo` on the runner (#284) |
 | `companion-e2e-stack` | advisory | **160 s** — 112 passed, **1 failed** (#211), twice identically | +4.9 GB (Gateway and Sensor builds) | 3 869 MB | **warm** Gateway and Sensor builds; 277 s when it built both from cold, which is what the original figure was |
 
 **A full required run is about 11½ minutes**, warm, when a change to `contracts/` or `tests/harness/` selects all three stack suites and they run one at a time: 383 + 163 + 132 s, with the hosted suites finishing inside 30 s alongside. A change to one component alone is 2–6½ minutes. The clerk's own stack variables are already in `.github/ci/stack-env.sh`, at `18370`, ahead of its suite being measured.

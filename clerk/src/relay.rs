@@ -13,9 +13,19 @@
 //! mirrored rather than reinvented, because a header the relay's own tooling
 //! builds is one the relay is known to accept.
 //!
-//! Four things this module decides and three it deliberately leaves alone.
+//! Five things this module decides and three it deliberately leaves alone.
 //! It **decides** what crosses the wire: the event's kind and tags as the
-//! caller gave them, the signature, and the header. It decides how a failure
+//! caller gave them, the signature, and the header. It decides that
+//! **nothing read back is believed until its signature is** ([`verified`],
+//! applied to every `/query` answer in [`Relay::query`]): the relay is a
+//! surface the clerk writes through and reads through, never an authority
+//! over what was said (ADR 0032), and since #284 what it serves decides
+//! whether a reply goes out — a `pubkey` field in a JSON object is the
+//! relay's word, a Schnorr signature over the id is the key holder's, and
+//! only the second makes a ✅ the owner's. An event that does not verify is
+//! dropped, warned about by id and kind, and counted
+//! (`twalk_clerk_skipped_total{why="unverified"}`), so a relay that starts
+//! forging is visible rather than obeyed. It decides how a failure
 //! is **named**: nothing answered ([`RelayError::Unreachable`]), the relay
 //! answered and said no ([`RelayError::Refused`], with the status and the
 //! relay's own short reason), or the relay answered something that is not a
@@ -63,9 +73,11 @@
 //! (`["r", "twalk:gesture:<id>"]`, [`answered_gesture`]), so a redelivery
 //! and a restart are one read ([`Relay::own_comments_on`]).
 
+use std::collections::HashSet;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -76,6 +88,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
+
+use crate::metrics::{Metrics, Skipped};
 
 /// NIP-98's own kind: an HTTP authorisation event, never stored by a relay.
 pub const NIP98_KIND: u16 = 27235;
@@ -315,6 +329,46 @@ pub fn answered_gesture(event: &Event) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
+/// One event the relay served that the clerk will not believe: which, of
+/// what kind, and why ([`nostr::event::Error::InvalidId`] for an id that
+/// is not the hash of the event, [`nostr::event::Error::InvalidSignature`]
+/// for a signature that is not the `pubkey`'s over that id). No content:
+/// it may be a forged post quoting who knows what.
+#[derive(Debug, PartialEq)]
+pub struct Rejected {
+    pub id: nostr::EventId,
+    pub kind: u16,
+    pub error: nostr::event::Error,
+}
+
+/// The events of `served` whose id and Schnorr signature verify
+/// (`nostr::Event::verify`), in their order, and the ones that did not,
+/// each with the reason. Applied to every `/query` answer
+/// ([`Relay::query`]), because a `pubkey` the relay serves is the relay's
+/// claim and only the signature is the key holder's: a compromised relay
+/// that answers `{"pubkey": <owner>, "content": "✅", …}` with a signature
+/// it cannot make must not get a reply sent in the owner's name — and one
+/// that recomputes the id over the owner's pubkey has only moved the
+/// failure from the id check to the signature check.
+pub fn verified(served: Vec<Event>) -> (Vec<Event>, Vec<Rejected>) {
+    let mut rejected = Vec::new();
+    let events = served
+        .into_iter()
+        .filter(|event| match event.verify() {
+            Ok(()) => true,
+            Err(error) => {
+                rejected.push(Rejected {
+                    id: event.id,
+                    kind: event.kind.as_u16(),
+                    error,
+                });
+                false
+            }
+        })
+        .collect();
+    (events, rejected)
+}
+
 /// The `e` tags of `event`, in order, each with at least the id cell.
 fn e_tags(event: &Event) -> Vec<&[String]> {
     event
@@ -332,6 +386,16 @@ pub struct Relay {
     base: String,
     keys: Keys,
     http: reqwest::Client,
+    /// Where an event dropped as unverified is counted, when the binary
+    /// handed its counters over ([`Relay::with_metrics`]); a relay built
+    /// without them (a test) still drops and warns.
+    metrics: Option<Arc<Metrics>>,
+    /// The ids already warned about as unverified, so that a forged event
+    /// the relay serves on every tick is one warning and not one a tick.
+    /// A log deduplication and nothing more — not a memory of what the
+    /// clerk did (ADR 0035 is about that), lost at every restart and worth
+    /// nothing kept: after a restart the event is warned about once more.
+    warned_unverified: Mutex<HashSet<nostr::EventId>>,
 }
 
 impl fmt::Debug for Relay {
@@ -356,7 +420,20 @@ impl Relay {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .context("building the HTTP client for the relay")?;
-        Ok(Self { base, keys, http })
+        Ok(Self {
+            base,
+            keys,
+            http,
+            metrics: None,
+            warned_unverified: Mutex::new(HashSet::new()),
+        })
+    }
+
+    /// The counters an unverified event is counted in
+    /// (`twalk_clerk_skipped_total{why="unverified"}`).
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// The announced URL as stored: no trailing slash.
@@ -407,7 +484,33 @@ impl Relay {
     pub async fn query(&self, filters: Vec<Value>) -> Result<Vec<Event>, RelayError> {
         let body = serde_json::to_vec(&filters)
             .map_err(|e| RelayError::Malformed(format!("serialising the filters: {e}")))?;
-        self.post("/query", body).await
+        let served: Vec<Event> = self.post("/query", body).await?;
+        let (events, rejected) = verified(served);
+        for rejected in rejected {
+            // Counted every time it is served and dropped — the counter is
+            // the slope of a relay that keeps serving it — but warned about
+            // once per process: the same forged event comes back on every
+            // tick of the sweep and the loop, and a warning a tick for ever
+            // is a log nobody reads.
+            if let Some(metrics) = &self.metrics {
+                metrics.record_skipped(Skipped::Unverified);
+            }
+            let first_time = self
+                .warned_unverified
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(rejected.id);
+            if first_time {
+                warn!(
+                    event_id = %rejected.id.to_hex(),
+                    kind = rejected.kind,
+                    error = %rejected.error,
+                    "dropped an event the relay served whose signature does not verify; counted \
+                     on every tick it is served again, warned about once"
+                );
+            }
+        }
+        Ok(events)
     }
 
     /// A forum post (kind 45001) in `channel`: what one suggestion becomes.
@@ -466,8 +569,10 @@ impl Relay {
 
     /// The reactions (kind 7) and thread replies (kind 45003) on any of
     /// `post_ids`, by anyone — the owner's gestures on the clerk's posts —
-    /// newest first, at most `limit` per query, one query per
-    /// [`GESTURE_QUERY_IDS`] ids ([`gestures_filters`]). No ids is no
+    /// at most `limit` per query, one query per [`GESTURE_QUERY_IDS`] ids
+    /// ([`gestures_filters`]), in the relay's order (newest first) **within
+    /// each chunk** and chunk-major across them, so a caller that needs an
+    /// order sorts (`decision::decisions_on` does). No ids is no
     /// query. Each event is answered once even when two of its `e` tags
     /// name two of the ids (a nested reply names its root and its parent),
     /// because a caller counts what it is given; and which post an event
@@ -1276,6 +1381,79 @@ mod tests {
         // A reaction with the very tag a bare reply has is not a reply.
         let reaction = event_of(KIND_REACTION, vec![tag("e", &post)], "✅");
         assert!(!is_direct_reply(&reaction, &post));
+    }
+
+    #[test]
+    fn an_event_whose_signature_does_not_verify_is_dropped_and_counted() {
+        let post = post_id(0);
+        let genuine = event_of(KIND_REACTION, vec![tag("e", &post)], "✅");
+        assert!(genuine.verify().is_ok());
+
+        // The same JSON object with one byte of its signature changed: the
+        // relay could serve this, and nothing but the signature says no.
+        let mut value: Value = serde_json::from_str(&genuine.as_json()).unwrap();
+        let sig = value["sig"].as_str().unwrap().to_owned();
+        let flipped = if sig.starts_with('0') { "1" } else { "0" };
+        value["sig"] = Value::String(format!("{flipped}{}", &sig[1..]));
+        let tampered_sig = Event::from_json(value.to_string()).unwrap();
+
+        // …with its `pubkey` swapped for another key's and nothing else:
+        // the id, a hash over the pubkey, no longer matches — a stranger's ✅
+        // served as the owner's, lazily.
+        let owner = Keys::generate().public_key();
+        let mut value: Value = serde_json::from_str(&genuine.as_json()).unwrap();
+        value["pubkey"] = Value::String(owner.to_hex());
+        let stale_id = Event::from_json(value.to_string()).unwrap();
+
+        // …and the intelligent forgery: the pubkey swapped **and** the id
+        // recomputed over it, so the id check passes and only the
+        // signature — which the forger cannot make without the owner's
+        // secret key — says no.
+        let recomputed = nostr::EventId::new(
+            &owner,
+            &genuine.created_at,
+            &genuine.kind,
+            &genuine.tags,
+            &genuine.content,
+        );
+        value["id"] = Value::String(recomputed.to_hex());
+        let forged = Event::from_json(value.to_string()).unwrap();
+        assert!(forged.verify_id(), "the forged id is consistent");
+
+        let (kept, rejected) = verified(vec![
+            tampered_sig.clone(),
+            genuine.clone(),
+            stale_id.clone(),
+            forged.clone(),
+        ]);
+        assert_eq!(kept, vec![genuine.clone()]);
+        assert_eq!(
+            rejected,
+            vec![
+                Rejected {
+                    id: tampered_sig.id,
+                    kind: KIND_REACTION,
+                    error: nostr::event::Error::InvalidSignature,
+                },
+                Rejected {
+                    id: stale_id.id,
+                    kind: KIND_REACTION,
+                    error: nostr::event::Error::InvalidId,
+                },
+                Rejected {
+                    id: forged.id,
+                    kind: KIND_REACTION,
+                    error: nostr::event::Error::InvalidSignature,
+                },
+            ]
+        );
+
+        let (kept, rejected) = verified(vec![genuine.clone()]);
+        assert!(rejected.is_empty());
+        assert_eq!(kept, vec![genuine]);
+        let (kept, rejected) = verified(Vec::new());
+        assert!(rejected.is_empty());
+        assert!(kept.is_empty());
     }
 
     #[test]

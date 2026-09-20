@@ -226,10 +226,28 @@ impl SessionFile {
     /// line, **atomically**: a temporary file in the same directory, created
     /// `0600` before a byte is written, synced, then renamed over the
     /// original — so a clerk killed mid-write leaves either the old token or
-    /// the new one, never a truncated file. Other lines are carried over.
+    /// the new one, never a truncated file. Other lines are carried over
+    /// — unless the file cannot be read at that moment, in which case the
+    /// token line is written alone and the loss is warned about: the
+    /// Companion Gateway has already rotated, so the credential outranks
+    /// an operator's comment lines, and a rewrite refused here would be a
+    /// session with fifteen minutes to live. A file that is not there is
+    /// simply rewritten from nothing, and a *write* failure is an error.
     pub fn write(&self, token: &str) -> Result<(), GatewayError> {
         let path = &self.path;
-        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let existing = match std::fs::read_to_string(path) {
+            Ok(existing) => existing,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                warn!(
+                    session_file = %path.display(),
+                    error = %e,
+                    "the session file could not be read before its rewrite; the rotated token \
+                     is written alone and every other line it held is lost"
+                );
+                String::new()
+            }
+        };
         let mut replaced = false;
         let mut lines: Vec<String> = existing
             .lines()
@@ -338,18 +356,33 @@ pub struct Device {
 /// long it was issued for — the last so that "a fifth of its life left" is
 /// a fifth of the lifetime this Gateway grants rather than of a number
 /// hard-coded here.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct DeviceToken {
     token: String,
     expires_at_unix: i64,
     lifetime_seconds: i64,
 }
 
+impl fmt::Debug for DeviceToken {
+    /// The token itself is never printed: this is the one derive by which a
+    /// future `{:?}` on the device slot could put a device token in a log
+    /// line, so it is written by hand.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceToken")
+            .field("token", &"<redacted>")
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("lifetime_seconds", &self.lifetime_seconds)
+            .finish()
+    }
+}
+
 impl DeviceToken {
     /// Whether the token is worth sending: at least a fifth of its lifetime
-    /// ahead of it — the Companion's own rule (`refreshAfterSeconds`, #186),
-    /// so a request that starts with the token alive does not finish with it
-    /// dead.
+    /// ahead of it, so a request that starts with the token alive does not
+    /// finish with it dead. A fifth **uncapped** — 180 s of a 900 s token —
+    /// where the Companion's own `refreshAfterSeconds` (#186) caps the
+    /// margin at 60 s: more margin than the browser keeps, because a
+    /// request here can wait on a bus lookup behind `POST /api/approvals`.
     fn is_fresh(&self, now_unix: i64) -> bool {
         self.expires_at_unix - now_unix >= self.lifetime_seconds / 5
     }
@@ -518,8 +551,7 @@ impl Gateway {
     }
 
     /// A device token with at least a fifth of its life left, refreshing
-    /// first otherwise (the Companion's own rule, `refreshAfterSeconds`,
-    /// #186).
+    /// first otherwise ([`DeviceToken::is_fresh`]).
     async fn device_token(&self) -> Result<String, GatewayError> {
         let mut device = self.device.lock().await;
         if let Some(held) = device.as_ref().filter(|held| held.is_fresh(now_unix())) {
@@ -607,10 +639,13 @@ impl Gateway {
         })
     }
 
-    /// `GET /api/devices` — the owner's device list, which the deployment
-    /// suite and the operator's script read to see the `Buzz` device; the
-    /// decision loop never calls it. The same one-refresh-one-retry as an
-    /// approval.
+    /// `GET /api/devices` — the owner's device list. Nothing in production
+    /// calls it today: the decisions loop has no use for it, the operator's
+    /// script is Python and the deployment suite reads the route with a
+    /// client of its own. It is the read a later diagnostic — "is the
+    /// `Buzz` device still signed in?" on `/health`, say — would make as
+    /// the device, kept with its own test so that the same
+    /// one-refresh-one-retry as an approval is known to hold for a `GET`.
     pub async fn devices(&self) -> Result<Vec<Device>, GatewayError> {
         let answer = self
             .as_device(|token| {
