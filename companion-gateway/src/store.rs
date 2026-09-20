@@ -73,7 +73,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 6] = [
+pub const MIGRATIONS: [&str; 7] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -421,6 +421,23 @@ pub const MIGRATIONS: [&str; 6] = [
     ) WITHOUT ROWID;
 
     CREATE INDEX portal_move_decided_at ON portal_move (decided_at);
+    "#,
+    // v7 — the registry of connections (ADR 0033, issue #269).
+    //
+    // What the Gateway is configured with, written at every start so the
+    // store always holds the registry the running Gateway serves: the next
+    // migration (#270) keys consent on it, and a decision must be able to
+    // reference a connection the store knows. `kind` is not CHECKed: the
+    // contract's definition is the authority and the Gateway refuses an
+    // unknown kind at startup, before anything reaches this table.
+    r#"
+    CREATE TABLE connection (
+        id         TEXT NOT NULL PRIMARY KEY,
+        kind       TEXT NOT NULL,
+        label      TEXT NOT NULL,
+        bridge_id  TEXT,
+        created_at TEXT NOT NULL
+    ) WITHOUT ROWID;
     "#,
 ];
 
@@ -1257,6 +1274,40 @@ impl Store {
     /// id, exactly as a replayed decision does. That is the second line of
     /// defence behind the state comparison: mautrix retries a push with
     /// backoff, so the same body genuinely does arrive twice.
+    /// Records the registry of connections as configured (#269): inserted
+    /// when new, kind and label refreshed when known. Never deleted here — a
+    /// connection that left the configuration may still be what a recorded
+    /// decision is scoped to, and forgetting it would orphan the decision.
+    pub fn record_connections(&self, connections: &[crate::connections::Connection]) -> Result<()> {
+        let now = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+        let connection = self.connection();
+        for entry in connections {
+            connection
+                .execute(
+                    "INSERT INTO connection (id, kind, label, bridge_id, created_at) \
+                     VALUES (?, ?, ?, ?, ?) \
+                     ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, \
+                     label = excluded.label, bridge_id = excluded.bridge_id",
+                    rusqlite::params![entry.id, entry.kind, entry.label, entry.bridge_id, now],
+                )
+                .context("failed to record a connection")?;
+        }
+        Ok(())
+    }
+
+    /// The connections the store knows, in id order.
+    pub fn connections(&self) -> Result<Vec<(String, String)>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare("SELECT id, kind FROM connection ORDER BY id")
+            .context("failed to prepare the connections query")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .context("failed to read the connections")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read a connection row")
+    }
+
     /// Journals one move, once: a second record about the same successor is
     /// a replay of the same decision and changes nothing. Returns whether
     /// this call was the one that recorded it.

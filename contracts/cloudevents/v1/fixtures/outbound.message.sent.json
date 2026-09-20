@@ -9,6 +9,7 @@
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/outbound.message.sent.schema.json",
   "traceparent": "00-853c5064ff97ff1d69b96ea4e149a85d-777919c1c21e656b-01",
   "network": "whatsapp",
+  "connection": "whatsapp",
   "data": {
     "body": "Oui, 20h c'est parfait.",
     "format": "text/plain",

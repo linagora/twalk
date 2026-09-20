@@ -900,3 +900,131 @@ async fn an_unreachable_gateway_labels_pending_without_losing_an_event() -> Resu
     sensor.stop().await;
     Ok(())
 }
+
+/// Issue #269 / ADR 0033: every event carries the **connection** it belongs to,
+/// and the Sensor never derives one — the registry is the Gateway's, handed
+/// over on the consent snapshot, and a room is looked up in it by the bridge
+/// bot that built it.
+#[tokio::test]
+async fn every_event_is_stamped_with_the_connection_the_registry_names_for_its_room() -> Result<()>
+{
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let alpha = Bot::login("bot_alpha").await?;
+    let puppet = Bot::login("whatsapp_33612345678").await?;
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    gateway.serve(Vec::new(), 0);
+    // A registry where the WhatsApp bridge whose bot is alpha is not the
+    // deployment's only WhatsApp account: the id is the registry's, not the
+    // network's name.
+    gateway.serve_connections(vec![
+        json!({ "id": "wa-work", "kind": "whatsapp", "bridge_bot": alpha.user_id() }),
+        json!({ "id": "wa-home", "kind": "whatsapp", "bridge_bot": "@someoneelse:test.twalk" }),
+        json!({ "id": "matrix", "kind": "matrix" }),
+    ]);
+    bus.delete_consumer(STREAM, CONSENT_CONSUMER).await?;
+    let sensor = SensorProc::start(&sensor_env_with_gateway(&gateway.url()))?;
+
+    let room_id = make_whatsapp_portal(&alpha, "connection-stamped-portal").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+    alpha.invite(&room_id, puppet.user_id()).await?;
+    puppet.join_room(&room_id).await?;
+
+    let event_id = puppet
+        .send_message(&room_id, "which account is this?")
+        .await?;
+    let stored = wait_for_matrix_event(&bus, &room_id, &event_id).await?;
+    validate_against_contract(&stored.payload, "inbound.message.received")?;
+    assert_eq!(
+        stored.payload["connection"].as_str(),
+        Some("wa-work"),
+        "the connection is the registry's id for this room's bridge bot, not the network's name"
+    );
+    assert_eq!(stored.payload["network"].as_str(), Some("whatsapp"));
+    assert_eq!(
+        stored
+            .headers
+            .iter()
+            .find(|(name, _)| name == "connection")
+            .map(|(_, value)| value.as_str()),
+        Some("wa-work"),
+        "and the bus header duplicates it for server-side filtering"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// A room no connection covers publishes nothing — never a guessed
+/// perimeter, whose decisions would be another account's — and the silence
+/// is counted and said.
+#[tokio::test]
+async fn a_room_no_connection_covers_is_not_published_and_the_drop_is_counted() -> Result<()> {
+    const METRICS_LISTEN: &str = "127.0.0.1:19013";
+    const METRICS_URL: &str = "http://127.0.0.1:19013/metrics";
+
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let alpha = Bot::login("bot_alpha").await?;
+    let puppet = Bot::login("whatsapp_33612345678").await?;
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    gateway.serve(Vec::new(), 0);
+    // A registry handed over that names no WhatsApp connection at all.
+    gateway.serve_connections(vec![json!({ "id": "signal", "kind": "signal" })]);
+    bus.delete_consumer(STREAM, CONSENT_CONSUMER).await?;
+    let url = gateway.url();
+    let sensor = SensorProc::start(&harness::sensor_env_with(&[
+        ("SENSOR_GATEWAY_URL", &url),
+        ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
+        ("SENSOR_METRICS_LISTEN", METRICS_LISTEN),
+    ]))?;
+
+    let room_id = make_whatsapp_portal(&alpha, "connection-uncovered-portal").await?;
+    alpha.invite(&room_id, SENSOR_USER_ID).await?;
+    alpha
+        .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+    alpha.invite(&room_id, puppet.user_id()).await?;
+    puppet.join_room(&room_id).await?;
+
+    puppet.send_message(&room_id, "into no perimeter").await?;
+    // The drop is counted; that is what proves the message was seen and
+    // refused rather than not yet processed.
+    poll_until(
+        || async {
+            let body = reqwest::get(METRICS_URL).await.ok()?.text().await.ok()?;
+            body.lines()
+                .find_map(|line| {
+                    line.strip_prefix(
+                        "twalk_sensor_events_dropped_total{reason=\"unknown_connection\"} ",
+                    )
+                })
+                .and_then(|rest| rest.trim().parse::<u64>().ok())
+                .filter(|count| *count >= 1)
+        },
+        "the uncovered room's message to be counted as dropped",
+    )
+    .await?;
+    assert!(
+        bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id)
+            .await?
+            .is_empty(),
+        "nothing from a room no connection covers reaches the bus"
+    );
+    let logs = sensor.logs().await;
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("no connection covers this room") && line.contains(&room_id)),
+        "the room is named once: {logs:?}"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}

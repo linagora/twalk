@@ -565,6 +565,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/connections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The registry of connections, the perimeters consent is scoped to.
+         * @description Every configured account this deployment observes or acts through
+         *     (ADR 0033, #269): a bridge, a mailbox, a calendar. Each has an opaque
+         *     stable id, a kind — one of the contract's
+         *     `definitions/kind.schema.json` — and a label; the ones a bridge
+         *     carries name the bridge and, when the operator named one, its bot.
+         *
+         *     Configuration, read-only: `GATEWAY_CONNECTIONS` (`id=kind[=label]`,
+         *     a label of `bridge:<bridge_id>` naming the transport explicitly), or,
+         *     unset, one connection per bridge **whose id is the network's name** —
+         *     the id every existing consent decision was migrated onto (#270). A
+         *     second bridge of one network is declared, never derived.
+         *
+         *     The Companion draws a card per connection and decides per connection
+         *     (#272); `network` on a card is its kind.
+         */
+        get: operations["listConnections"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/consent/decisions": {
         parameters: {
             query?: never;
@@ -1968,6 +2001,26 @@ export interface components {
              */
             network: string;
         };
+        /** @description One connection of the registry (ADR 0033, */
+        Connection: {
+            /**
+             * @description The bridge's bot (`GATEWAY_BRIDGE_<ID>_BOT_USER_ID`), the account
+             *     the Sensor recognises a portal of this connection by. Absent when
+             *     the operator named none; the Sensor then resolves the connection
+             *     by kind when the kind has exactly one.
+             */
+            bridge_bot?: string;
+            /** @description The bridge instance carrying it (`GATEWAY_BRIDGES`), for a connection a bridge carries. */
+            bridge_id?: string;
+            /**
+             * @description Opaque and stable. On a deployment with one connection per
+             *     network it is the network's name; nothing parses an id.
+             */
+            id: string;
+            kind: components["schemas"]["Kind"];
+            /** @description For a person to read; a bridge's instance id by default. */
+            label: string;
+        };
         /** @description One decision the owner asks the Gateway to record. */
         ConsentDecisionRequest: {
             new_state: components["schemas"]["ConsentState_State"];
@@ -1995,6 +2048,18 @@ export interface components {
          *     between them without appearing in one of the two.
          */
         ConsentSnapshot: {
+            /**
+             * @description The registry of connections (ADR 0033, #269): every configured
+             *     account this deployment observes or acts through, with the bridge
+             *     and the bot for the ones a bridge carries. Here on the same
+             *     argument as `owner_identities`: the registry has one owner and
+             *     the Sensor reads it rather than deriving it, stamping every event
+             *     with the connection of the bridge that built the room. A bot no
+             *     connection names is a bridge no connection covers, and the Sensor
+             *     publishes nothing from its portals rather than guessing. Empty
+             *     on a deployment with no bridge and no declaration; never absent.
+             */
+            connections: components["schemas"]["Connection"][];
             /**
              * @description The position in the Gateway's own decision journal this snapshot
              *     reflects — the same counter as a recorded decision's `sequence`.
@@ -2424,6 +2489,13 @@ export interface components {
             owner: string;
             sensor: components["schemas"]["SensorUserId"];
         };
+        /**
+         * @description The kind of a connection: the contract's own definition
+         *     (`contracts/cloudevents/v1/definitions/kind.schema.json`, the one
+         *     authority): every network, plus `calendar` (ADR 0033).
+         * @enum {string}
+         */
+        Kind: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix" | "email" | "calendar";
         /** @description The user's native language, and the choices. */
         LanguagePreference: {
             /** @description The interface languages the Companion ships, in the order it offers them. */
@@ -4796,6 +4868,29 @@ export interface operations {
             };
             502: components["responses"]["BridgeUnavailable"];
             503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    listConnections: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The registry, in the order declared. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        connections: components["schemas"]["Connection"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
         };
     };
     recordConsentDecision: {

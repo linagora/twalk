@@ -235,7 +235,12 @@ async fn consent_snapshot(State(gateway): State<Gateway>, headers: HeaderMap) ->
                 withheld,
                 "served a consent snapshot"
             );
-            Json(snapshot_json(&snapshot, consent.owner())).into_response()
+            Json(snapshot_json(
+                &snapshot,
+                consent.owner(),
+                gateway.connections(),
+            ))
+            .into_response()
         }
         Err(SnapshotRefusal::TooLarge { max_entries }) => {
             // Loudly, and with nothing in the body a consumer could mistake
@@ -282,7 +287,18 @@ async fn consent_snapshot(State(gateway): State<Gateway>, headers: HeaderMap) ->
 /// so an absent member would mean "this Gateway is older than #149" and an
 /// empty array would mean "this deployment has no owner", which cannot happen
 /// on a Gateway that serves a snapshot at all.
-fn snapshot_json(snapshot: &Snapshot, owner: &crate::owner::Owner) -> Value {
+///
+/// `connections` is #269's, on the same argument as `owner_identities`: the
+/// registry of perimeters has one owner, the Gateway, and the Sensor stamps
+/// every event with the connection of the bridge that built its room by
+/// reading this list — handed over, never derived. A bot the list does not
+/// name is a bridge no connection covers, and the Sensor publishes nothing
+/// from its portals rather than guessing a perimeter.
+fn snapshot_json(
+    snapshot: &Snapshot,
+    owner: &crate::owner::Owner,
+    connections: &crate::connections::Registry,
+) -> Value {
     json!({
         "stream": STREAM_NAME,
         "subject": consent::bus_subject(CONSENT_CHANGED_TYPE),
@@ -290,6 +306,7 @@ fn snapshot_json(snapshot: &Snapshot, owner: &crate::owner::Owner) -> Value {
         "next_stream_sequence": snapshot.stream_sequence + 1,
         "decision_sequence": snapshot.decision_sequence,
         "owner_identities": owner.identities(),
+        "connections": connections.connections(),
         "entries": snapshot.entries.iter().map(entry_json).collect::<Vec<_>>(),
     })
 }
@@ -400,7 +417,11 @@ mod tests {
             stream_sequence: 41,
         };
         assert_eq!(
-            snapshot_json(&snapshot, &owner()),
+            snapshot_json(
+                &snapshot,
+                &owner(),
+                &crate::connections::Registry::default()
+            ),
             json!({
                 "stream": "twalk",
                 "subject": "twalk.consent.state.changed.v1",
@@ -411,6 +432,7 @@ mod tests {
                     "@michel:example.com",
                     "@whatsapp_lid-115332874281144:example.com"
                 ],
+                "connections": [],
                 "entries": [{
                     "subject": { "type": "network", "id": "whatsapp" },
                     "network": "whatsapp",
@@ -429,7 +451,7 @@ mod tests {
             decision_sequence: 0,
             stream_sequence: 0,
         };
-        let document = snapshot_json(&empty, &owner());
+        let document = snapshot_json(&empty, &owner(), &crate::connections::Registry::default());
         assert_eq!(document["stream_sequence"], json!(0));
         assert_eq!(
             document["next_stream_sequence"],
@@ -462,7 +484,12 @@ mod tests {
                 stream_sequence: 0,
             },
             &crate::owner::Owner::new("@michel:example.com", []),
+            &crate::connections::Registry::default(),
         );
         assert_eq!(document["owner_identities"], json!(["@michel:example.com"]));
+        // #269: the registry travels with the snapshot, even when empty — an
+        // absent member would mean "a Gateway older than #269", an empty one
+        // "no connection configured", and the Sensor tells the two apart.
+        assert_eq!(document["connections"], json!([]));
     }
 }

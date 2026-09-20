@@ -421,6 +421,9 @@ services:
       # #252, ADR 0029). Empty: 20. Served to the Companion, which holds no
       # number of its own, and applied when a conversation's room is replaced.
       GATEWAY_CROWD_THRESHOLD: ${GATEWAY_CROWD_THRESHOLD:-}
+      # The registry of connections (ADR 0033, #269). Empty: one per bridge,
+      # named after its network. See .env.example.
+      GATEWAY_CONNECTIONS: ${GATEWAY_CONNECTIONS:-}
       # The seam to Hermes, the Gateway's half (#206, ADR 0032): the secret
       # Hermes's outbound hook signs each answer with, and the domain a
       # suggestion published from one names its persona under — the same

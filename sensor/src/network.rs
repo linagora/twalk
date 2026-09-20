@@ -248,7 +248,10 @@ mod tests {
         let authority = twalk_test_harness::contract_definition_values("network")
             .expect("the contract's network definition");
         let copy: Vec<&str> = Network::ALL.iter().map(Network::as_str).collect();
-        assert_eq!(copy, authority, "sensor/src/network.rs disagrees with the contract");
+        assert_eq!(
+            copy, authority,
+            "sensor/src/network.rs disagrees with the contract"
+        );
         for value in &authority {
             assert_eq!(
                 Network::from_contract_value(value).map(|network| network.as_str()),

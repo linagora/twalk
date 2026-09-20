@@ -450,6 +450,9 @@ pub struct InboundMessage {
     pub sender: String,
     pub body: String,
     pub network: Network,
+    /// The connection the room belongs to (ADR 0033, #269): handed to the
+    /// Sensor by the registry, never derived. See `crate::connection`.
+    pub connection: String,
     pub consent: Consent,
     pub display_name: String,
     /// The sender's native network identifier, derived from the ghost
@@ -536,6 +539,7 @@ pub fn build_message_received(input: &InboundMessage) -> Value {
         "dataschema": MESSAGE_RECEIVED_DATASCHEMA,
         "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
+        "connection": input.connection,
         "consent": input.consent.as_str(),
         "data": data,
     })
@@ -560,6 +564,9 @@ pub struct OutboundMessage {
     pub owner_matrix_id: String,
     pub body: String,
     pub network: Network,
+    /// The connection the room belongs to (ADR 0033, #269): handed to the
+    /// Sensor by the registry, never derived. See `crate::connection`.
+    pub connection: String,
     /// Structured reply reference, when the message replies to a parent.
     pub reply_to: Option<ReplyTo>,
     /// Thread root event id, when the message is part of a Matrix thread.
@@ -631,6 +638,7 @@ pub fn build_outbound_message_sent(input: &OutboundMessage) -> Value {
         "dataschema": OUTBOUND_MESSAGE_SENT_DATASCHEMA,
         "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
+        "connection": input.connection,
         "data": data,
     })
 }
@@ -653,6 +661,9 @@ pub struct InboundReaction {
     /// the author whose consent governs it.
     pub target_excerpt: Option<QuotedExcerpt>,
     pub network: Network,
+    /// The connection the room belongs to (ADR 0033, #269): handed to the
+    /// Sensor by the registry, never derived. See `crate::connection`.
+    pub connection: String,
     pub consent: Consent,
     pub display_name: String,
     /// The reactor's native network identifier, derived from the ghost
@@ -702,6 +713,7 @@ pub fn build_reaction_added(input: &InboundReaction) -> Value {
         "dataschema": REACTION_ADDED_DATASCHEMA,
         "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
+        "connection": input.connection,
         "consent": input.consent.as_str(),
         "data": data,
     })
@@ -736,6 +748,9 @@ pub struct OutboundReaction {
     /// the author whose consent governs it.
     pub target_excerpt: Option<QuotedExcerpt>,
     pub network: Network,
+    /// The connection the room belongs to (ADR 0033, #269): handed to the
+    /// Sensor by the registry, never derived. See `crate::connection`.
+    pub connection: String,
     /// RFC 3339 timestamp of when the Sensor produced the event.
     pub produced_at: String,
     /// RFC 3339 timestamp reported by the source network, when the bridge
@@ -785,6 +800,7 @@ pub fn build_outbound_reaction_added(input: &OutboundReaction) -> Value {
         "dataschema": OUTBOUND_REACTION_ADDED_DATASCHEMA,
         "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
+        "connection": input.connection,
         "data": data,
     })
 }
@@ -822,6 +838,9 @@ pub struct InboundPresence {
     /// observed room shared with the contact.
     pub matrix_room_id: String,
     pub network: Network,
+    /// The connection the room belongs to (ADR 0033, #269): handed to the
+    /// Sensor by the registry, never derived. See `crate::connection`.
+    pub connection: String,
     pub consent: Consent,
     pub display_name: String,
     /// The contact's native network identifier, derived from the ghost
@@ -863,6 +882,7 @@ pub fn build_presence_updated(input: &InboundPresence) -> Value {
         "dataschema": PRESENCE_UPDATED_DATASCHEMA,
         "traceparent": originate_traceparent(&id),
         "network": input.network.as_str(),
+        "connection": input.connection,
         "consent": input.consent.as_str(),
         "data": data,
     })
@@ -936,6 +956,7 @@ mod tests {
             sender: "@whatsapp_33612345678:example.com".to_owned(),
             body: "hello".to_owned(),
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
             network_identifier: None,
@@ -955,6 +976,7 @@ mod tests {
             owner_matrix_id: "@michel:example.com".to_owned(),
             body: "je confirme pour 20h".to_owned(),
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             reply_to: None,
             thread_root: None,
             attachments: Vec::new(),
@@ -1060,6 +1082,7 @@ mod tests {
             target_event_id: "$Target".to_owned(),
             target_excerpt: None,
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             produced_at: "2026-09-17T10:00:00Z".to_owned(),
             network_timestamp: None,
         }
@@ -1534,6 +1557,7 @@ mod tests {
             target_event_id: "$AbCdEfGh1234".to_owned(),
             target_excerpt: Some(granted_quote("On décale à 20h ?")),
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
             network_identifier: None,
@@ -1549,6 +1573,7 @@ mod tests {
             server_name: "example.com".to_owned(),
             matrix_room_id: "!abcXYZ123:example.com".to_owned(),
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             consent: Consent::Pending,
             display_name: "Aïcha".to_owned(),
             network_identifier: None,

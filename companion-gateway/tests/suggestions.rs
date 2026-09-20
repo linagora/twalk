@@ -145,6 +145,7 @@ fn inbound_event(sender: &str, room_id: &str, consent: &str) -> Value {
         "datacontenttype": "application/json",
         "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
         "network": "whatsapp",
+        "connection": "whatsapp",
         "consent": consent,
         "data": data
     });
@@ -176,6 +177,7 @@ fn suggest_event(trigger: &Value, body: &str, expires_at: Option<&str>) -> Value
         "datacontenttype": "application/json",
         "dataschema": "https://schemas.twalk.dev/cloudevents/v1/persona.suggest.produced.schema.json",
         "network": trigger["network"],
+        "connection": trigger["connection"],
         "consent": trigger["consent"],
         "data": data
     });
@@ -895,6 +897,7 @@ async fn a_suggestion_this_build_cannot_read_is_counted_rather_than_blanking_the
         "subject": harness::sha256_hex(&unique("future-trigger")),
         "datacontenttype": "application/json",
         "network": "carrierpigeon",
+        "connection": "carrierpigeon",
         "consent": "granted",
         "data": {
             "persona_id": "assistant",

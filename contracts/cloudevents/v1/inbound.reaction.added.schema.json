@@ -13,6 +13,7 @@
     "subject",
     "datacontenttype",
     "network",
+    "connection",
     "consent",
     "data"
   ],
@@ -76,6 +77,11 @@
     "network": {
       "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Identifies the external network the reaction originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic: a room with no m.bridge state event and no ghost-prefixed sender, reached through the user's own Matrix account instead of through a bridge (see ADR 0009). Enables server-side filtering on NATS without deserializing the data payload."
+    },
+    "connection": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+      "description": "Twalk extension (ADR 0033). The **connection** this event belongs to: the one configured account — a bridge, a mailbox, a calendar — the deployment observed it on or acts through, by the opaque stable id the deployment gave it (`whatsapp`, `mail-linagora`). `network` says what kind of thing that is; this says which one. Two facts, two fields: a deployment with two bridges of one network has two connections, and a consent decision is scoped to a connection. On a deployment with one connection per network the id is the network's name, which is what every existing decision was migrated onto. The Companion Gateway keeps the registry (`GET /api/connections`); a producer never derives an id, it is handed one."
     },
     "consent": {
       "type": "string",

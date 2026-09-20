@@ -357,6 +357,11 @@ pub struct Suggestion {
     /// `subject`).
     pub trigger_event_id: String,
     pub network: Network,
+    /// The connection the trigger arrived on (ADR 0033, #269), copied onto the
+    /// approved reply unchanged. A suggestion older than #269 carries none and
+    /// is read as its network's single connection — the id every existing
+    /// decision was migrated onto.
+    pub connection: String,
     /// The consent label the trigger carried when the Sensor observed it.
     /// The audit fact, checked as the spec asks — and not a substitute for
     /// the current state, which is checked separately.
@@ -388,6 +393,20 @@ pub struct Trigger {
 /// The room id out of an inbound event's `source`
 /// (`matrix://<homeserver>/!room:server`), or `None` when the source is not
 /// one.
+/// The connection an event carries, or — for one published before #269, or by
+/// a producer that has not learned the extension yet — its network's single
+/// connection, whose id is the network's name (the migration id of #270).
+/// The fallback is what makes an old bus readable, and it is correct for the
+/// same reason the migration is: every deployment has one connection per
+/// network today.
+pub fn connection_or_networks(connection: Option<&str>, network: Network) -> String {
+    connection
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| network.as_str().to_owned())
+}
+
 pub fn room_from_source(source: &str) -> Option<String> {
     let rest = source.strip_prefix("matrix://")?;
     let (_homeserver, room) = rest.split_once('/')?;
@@ -404,6 +423,8 @@ struct SuggestionDocument {
     source: String,
     subject: String,
     network: String,
+    #[serde(default)]
+    connection: Option<String>,
     consent: String,
     #[serde(default)]
     traceparent: Option<String>,
@@ -448,6 +469,9 @@ struct TriggerDocument {
 /// the Gateway is not told them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerEnvelope {
+    /// The connection the message arrived on (ADR 0033, #269); a trigger older
+    /// than #269 is read as its network's single connection.
+    pub connection: String,
     pub event_id: String,
     pub event_type: String,
     /// The sender's Matrix user ID: the contact whose consent is checked
@@ -466,6 +490,8 @@ pub struct TriggerEnvelope {
 /// other holds somebody's words.
 #[derive(Debug, Deserialize)]
 struct TriggerEnvelopeDocument {
+    #[serde(default)]
+    connection: Option<String>,
     id: String,
     #[serde(rename = "type")]
     event_type: String,
@@ -531,6 +557,7 @@ impl Approval {
             "datacontenttype": "application/json",
             "dataschema": REPLY_APPROVED_DATASCHEMA,
             "network": self.suggestion.network.as_str(),
+            "connection": self.suggestion.connection,
             "consent": self.suggestion.consent_label.as_str(),
             "data": {
                 "persona_id": self.suggestion.persona_id,
@@ -878,6 +905,7 @@ impl Approvals {
             ))
         })?;
         Ok(TriggerEnvelope {
+            connection: connection_or_networks(document.connection.as_deref(), network),
             event_id: document.id,
             event_type: document.event_type,
             contact: document.subject,
@@ -1148,7 +1176,7 @@ impl Approvals {
     }
 
     /// Publishes the approved reply, with the contract's id as `Nats-Msg-Id`
-    /// and the three extensions duplicated as headers — the same shape the
+    /// and the extensions duplicated as headers — the same shape the
     /// Sensor and the SDK publish with, so a consumer filtering on headers
     /// sees this event like any other.
     async fn publish(
@@ -1159,6 +1187,7 @@ impl Approvals {
     ) -> Result<u64> {
         let mut extensions = vec![
             ("network", approval.suggestion.network.as_str()),
+            ("connection", approval.suggestion.connection.as_str()),
             ("consent", approval.suggestion.consent_label.as_str()),
         ];
         if let Some(traceparent) = &approval.suggestion.traceparent {
@@ -1224,6 +1253,7 @@ impl Approvals {
             source: document.source,
             persona_id: document.data.persona_id,
             trigger_event_id: document.subject,
+            connection: connection_or_networks(document.connection.as_deref(), network),
             network,
             consent_label,
             suggestion: Content {
@@ -1433,6 +1463,7 @@ mod tests {
             persona_id: "assistant".to_owned(),
             trigger_event_id: "b".repeat(64),
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             consent_label: State::Granted,
             suggestion: Content {
                 body: "Pas de problème, à 20h !".to_owned(),

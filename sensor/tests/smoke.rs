@@ -213,6 +213,42 @@ async fn every_contract_variant_fixture_validates_against_its_type() -> Result<(
     Ok(())
 }
 
+/// A message-flow event names its connection, and the contract refuses one
+/// that does not (ADR 0033, #269): the eight `inbound.*`, `outbound.*` and
+/// `persona.*` types require the extension, and the two status types —
+/// which are about a bridge and about a decision, not about a message —
+/// do not carry it. Both halves are asserted, so a type moved from one
+/// list to the other is a change somebody made on purpose.
+#[tokio::test]
+async fn a_message_flow_event_without_a_connection_is_invalid() -> Result<()> {
+    ensure_stack().await?;
+    for type_name in contract_fixture_types()? {
+        let mut fixture = contract_fixture(&type_name)?;
+        let is_message_flow = type_name.starts_with("inbound.")
+            || type_name.starts_with("outbound.")
+            || type_name.starts_with("persona.");
+        if is_message_flow {
+            let connection = fixture
+                .as_object_mut()
+                .and_then(|event| event.remove("connection"));
+            assert!(
+                connection.is_some(),
+                "{type_name}: the fixture must carry `connection`"
+            );
+            assert!(
+                validate_against_contract(&fixture, &type_name).is_err(),
+                "{type_name}: an event without `connection` must not validate"
+            );
+        } else {
+            assert!(
+                fixture.get("connection").is_none(),
+                "{type_name}: a status type is about no message and names no connection"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The contract does not merely describe the reduction (ADR 0012), it
 /// enforces it: an event labelled `revoked` that still carries content is
 /// invalid, and one labelled `granted` or `pending` that dropped it is

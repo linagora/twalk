@@ -63,6 +63,10 @@ pub struct Config {
     /// answer to "what can I connect?" — the origin, the session and consent
     /// are untouched. See [`bridges_from_env`].
     pub bridges: Vec<crate::bridge::BridgeConfig>,
+    /// The registry of connections (ADR 0033, #269): `GATEWAY_CONNECTIONS`,
+    /// or one connection per bridge named after its network. See
+    /// [`crate::connections`].
+    pub connections: crate::connections::Registry,
     /// The consent snapshot a cold consumer reads (ticket #50), or `None`
     /// when GATEWAY_SERVICE_TOKEN is unset — in which case the snapshot
     /// endpoint answers 503 naming it. See [`Snapshot`].
@@ -639,6 +643,16 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         let sign_in = SignIn::from_env()?;
         let bootstrap = Bootstrap::from_env(sign_in.as_ref());
+        let bridges = bridges_from_env(
+            sign_in
+                .as_ref()
+                .map(|sign_in| sign_in.owner.as_str())
+                .unwrap_or_default(),
+        )?;
+        let connections = crate::connections::Registry::from_config(
+            env("GATEWAY_CONNECTIONS").as_deref(),
+            &bridges,
+        )?;
         Ok(Self {
             listen: optional("GATEWAY_LISTEN", "0.0.0.0:8080")?,
             static_dir: PathBuf::from(required("GATEWAY_STATIC_DIR")?),
@@ -656,12 +670,8 @@ impl Config {
             // The owner is the acting user for every provisioning call
             // (#106); with no sign-in configured there is no owner, and a
             // bridge login could not be authenticated anyway.
-            bridges: bridges_from_env(
-                sign_in
-                    .as_ref()
-                    .map(|sign_in| sign_in.owner.as_str())
-                    .unwrap_or_default(),
-            )?,
+            bridges,
+            connections,
             snapshot: Snapshot::from_env()?,
             hermes_answers: HermesAnswers::from_env()?,
             inbound_consumer: env("GATEWAY_INBOUND_CONSUMER")

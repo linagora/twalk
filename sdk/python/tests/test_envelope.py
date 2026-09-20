@@ -176,10 +176,34 @@ class NatsHeadersTest(unittest.TestCase):
             {
                 "Nats-Msg-Id": event["id"],
                 "network": "whatsapp",
+                "connection": "whatsapp",
                 "consent": "granted",
                 "traceparent": trigger().traceparent,
             },
         )
+
+    def test_the_connection_is_copied_from_the_trigger_and_never_derived(self) -> None:
+        # ADR 0033, #269: the perimeter the trigger arrived on is the one the
+        # persona's answer belongs to — a second WhatsApp account is a second
+        # connection, and only the trigger knows which.
+        raw = fixture("inbound.message.received")
+        raw["connection"] = "wa-work"
+        event = thinking_event(
+            persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
+        )
+        self.assertEqual(event["connection"], "wa-work")
+        self.assertEqual(nats_headers(event)["connection"], "wa-work")
+
+    def test_a_trigger_older_than_the_connection_reads_as_its_networks_one(self) -> None:
+        # The bus keeps events published before #269: they carry no
+        # connection and are read as their network's single one, the id every
+        # existing decision was migrated onto.
+        raw = fixture("inbound.message.received")
+        del raw["connection"]
+        event = thinking_event(
+            persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
+        )
+        self.assertEqual(event["connection"], "whatsapp")
 
     def test_the_traceparent_header_is_absent_when_the_event_has_none(self) -> None:
         raw = fixture("inbound.message.received")
