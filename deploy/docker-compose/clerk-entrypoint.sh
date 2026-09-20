@@ -95,6 +95,13 @@ case "$mode" in
 	;;
 esac
 
+# /run/clerk is a tmpfs (compose.yaml), and Docker mounts a tmpfs with the
+# mode and owner of the directory underneath it — the image's `0700 root`,
+# not the 1777 a bare `mount -t tmpfs` gives — so the clerk could not
+# traverse it to read its own 0600 copy: the first live start failed on
+# exactly that. Root hands the directory to the clerk before the copy.
+chown clerk:clerk /run/clerk
+chmod 0700 /run/clerk
 install -o clerk -g clerk -m 0600 "$mount" /run/clerk/key
 export CLERK_NOSTR_KEY_FILE=/run/clerk/key
 exec setpriv --reuid=clerk --regid=clerk --clear-groups twalk-clerk "$@"
