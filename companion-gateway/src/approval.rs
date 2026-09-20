@@ -377,13 +377,16 @@ pub struct Suggestion {
 /// The half of the trigger event an approval needs: who wrote, and which
 /// room to answer in.
 ///
-/// Three values, and the struct has no `data` member — so the trigger's body,
+/// Four values, and the struct has no `data` member — so the trigger's body,
 /// its attachments and the contact's `network_identifier` never become values
 /// in this process, exactly as they do not on the pending-contact path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trigger {
     /// The sender's Matrix user ID: the contact whose consent is checked.
     pub contact: String,
+    /// The perimeter the message arrived on — what the consent is read
+    /// against (#270).
+    pub connection: String,
     pub network: Network,
     /// The portal room the reply is posted into, from the event's
     /// `matrix://<homeserver>/<room id>` source.
@@ -461,14 +464,17 @@ struct SuggestionContent {
     format: String,
 }
 
-/// What the Gateway reads of the trigger event: three CloudEvents
-/// attributes, no `data`.
+/// What the Gateway reads of the trigger event: its CloudEvents attributes,
+/// no `data`.
 #[derive(Debug, Deserialize)]
 struct TriggerDocument {
     id: String,
     source: String,
     subject: String,
     network: String,
+    /// The perimeter (#269); absent on an event older than it.
+    #[serde(default)]
+    connection: Option<String>,
 }
 
 /// The trigger event as a suggestion built **outside** a persona needs it
@@ -944,11 +950,19 @@ impl Approvals {
     /// before it publishes a suggestion, and a contact revoked while Hermes was
     /// reasoning must not have a draft about them appear on the approval
     /// screen. One implementation, one refusal vocabulary.
-    pub fn consent_now(&self, contact: &str, network: Network) -> Result<(), Refusal> {
-        let effective = self.store.effective(contact, network).map_err(|error| {
-            warn!(%error, %contact, "a consent state could not be read");
-            Refusal::StoreUnavailable(format!("the consent state could not be read: {error:#}"))
-        })?;
+    pub fn consent_now(
+        &self,
+        contact: &str,
+        connection: &str,
+        network: Network,
+    ) -> Result<(), Refusal> {
+        let effective = self
+            .store
+            .effective(contact, connection, network)
+            .map_err(|error| {
+                warn!(%error, %contact, "a consent state could not be read");
+                Refusal::StoreUnavailable(format!("the consent state could not be read: {error:#}"))
+            })?;
         match effective.state {
             State::Granted => Ok(()),
             State::Revoked => Err(Refusal::ConsentRevoked {
@@ -1101,7 +1115,7 @@ impl Approvals {
         // about now. Failing closed: an approval whose consent cannot be read
         // is refused, because refusing a send is recoverable and sending is
         // not ([`Self::consent_now`], shared with the answer path since #206).
-        self.consent_now(&trigger.contact, trigger.network)?;
+        self.consent_now(&trigger.contact, &trigger.connection, trigger.network)?;
 
         let content = request
             .edited
@@ -1331,6 +1345,7 @@ impl Approvals {
         let network = Network::parse(&document.network).unwrap_or(suggestion.network);
         Ok(Trigger {
             contact: document.subject,
+            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
             network,
             room_id,
         })
@@ -1499,6 +1514,7 @@ mod tests {
     fn trigger() -> Trigger {
         Trigger {
             contact: "@whatsapp_33612345678:example.com".to_owned(),
+            connection: "whatsapp".to_owned(),
             network: Network::Whatsapp,
             room_id: "!abcXYZ123:example.com".to_owned(),
         }

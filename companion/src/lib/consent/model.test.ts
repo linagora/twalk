@@ -33,6 +33,8 @@ function sighting(
 ): PendingContact {
 	return {
 		contact,
+		// One connection per network, named after it (#270).
+		connection: network,
 		network,
 		first_seen: '2026-09-18T07:00:00.000Z',
 		last_seen: '2026-09-18T09:00:00.000Z'
@@ -47,6 +49,7 @@ function entry(
 ): Entry {
 	return {
 		subject: { type, id },
+		connection: network,
 		network,
 		state,
 		decided_at: '2026-09-18T08:00:00.000Z',

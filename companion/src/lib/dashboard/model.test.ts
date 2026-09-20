@@ -92,6 +92,7 @@ function entry(
 ): ConsentEntry {
 	return {
 		subject: { type, id },
+		connection: network,
 		network,
 		state,
 		decided_at: decided,

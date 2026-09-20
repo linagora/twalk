@@ -189,13 +189,19 @@ pub struct Subject {
 }
 
 /// A decision the user asks the Gateway to record, once validated: a subject,
-/// the state it moves to, and the networks the decision covers. The scope is
-/// held sorted and deduplicated, because it is part of the event's natural
-/// key (the id recipe joins it in ascending order).
+/// the state it moves to, and the connections the decision covers (ADR
+/// 0033, #270). The scope is held sorted and deduplicated, because it is
+/// part of the event's natural key (the id recipe joins it in ascending
+/// order). `networks` is the kinds of those connections — derivable, and
+/// carried because `scope.networks` stays on the wire for every consumer
+/// not yet migrated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub subject: Subject,
     pub new_state: State,
+    /// The perimeter: connection ids, ascending, no duplicate.
+    pub connections: Vec<String>,
+    /// The kinds of `connections`, ascending, no duplicate.
     pub networks: Vec<Network>,
     pub reason: Option<String>,
 }
@@ -220,6 +226,22 @@ pub enum Invalid {
     /// A network subject whose scope does not name exactly that network, which
     /// the contract forbids.
     ScopeContradictsSubject { subject: String, scope: Vec<String> },
+    /// `scope.networks` alone names a network that has several connections
+    /// (#270): the caller has to say which perimeter it means, and the
+    /// Gateway will not pick one. Answered under `malformed_request` — the
+    /// member that would settle it, `scope.connections`, is missing — with
+    /// the candidates named.
+    ScopeNeedsConnections {
+        network: String,
+        connections: Vec<String>,
+    },
+    /// `scope.networks` and `scope.connections` were both sent and do not
+    /// describe one perimeter: the networks are not the connections' kinds.
+    /// Under `malformed_request` too — the body disagrees with itself.
+    ScopeMembersDisagree {
+        networks: Vec<String>,
+        connections: Vec<String>,
+    },
     /// The subject is one of the owner's own identities (ticket #149, ADR
     /// 0018, ADR 0021). The only variant [`Decision::parse`] never produces:
     /// it takes knowing who the owner is, which is
@@ -240,6 +262,8 @@ impl Invalid {
             Invalid::UnsupportedSubjectType(_) => "unsupported_subject_type",
             Invalid::Unknown { .. } => "unknown_value",
             Invalid::ScopeContradictsSubject { .. } => "scope_contradicts_subject",
+            Invalid::ScopeNeedsConnections { .. } => "malformed_request",
+            Invalid::ScopeMembersDisagree { .. } => "malformed_request",
             Invalid::SubjectIsTheOwner { .. } => "subject_is_the_owner",
         }
     }
@@ -274,6 +298,22 @@ impl Invalid {
             Invalid::ScopeContradictsSubject { subject, scope } => format!(
                 "a network subject must be scoped to exactly its own network: subject {subject:?} against scope {scope:?}"
             ),
+            Invalid::ScopeNeedsConnections {
+                network,
+                connections,
+            } => format!(
+                "scope.networks names {network:?}, which has {} connections on this deployment \
+                 ({}): name the one you mean in scope.connections",
+                connections.len(),
+                connections.join(", ")
+            ),
+            Invalid::ScopeMembersDisagree {
+                networks,
+                connections,
+            } => format!(
+                "scope.networks {networks:?} is not the kinds of scope.connections {connections:?}: \
+                 send one member, or two that agree"
+            ),
             Invalid::SubjectIsTheOwner { id } => format!(
                 "{id:?} is one of this deployment's owner identities, and the owner is never a \
                  contact and never has a consent state: there is nothing to decide, and no \
@@ -293,15 +333,21 @@ impl Decision {
     /// {
     ///   "subject": { "type": "contact", "id": "@whatsapp_33612345678:example.com" },
     ///   "new_state": "granted",
-    ///   "scope": { "networks": ["whatsapp"] },
+    ///   "scope": { "connections": ["whatsapp"] },
     ///   "reason": "optional, kept in the audit trail"
     /// }
     /// ```
     ///
+    /// The scope is `scope.connections`, looked up in the registry (#270). A
+    /// caller not yet migrated sends `scope.networks` alone, and each
+    /// network is read as its single connection on this deployment — a
+    /// lookup, not a guess: a network with several is refused naming them.
+    /// Both members together must agree.
+    ///
     /// The scope comes back sorted and deduplicated: the id recipe joins the
     /// networks in ascending order, so two spellings of one scope must not
     /// become two different decisions.
-    pub fn parse(body: &Value) -> Result<Self, Invalid> {
+    pub fn parse(body: &Value, registry: &crate::connections::Registry) -> Result<Self, Invalid> {
         let kind = string(body, "/subject/type")?;
         let kind = SubjectType::parse(&kind).ok_or(Invalid::Unknown {
             field: "subject.type".to_owned(),
@@ -316,29 +362,7 @@ impl Decision {
             field: "new_state".to_owned(),
             value: new_state,
         })?;
-        let scope = body
-            .pointer("/scope/networks")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Invalid::Malformed("scope.networks".to_owned()))?;
-        let mut networks = Vec::new();
-        for entry in scope {
-            let value = entry
-                .as_str()
-                .ok_or_else(|| Invalid::Malformed("scope.networks".to_owned()))?;
-            let network = Network::parse(value).ok_or(Invalid::Unknown {
-                field: "scope.networks".to_owned(),
-                value: value.to_owned(),
-            })?;
-            if !networks.contains(&network) {
-                networks.push(network);
-            }
-        }
-        if networks.is_empty() {
-            return Err(Invalid::Malformed("scope.networks".to_owned()));
-        }
-        // Ascending order of the contract's own string values — the order
-        // the id recipe joins them in.
-        networks.sort_by_key(|network| network.as_str());
+        let (connections, networks) = Self::parse_scope(body, registry)?;
         // The contract: "for a network subject the id is the network value
         // itself, in which case scope.networks holds exactly that one
         // network". Anything else would publish a decision whose own two
@@ -365,9 +389,120 @@ impl Decision {
         Ok(Self {
             subject: Subject { kind, id },
             new_state,
+            connections,
             networks,
             reason,
         })
+    }
+
+    /// The scope, as connection ids and their kinds, both ascending and
+    /// deduplicated.
+    fn parse_scope(
+        body: &Value,
+        registry: &crate::connections::Registry,
+    ) -> Result<(Vec<String>, Vec<Network>), Invalid> {
+        let strings = |member: &str| -> Result<Option<Vec<String>>, Invalid> {
+            let Some(value) = body.pointer(&format!("/scope/{member}")) else {
+                return Ok(None);
+            };
+            let entries = value
+                .as_array()
+                .ok_or_else(|| Invalid::Malformed(format!("scope.{member}")))?;
+            let mut values = Vec::new();
+            for entry in entries {
+                let value = entry
+                    .as_str()
+                    .ok_or_else(|| Invalid::Malformed(format!("scope.{member}")))?;
+                if !values.contains(&value.to_owned()) {
+                    values.push(value.to_owned());
+                }
+            }
+            if values.is_empty() {
+                return Err(Invalid::Malformed(format!("scope.{member}")));
+            }
+            Ok(Some(values))
+        };
+        let declared_networks = match strings("networks")? {
+            None => None,
+            Some(values) => {
+                let mut networks = Vec::new();
+                for value in values {
+                    networks.push(Network::parse(&value).ok_or(Invalid::Unknown {
+                        field: "scope.networks".to_owned(),
+                        value,
+                    })?);
+                }
+                Some(networks)
+            }
+        };
+        let mut connections = match strings("connections")? {
+            Some(ids) => {
+                for id in &ids {
+                    if registry.get(id).is_none() {
+                        return Err(Invalid::Unknown {
+                            field: "scope.connections".to_owned(),
+                            value: id.clone(),
+                        });
+                    }
+                }
+                ids
+            }
+            // A caller not yet migrated: each network is its single
+            // connection on this deployment, read in the registry.
+            None => {
+                let networks = declared_networks
+                    .as_ref()
+                    .ok_or_else(|| Invalid::Malformed("scope.connections".to_owned()))?;
+                let mut ids = Vec::new();
+                for network in networks {
+                    match registry.only_of_kind(network.as_str()) {
+                        Some(connection) => ids.push(connection.id.clone()),
+                        None => {
+                            return Err(Invalid::ScopeNeedsConnections {
+                                network: network.as_str().to_owned(),
+                                connections: registry
+                                    .connections()
+                                    .iter()
+                                    .filter(|c| c.kind == network.as_str())
+                                    .map(|c| c.id.clone())
+                                    .collect(),
+                            })
+                        }
+                    }
+                }
+                ids
+            }
+        };
+        // Ascending order — the order the id recipe joins them in.
+        connections.sort();
+        let mut networks = Vec::new();
+        for id in &connections {
+            let kind = registry
+                .get(id)
+                .map(|connection| connection.kind.as_str())
+                .unwrap_or_default();
+            // A connection whose kind is not a network — a calendar — has
+            // no consent to decide (ADR 0033).
+            let network = Network::parse(kind).ok_or(Invalid::Unknown {
+                field: "scope.connections".to_owned(),
+                value: id.clone(),
+            })?;
+            if !networks.contains(&network) {
+                networks.push(network);
+            }
+        }
+        networks.sort_by_key(|network| network.as_str());
+        if let Some(mut declared) = declared_networks {
+            declared.sort_by_key(|network| network.as_str());
+            declared.dedup();
+            if declared != networks {
+                return Err(Invalid::ScopeMembersDisagree {
+                    networks: declared.iter().map(|n| n.as_str().to_owned()).collect(),
+                    connections,
+                });
+            }
+        }
+        Ok((connections, networks))
     }
 
     /// Refuses a decision whose subject is one of the owner's own identities
@@ -396,15 +531,13 @@ impl Decision {
         Ok(())
     }
 
-    /// The scope as the id recipe renders it: the networks in ascending
+    /// The scope as the id recipe renders it: the connections in ascending
     /// order, joined by single ASCII commas with no spaces, so a single
-    /// network renders as just that value.
+    /// connection renders as just that value. Before #270 this joined the
+    /// networks; on a deployment whose connections are named after their
+    /// networks the string is the same, so no id changed.
     pub fn scope_key(&self) -> String {
-        self.networks
-            .iter()
-            .map(|network| network.as_str())
-            .collect::<Vec<_>>()
-            .join(",")
+        self.connections.join(",")
     }
 }
 
@@ -426,14 +559,14 @@ pub struct Recorded {
 
 impl Recorded {
     /// The contract's deterministic id: the lowercase-hex sha256 of
-    /// `subject.type:subject.id:new_state:<networks>:occurred_at`, where
-    /// `<networks>` is the scope sorted ascending and comma-joined, and
+    /// `subject.type:subject.id:new_state:<connections>:occurred_at`, where
+    /// `<connections>` is the scope sorted ascending and comma-joined, and
     /// `occurred_at` is verbatim what the event carries.
     ///
     /// The scope is in the key on purpose: two decisions on the same subject,
-    /// to the same state, at the same instant but over different networks are
-    /// different decisions, and a key without the scope would collide them
-    /// onto one id that the bus would then deduplicate down to one.
+    /// to the same state, at the same instant but over different perimeters
+    /// are different decisions, and a key without the scope would collide
+    /// them onto one id that the bus would then deduplicate down to one.
     pub fn event_id(&self) -> String {
         let key = format!(
             "{}:{}:{}:{}:{}",
@@ -488,6 +621,7 @@ impl Recorded {
                 "old_state": self.old_state.as_str(),
                 "new_state": self.decision.new_state.as_str(),
                 "scope": {
+                    "connections": self.decision.connections.clone(),
                     "networks": self.decision.networks
                         .iter()
                         .map(|network| Value::from(network.as_str()))
@@ -607,8 +741,24 @@ mod tests {
         }
     }
 
+    /// The reference deployment's registry: one connection per network,
+    /// named after it — the shape under which `scope.networks` alone is
+    /// enough — plus a second SMS account for the tests that need a kind
+    /// with two.
+    fn registry() -> crate::connections::Registry {
+        crate::connections::Registry::from_config(
+            Some(
+                "whatsapp=whatsapp,signal=signal,telegram=telegram,sms=sms,sms-work=sms=Work,\
+                 mail-linagora=email",
+            ),
+            &[],
+            "example.com",
+        )
+        .expect("a registry")
+    }
+
     fn request(body: Value) -> Result<Decision, Invalid> {
-        Decision::parse(&body)
+        Decision::parse(&body, &registry())
     }
 
     fn contact_decision(networks: Value) -> Value {
@@ -659,6 +809,7 @@ mod tests {
                     id: "@whatsapp_33612345678:example.com".to_owned(),
                 },
                 new_state: State::Granted,
+                connections: vec!["signal".to_owned(), "whatsapp".to_owned()],
                 networks: vec![Network::Signal, Network::Whatsapp],
                 reason: None,
             },
@@ -691,6 +842,7 @@ mod tests {
                     id: "@a:example.com".to_owned(),
                 },
                 new_state: State::Granted,
+                connections: vec!["whatsapp".to_owned()],
                 networks: vec![Network::Whatsapp],
                 reason: None,
             },
@@ -713,6 +865,7 @@ mod tests {
             Some("@michel:example.com")
         );
 
+        recorded.decision.connections = vec!["signal".to_owned(), "whatsapp".to_owned()];
         recorded.decision.networks = vec![Network::Signal, Network::Whatsapp];
         let several = recorded.envelope("example.com", "2026-09-17T10:05:01Z");
         assert!(
@@ -723,6 +876,84 @@ mod tests {
             several["data"]["scope"]["networks"],
             json!(["signal", "whatsapp"])
         );
+        assert_eq!(
+            several["data"]["scope"]["connections"],
+            json!(["signal", "whatsapp"]),
+            "the perimeter itself, beside its kinds"
+        );
+    }
+
+    #[test]
+    fn a_scope_of_networks_alone_is_read_as_their_single_connections() {
+        // A caller not yet migrated (#270): the registry has one Signal
+        // connection, so `signal` is it — read there, not spelled from the
+        // name — and the decision carries both members.
+        let decision = request(contact_decision(json!(["signal"]))).unwrap();
+        assert_eq!(decision.connections, ["signal"]);
+        assert_eq!(decision.networks, [Network::Signal]);
+        // SMS has two on this registry: the Gateway will not pick.
+        match request(contact_decision(json!(["sms"]))) {
+            Err(Invalid::ScopeNeedsConnections {
+                network,
+                connections,
+            }) => {
+                assert_eq!(network, "sms");
+                assert_eq!(connections, ["sms", "sms-work"]);
+            }
+            other => panic!("expected the two candidates named, got {other:?}"),
+        }
+        assert_eq!(
+            Invalid::ScopeNeedsConnections {
+                network: "whatsapp".to_owned(),
+                connections: vec![]
+            }
+            .code(),
+            "malformed_request",
+            "not a new code: the member that would settle it is missing"
+        );
+    }
+
+    #[test]
+    fn a_scope_of_connections_is_the_perimeter_and_its_kinds_follow() {
+        let decision = request(json!({
+            "subject": { "type": "contact", "id": "@whatsapp_33612345678:example.com" },
+            "new_state": "granted",
+            "scope": { "connections": ["sms-work", "signal", "sms-work"] }
+        }))
+        .unwrap();
+        assert_eq!(decision.connections, ["signal", "sms-work"]);
+        assert_eq!(decision.networks, [Network::Signal, Network::Sms]);
+        assert_eq!(decision.scope_key(), "signal,sms-work");
+        // Both members: they must describe one perimeter.
+        let disagree = request(json!({
+            "subject": { "type": "contact", "id": "@whatsapp_33612345678:example.com" },
+            "new_state": "granted",
+            "scope": { "connections": ["sms-work"], "networks": ["signal"] }
+        }));
+        assert!(
+            matches!(disagree, Err(Invalid::ScopeMembersDisagree { .. })),
+            "{disagree:?}"
+        );
+        // A connection the registry does not know, and one whose kind has
+        // no consent to decide (a mailbox is a network; a calendar is not,
+        // and none is registered here, so the unknown id is the case).
+        let unknown = request(json!({
+            "subject": { "type": "contact", "id": "@whatsapp_33612345678:example.com" },
+            "new_state": "granted",
+            "scope": { "connections": ["wa-home"] }
+        }));
+        assert!(
+            matches!(unknown, Err(Invalid::Unknown { ref field, .. }) if field == "scope.connections"),
+            "{unknown:?}"
+        );
+        // A network default can be held on one connection of its kind.
+        let default = request(json!({
+            "subject": { "type": "network", "id": "sms" },
+            "new_state": "revoked",
+            "scope": { "connections": ["sms-work"] }
+        }))
+        .unwrap();
+        assert_eq!(default.connections, ["sms-work"]);
     }
 
     #[test]
@@ -734,6 +965,7 @@ mod tests {
                     id: "whatsapp".to_owned(),
                 },
                 new_state: State::Revoked,
+                connections: vec!["whatsapp".to_owned()],
                 networks: vec![Network::Whatsapp],
                 reason: Some("stepping away for a while".to_owned()),
             },

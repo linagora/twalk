@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
     let connections = Arc::new(config.connections.clone());
     let (consent, contacts, approvals, suggestions, answers, store) = match &config.consent {
         Some(consent) => {
-            let (store, outbox, owner) = open_consent(consent, &metrics)?;
+            let (store, outbox, owner) = open_consent(consent, &metrics, &connections)?;
             tokio::spawn(publish_until_shutdown(
                 outbox.clone(),
                 consent.nats_url.clone(),
@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
                 store.clone(),
                 metrics.clone(),
                 owner,
+                connections.clone(),
                 consent.nats_url.clone(),
                 config.inbound_consumer.clone(),
             ));
@@ -432,12 +433,6 @@ async fn main() -> Result<()> {
         "the registry of connections is what every event is stamped with and every consent \
          decision is scoped to"
     );
-    if let Some(store) = &store {
-        store
-            .record_connections(connections.connections())
-            .context("failed to record the connections in the store")?;
-    }
-
     let portals = match Portals::new(
         config.bootstrap.homeserver_url.as_deref(),
         config.bootstrap.sensor_user_id.as_deref(),
@@ -594,6 +589,7 @@ async fn main() -> Result<()> {
 fn open_consent(
     consent: &Consent,
     metrics: &Arc<Metrics>,
+    connections: &twalk_companion_gateway::connections::Registry,
 ) -> Result<(Arc<Store>, Arc<Outbox>, Arc<Owner>)> {
     // Who this deployment's owner is, under every identity their own traffic
     // arrives under (#149). The store holds it, so no read of the consent
@@ -604,6 +600,12 @@ fn open_consent(
     ));
     let store = Store::open(&consent.state_dir, owner.clone())
         .context("failed to open the consent store")?;
+    // The registry, recorded before anything else touches the store (#269,
+    // #270): a sighting and a decision both reference a connection row, and
+    // the projection task starts consuming as soon as it is spawned.
+    store
+        .record_connections(connections.connections())
+        .context("failed to record the connections in the store")?;
     info!(
         store = %store.path().display(),
         owner = %consent.owner,

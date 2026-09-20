@@ -1051,7 +1051,7 @@ async fn the_deployed_gateway_creates_the_one_account_and_the_sensor_joins_what_
     members.sort();
     assert_eq!(
         members,
-        vec!["contact", "first_seen", "last_seen", "network"],
+        vec!["connection", "contact", "first_seen", "last_seen", "network"],
         "the deployed Gateway hands out an ID, a network and two instants — no body,          no display name, no network identifier: {entry}"
     );
     assert!(

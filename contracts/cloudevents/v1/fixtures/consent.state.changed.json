@@ -16,6 +16,7 @@
     "old_state": "unset",
     "new_state": "granted",
     "scope": {
+      "connections": ["whatsapp"],
       "networks": ["whatsapp"]
     },
     "occurred_at": "2026-09-17T10:05:00Z",

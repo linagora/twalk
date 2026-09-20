@@ -1054,10 +1054,14 @@ fn the_networks_the_description_names_are_the_contracts() -> Result<()> {
         .context("the connection definition has a pattern")?
         .to_owned();
     assert_eq!(
-        description.doc["components"]["schemas"]["Connection"]["properties"]["id"]["pattern"]
-            .as_str(),
+        description.doc["components"]["schemas"]["ConnectionId"]["pattern"].as_str(),
         Some(id_pattern.as_str()),
-        "openapi.yaml's Connection.id pattern disagrees with the contract"
+        "openapi.yaml's ConnectionId pattern disagrees with the contract"
+    );
+    assert_eq!(
+        text.matches(&format!("pattern: \"{id_pattern}\"")).count(),
+        1,
+        "openapi.yaml spells the id's pattern somewhere other than ConnectionId"
     );
     Ok(())
 }

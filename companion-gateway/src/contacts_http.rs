@@ -324,6 +324,7 @@ mod tests {
     fn seen(contact: &str, network: Network, at: &str) -> SeenContact {
         SeenContact {
             contact: contact.to_owned(),
+            connection: network.as_str().to_owned(),
             network,
             first_seen: at.to_owned(),
             last_seen: at.to_owned(),
@@ -394,7 +395,7 @@ mod tests {
         let members: Vec<&String> = entry.as_object().expect("an object").keys().collect();
         assert_eq!(
             members,
-            vec!["contact", "first_seen", "last_seen", "network"],
+            vec!["connection", "contact", "first_seen", "last_seen", "network"],
             "a body, a display name or a network identifier must never be one of these"
         );
     }
