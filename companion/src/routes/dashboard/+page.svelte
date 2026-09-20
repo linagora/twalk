@@ -511,6 +511,9 @@
 	<nav class="actions">
 		<a class="button button--secondary" href="/networks">{$t('dashboard.addNetwork')}</a>
 		<a class="button button--secondary" href="/personas">{$t('dashboard.activateAgent')}</a>
+		<!-- The settings entry (#101): the model, the language — the decisions
+		     an operator used to need shell access for (ADR 0015). -->
+		<a class="button button--secondary" href="/settings" data-testid="to-settings">{$t('dashboard.settings')}</a>
 	</nav>
 
 	<p class="small muted" data-testid="deployment-version">
