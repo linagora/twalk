@@ -377,46 +377,38 @@ pub struct Suggestion {
 /// The half of the trigger event an approval needs: who wrote, and which
 /// room to answer in.
 ///
-/// Three values, and the struct has no `data` member — so the trigger's body,
+/// Four values, and the struct has no `data` member — so the trigger's body,
 /// its attachments and the contact's `network_identifier` never become values
 /// in this process, exactly as they do not on the pending-contact path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trigger {
     /// The sender's Matrix user ID: the contact whose consent is checked.
     pub contact: String,
+    /// The perimeter the message arrived on — what the consent is read
+    /// against (#270).
+    pub connection: String,
     pub network: Network,
     /// The portal room the reply is posted into, from the event's
     /// `matrix://<homeserver>/<room id>` source.
     pub room_id: String,
 }
 
-/// The connection an event on the bus belongs to: the one it carries, or —
-/// for an event published before #269, or by a producer that has not
-/// learned the extension yet — the registry's single connection of its
-/// kind. A lookup in the registry the Gateway keeps, never a name derived
-/// from the network: when the kind has no connection, or two, the Gateway
-/// does not guess which perimeter the event was about, and says so.
+/// The connection an event on the bus belongs to: the one it carries — which
+/// must be the registry's — or, for an event published before #269 or by a
+/// producer that has not learned the extension yet, the registry's single
+/// connection of its kind. [`crate::connections::Registry::resolve`], with
+/// the refusal every unreadable event gets: the Gateway does not guess which
+/// perimeter the event was about, and says why it could not tell.
 pub fn connection_of(
     registry: &crate::connections::Registry,
     carried: Option<&str>,
     network: Network,
 ) -> Result<String, Refusal> {
-    if let Some(id) = carried.map(str::trim).filter(|id| !id.is_empty()) {
-        return Ok(id.to_owned());
-    }
     registry
-        .only_of_kind(network.as_str())
+        .resolve(carried, network.as_str())
         .map(|connection| connection.id.clone())
-        .ok_or_else(|| {
-            Refusal::SuggestionUnreadable(format!(
-                "it names no connection, and the registry has {} of the kind {:?} to stand in",
-                registry
-                    .connections()
-                    .iter()
-                    .filter(|c| c.kind == network.as_str())
-                    .count(),
-                network.as_str()
-            ))
+        .map_err(|why| {
+            Refusal::SuggestionUnreadable(format!("its connection cannot be told: {why}"))
         })
 }
 
@@ -485,14 +477,17 @@ struct SuggestionContent {
     format: String,
 }
 
-/// What the Gateway reads of the trigger event: three CloudEvents
-/// attributes, no `data`.
+/// What the Gateway reads of the trigger event: its CloudEvents attributes,
+/// no `data`.
 #[derive(Debug, Deserialize)]
 struct TriggerDocument {
     id: String,
     source: String,
     subject: String,
     network: String,
+    /// The perimeter (#269); absent on an event older than it.
+    #[serde(default)]
+    connection: Option<String>,
 }
 
 /// The trigger event as a suggestion built **outside** a persona needs it
@@ -969,11 +964,19 @@ impl Approvals {
     /// before it publishes a suggestion, and a contact revoked while Hermes was
     /// reasoning must not have a draft about them appear on the approval
     /// screen. One implementation, one refusal vocabulary.
-    pub fn consent_now(&self, contact: &str, network: Network) -> Result<(), Refusal> {
-        let effective = self.store.effective(contact, network).map_err(|error| {
-            warn!(%error, %contact, "a consent state could not be read");
-            Refusal::StoreUnavailable(format!("the consent state could not be read: {error:#}"))
-        })?;
+    pub fn consent_now(
+        &self,
+        contact: &str,
+        connection: &str,
+        network: Network,
+    ) -> Result<(), Refusal> {
+        let effective = self
+            .store
+            .effective(contact, connection, network)
+            .map_err(|error| {
+                warn!(%error, %contact, "a consent state could not be read");
+                Refusal::StoreUnavailable(format!("the consent state could not be read: {error:#}"))
+            })?;
         match effective.state {
             State::Granted => Ok(()),
             State::Revoked => Err(Refusal::ConsentRevoked {
@@ -1175,7 +1178,7 @@ impl Approvals {
         // about now. Failing closed: an approval whose consent cannot be read
         // is refused, because refusing a send is recoverable and sending is
         // not ([`Self::consent_now`], shared with the answer path since #206).
-        self.consent_now(&trigger.contact, trigger.network)?;
+        self.consent_now(&trigger.contact, &trigger.connection, trigger.network)?;
 
         let content = request
             .edited
@@ -1407,6 +1410,7 @@ impl Approvals {
         let network = Network::parse(&document.network).unwrap_or(suggestion.network);
         Ok(Trigger {
             contact: document.subject,
+            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
             network,
             room_id,
         })
@@ -1650,6 +1654,7 @@ mod tests {
     fn trigger() -> Trigger {
         Trigger {
             contact: "@whatsapp_33612345678:example.com".to_owned(),
+            connection: "whatsapp".to_owned(),
             network: Network::Whatsapp,
             room_id: "!abcXYZ123:example.com".to_owned(),
         }
@@ -1809,6 +1814,13 @@ mod tests {
             "wa-work",
             "what the event carries is what it belongs to"
         );
+        assert!(
+            matches!(
+                connection_of(&registry, Some("wa-old"), Network::Whatsapp),
+                Err(Refusal::SuggestionUnreadable(_))
+            ),
+            "a carried id the registry does not know is not trusted either"
+        );
         assert_eq!(
             connection_of(&registry, None, Network::Signal).unwrap(),
             "signal"
@@ -1818,10 +1830,10 @@ mod tests {
             "matrix",
             "the native connection every registry has"
         );
-        for (network, count) in [(Network::Whatsapp, "2"), (Network::Telegram, "0")] {
+        for (network, reason_names) in [(Network::Whatsapp, "2 connections"), (Network::Telegram, "no connection")] {
             match connection_of(&registry, Some(""), network) {
                 Err(Refusal::SuggestionUnreadable(reason)) => {
-                    assert!(reason.contains(count), "{reason}");
+                    assert!(reason.contains(reason_names), "{reason}");
                 }
                 other => panic!("{network:?}: expected a refusal, got {other:?}"),
             }

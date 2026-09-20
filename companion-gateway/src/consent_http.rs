@@ -54,6 +54,7 @@ use axum::{Extension, Router};
 use serde_json::{json, Value};
 use tracing::{debug, error};
 
+use crate::connections::Unresolved;
 use crate::consent::{Decision, Effective, Invalid, Network, Subject};
 use crate::http::Gateway;
 use crate::outbox::Refused;
@@ -79,7 +80,7 @@ pub fn routes() -> Router<Gateway> {
 /// {
 ///   "subject": { "type": "contact", "id": "@whatsapp_33612345678:example.com" },
 ///   "new_state": "granted",
-///   "scope": { "networks": ["whatsapp"] },
+///   "scope": { "connections": ["whatsapp"] },
 ///   "reason": "optional, kept in the audit trail"
 /// }
 /// ```
@@ -109,7 +110,7 @@ async fn record_decision(
             )
         }
     };
-    let decision = match Decision::parse(&body) {
+    let decision = match Decision::parse(&body, gateway.connections()) {
         Ok(decision) => decision,
         Err(invalid) => {
             debug!(
@@ -153,7 +154,10 @@ async fn record_decision(
                     "subject": subject_json(&recorded.decision.subject),
                     "old_state": recorded.old_state.as_str(),
                     "new_state": recorded.decision.new_state.as_str(),
-                    "scope": { "networks": networks_json(&recorded.decision.networks) },
+                    "scope": {
+                        "connections": recorded.decision.connections,
+                        "networks": networks_json(&recorded.decision.networks),
+                    },
                     "occurred_at": recorded.occurred_at,
                     "actor": recorded.actor,
                     "replayed": committed.replayed,
@@ -226,18 +230,57 @@ async fn effective_consent(
             "the contact query parameter is required: a contact's Matrix user ID",
         );
     };
-    let Some(network) = query.get("network").filter(|value| !value.is_empty()) else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "malformed_request",
-            "the network query parameter is required",
-        );
+    // The perimeter (#270): `connection` when the caller names one, else the
+    // single connection of the kind `network` names — the registry's one
+    // resolver, refused when the kind has none or several.
+    let carried = query.get("connection").filter(|value| !value.is_empty());
+    let kind = match query.get("network").filter(|value| !value.is_empty()) {
+        Some(network) if Network::parse(network).is_none() => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_value",
+                &format!("network has the unknown value {network:?}"),
+            );
+        }
+        Some(network) => network.as_str(),
+        None if carried.is_none() => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                "the connection query parameter is required (or network, for a network with \
+                 one connection)",
+            );
+        }
+        None => "",
     };
-    let Some(network) = Network::parse(network) else {
+    let connection = match gateway
+        .connections()
+        .resolve(carried.map(String::as_str), kind)
+    {
+        Ok(connection) => connection.clone(),
+        Err(Unresolved::UnknownId(id)) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_value",
+                &format!("connection has the unknown value {id:?}"),
+            )
+        }
+        Err(why) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                &format!("{why}: pass the connection query parameter"),
+            )
+        }
+    };
+    let Some(network) = Network::parse(&connection.kind) else {
         return api_error(
             StatusCode::BAD_REQUEST,
             "unknown_value",
-            &format!("network has the unknown value {network:?}"),
+            &format!(
+                "connection {:?} is of the kind {:?}, which has no consent state",
+                connection.id, connection.kind
+            ),
         );
     };
     // "What consent applies to the owner?" has no answer, and the honest reply
@@ -257,8 +300,10 @@ async fn effective_consent(
             &refusal.message(),
         );
     }
-    match consent.store().effective(contact, network) {
-        Ok(effective) => Json(effective_json(contact, network, &effective)).into_response(),
+    match consent.store().effective(contact, &connection.id, network) {
+        Ok(effective) => {
+            Json(effective_json(contact, &connection.id, network, &effective)).into_response()
+        }
         Err(error) => {
             error!(%error, "failed to resolve the effective consent state");
             store_unavailable()
@@ -306,6 +351,7 @@ fn networks_json(networks: &[Network]) -> Vec<Value> {
 fn entry_json(entry: &Entry) -> Value {
     json!({
         "subject": subject_json(&entry.subject),
+        "connection": entry.connection,
         "network": entry.network.as_str(),
         "state": entry.state.as_str(),
         "decided_at": entry.decided_at,
@@ -313,9 +359,15 @@ fn entry_json(entry: &Entry) -> Value {
     })
 }
 
-fn effective_json(contact: &str, network: Network, effective: &Effective) -> Value {
+fn effective_json(
+    contact: &str,
+    connection: &str,
+    network: Network,
+    effective: &Effective,
+) -> Value {
     json!({
         "contact": contact,
+        "connection": connection,
         "network": network.as_str(),
         "state": effective.state.as_str(),
         "decided_by": effective.decided_by.as_ref().map(subject_json),
@@ -334,6 +386,7 @@ mod tests {
                 kind: SubjectType::Network,
                 id: "whatsapp".to_owned(),
             },
+            connection: "whatsapp".to_owned(),
             network: Network::Whatsapp,
             state: State::Granted,
             decided_at: "2026-09-17T10:00:00.000Z".to_owned(),
@@ -343,6 +396,7 @@ mod tests {
             entry_json(&entry),
             json!({
                 "subject": { "type": "network", "id": "whatsapp" },
+                "connection": "whatsapp",
                 "network": "whatsapp",
                 "state": "granted",
                 "decided_at": "2026-09-17T10:00:00.000Z",
@@ -355,9 +409,10 @@ mod tests {
     fn an_undecided_contact_names_no_decision() {
         let undecided = Effective::resolve("@a:example.com", Network::Telegram, None, None);
         assert_eq!(
-            effective_json("@a:example.com", Network::Telegram, &undecided),
+            effective_json("@a:example.com", "telegram", Network::Telegram, &undecided),
             json!({
                 "contact": "@a:example.com",
+                "connection": "telegram",
                 "network": "telegram",
                 "state": "pending",
                 "decided_by": null

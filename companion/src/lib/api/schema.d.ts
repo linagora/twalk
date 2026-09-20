@@ -2090,11 +2090,17 @@ export interface components {
              * @description Opaque and stable. On a deployment with one connection per
              *     network it is the network's name; nothing parses an id.
              */
-            id: string;
+            id: components["schemas"]["ConnectionId"];
             kind: components["schemas"]["Kind"];
             /** @description For a person to read; a bridge's instance id by default. */
             label: string;
         };
+        /**
+         * @description The id of a connection (ADR 0033): the one shape, copied from the
+         *     contract's `definitions/connection.schema.json` and tested against
+         *     it. Every member that names a connection references this schema.
+         */
+        ConnectionId: string;
         /** @description One decision the owner asks the Gateway to record. */
         ConsentDecisionRequest: {
             new_state: components["schemas"]["ConsentState_State"];
@@ -2104,17 +2110,40 @@ export interface components {
              *     decision — never message content.
              */
             reason?: string;
-            scope: components["schemas"]["ConsentScope"];
+            scope: components["schemas"]["ConsentScopeRequest"];
             subject: components["schemas"]["ConsentSubject"];
         };
-        /** @description The perimeter of a decision. */
+        /**
+         * @description The perimeter of a decision as recorded: the connections it covers —
+         *     the key the state is held under — and their kinds, derived and kept
+         *     for a client not yet migrated (#270).
+         */
         ConsentScope: {
-            /**
-             * @description The networks the decision applies to. Order does not matter on
-             *     the way in: the Gateway sorts it, because the sorted scope is
-             *     part of the event's deterministic id.
-             */
+            /** @description The connections, sorted ascending. */
+            connections: components["schemas"]["ConnectionId"][];
+            /** @description The kinds of `connections`, deduplicated, sorted. */
             networks: components["schemas"]["Network"][];
+        };
+        /**
+         * @description The perimeter of a decision on the way in (ADR 0033, #270). Either
+         *     member is enough: `connections` names the perimeter; `networks`
+         *     alone is read as each network's single connection on this
+         *     deployment, and refused (`malformed_request`, naming the candidates)
+         *     when a network has several. Both together must agree.
+         */
+        ConsentScopeRequest: {
+            /**
+             * @description The connections the decision applies to, by the ids of
+             *     `GET /api/connections`. Order does not matter: the Gateway sorts
+             *     it, because the sorted scope is part of the event's deterministic
+             *     id.
+             */
+            connections?: components["schemas"]["ConnectionId"][];
+            /**
+             * @description Deprecated as an input since #270 — send `connections`. Read as
+             *     each network's single connection.
+             */
+            networks?: components["schemas"]["Network"][];
         };
         /**
          * @description The whole consent state, and the bus position it reflects. The two
@@ -2217,8 +2246,13 @@ export interface components {
          * @enum {string}
          */
         ConsentState_State: "granted" | "pending" | "revoked";
-        /** @description One (subject, network) of the current state. */
+        /**
+         * @description One (subject, connection) of the current state (#270). `network` is
+         *     the connection's kind, kept beside it for a client not yet migrated.
+         */
         ConsentStateEntry: {
+            /** @description The perimeter, by its id in `GET /api/connections`. */
+            connection: components["schemas"]["ConnectionId"];
             /**
              * Format: date-time
              * @description When the decision this entry comes from was taken.
@@ -2367,8 +2401,10 @@ export interface components {
              */
             devices: components["schemas"]["Device"][];
         };
-        /** @description The state that applies to one contact on one network. */
+        /** @description The state that applies to one contact on one connection. */
         EffectiveConsent: {
+            /** @description The connection the answer is about (#270). */
+            connection: components["schemas"]["ConnectionId"];
             /** @description The contact the question was about. */
             contact: string;
             /**
@@ -2759,11 +2795,17 @@ export interface components {
          */
         Network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix" | "email";
         /**
-         * @description One contact waiting for a decision, on one network. Four members, and
-         *     deliberately no fifth: a body, a display name or a network identifier
-         *     would each turn this list into something else.
+         * @description One contact waiting for a decision, on one connection. An id, a
+         *     perimeter and two instants — and deliberately nothing else: a body, a
+         *     display name or a network identifier would each turn this list into
+         *     something else. `network` is the connection's kind (#270).
          */
         PendingContact: {
+            /**
+             * @description The connection they wrote on: the perimeter a decision about
+             *     them is scoped to.
+             */
+            connection: components["schemas"]["ConnectionId"];
             /**
              * @description The contact's Matrix user ID, as the bridge materialised it, and
              *     what a decision about them will name as its subject.
@@ -3132,8 +3174,10 @@ export interface components {
              * @description The id of the `consent.state.changed.v1` event this decision is
              *     published as: the contract's deterministic key, the lowercase-hex
              *     sha256 of
-             *     `subject.type:subject.id:new_state:<sorted networks>:occurred_at`.
-             *     A consumer can match a bus event to this answer by it.
+             *     `subject.type:subject.id:new_state:<sorted connections>:occurred_at`.
+             *     A consumer can match a bus event to this answer by it. (Before
+             *     #270 the recipe joined the networks; a connection named after
+             *     its network makes the same string, so no id changed.)
              */
             event_id: string;
             new_state: components["schemas"]["ConsentState_State"];
@@ -5214,12 +5258,22 @@ export interface operations {
         parameters: {
             query: {
                 /**
+                 * @description The connection the question is about (#270), by its id in
+                 *     `GET /api/connections`. One of `connection` and `network` is
+                 *     required; `connection` wins when both are sent.
+                 */
+                connection?: components["schemas"]["ConnectionId"];
+                /**
                  * @description The contact's Matrix user ID.
                  * @example @whatsapp_33612345678:example.com
                  */
                 contact: string;
-                /** @description The network the question is about. */
-                network: components["schemas"]["Network"];
+                /**
+                 * @description The network the question is about, read as its single connection
+                 *     on this deployment — refused (`malformed_request`) when the
+                 *     network has none or several; send `connection` then.
+                 */
+                network?: components["schemas"]["Network"];
             };
             header?: never;
             path?: never;

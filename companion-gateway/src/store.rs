@@ -73,7 +73,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 7] = [
+pub const MIGRATIONS: [&str; 8] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -439,6 +439,179 @@ pub const MIGRATIONS: [&str; 7] = [
         created_at TEXT NOT NULL
     ) WITHOUT ROWID;
     "#,
+    // v8 — consent is keyed on the connection (ADR 0033, issue #270): the
+    // expand step of the wide refactor #251 sequences.
+    //
+    // A decision's scope becomes a set of connections, held in a table of
+    // the same shape as the network one, and every projection is rewritten
+    // over it: `consent_state`, `consent_snapshot`, `pending_contact`, and
+    // the `contact_seen` table they join. `network` stays on every one of
+    // them as a derived column — the connection's kind, from the registry
+    // table v7 made — so that a consumer not yet migrated reads what it read
+    // before. `consent_decision_network` is not dropped: it is part of the
+    // journal's history, append-only by its own triggers, and after this
+    // migration nothing writes it.
+    //
+    // **The migration of the decisions already taken.** Every scope row is
+    // copied onto the connection whose id is its network's name — the id the
+    // registry derives for a deployment with one bridge per network, and the
+    // id #269 fixed on purpose so that this copy is a rename and not a
+    // guess. It is correct only because it is done now, while every
+    // deployment has exactly one connection per network (ADR 0033); a second
+    // account of one network declared later starts with no decision, which
+    // is the safe direction. The registry rows those ids need are inserted
+    // here too, kind and label both the network's name, so a store migrated
+    // before its Gateway starts still joins — the Gateway's own registry
+    // refreshes the label at its next start.
+    //
+    // The `CHECK`s on `network` were copies of the contract frozen at v1 and
+    // would refuse `email` (#268). SQLite cannot alter a constraint, so the
+    // two tables that still carry one and are still written, `approval` and
+    // `bridge_status_change`, are rebuilt with the contract's current list;
+    // `contact_seen` is rebuilt anyway, keyed on the connection, and carries
+    // no network column at all any more — four columns, still.
+    r#"
+    CREATE TABLE consent_decision_connection (
+        sequence   INTEGER NOT NULL REFERENCES consent_decision(sequence),
+        connection TEXT NOT NULL REFERENCES connection(id),
+        PRIMARY KEY (sequence, connection)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER consent_decision_connection_no_delete
+    BEFORE DELETE ON consent_decision_connection
+    BEGIN
+        SELECT RAISE(ABORT, 'the consent decision journal is append-only');
+    END;
+    CREATE TRIGGER consent_decision_connection_no_update
+    BEFORE UPDATE ON consent_decision_connection
+    BEGIN
+        SELECT RAISE(ABORT, 'the consent decision journal is append-only');
+    END;
+
+    INSERT OR IGNORE INTO connection (id, kind, label, created_at)
+    SELECT network, network, network, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    FROM (SELECT network FROM consent_decision_network
+          UNION SELECT network FROM contact_seen);
+    INSERT INTO consent_decision_connection (sequence, connection)
+    SELECT sequence, network FROM consent_decision_network;
+
+    DROP VIEW pending_contact;
+    DROP VIEW consent_snapshot;
+    DROP VIEW consent_state;
+
+    CREATE VIEW consent_state AS
+    SELECT subject_type, subject_id, connection, network, new_state AS state,
+           occurred_at AS decided_at, sequence AS decision_sequence
+    FROM (
+        SELECT d.subject_type, d.subject_id, c.connection, k.kind AS network,
+               d.new_state, d.occurred_at, d.sequence,
+               ROW_NUMBER() OVER (
+                   PARTITION BY d.subject_type, d.subject_id, c.connection
+                   ORDER BY d.sequence DESC
+               ) AS recency
+        FROM consent_decision d
+        JOIN consent_decision_connection c ON c.sequence = d.sequence
+        JOIN connection k ON k.id = c.connection
+    )
+    WHERE recency = 1;
+
+    CREATE VIEW consent_snapshot AS
+    SELECT subject_type, subject_id, connection, network, state, decided_at, decision_sequence
+    FROM (
+        SELECT d.subject_type, d.subject_id, c.connection, k.kind AS network,
+               d.new_state AS state, d.occurred_at AS decided_at,
+               d.sequence AS decision_sequence,
+               ROW_NUMBER() OVER (
+                   PARTITION BY d.subject_type, d.subject_id, c.connection
+                   ORDER BY d.sequence DESC
+               ) AS recency
+        FROM consent_decision d
+        JOIN consent_decision_connection c ON c.sequence = d.sequence
+        JOIN connection k ON k.id = c.connection
+        WHERE d.subject_type <> 'persona'
+          AND d.sequence <= (SELECT decision_sequence FROM consent_snapshot_horizon)
+    )
+    WHERE recency = 1;
+
+    CREATE TABLE contact_seen_v8 (
+        contact_id TEXT NOT NULL,
+        -- The connection it wrote on (ADR 0033): the perimeter a decision
+        -- about this contact is scoped to. Its kind is the network.
+        connection TEXT NOT NULL REFERENCES connection(id),
+        first_seen TEXT NOT NULL,
+        last_seen  TEXT NOT NULL,
+        PRIMARY KEY (contact_id, connection)
+    ) WITHOUT ROWID;
+    INSERT INTO contact_seen_v8 (contact_id, connection, first_seen, last_seen)
+    SELECT contact_id, network, first_seen, last_seen FROM contact_seen;
+    DROP TABLE contact_seen;
+    ALTER TABLE contact_seen_v8 RENAME TO contact_seen;
+
+    -- The pending list, keyed on the connection: a network default taken
+    -- on that connection covers every contact on it, a contact's own
+    -- decision on it covers the contact.
+    CREATE VIEW pending_contact AS
+    SELECT s.contact_id, s.connection, k.kind AS network, s.first_seen, s.last_seen
+    FROM contact_seen s
+    JOIN connection k ON k.id = s.connection
+    WHERE NOT EXISTS (
+        SELECT 1 FROM consent_state c
+        WHERE c.connection = s.connection
+          AND ((c.subject_type = 'contact' AND c.subject_id = s.contact_id)
+            OR (c.subject_type = 'network' AND c.subject_id = k.kind))
+    );
+
+    CREATE TABLE approval_v8 (
+        sequence            INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id            TEXT NOT NULL UNIQUE,
+        suggestion_event_id TEXT NOT NULL,
+        approved_by         TEXT NOT NULL,
+        persona_id          TEXT NOT NULL,
+        network             TEXT NOT NULL CHECK (network IN ('whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix', 'email')),
+        contact             TEXT NOT NULL,
+        edited              INTEGER NOT NULL CHECK (edited IN (0, 1)),
+        approved_at         TEXT NOT NULL,
+        published_at        TEXT,
+        stream_sequence     INTEGER,
+        UNIQUE (suggestion_event_id, approved_by)
+    );
+    INSERT INTO approval_v8 SELECT * FROM approval;
+    DROP TABLE approval;
+    ALTER TABLE approval_v8 RENAME TO approval;
+    CREATE INDEX approval_suggestion ON approval (suggestion_event_id);
+
+    DROP VIEW bridge_status_current;
+    CREATE TABLE bridge_status_change_v8 (
+        sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id        TEXT NOT NULL UNIQUE,
+        bridge_id       TEXT NOT NULL,
+        network         TEXT NOT NULL CHECK (network IN ('whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix', 'email')),
+        from_state      TEXT NOT NULL CHECK (from_state IN ('starting', 'connected', 'degraded', 'disconnected', 'session_expired')),
+        to_state        TEXT NOT NULL CHECK (to_state IN ('starting', 'connected', 'degraded', 'disconnected', 'session_expired')),
+        occurred_at     TEXT NOT NULL,
+        reason          TEXT,
+        last_message_at TEXT,
+        envelope        TEXT NOT NULL,
+        published_at    TEXT,
+        stream_sequence INTEGER
+    );
+    INSERT INTO bridge_status_change_v8 SELECT * FROM bridge_status_change;
+    DROP TABLE bridge_status_change;
+    ALTER TABLE bridge_status_change_v8 RENAME TO bridge_status_change;
+    CREATE INDEX bridge_status_change_bridge
+        ON bridge_status_change (bridge_id, sequence);
+    CREATE INDEX bridge_status_change_unpublished
+        ON bridge_status_change (sequence) WHERE published_at IS NULL;
+    CREATE VIEW bridge_status_current AS
+    SELECT bridge_id, network, to_state AS state, occurred_at, reason,
+           last_message_at, sequence
+    FROM (
+        SELECT c.*, ROW_NUMBER() OVER (
+                   PARTITION BY c.bridge_id ORDER BY c.sequence DESC
+               ) AS recency
+        FROM bridge_status_change c
+    )
+    WHERE recency = 1;
+    "#,
 ];
 
 /// One conversation's move, as the register decided it (issue #255).
@@ -500,11 +673,13 @@ pub struct Committed {
     pub replayed: bool,
 }
 
-/// One entry of the current state: a subject, a network, and the state the
-/// most recent decision covering them left behind.
+/// One entry of the current state: a subject, a connection, and the state
+/// the most recent decision covering them left behind. `network` is the
+/// connection's kind (#270).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub subject: Subject,
+    pub connection: String,
     pub network: Network,
     pub state: State,
     pub decided_at: String,
@@ -534,6 +709,8 @@ pub struct BridgeStatusCommitted {
 pub struct SeenContact {
     /// The contact's Matrix user ID, as the bridge materialised it.
     pub contact: String,
+    /// The connection it wrote on (#270); `network` is its kind.
+    pub connection: String,
     pub network: Network,
     /// RFC 3339, from the event's own `time` — the instant the Sensor
     /// produced the first and the last event this contact was the subject
@@ -799,22 +976,17 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .context("failed to open the decision transaction")?;
 
-        let placeholders = vec!["?"; decision.networks.len()].join(", ");
+        let placeholders = vec!["?"; decision.connections.len()].join(", ");
         let mut parameters: Vec<String> = vec![
             decision.subject.kind.as_str().to_owned(),
             decision.subject.id.clone(),
         ];
-        parameters.extend(
-            decision
-                .networks
-                .iter()
-                .map(|network| network.as_str().to_owned()),
-        );
+        parameters.extend(decision.connections.iter().cloned());
         let previous: Option<String> = transaction
             .query_row(
                 &format!(
                     "SELECT state FROM consent_state \
-                     WHERE subject_type = ? AND subject_id = ? AND network IN ({placeholders}) \
+                     WHERE subject_type = ? AND subject_id = ? AND connection IN ({placeholders}) \
                      ORDER BY decision_sequence DESC LIMIT 1"
                 ),
                 rusqlite::params_from_iter(parameters.iter()),
@@ -884,11 +1056,14 @@ impl Store {
             });
         }
         let sequence = transaction.last_insert_rowid();
-        for network in &decision.networks {
+        // The scope, one row per connection (#270). `consent_decision_network`
+        // is no longer written: `network` is read off the registry's kind.
+        for connection_id in &decision.connections {
             transaction
                 .execute(
-                    "INSERT INTO consent_decision_network (sequence, network) VALUES (?, ?)",
-                    rusqlite::params![sequence, network.as_str()],
+                    "INSERT INTO consent_decision_connection (sequence, connection) \
+                     VALUES (?, ?)",
+                    rusqlite::params![sequence, connection_id],
                 )
                 .context("failed to append the decision's scope")?;
         }
@@ -949,8 +1124,9 @@ impl Store {
         let connection = self.connection();
         let mut statement = connection
             .prepare(&format!(
-                "SELECT subject_type, subject_id, network, state, decided_at, decision_sequence \
-                 FROM consent_state {predicate} ORDER BY subject_type, subject_id, network"
+                "SELECT subject_type, subject_id, connection, network, state, decided_at, \
+                        decision_sequence \
+                 FROM consent_state {predicate} ORDER BY subject_type, subject_id, connection"
             ))
             .context("failed to prepare the current-state query")?;
         let rows = statement
@@ -961,17 +1137,19 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             })
             .context("failed to read the current state")?;
         let mut entries = Vec::new();
         for row in rows {
-            let (kind, id, network, state, decided_at, decision_sequence) =
+            let (kind, id, connection, network, state, decided_at, decision_sequence) =
                 row.context("failed to read a current-state row")?;
             entries.push(entry(
                 kind,
                 id,
+                connection,
                 network,
                 state,
                 decided_at,
@@ -1061,9 +1239,10 @@ impl Store {
         let (exclusion, identities) = self.owner_exclusion();
         let mut statement = transaction
             .prepare(&format!(
-                "SELECT subject_type, subject_id, network, state, decided_at, decision_sequence \
+                "SELECT subject_type, subject_id, connection, network, state, decided_at, \
+                        decision_sequence \
                  FROM consent_snapshot {exclusion} \
-                 ORDER BY subject_type, subject_id, network LIMIT ?"
+                 ORDER BY subject_type, subject_id, connection LIMIT ?"
             ))
             .context("failed to prepare the snapshot query")
             .map_err(SnapshotRefusal::Store)?;
@@ -1085,22 +1264,31 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             })
             .context("failed to read the snapshot")
             .map_err(SnapshotRefusal::Store)?;
         let mut entries = Vec::new();
         for row in rows {
-            let (kind, id, network, state, decided_at, decision_sequence) = row
+            let (kind, id, connection, network, state, decided_at, decision_sequence) = row
                 .context("failed to read a snapshot row")
                 .map_err(SnapshotRefusal::Store)?;
             if entries.len() == max_entries {
                 return Err(SnapshotRefusal::TooLarge { max_entries });
             }
             entries.push(
-                entry(kind, id, network, state, decided_at, decision_sequence)
-                    .map_err(SnapshotRefusal::Store)?,
+                entry(
+                    kind,
+                    id,
+                    connection,
+                    network,
+                    state,
+                    decided_at,
+                    decision_sequence,
+                )
+                .map_err(SnapshotRefusal::Store)?,
             );
         }
         Ok(Snapshot {
@@ -1110,9 +1298,10 @@ impl Store {
         })
     }
 
-    /// The effective consent state of a contact on one network, with the
-    /// precedence applied: the contact's own decision if it has one, the
-    /// network's default otherwise, and `pending` when neither exists.
+    /// The effective consent state of a contact on one connection (#270),
+    /// with the precedence applied: the contact's own decision on it if
+    /// there is one, the network's default on it otherwise, and `pending`
+    /// when neither exists.
     ///
     /// An owner identity resolves to `pending` with no decision named, and no
     /// row is read for it — not the owner's own, and not the network's default
@@ -1123,7 +1312,12 @@ impl Store {
     /// refused at the HTTP surface with its own code, so a caller who asks it
     /// is told why rather than handed a `pending` it would read as "not yet
     /// decided".
-    pub fn effective(&self, contact: &str, network: Network) -> Result<Effective> {
+    pub fn effective(
+        &self,
+        contact: &str,
+        connection_id: &str,
+        network: Network,
+    ) -> Result<Effective> {
         if self.owner.is_owner(contact) {
             return Ok(Effective::resolve(contact, network, None, None));
         }
@@ -1131,15 +1325,14 @@ impl Store {
         let mut statement = connection
             .prepare(
                 "SELECT state FROM consent_state \
-                 WHERE subject_type = ? AND subject_id = ? AND network = ?",
+                 WHERE subject_type = ? AND subject_id = ? AND connection = ?",
             )
             .context("failed to prepare the precedence query")?;
         let mut read = |kind: SubjectType, id: &str| -> Result<Option<State>> {
             let state: Option<String> = statement
-                .query_row(
-                    rusqlite::params![kind.as_str(), id, network.as_str()],
-                    |row| row.get(0),
-                )
+                .query_row(rusqlite::params![kind.as_str(), id, connection_id], |row| {
+                    row.get(0)
+                })
                 .optional()
                 .context("failed to read a consent state")?;
             match state {
@@ -1269,7 +1462,17 @@ impl Store {
     /// when new, kind and label refreshed when known. Never deleted here — a
     /// connection that left the configuration may still be what a recorded
     /// decision is scoped to, and forgetting it would orphan the decision.
-    pub fn record_connections(&self, connections: &[crate::connections::Connection]) -> Result<()> {
+    ///
+    /// Returns the ids the store holds that the registry does **not** name:
+    /// a connection that left the configuration, or the one the migration
+    /// (#270) attached every earlier decision to on a deployment whose
+    /// declared ids are not the networks' names. A decision scoped to such
+    /// an id governs no live connection, and the Gateway says so at
+    /// startup rather than letting the user's earlier answers go quiet.
+    pub fn record_connections(
+        &self,
+        connections: &[crate::connections::Connection],
+    ) -> Result<Vec<String>> {
         let now = crate::consent::rfc3339_millis(std::time::SystemTime::now());
         let connection = self.connection();
         for entry in connections {
@@ -1283,7 +1486,18 @@ impl Store {
                 )
                 .context("failed to record a connection")?;
         }
-        Ok(())
+        let mut statement = connection
+            .prepare("SELECT id FROM connection ORDER BY id")
+            .context("failed to prepare the connections query")?;
+        let known = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("failed to read the connections")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to read a connection row")?;
+        Ok(known
+            .into_iter()
+            .filter(|id| !connections.iter().any(|entry| &entry.id == id))
+            .collect())
     }
 
     /// Journals one move, once: a second record about the same successor is
@@ -1626,8 +1840,8 @@ impl Store {
     /// `last_seen` only ever goes later. The stream is not necessarily in
     /// timestamp order — a full first delivery replays weeks of history at
     /// once — so the extremes are taken rather than the last write winning.
-    pub fn observe_contact(&self, contact: &str, network: Network, at: &str) -> Result<()> {
-        self.observe_contacts(&[(contact.to_owned(), network, at.to_owned())])
+    pub fn observe_contact(&self, contact: &str, connection: &str, at: &str) -> Result<()> {
+        self.observe_contacts(&[(contact.to_owned(), connection.to_owned(), at.to_owned())])
     }
 
     /// The same, for a whole batch of sightings, in **one** transaction.
@@ -1644,7 +1858,7 @@ impl Store {
     /// between redelivers the whole batch, which changes nothing — the upsert
     /// only ever moves `first_seen` earlier and `last_seen` later, so
     /// applying a sighting twice is applying it once.
-    pub fn observe_contacts(&self, sightings: &[(String, Network, String)]) -> Result<()> {
+    pub fn observe_contacts(&self, sightings: &[(String, String, String)]) -> Result<()> {
         if sightings.is_empty() {
             return Ok(());
         }
@@ -1655,16 +1869,16 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO contact_seen (contact_id, network, first_seen, last_seen) \
+                    "INSERT INTO contact_seen (contact_id, connection, first_seen, last_seen) \
                      VALUES (?1, ?2, ?3, ?3) \
-                     ON CONFLICT (contact_id, network) DO UPDATE SET \
+                     ON CONFLICT (contact_id, connection) DO UPDATE SET \
                          first_seen = MIN(first_seen, excluded.first_seen), \
                          last_seen  = MAX(last_seen,  excluded.last_seen)",
                 )
                 .context("failed to prepare the sighting statement")?;
-            for (contact, network, at) in sightings {
+            for (contact, connection_id, at) in sightings {
                 statement
-                    .execute(rusqlite::params![contact, network.as_str(), at])
+                    .execute(rusqlite::params![contact, connection_id, at])
                     .context("failed to record a seen contact")?;
             }
         }
@@ -1694,8 +1908,8 @@ impl Store {
         let connection = self.connection();
         let mut statement = connection
             .prepare(&format!(
-                "SELECT contact_id, network, first_seen, last_seen FROM pending_contact \
-                 {exclusion} ORDER BY first_seen, contact_id, network"
+                "SELECT contact_id, connection, network, first_seen, last_seen \
+                 FROM pending_contact {exclusion} ORDER BY first_seen, contact_id, connection"
             ))
             .context("failed to prepare the pending-contact query")?;
         let rows = statement
@@ -1705,15 +1919,17 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .context("failed to read the pending contacts")?;
         let mut pending = Vec::new();
         for row in rows {
-            let (contact, network, first_seen, last_seen) =
+            let (contact, connection, network, first_seen, last_seen) =
                 row.context("failed to read a pending-contact row")?;
             pending.push(SeenContact {
                 contact,
+                connection,
                 network: Network::parse(&network)
                     .with_context(|| format!("the store holds the network {network:?}"))?,
                 first_seen,
@@ -1769,6 +1985,7 @@ impl Store {
 fn entry(
     kind: String,
     id: String,
+    connection: String,
     network: String,
     state: String,
     decided_at: String,
@@ -1780,6 +1997,7 @@ fn entry(
                 .with_context(|| format!("the journal holds the subject type {kind:?}"))?,
             id,
         },
+        connection,
         network: Network::parse(&network)
             .with_context(|| format!("the journal holds the network {network:?}"))?,
         state: State::parse(&state)
@@ -1800,6 +2018,28 @@ fn restrict_to_owner(path: &Path, mode: u32) {
             %error,
             "could not restrict the consent store's permissions to its owner"
         );
+    }
+}
+
+/// What the two test modules below share.
+#[cfg(test)]
+mod test_support {
+    use super::Network;
+
+    /// One connection per network, named after it — the reference
+    /// deployment's registry, and the id every migrated decision landed on
+    /// (#270). Recorded on every test store, because the views join on it.
+    pub fn implicit_registry() -> Vec<crate::connections::Connection> {
+        Network::ALL
+            .iter()
+            .map(|network| crate::connections::Connection {
+                id: network.as_str().to_owned(),
+                kind: network.as_str().to_owned(),
+                label: network.as_str().to_owned(),
+                bridge_id: None,
+                bridge_bot: None,
+            })
+            .collect()
     }
 }
 
@@ -1829,31 +2069,36 @@ mod tests {
 
     /// The contract is the one authority for the network values (ADR 0033,
     /// #268), and the store's `CHECK` constraints are copies of it — frozen
-    /// ones, since a migration is never edited in place. So this test says
-    /// exactly what they admit: the contract's values **minus `email`**,
-    /// which #270 is the migration to admit, by rebuilding the constrained
-    /// tables. When that lands, this test's expectation moves with it; until
-    /// then it is the one place the lag is written down.
+    /// ones, since a migration is never edited in place. So the live schema
+    /// is what this test holds to the contract: the constraints the **latest**
+    /// constraining migration writes admit exactly the contract's values,
+    /// because that migration rebuilt every table still carrying one (#270).
+    /// Every earlier copy is history and admits a prefix of the contract —
+    /// never a value the contract does not have.
     #[test]
-    fn the_checks_admit_the_contracts_networks_except_the_one_the_next_migration_adds() {
+    fn the_latest_checks_admit_exactly_the_contracts_networks() {
         let authority = twalk_test_harness::contract_definition_values("network")
             .expect("the contract's network definition");
-        let not_yet_admitted = ["email"];
-        let expected: Vec<String> = authority
-            .iter()
-            .filter(|value| !not_yet_admitted.contains(&value.as_str()))
-            .cloned()
-            .collect();
         let checks = admitted_by_the_checks();
-        assert!(
-            !checks.is_empty(),
-            "the migrations constrain network somewhere"
-        );
+        let latest = checks
+            .iter()
+            .map(|(version, _)| *version)
+            .max()
+            .expect("the migrations constrain network somewhere");
+        // A network the contract gains later fails this: the answer is a
+        // migration that rebuilds the constrained tables, as v8 did.
         for (version, admitted) in checks {
-            assert_eq!(
-                admitted, expected,
-                "migration v{version}'s CHECK disagrees with the contract (minus what #270 admits)"
-            );
+            if version == latest {
+                assert_eq!(
+                    admitted, authority,
+                    "migration v{version}'s CHECK disagrees with the contract"
+                );
+            } else {
+                assert!(
+                    authority.starts_with(&admitted),
+                    "migration v{version}'s CHECK ({admitted:?}) is not a prefix of the contract"
+                );
+            }
         }
     }
 
@@ -1869,7 +2114,13 @@ mod tests {
             "twalk-consent-store-{test_name}-{}-{unique}",
             std::process::id()
         ));
-        Store::open(&dir, Arc::new(test_owner())).expect("the store opens")
+        let store = Store::open(&dir, Arc::new(test_owner())).expect("the store opens");
+        // The registry every Gateway records at startup (#269), one
+        // connection per network named after it: what the views join on.
+        store
+            .record_connections(&test_support::implicit_registry())
+            .expect("the registry records");
+        store
     }
 
     /// The owner every store in these tests belongs to: their Matrix ID, and
@@ -1890,6 +2141,10 @@ mod tests {
                 id: id.to_owned(),
             },
             new_state: state,
+            connections: networks
+                .iter()
+                .map(|network| network.as_str().to_owned())
+                .collect(),
             networks: networks.to_vec(),
             reason: None,
         }
@@ -1923,6 +2178,9 @@ mod tests {
         // A Gateway that has not been told about the ghost: it is a contact,
         // and the user's decision about them is recorded like anybody's.
         let before = Store::open(&dir, Arc::new(Owner::new(OWNER, []))).expect("the store opens");
+        before
+            .record_connections(&test_support::implicit_registry())
+            .expect("the registry records");
         let owners_row = record(
             &before,
             &decision(
@@ -1956,7 +2214,7 @@ mod tests {
                 .expect("the outbox marks it published");
         }
         before
-            .observe_contact(OWNER_GHOST, Network::Signal, "2026-09-17T10:02:00.000Z")
+            .observe_contact(OWNER_GHOST, "signal", "2026-09-17T10:02:00.000Z")
             .expect("a sighting an older build recorded");
         assert!(
             before
@@ -2017,12 +2275,18 @@ mod tests {
             ),
             "2026-09-17T11:00:00.000Z",
         );
-        let effective = after.effective(OWNER_GHOST, Network::Whatsapp).unwrap();
+        let effective = after
+            .effective(OWNER_GHOST, "whatsapp", Network::Whatsapp)
+            .unwrap();
         assert_eq!(effective.state, State::Pending);
         assert_eq!(effective.decided_by, None);
         assert_eq!(
             after
-                .effective("@whatsapp_33612345678:example.com", Network::Whatsapp)
+                .effective(
+                    "@whatsapp_33612345678:example.com",
+                    "whatsapp",
+                    Network::Whatsapp
+                )
                 .unwrap()
                 .state,
             State::Granted,
@@ -2056,6 +2320,371 @@ mod tests {
             1,
             "and nothing was appended"
         );
+    }
+
+    /// What migration v8 (#270) promises: every `(subject, network)` state
+    /// a store held before it is the same `(subject, connection)` state
+    /// after it, on the connection named after the network — and the
+    /// pending list, the journal's length, the bridge and approval rows all
+    /// come through untouched.
+    ///
+    /// The check is written once and run twice: on a v7 store built by hand
+    /// here, and on a **copy of the reference deployment's store** when
+    /// `TWALK_REFERENCE_STORE` names one (never committed: it holds the
+    /// user's contacts). The copy is what makes the promise about the real
+    /// journal and not about a fixture's idea of it.
+    fn assert_v8_keeps_every_state(dir: &Path) {
+        let path = dir.join(DATABASE_FILE);
+        // Before: the store at v7 — brought there from wherever the copy
+        // was, by the migrations up to and excluding v8 — read through the
+        // views v8 rewrites.
+        let before = {
+            let raw = Connection::open(&path).expect("the store opens raw");
+            let applied: i64 = raw
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert!(
+                applied <= 7,
+                "a store already at v{applied} has nothing to migrate"
+            );
+            for (index, migration) in MIGRATIONS.iter().enumerate().take(7).skip(applied as usize) {
+                raw.execute_batch(migration)
+                    .expect("an earlier migration applies");
+                raw.pragma_update(None, "user_version", index as i64 + 1)
+                    .unwrap();
+            }
+            let states = read_rows(
+                &raw,
+                "SELECT subject_type, subject_id, network, state FROM consent_state \
+                 ORDER BY subject_type, subject_id, network",
+            );
+            let pending = read_rows(
+                &raw,
+                "SELECT contact_id, network, first_seen, last_seen FROM pending_contact \
+                 ORDER BY contact_id, network",
+            );
+            let counts: Vec<i64> = [
+                "consent_decision",
+                "consent_decision_network",
+                "contact_seen",
+                "approval",
+                "bridge_status_change",
+            ]
+            .iter()
+            .map(|table| {
+                raw.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+            })
+            .collect();
+            (states, pending, counts)
+        };
+        assert!(
+            !before.0.is_empty(),
+            "a store with no decision proves nothing about the migration"
+        );
+
+        // After: opened by this build, which applies v8.
+        let store = Store::open(dir, Arc::new(Owner::new(OWNER, []))).expect("the store migrates");
+        let version: i64 = store
+            .connection()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version as usize, MIGRATIONS.len());
+        let after_states = read_rows(
+            &store.connection(),
+            "SELECT subject_type, subject_id, connection, state FROM consent_state \
+             ORDER BY subject_type, subject_id, connection",
+        );
+        assert_eq!(
+            after_states, before.0,
+            "every (subject, network) state before is the (subject, connection) state after, \
+             on the connection named after the network"
+        );
+        // And `network` is still on every row, derived, the same value.
+        let after_networks = read_rows(
+            &store.connection(),
+            "SELECT subject_type, subject_id, network, state FROM consent_state \
+             ORDER BY subject_type, subject_id, network",
+        );
+        assert_eq!(after_networks, before.0);
+        let after_pending = read_rows(
+            &store.connection(),
+            "SELECT contact_id, connection, first_seen, last_seen FROM pending_contact \
+             ORDER BY contact_id, connection",
+        );
+        assert_eq!(after_pending, before.1, "the pending list is the same list");
+        let after_counts: Vec<i64> = [
+            "consent_decision",
+            "consent_decision_connection",
+            "contact_seen",
+            "approval",
+            "bridge_status_change",
+        ]
+        .iter()
+        .map(|table| {
+            store
+                .connection()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        })
+        .collect();
+        assert_eq!(
+            after_counts, before.2,
+            "the journal, one scope row per network row, the sightings, the approvals and \
+             the bridge transitions all come through"
+        );
+        // The registry rows the migration had to make: one per network the
+        // journal or the sightings named, kind and id the same word.
+        let registry = read_rows(
+            &store.connection(),
+            "SELECT id, kind FROM connection WHERE id = kind ORDER BY id",
+        );
+        let named: std::collections::BTreeSet<&String> = before
+            .0
+            .iter()
+            .map(|row| &row[2])
+            .chain(before.1.iter().map(|row| &row[1]))
+            .collect();
+        for network in named {
+            assert!(
+                registry.iter().any(|row| &row[0] == network),
+                "the connection {network} the migration needed is registered: {registry:?}"
+            );
+        }
+    }
+
+    fn read_rows(connection: &Connection, sql: &str) -> Vec<Vec<String>> {
+        let mut statement = connection.prepare(sql).expect("the query prepares");
+        let width = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..width)
+                    .map(|column| {
+                        row.get::<_, rusqlite::types::Value>(column)
+                            .map(|v| match v {
+                                rusqlite::types::Value::Null => String::new(),
+                                rusqlite::types::Value::Integer(i) => i.to_string(),
+                                rusqlite::types::Value::Real(r) => r.to_string(),
+                                rusqlite::types::Value::Text(t) => t,
+                                rusqlite::types::Value::Blob(_) => "<blob>".to_owned(),
+                            })
+                    })
+                    .collect()
+            })
+            .expect("the query runs")
+            .map(|row| row.expect("a row reads"))
+            .collect()
+    }
+
+    #[test]
+    fn every_decision_taken_before_the_connection_holds_the_same_state_on_its_networks_one() {
+        // A v7 store, built the way a Gateway before #270 built its own:
+        // decisions with their scope in `consent_decision_network`, contacts
+        // seen per network, an approval and a bridge transition.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "twalk-consent-store-v7-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let raw = Connection::open(dir.join(DATABASE_FILE)).unwrap();
+            for (index, migration) in MIGRATIONS.iter().enumerate().take(7) {
+                raw.execute_batch(migration).unwrap();
+                raw.pragma_update(None, "user_version", index as i64 + 1)
+                    .unwrap();
+            }
+            let mut sequence = 0;
+            let mut decide =
+                |kind: &str, id: &str, old: &str, new: &str, networks: &[&str], at: &str| {
+                    sequence += 1;
+                    raw.execute(
+                    "INSERT INTO consent_decision (sequence, event_id, subject_type, subject_id, \
+                     old_state, new_state, scope_key, occurred_at, actor, reason, envelope, \
+                     published_at, stream_sequence) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '{}', ?, ?)",
+                    rusqlite::params![
+                        sequence,
+                        format!("event-{sequence}"),
+                        kind,
+                        id,
+                        old,
+                        new,
+                        networks.join(","),
+                        at,
+                        OWNER,
+                        at,
+                        sequence * 10
+                    ],
+                )
+                .unwrap();
+                    for network in networks {
+                        raw.execute(
+                        "INSERT INTO consent_decision_network (sequence, network) VALUES (?, ?)",
+                        rusqlite::params![sequence, network],
+                    )
+                    .unwrap();
+                    }
+                };
+            decide(
+                "contact",
+                "@a:example.com",
+                "unset",
+                "granted",
+                &["whatsapp"],
+                "2026-09-01T10:00:00.000Z",
+            );
+            decide(
+                "contact",
+                "@b:example.com",
+                "unset",
+                "pending",
+                &["whatsapp", "signal"],
+                "2026-09-02T10:00:00.000Z",
+            );
+            decide(
+                "contact",
+                "@b:example.com",
+                "pending",
+                "revoked",
+                &["signal"],
+                "2026-09-03T10:00:00.000Z",
+            );
+            decide(
+                "network",
+                "telegram",
+                "unset",
+                "granted",
+                &["telegram"],
+                "2026-09-04T10:00:00.000Z",
+            );
+            decide(
+                "persona",
+                "assistant",
+                "unset",
+                "granted",
+                &["whatsapp", "signal"],
+                "2026-09-05T10:00:00.000Z",
+            );
+            decide(
+                "contact",
+                "@a:example.com",
+                "granted",
+                "revoked",
+                &["whatsapp"],
+                "2026-09-06T10:00:00.000Z",
+            );
+            decide(
+                "contact",
+                "@e:example.com",
+                "unset",
+                "granted",
+                &["whatsapp"],
+                "2026-09-07T10:00:00.000Z",
+            );
+            for (contact, network, at) in [
+                ("@a:example.com", "whatsapp", "2026-09-01T09:00:00.000Z"),
+                ("@c:example.com", "whatsapp", "2026-09-02T09:00:00.000Z"),
+                ("@c:example.com", "signal", "2026-09-02T09:30:00.000Z"),
+                ("@d:example.com", "telegram", "2026-09-03T09:00:00.000Z"),
+            ] {
+                raw.execute(
+                    "INSERT INTO contact_seen (contact_id, network, first_seen, last_seen) \
+                     VALUES (?, ?, ?, ?)",
+                    rusqlite::params![contact, network, at, at],
+                )
+                .unwrap();
+            }
+            raw.execute(
+                "INSERT INTO approval (event_id, suggestion_event_id, approved_by, persona_id, \
+                 network, contact, edited, approved_at, published_at, stream_sequence) \
+                 VALUES ('approval-1', 'suggestion-1', ?, 'assistant', 'whatsapp', \
+                         '@a:example.com', 0, '2026-09-01T11:00:00.000Z', \
+                         '2026-09-01T11:00:00.100Z', 77)",
+                [OWNER],
+            )
+            .unwrap();
+            raw.execute(
+                "INSERT INTO bridge_status_change (event_id, bridge_id, network, from_state, \
+                 to_state, occurred_at, envelope, published_at, stream_sequence) \
+                 VALUES ('bridge-1', 'bridge-whatsapp', 'whatsapp', 'starting', 'connected', \
+                         '2026-09-01T08:00:00.000Z', '{}', '2026-09-01T08:00:00.100Z', 5)",
+                [],
+            )
+            .unwrap();
+        }
+        assert_v8_keeps_every_state(&dir);
+
+        // The acceptance criterion, spelled out: a decision recorded before
+        // the migration is `granted` on `whatsapp` after it — read the way
+        // an approval reads it, by connection.
+        let store = Store::open(&dir, Arc::new(Owner::new(OWNER, []))).unwrap();
+        let effective = store
+            .effective("@e:example.com", "whatsapp", Network::Whatsapp)
+            .unwrap();
+        assert_eq!(
+            (effective.state, effective.decided_by.map(|s| s.id)),
+            (State::Granted, Some("@e:example.com".to_owned())),
+            "granted on whatsapp before, granted on whatsapp after"
+        );
+        let effective = store
+            .effective("@a:example.com", "whatsapp", Network::Whatsapp)
+            .unwrap();
+        assert_eq!(effective.state, State::Revoked, "the last decision on @a");
+        let effective = store
+            .effective("@d:example.com", "telegram", Network::Telegram)
+            .unwrap();
+        assert_eq!(
+            (effective.state, effective.decided_by.map(|s| s.id)),
+            (State::Granted, Some("telegram".to_owned())),
+            "the network default, on the network's connection"
+        );
+        assert_eq!(
+            store.bridge_status("bridge-whatsapp").unwrap(),
+            Some(ContractState::Connected),
+            "the rebuilt bridge table still answers"
+        );
+        assert!(
+            store.approval("suggestion-1").unwrap().is_some(),
+            "the rebuilt approval table still answers"
+        );
+        // And an `email` decision is no longer refused by a frozen CHECK:
+        // the rebuilt tables admit the contract's whole list.
+        store
+            .record_connections(&[crate::connections::Connection {
+                id: "mail-linagora".to_owned(),
+                kind: "email".to_owned(),
+                label: "Twake Mail".to_owned(),
+                bridge_id: None,
+                bridge_bot: None,
+            }])
+            .unwrap();
+        store
+            .observe_contact(
+                "@mail_someone:example.com",
+                "mail-linagora",
+                "2026-09-07T10:00:00.000Z",
+            )
+            .expect("an email sighting is admitted");
+    }
+
+    /// The same promise, on a copy of the reference deployment's store —
+    /// run by hand with `TWALK_REFERENCE_STORE=<dir holding consent.sqlite3>`
+    /// (a copy; the migration writes), and skipped without it.
+    #[test]
+    fn the_reference_deployments_store_migrates_with_every_state_kept() {
+        let Some(dir) = std::env::var_os("TWALK_REFERENCE_STORE") else {
+            eprintln!("TWALK_REFERENCE_STORE is not set: the reference store is not checked");
+            return;
+        };
+        assert_v8_keeps_every_state(Path::new(&dir));
     }
 
     #[test]
@@ -2189,7 +2818,7 @@ mod tests {
         );
 
         let overridden = store
-            .effective("@loud:example.com", Network::Whatsapp)
+            .effective("@loud:example.com", "whatsapp", Network::Whatsapp)
             .unwrap();
         assert_eq!(overridden.state, State::Revoked);
         assert_eq!(
@@ -2198,14 +2827,14 @@ mod tests {
             "the contact's own decision is what answered"
         );
         let defaulted = store
-            .effective("@quiet:example.com", Network::Whatsapp)
+            .effective("@quiet:example.com", "whatsapp", Network::Whatsapp)
             .unwrap();
         assert_eq!(defaulted.state, State::Granted);
         assert_eq!(defaulted.decided_by.unwrap().kind, SubjectType::Network);
         // Another network the user never decided about stays pending, and
         // names no decision: "never decided" is not "revoked".
         let undecided = store
-            .effective("@loud:example.com", Network::Telegram)
+            .effective("@loud:example.com", "telegram", Network::Telegram)
             .unwrap();
         assert_eq!(undecided.state, State::Pending);
         assert_eq!(undecided.decided_by, None);
@@ -2281,7 +2910,7 @@ mod tests {
         let reopened = Store::open(&dir, Arc::new(test_owner())).unwrap();
         assert_eq!(
             reopened
-                .effective("@someone:example.com", Network::Matrix)
+                .effective("@someone:example.com", "matrix", Network::Matrix)
                 .unwrap()
                 .state,
             State::Granted
@@ -2565,7 +3194,7 @@ mod tests {
             "2026-09-17T18:00:00.000Z",
         ] {
             store
-                .observe_contact("@whatsapp_33612345678:example.com", Network::Whatsapp, at)
+                .observe_contact("@whatsapp_33612345678:example.com", "whatsapp", at)
                 .expect("the sighting records");
         }
         let pending = store.pending_contacts().unwrap();
@@ -2577,7 +3206,7 @@ mod tests {
         store
             .observe_contact(
                 "@whatsapp_33612345678:example.com",
-                Network::Whatsapp,
+                "whatsapp",
                 "2026-09-17T12:00:00.000Z",
             )
             .unwrap();
@@ -2588,25 +3217,13 @@ mod tests {
     fn a_contact_is_pending_per_network_it_wrote_on() {
         let store = store("seen-per-network");
         store
-            .observe_contact(
-                "@a:example.com",
-                Network::Whatsapp,
-                "2026-09-17T10:00:00.000Z",
-            )
+            .observe_contact("@a:example.com", "whatsapp", "2026-09-17T10:00:00.000Z")
             .unwrap();
         store
-            .observe_contact(
-                "@a:example.com",
-                Network::Signal,
-                "2026-09-17T10:01:00.000Z",
-            )
+            .observe_contact("@a:example.com", "signal", "2026-09-17T10:01:00.000Z")
             .unwrap();
         store
-            .observe_contact(
-                "@b:example.com",
-                Network::Whatsapp,
-                "2026-09-17T10:02:00.000Z",
-            )
+            .observe_contact("@b:example.com", "whatsapp", "2026-09-17T10:02:00.000Z")
             .unwrap();
         assert_eq!(store.pending_contact_count().unwrap(), 3);
         // Oldest first sighting first: the order the user met them in.
@@ -2628,18 +3245,10 @@ mod tests {
     fn a_decision_takes_a_contact_out_of_the_pending_list() {
         let store = store("seen-decided");
         store
-            .observe_contact(
-                "@a:example.com",
-                Network::Whatsapp,
-                "2026-09-17T10:00:00.000Z",
-            )
+            .observe_contact("@a:example.com", "whatsapp", "2026-09-17T10:00:00.000Z")
             .unwrap();
         store
-            .observe_contact(
-                "@a:example.com",
-                Network::Signal,
-                "2026-09-17T10:00:00.000Z",
-            )
+            .observe_contact("@a:example.com", "signal", "2026-09-17T10:00:00.000Z")
             .unwrap();
         assert_eq!(store.pending_contact_count().unwrap(), 2);
 
@@ -2680,15 +3289,11 @@ mod tests {
         let store = store("seen-default");
         for contact in ["@a:example.com", "@b:example.com", "@c:example.com"] {
             store
-                .observe_contact(contact, Network::Whatsapp, "2026-09-17T10:00:00.000Z")
+                .observe_contact(contact, "whatsapp", "2026-09-17T10:00:00.000Z")
                 .unwrap();
         }
         store
-            .observe_contact(
-                "@d:example.com",
-                Network::Telegram,
-                "2026-09-17T10:00:00.000Z",
-            )
+            .observe_contact("@d:example.com", "telegram", "2026-09-17T10:00:00.000Z")
             .unwrap();
         assert_eq!(store.pending_contact_count().unwrap(), 4);
 
@@ -2715,11 +3320,7 @@ mod tests {
     fn a_contact_the_user_decided_pending_is_not_waiting_for_a_decision() {
         let store = store("seen-decided-pending");
         store
-            .observe_contact(
-                "@a:example.com",
-                Network::Whatsapp,
-                "2026-09-17T10:00:00.000Z",
-            )
+            .observe_contact("@a:example.com", "whatsapp", "2026-09-17T10:00:00.000Z")
             .unwrap();
         record(
             &store,
@@ -2757,8 +3358,8 @@ mod tests {
             .collect();
         assert_eq!(
             columns,
-            vec!["contact_id", "network", "first_seen", "last_seen"],
-            "the pending-contact store holds a Matrix ID, a network and two instants, \
+            vec!["contact_id", "connection", "first_seen", "last_seen"],
+            "the pending-contact store holds a Matrix ID, a connection and two instants, \
              and nothing else: see the migration's own comment and \
              docs/architecture/security-model.md"
         );
@@ -2909,7 +3510,13 @@ mod bridge_status_tests {
             "twalk-bridge-status-store-{test_name}-{}-{unique}",
             std::process::id()
         ));
-        Store::open(&dir, Arc::new(test_owner())).expect("the store opens")
+        let store = Store::open(&dir, Arc::new(test_owner())).expect("the store opens");
+        // The registry every Gateway records at startup (#269), one
+        // connection per network named after it: what the views join on.
+        store
+            .record_connections(&test_support::implicit_registry())
+            .expect("the registry records");
+        store
     }
 
     fn transition(from: ContractState, to: ContractState, occurred_at: &str) -> Transition {
@@ -3025,7 +3632,17 @@ mod bridge_status_tests {
         // connection that left the configuration stays — a decision may
         // still name it — and one that is back is the same row, with its
         // first `created_at`, not a new one.
-        let store = store("connections-recorded");
+        // A bare store: `store()` records a registry of its own, and this
+        // test is about what recording does.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "twalk-connections-recorded-{}-{unique}",
+            std::process::id()
+        ));
+        let store = Store::open(&dir, Arc::new(test_owner())).expect("the store opens");
         let connection = |id: &str, kind: &str, label: &str, bridge: Option<&str>| {
             crate::connections::Connection {
                 id: id.to_owned(),
@@ -3079,12 +3696,17 @@ mod bridge_status_tests {
 
         // The next start: WhatsApp relabelled, Matrix gone from the
         // configuration, Signal new.
-        store
+        let stale = store
             .record_connections(&[
                 connection("whatsapp", "whatsapp", "Home", Some("mautrix-whatsapp")),
                 connection("signal", "signal", "mautrix-signal", Some("mautrix-signal")),
             ])
             .expect("recorded again");
+        assert_eq!(
+            stale,
+            ["matrix"],
+            "the connection the registry no longer names is kept, and named back"
+        );
         let second = rows(&store);
         let ids: Vec<&str> = second.iter().map(|row| row.0.as_str()).collect();
         assert_eq!(ids, ["matrix", "signal", "whatsapp"], "never deleted here");

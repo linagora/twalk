@@ -21,7 +21,7 @@
 //!
 //! That is not a convention to be careful about; it is enforced by the shape
 //! of the types. The projection deserialises each inbound event into
-//! [`InboundHeader`], which has **three fields and no `data` member at all**,
+//! [`InboundHeader`], which has **four envelope attributes and no `data` member at all**,
 //! so there is no expression anywhere downstream of it that could reach a
 //! body. The raw bytes stay in the NATS message and are dropped with it. The
 //! store is a four-column table whose columns are asserted by a test
@@ -110,20 +110,27 @@ pub const MAX_DISPLAY_NAME_LOOKUPS: usize = 200;
 /// What the Gateway reads of an inbound event — and, by construction, all it
 /// **can** read.
 ///
-/// Three CloudEvents attributes, no `data` member. `serde` fills these and
+/// Four CloudEvents attributes, no `data` member. `serde` fills these and
 /// drops the rest of the document on the floor, so the message body, the
 /// attachments, the reply excerpt and the contact's `network_identifier`
 /// never become values in this process at all: they exist as bytes inside the
 /// NATS message and are freed with it.
 ///
 /// This is the module's central safeguard, and it is deliberately a type
-/// rather than a rule. Adding a field here is the change a reviewer refuses.
+/// rather than a rule. Adding a field here is the change a reviewer refuses —
+/// the fourth, `connection`, is the envelope's own perimeter attribute (ADR
+/// 0033, #270), the key the sighting is held under, and no more content than
+/// `network` was.
 #[derive(Debug, Clone, Deserialize)]
 pub struct InboundHeader {
     /// The observed sender's Matrix user ID (the contract's `subject`).
     pub subject: String,
     /// The network it wrote on (the contract's `network` extension).
     pub network: String,
+    /// The connection it wrote on (the contract's `connection` extension,
+    /// #269). Absent on an event published before it existed.
+    #[serde(default)]
+    pub connection: Option<String>,
     /// When the Sensor produced the event (the contract's `time`).
     pub time: String,
 }
@@ -132,6 +139,8 @@ pub struct InboundHeader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Correspondent {
     pub contact: String,
+    /// The perimeter the sighting is held under (#270).
+    pub connection: String,
     pub network: Network,
     /// The event's `time`, re-formatted into the Gateway's one canonical
     /// RFC 3339 spelling so that "earliest" and "latest" are comparisons the
@@ -159,19 +168,36 @@ impl Correspondent {
     /// - **the network is not one of the contract's.** A value this build
     ///   does not know is a contract it does not implement; guessing would
     ///   put a row in the store under a network nobody can decide about.
+    /// - **the connection is not the registry's** (#270) — or the event
+    ///   carries none, being older than #269, and the registry has no single
+    ///   connection of its kind to read it as. The stream's whole history is
+    ///   replayed through here on a first start, so the old shape is the
+    ///   common one, and it resolves the way every old decision was migrated:
+    ///   to the kind's one connection, looked up, not spelled.
     /// - **the time is not RFC 3339.** The instant is the whole of what the
     ///   projection records besides the ID, so an unreadable one is not worth
     ///   inventing a substitute for.
-    pub fn read(header: &InboundHeader, owner: &Owner) -> Option<Self> {
+    pub fn read(
+        header: &InboundHeader,
+        owner: &Owner,
+        registry: &crate::connections::Registry,
+    ) -> Option<Self> {
         if owner.is_owner(&header.subject) {
             return None;
         }
         if header.subject.is_empty() {
             return None;
         }
+        let network = Network::parse(&header.network)?;
+        let connection = registry
+            .resolve(header.connection.as_deref(), network.as_str())
+            .ok()?
+            .id
+            .clone();
         Some(Self {
             contact: header.subject.clone(),
-            network: Network::parse(&header.network)?,
+            connection,
+            network,
             at: canonical_instant(&header.time)?,
         })
     }
@@ -217,6 +243,8 @@ pub struct Contacts {
     /// This deployment's owner, and every identity their own traffic arrives
     /// under (#149): never a correspondent of their own, under any of them.
     owner: Arc<Owner>,
+    /// The registry a sighting's connection is looked up in (#270).
+    connections: Arc<crate::connections::Registry>,
     nats_url: String,
     consumer_name: String,
     /// The bus connection, made on first need and shared by the projection
@@ -230,6 +258,7 @@ impl Contacts {
         store: Arc<Store>,
         metrics: Arc<Metrics>,
         owner: Arc<Owner>,
+        connections: Arc<crate::connections::Registry>,
         nats_url: String,
         consumer_name: String,
     ) -> Self {
@@ -237,6 +266,7 @@ impl Contacts {
             store,
             metrics,
             owner,
+            connections,
             nats_url,
             consumer_name,
             bus: tokio::sync::OnceCell::new(),
@@ -501,29 +531,31 @@ async fn drain(
         .context("failed to fetch from the pending-contact consumer")?;
 
     use futures::StreamExt;
-    let mut sightings: Vec<(String, Network, String)> = Vec::new();
+    let mut sightings: Vec<(String, String, String)> = Vec::new();
     let mut delivered = Vec::new();
     while let Some(message) = batch.next().await {
         let message =
             message.map_err(|error| anyhow::anyhow!("failed to read a message: {error}"))?;
-        // Three attributes out of the event, and the rest of its bytes are
+        // Four attributes out of the event, and the rest of its bytes are
         // never parsed. See `InboundHeader`.
         match serde_json::from_slice::<InboundHeader>(&message.payload) {
-            Ok(header) => match Correspondent::read(&header, &contacts.owner) {
-                Some(correspondent) => sightings.push((
-                    correspondent.contact,
-                    correspondent.network,
-                    correspondent.at,
-                )),
-                // The owner's own message, an unknown network, an unreadable
-                // instant: nothing to record, and nothing to redeliver
-                // either.
-                None => debug!(
-                    subject = %header.subject,
-                    network = %header.network,
-                    "an inbound event is not a correspondent's: not recorded"
-                ),
-            },
+            Ok(header) => {
+                match Correspondent::read(&header, &contacts.owner, &contacts.connections) {
+                    Some(correspondent) => sightings.push((
+                        correspondent.contact,
+                        correspondent.connection,
+                        correspondent.at,
+                    )),
+                    // The owner's own message, an unknown network or connection,
+                    // an unreadable instant: nothing to record, and nothing to
+                    // redeliver either.
+                    None => debug!(
+                        subject = %header.subject,
+                        network = %header.network,
+                        "an inbound event is not a correspondent's: not recorded"
+                    ),
+                }
+            }
             Err(error) => warn!(%error, "an inbound event could not be read; skipping it"),
         }
         delivered.push(message);
@@ -556,6 +588,7 @@ async fn drain(
 pub fn pending_json(seen: &SeenContact) -> Value {
     serde_json::json!({
         "contact": seen.contact,
+        "connection": seen.connection,
         "network": seen.network.as_str(),
         "first_seen": seen.first_seen,
         "last_seen": seen.last_seen,
@@ -575,6 +608,18 @@ mod tests {
 
     fn owner() -> Owner {
         Owner::new(OWNER, [OWNER_GHOST.to_owned()])
+    }
+
+    /// One WhatsApp, one Signal, and two SMS accounts: the registry under
+    /// which a sighting's connection is a lookup, and sometimes has no
+    /// answer.
+    fn registry() -> crate::connections::Registry {
+        crate::connections::Registry::from_config(
+            Some("whatsapp=whatsapp,signal=signal,sms=sms,sms-work=sms"),
+            &[],
+            "example.com",
+        )
+        .expect("a registry")
     }
 
     fn header(event: &Value) -> InboundHeader {
@@ -620,11 +665,13 @@ mod tests {
         // network identifier from here: `InboundHeader` has no `data`
         // member, so this is a statement about the type and not about this
         // test's diligence.
-        let correspondent = Correspondent::read(&header, &owner()).expect("a correspondent");
+        let correspondent =
+            Correspondent::read(&header, &owner(), &registry()).expect("a correspondent");
         assert_eq!(
             correspondent,
             Correspondent {
                 contact: "@whatsapp_33612345678:example.com".to_owned(),
+                connection: "whatsapp".to_owned(),
                 network: Network::Whatsapp,
                 at: "2026-09-17T10:00:00.000Z".to_owned(),
             }
@@ -649,7 +696,7 @@ mod tests {
             let mut event = full_event();
             event["subject"] = json!(identity);
             assert_eq!(
-                Correspondent::read(&header(&event), &owner()),
+                Correspondent::read(&header(&event), &owner(), &registry()),
                 None,
                 "the user's own messages travel through the same rooms; they are not \
                  decisions the user has to take about themselves ({identity})"
@@ -659,7 +706,44 @@ mod tests {
         // and is still recorded as one.
         let mut somebody_else = full_event();
         somebody_else["subject"] = json!("@whatsapp_lid-115332874281145:example.com");
-        assert!(Correspondent::read(&header(&somebody_else), &owner()).is_some());
+        assert!(Correspondent::read(&header(&somebody_else), &owner(), &registry()).is_some());
+    }
+
+    #[test]
+    fn the_sighting_is_held_under_the_events_connection_or_the_kinds_only_one() {
+        // #269 stamps the connection; the projection keeps it as the key.
+        let mut stamped = full_event();
+        stamped["network"] = json!("sms");
+        stamped["connection"] = json!("sms-work");
+        let read = Correspondent::read(&header(&stamped), &owner(), &registry()).unwrap();
+        assert_eq!(
+            (read.connection.as_str(), read.network),
+            ("sms-work", Network::Sms)
+        );
+        // An event older than #269 — the stream's history, replayed on a
+        // first start — is read as its kind's one connection, from the
+        // registry: `whatsapp` has one, `sms` has two here, so an SMS
+        // sighting with no connection is not a row to guess at.
+        assert_eq!(
+            Correspondent::read(&header(&full_event()), &owner(), &registry())
+                .unwrap()
+                .connection,
+            "whatsapp"
+        );
+        let mut old_sms = full_event();
+        old_sms["network"] = json!("sms");
+        assert_eq!(
+            Correspondent::read(&header(&old_sms), &owner(), &registry()),
+            None,
+            "two SMS connections and an event naming neither"
+        );
+        // A connection the registry does not know is not a row either.
+        let mut unknown = full_event();
+        unknown["connection"] = json!("wa-home");
+        assert_eq!(
+            Correspondent::read(&header(&unknown), &owner(), &registry()),
+            None
+        );
     }
 
     #[test]
@@ -669,7 +753,7 @@ mod tests {
         let mut unknown_network = full_event();
         unknown_network["network"] = json!("gmessages");
         assert_eq!(
-            Correspondent::read(&header(&unknown_network), &owner()),
+            Correspondent::read(&header(&unknown_network), &owner(), &registry()),
             None
         );
 
@@ -677,12 +761,18 @@ mod tests {
         // projection records, so there is nothing to substitute for it.
         let mut bad_time = full_event();
         bad_time["time"] = json!("last tuesday");
-        assert_eq!(Correspondent::read(&header(&bad_time), &owner()), None);
+        assert_eq!(
+            Correspondent::read(&header(&bad_time), &owner(), &registry()),
+            None
+        );
 
         // And an event with no sender at all.
         let mut no_subject = full_event();
         no_subject["subject"] = json!("");
-        assert_eq!(Correspondent::read(&header(&no_subject), &owner()), None);
+        assert_eq!(
+            Correspondent::read(&header(&no_subject), &owner(), &registry()),
+            None
+        );
     }
 
     #[test]
@@ -712,16 +802,18 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_contact_renders_as_the_four_values_it_is() {
+    fn a_pending_contact_renders_as_the_values_it_is_and_no_more() {
         assert_eq!(
             pending_json(&SeenContact {
                 contact: "@whatsapp_33612345678:example.com".to_owned(),
+                connection: "whatsapp".to_owned(),
                 network: Network::Whatsapp,
                 first_seen: "2026-09-17T10:00:00.000Z".to_owned(),
                 last_seen: "2026-09-17T18:30:00.000Z".to_owned(),
             }),
             json!({
                 "contact": "@whatsapp_33612345678:example.com",
+                "connection": "whatsapp",
                 "network": "whatsapp",
                 "first_seen": "2026-09-17T10:00:00.000Z",
                 "last_seen": "2026-09-17T18:30:00.000Z"

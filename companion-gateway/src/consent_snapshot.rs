@@ -317,6 +317,9 @@ fn snapshot_json(
 fn entry_json(entry: &Entry) -> Value {
     json!({
         "subject": { "type": entry.subject.kind.as_str(), "id": entry.subject.id },
+        // The perimeter (#270), beside its kind: a consumer not yet migrated
+        // reads `network` as before.
+        "connection": entry.connection,
         "network": entry.network.as_str(),
         "state": entry.state.as_str(),
         "decided_at": entry.decided_at,
@@ -408,6 +411,7 @@ mod tests {
                     kind: SubjectType::Network,
                     id: "whatsapp".to_owned(),
                 },
+                connection: "whatsapp".to_owned(),
                 network: Network::Whatsapp,
                 state: State::Granted,
                 decided_at: "2026-09-17T10:00:00.000Z".to_owned(),
@@ -435,6 +439,7 @@ mod tests {
                 "connections": [],
                 "entries": [{
                     "subject": { "type": "network", "id": "whatsapp" },
+                    "connection": "whatsapp",
                     "network": "whatsapp",
                     "state": "granted",
                     "decided_at": "2026-09-17T10:00:00.000Z",

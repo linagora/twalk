@@ -587,7 +587,7 @@ impl Answers {
             .trigger_envelope(&answer.reference.trigger_event_id)
             .await?;
         self.approvals
-            .consent_now(&trigger.contact, trigger.network)?;
+            .consent_now(&trigger.contact, &trigger.connection, trigger.network)?;
 
         let suggestion_event_id = answer.reference.suggestion_event_id();
         let produced_at = (self.now)();

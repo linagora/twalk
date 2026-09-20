@@ -23,7 +23,7 @@
     "id": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$",
-      "description": "Deterministic identifier: the lowercase-hex sha256 of the UTF-8 string data.subject.type + ':' + data.subject.id + ':' + data.new_state + ':' + <networks> + ':' + data.occurred_at, where the parts are joined by single ASCII colons, each is the corresponding value verbatim (occurred_at exactly as serialized in this event, not reformatted), and <networks> is data.scope.networks sorted in ascending order and joined by single ASCII commas with no spaces, so a single network renders as just that value, with no comma. A third-party producer reproducing this string byte for byte gets the same id, so re-emitting the same recorded change is idempotent on the bus. The scope is part of the key on purpose: two decisions on the same subject, to the same state, at the same instant but over different networks are different decisions, and a key without the scope would collide them onto one id, which the bus would then deduplicate down to one."
+      "description": "Deterministic identifier: the lowercase-hex sha256 of the UTF-8 string data.subject.type + ':' + data.subject.id + ':' + data.new_state + ':' + <connections> + ':' + data.occurred_at, where the parts are joined by single ASCII colons, each is the corresponding value verbatim (occurred_at exactly as serialized in this event, not reformatted), and <connections> is data.scope.connections sorted in ascending order and joined by single ASCII commas with no spaces, so a single connection renders as just that value, with no comma. (Before #270 the recipe joined data.scope.networks; on a deployment whose connections are named after their networks the two strings are identical, so no id changed.) A third-party producer reproducing this string byte for byte gets the same id, so re-emitting the same recorded change is idempotent on the bus. The scope is part of the key on purpose: two decisions on the same subject, to the same state, at the same instant but over different networks are different decisions, and a key without the scope would collide them onto one id, which the bus would then deduplicate down to one."
     },
     "source": {
       "type": "string",
@@ -98,7 +98,7 @@
             "id": {
               "type": "string",
               "maxLength": 256,
-              "description": "Identifier of the subject: a Matrix user ID for a contact, a persona id for a persona, and for a network subject the network value itself, in which case scope.networks holds exactly that one network."
+              "description": "Identifier of the subject: a Matrix user ID for a contact, a persona id for a persona, and for a network subject the network value itself, in which case scope.networks holds exactly that one network and scope.connections holds connections of that kind only — the default is held per connection (#270)."
             }
           },
           "description": "Who or what the consent decision applies to."
@@ -115,9 +115,18 @@
         },
         "scope": {
           "type": "object",
-          "required": ["networks"],
+          "required": ["connections", "networks"],
           "additionalProperties": false,
           "properties": {
+            "connections": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "definitions/connection.schema.json"
+              },
+              "description": "The connections the decision applies to (ADR 0033, #270): the perimeter, by the ids the Companion Gateway's registry gave them (`GET /api/connections`). This is the key a consent state is held under; `networks` is derivable from it — each connection's kind — and kept for consumers not yet migrated. A contact reachable on several connections gets one decision per scope."
+            },
             "networks": {
               "type": "array",
               "minItems": 1,
@@ -125,10 +134,10 @@
               "items": {
                 "$ref": "definitions/network.schema.json"
               },
-              "description": "Networks the decision applies to. A contact reachable on several networks gets one decision per scope."
+              "description": "Deprecated since #270 and kept for consumers not yet migrated: the kinds of the connections in `connections`, deduplicated. Derivable — a consumer holding the registry needs only `connections`. Removed with the next major version, not before."
             }
           },
-          "description": "The perimeter of the consent decision."
+          "description": "The perimeter of the consent decision: the connections it covers, and their kinds."
         },
         "occurred_at": {
           "type": "string",

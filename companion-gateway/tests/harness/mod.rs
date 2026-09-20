@@ -304,6 +304,10 @@ pub fn gateway_state_dir(static_dir: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// One connection per network a suite decides on, named after it.
+pub const TEST_CONNECTIONS: &str =
+    "whatsapp=whatsapp,signal=signal,telegram=telegram,discord=discord,sms=sms";
+
 /// The environment the Gateway runs from in tests: port 0 (the kernel picks),
 /// the given static directory, debug logs for the Gateway's own target, and
 /// the sign-in configuration (ticket #52) — the owner, the homeserver's
@@ -347,6 +351,15 @@ pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
         // no bus answers `consent_not_configured` rather than pretending
         // the snapshot is the thing that is missing.
         ("GATEWAY_SERVICE_TOKEN".to_owned(), SERVICE_TOKEN.to_owned()),
+        // The registry of connections (#269, #270): a Gateway derives one
+        // per bridge, and this Gateway has no bridge, so the networks the
+        // suites decide on are declared — named after their network, the
+        // reference deployment's shape. `gateway_env_with_bridges` clears it
+        // so the bridged Gateway runs the derived path.
+        (
+            "GATEWAY_CONNECTIONS".to_owned(),
+            TEST_CONNECTIONS.to_owned(),
+        ),
         // The pending-contact projection's durable consumer (ticket #54).
         // A deployment has one Gateway and uses the default name; the test
         // stack has one bus shared by every suite and every run, so each
@@ -965,7 +978,18 @@ pub const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 /// the owner, the domain its events name themselves by — it takes from the
 /// sign-in configuration already in [`gateway_env`].
 pub fn gateway_env_with_consent(static_dir: &Path, nats_url: &str) -> Vec<(String, String)> {
-    gateway_env_with(static_dir, &[("GATEWAY_NATS_URL", nats_url)])
+    gateway_env_with(
+        static_dir,
+        &[
+            ("GATEWAY_NATS_URL", nats_url),
+            // The test stack's bus is shared by every suite and lives for
+            // days, so "not on the bus" must be a search of the whole
+            // stream, not of the default 20000 positions: a long-lived
+            // stack would otherwise turn every `*_not_found` into
+            // `*_out_of_reach`. A suite about the window sets its own.
+            ("GATEWAY_APPROVAL_LOOKUP_WINDOW", "100000000"),
+        ],
+    )
 }
 
 /// The two bridge instances the bridge suite configures the Gateway with
@@ -1009,6 +1033,8 @@ pub fn gateway_env_with_bridges(static_dir: &Path, stub_base_url: &str) -> Vec<(
                 "GATEWAY_BRIDGES",
                 &format!("{STUB_BRIDGE_ID},{UNREACHABLE_BRIDGE_ID}"),
             ),
+            // Derived from the bridges, not declared (#269).
+            ("GATEWAY_CONNECTIONS", ""),
             ("GATEWAY_BRIDGE_MAUTRIX_STUB_URL", stub_base_url),
             (
                 "GATEWAY_BRIDGE_MAUTRIX_STUB_PROVISIONING_SECRET",
@@ -1164,6 +1190,8 @@ pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String
             ("GATEWAY_NATS_URL", nats_url),
             ("GATEWAY_HERMES_ANSWER_SECRET", HERMES_ANSWER_SECRET),
             ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
+            // See `gateway_env_with_consent`.
+            ("GATEWAY_APPROVAL_LOOKUP_WINDOW", "100000000"),
         ],
     )
 }

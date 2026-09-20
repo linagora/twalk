@@ -1039,10 +1039,22 @@ paths:
             type: string
             minLength: 1
           example: "@whatsapp_33612345678:example.com"
+        - name: connection
+          in: query
+          required: false
+          description: |
+            The connection the question is about (#270), by its id in
+            `GET /api/connections`. One of `connection` and `network` is
+            required; `connection` wins when both are sent.
+          schema:
+            $ref: "#/components/schemas/ConnectionId"
         - name: network
           in: query
-          required: true
-          description: The network the question is about.
+          required: false
+          description: |
+            The network the question is about, read as its single connection
+            on this deployment — refused (`malformed_request`) when the
+            network has none or several; send `connection` then.
           schema:
             $ref: "#/components/schemas/Network"
       responses:
@@ -4958,8 +4970,8 @@ components:
       additionalProperties: false
       properties:
         id:
-          type: string
-          pattern: "^[a-z0-9][a-z0-9-]{0,63}$"
+          allOf:
+            - $ref: "#/components/schemas/ConnectionId"
           description: |
             Opaque and stable. On a deployment with one connection per
             network it is the network's name; nothing parses an id.
@@ -4978,6 +4990,14 @@ components:
             the Sensor recognises a portal of this connection by. Absent when
             the operator named none; the Sensor then resolves the connection
             by kind when the kind has exactly one.
+
+    ConnectionId:
+      type: string
+      pattern: "^[a-z0-9][a-z0-9-]{0,63}$"
+      description: |
+        The id of a connection (ADR 0033): the one shape, copied from the
+        contract's `definitions/connection.schema.json` and tested against
+        it. Every member that names a connection references this schema.
 
     Kind:
       type: string
@@ -5447,12 +5467,27 @@ components:
             network's own value — in which case the scope holds exactly that
             one network; for a persona, the persona's name (`assistant`).
 
-    ConsentScope:
+    ConsentScopeRequest:
       type: object
-      description: The perimeter of a decision.
-      required: [networks]
+      description: |
+        The perimeter of a decision on the way in (ADR 0033, #270). Either
+        member is enough: `connections` names the perimeter; `networks`
+        alone is read as each network's single connection on this
+        deployment, and refused (`malformed_request`, naming the candidates)
+        when a network has several. Both together must agree.
       additionalProperties: false
       properties:
+        connections:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ConnectionId"
+          description: |
+            The connections the decision applies to, by the ids of
+            `GET /api/connections`. Order does not matter: the Gateway sorts
+            it, because the sorted scope is part of the event's deterministic
+            id.
         networks:
           type: array
           minItems: 1
@@ -5460,9 +5495,32 @@ components:
           items:
             $ref: "#/components/schemas/Network"
           description: |
-            The networks the decision applies to. Order does not matter on
-            the way in: the Gateway sorts it, because the sorted scope is
-            part of the event's deterministic id.
+            Deprecated as an input since #270 — send `connections`. Read as
+            each network's single connection.
+
+    ConsentScope:
+      type: object
+      description: |
+        The perimeter of a decision as recorded: the connections it covers —
+        the key the state is held under — and their kinds, derived and kept
+        for a client not yet migrated (#270).
+      required: [connections, networks]
+      additionalProperties: false
+      properties:
+        connections:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ConnectionId"
+          description: The connections, sorted ascending.
+        networks:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Network"
+          description: The kinds of `connections`, deduplicated, sorted.
 
     ConsentDecisionRequest:
       type: object
@@ -5475,7 +5533,7 @@ components:
         new_state:
           $ref: "#/components/schemas/ConsentState_State"
         scope:
-          $ref: "#/components/schemas/ConsentScope"
+          $ref: "#/components/schemas/ConsentScopeRequest"
         reason:
           type: string
           maxLength: 1024
@@ -5498,8 +5556,10 @@ components:
             The id of the `consent.state.changed.v1` event this decision is
             published as: the contract's deterministic key, the lowercase-hex
             sha256 of
-            `subject.type:subject.id:new_state:<sorted networks>:occurred_at`.
-            A consumer can match a bus event to this answer by it.
+            `subject.type:subject.id:new_state:<sorted connections>:occurred_at`.
+            A consumer can match a bus event to this answer by it. (Before
+            #270 the recipe joined the networks; a connection named after
+            its network makes the same string, so no id changed.)
         sequence:
           type: integer
           minimum: 1
@@ -5542,12 +5602,18 @@ components:
 
     ConsentStateEntry:
       type: object
-      description: One (subject, network) of the current state.
-      required: [subject, network, state, decided_at, decision_sequence]
+      description: |
+        One (subject, connection) of the current state (#270). `network` is
+        the connection's kind, kept beside it for a client not yet migrated.
+      required: [subject, connection, network, state, decided_at, decision_sequence]
       additionalProperties: false
       properties:
         subject:
           $ref: "#/components/schemas/ConsentSubject"
+        connection:
+          allOf:
+            - $ref: "#/components/schemas/ConnectionId"
+          description: The perimeter, by its id in `GET /api/connections`.
         network:
           $ref: "#/components/schemas/Network"
         state:
@@ -5687,13 +5753,17 @@ components:
 
     EffectiveConsent:
       type: object
-      description: The state that applies to one contact on one network.
-      required: [contact, network, state, decided_by]
+      description: The state that applies to one contact on one connection.
+      required: [contact, connection, network, state, decided_by]
       additionalProperties: false
       properties:
         contact:
           type: string
           description: The contact the question was about.
+        connection:
+          allOf:
+            - $ref: "#/components/schemas/ConnectionId"
+          description: The connection the answer is about (#270).
         network:
           $ref: "#/components/schemas/Network"
         state:
@@ -5710,10 +5780,11 @@ components:
     PendingContact:
       type: object
       description: |
-        One contact waiting for a decision, on one network. Four members, and
-        deliberately no fifth: a body, a display name or a network identifier
-        would each turn this list into something else.
-      required: [contact, network, first_seen, last_seen]
+        One contact waiting for a decision, on one connection. An id, a
+        perimeter and two instants — and deliberately nothing else: a body, a
+        display name or a network identifier would each turn this list into
+        something else. `network` is the connection's kind (#270).
+      required: [contact, connection, network, first_seen, last_seen]
       additionalProperties: false
       properties:
         contact:
@@ -5722,6 +5793,12 @@ components:
             The contact's Matrix user ID, as the bridge materialised it, and
             what a decision about them will name as its subject.
           example: "@whatsapp_33612345678:example.com"
+        connection:
+          allOf:
+            - $ref: "#/components/schemas/ConnectionId"
+          description: |
+            The connection they wrote on: the perimeter a decision about
+            them is scoped to.
         network:
           $ref: "#/components/schemas/Network"
         first_seen:
