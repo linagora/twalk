@@ -233,10 +233,12 @@ test('a jar of request headers is one paste, and is not called a jar of cookies'
 
 	// The answer went out as one map, keyed by the bridge's own field ids — not
 	// by the header names the user pasted — and the optional value it did not
-	// have is simply absent rather than empty.
+	// have is simply absent rather than empty. The map travels as one JSON
+	// string, which is how bridgev2 declares a cookies answer (#224, #267).
 	const stats = await bridge.stats();
 	const relayed = stats.submits.find((submit) => submit.step_type === 'cookies');
-	expect(relayed?.body?.cookies).toEqual({
+	expect(typeof relayed?.body?.cookies).toBe('string');
+	expect(JSON.parse(relayed?.body?.cookies ?? 'null')).toEqual({
 		cookie: 'li_at=a-session; lidc=b',
 		csrf: 'ajax:42'
 	});

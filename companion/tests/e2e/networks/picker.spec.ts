@@ -31,23 +31,27 @@ test.beforeEach(async ({ context, request }) => {
 	}
 });
 
-test('shows the four v0.1 networks, Telegram and Discord as v0.2, and a skip link', async ({
-	page
-}) => {
+test('shows the five v0.1 networks, Discord as v0.2, and a skip link', async ({ page }) => {
 	await page.goto('/networks');
 
 	await expect(page.getByTestId('screen-networks')).toBeVisible();
-	for (const network of ['whatsapp', 'signal', 'sms', 'matrix']) {
+	for (const network of ['whatsapp', 'signal', 'sms', 'matrix', 'telegram']) {
 		await expect(page.getByTestId(`card-${network}`)).toBeVisible();
 	}
 
-	// The two v0.2 cards are shown so the user knows the roadmap, and are
-	// never interactive.
-	for (const network of ['telegram', 'discord']) {
-		const card = page.getByTestId(`card-${network}`);
-		await expect(card).toHaveAttribute('data-blocked', 'coming-soon');
-		await expect(card.getByRole('link')).toHaveCount(0);
-	}
+	// Telegram is a network this product connects since #235; what its card
+	// says depends on the deployment, and this one runs no Telegram bridge. So
+	// it is blocked for *that* reason — never "coming soon", which would be the
+	// Companion contradicting a deployment that can connect it (#267).
+	const telegram = page.getByTestId('card-telegram');
+	await expect(telegram).toHaveAttribute('data-blocked', 'no-bridge');
+	await expect(telegram.getByRole('link')).toHaveCount(0);
+
+	// The one v0.2 card is shown so the user knows the roadmap, and is never
+	// interactive.
+	const discord = page.getByTestId('card-discord');
+	await expect(discord).toHaveAttribute('data-blocked', 'coming-soon');
+	await expect(discord.getByRole('link')).toHaveCount(0);
 
 	// The SMS card carries the discreet preview badge.
 	await expect(page.getByTestId('card-sms')).toContainText(/Preview|Aperçu/);

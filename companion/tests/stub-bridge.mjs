@@ -408,6 +408,20 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 				return;
 			}
 			const body = await readBody(request);
+			// bridgev2 decodes a submit's body into `map[string]string` before
+			// any connector runs, so a value that is not a string — a cookie jar
+			// sent as an object, which the Companion did until #224 — is refused
+			// by the decoder as `M_NOT_JSON`, and the login process survives it:
+			// only a connector's refusal reaches `deleteLogin` (#249). The stub
+			// says the same, so a journey that reads the jar off `stats()` reads
+			// the wire shape and not a convenience of the stub's (#267).
+			if (body !== null && typeof body === 'object') {
+				const wrong = Object.entries(body).find(([, value]) => typeof value !== 'string');
+				if (wrong !== undefined) {
+					mautrixError(response, 400, 'M_NOT_JSON');
+					return;
+				}
+			}
 			bridge.submits.push({
 				step_id: stepId,
 				step_type: stepType,
