@@ -71,19 +71,19 @@
 			"targets": ["authorize", "oidc"],
 			"needs": ["rust"],
 			"tier": "required",
-			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"],
-			"triggers_note": "The Gateway's OpenAPI description is in here because the collector checks the connections it holds against the registry `GET /api/consent/snapshot` carries. `consent-cache/` is deliberately not: the collector labels no sender in #274, and the dependency arrives with the mail collector in lot 3 — `test_selection.py` derives it from `Cargo.toml`, so the line appears when the dependency does."
+			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"],
+			"triggers_note": "The Gateway's OpenAPI description is in here because the collector checks the connections it holds against the registry `GET /api/consent/snapshot` carries, and reads the consent snapshot off the same document. `consent-cache/` since #280: a participant in the owner's meeting is labelled by the decision taken about them on the mail connection, through the shared cache — `test_selection.py` derives the dependency from `Cargo.toml`."
 		},
 
 		"collector-stack": {
-			"what": "The collector at its process boundary (#274), against the fake SSO and the shared test stack's bus: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1.",
+			"what": "The collector at its process boundary, against the fake SSO, the fake side service and the shared test stack's bus. #274: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1. #280: an event created, moved and removed in the owner's calendar is the three calendar types with the contract's ids, an unchanged CTag publishes nothing, a participant revoked on the mail connection — in the snapshot or over the stream — is withheld and counted, one never decided about is carried.",
 			"component": "collector",
 			"workdir": "collector",
-			"run": "cargo test --test status",
-			"targets": ["status"],
+			"run": "cargo test --test calendar --test status",
+			"targets": ["calendar", "status"],
 			"needs": ["rust", "docker"],
 			"tier": "required",
-			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"]
+			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"]
 		},
 
 		"clerk": {

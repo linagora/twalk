@@ -534,6 +534,10 @@ impl ServiceRefusal {
 pub struct Identities {
     pub jmap: Result<String, ServiceRefusal>,
     pub caldav: Result<String, ServiceRefusal>,
+    /// The owner's id on the calendar side service (`/api/user`'s `_id`),
+    /// which their calendar collections are under. `None` when the side
+    /// service did not answer, or answered without one.
+    pub caldav_owner_id: Option<String>,
 }
 
 impl Identities {
@@ -583,24 +587,41 @@ impl Services {
                 .map(str::to_owned)
         })
         .await;
+        // The side service's `/api/user` is the OpenPaaS one: the owner's
+        // `_id`, which the calendar collections are under (#280), beside
+        // `preferredEmail`. Both are read here so the calendar half asks
+        // nothing more.
         let caldav_user = format!("{}/api/user", self.caldav_url.trim_end_matches('/'));
-        let caldav = ask(&http, "caldav", &caldav_user, access, |body| {
-            body.get("email")
+        let caldav_document = ask(&http, "caldav", &caldav_user, access, |body| {
+            body.get("preferredEmail")
                 .and_then(|v| v.as_str())
-                .map(str::to_owned)
+                .map(|email| {
+                    (
+                        email.to_owned(),
+                        body.get("_id").and_then(|v| v.as_str()).map(str::to_owned),
+                    )
+                })
         })
         .await;
-        Ok(Identities { jmap, caldav })
+        let (caldav, caldav_owner_id) = match caldav_document {
+            Ok((email, id)) => (Ok(email), id),
+            Err(refusal) => (Err(refusal), None),
+        };
+        Ok(Identities {
+            jmap,
+            caldav,
+            caldav_owner_id,
+        })
     }
 }
 
-async fn ask(
+async fn ask<T>(
     http: &reqwest::Client,
     service: &str,
     url: &str,
     access: &AccessToken,
-    account_of: impl Fn(&serde_json::Value) -> Option<String>,
-) -> Result<String, ServiceRefusal> {
+    account_of: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Result<T, ServiceRefusal> {
     let response = http
         .get(url)
         .bearer_auth(&access.token)

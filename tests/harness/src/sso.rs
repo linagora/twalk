@@ -22,10 +22,17 @@
 //!   checked, and a grant the test can revoke, after which renewal answers
 //!   `400 invalid_grant`;
 //! - **two services behind the grant** — a JMAP session (`/jmap/session`,
-//!   `username`) and the calendar side service (`/api/user`, `email`), each
-//!   accepting a live access token and each one the test can make refuse a
-//!   fresh token with `403`, which is the `pending_operator` case: the grant
-//!   stands, the service wants an audience the client does not have.
+//!   `username`) and the calendar side service (`/api/user`,
+//!   `preferredEmail` and the owner's `_id`), each accepting a live access
+//!   token and each one the test can make refuse a fresh token with `403`,
+//!   which is the `pending_operator` case: the grant stands, the service
+//!   wants an audience the client does not have;
+//! - **the owner's calendars on the side service** (#280) — the HAL list at
+//!   `/dav/calendars/<id>.json`, `PROPFIND` on a collection answering its
+//!   CTag and each resource's ETag, and `REPORT calendar-multiget`
+//!   answering the VEVENTs asked for. A test puts and removes events
+//!   ([`FakeSso::put_event`], [`FakeSso::remove_event`]); the CTag moves
+//!   on every change and an ETag on every write, as a sabre/dav does.
 //!
 //! Every token the fake issues is random and never a secret worth
 //! protecting; what the tests assert is that the collector never prints one.
@@ -78,12 +85,34 @@ struct State {
     silent: Vec<&'static str>,
     /// The listener's port: the issuer discovery names has to be this fake.
     port: u16,
+    /// The owner's calendars on the side service, by calendar id.
+    calendars: std::collections::BTreeMap<String, FakeCalendar>,
+    /// A Companion Gateway's consent snapshot to answer at
+    /// `/api/consent/snapshot`, when a test stands this fake in for the
+    /// Gateway too; `None` answers 404 there, an unreadable registry.
+    gateway_snapshot: Option<Value>,
+    /// One counter for every CTag and ETag the fake ever hands out, so no
+    /// two versions of anything share one.
+    versions: u64,
     /// What happened, for the assertions: every token request's grant type,
     /// every refresh token presented.
     token_requests: Vec<String>,
     refresh_tokens_presented: Vec<String>,
     counter: u64,
 }
+
+/// One calendar collection on the fake side service.
+#[derive(Default)]
+struct FakeCalendar {
+    name: String,
+    ctag: String,
+    /// Resources by name (`<uid>.ics`): the ETag and the iCalendar text.
+    resources: std::collections::BTreeMap<String, (String, String)>,
+}
+
+/// The owner's id on the side service: what `/api/user` answers as `_id`
+/// and what the calendar paths are under.
+pub const OWNER_ID: &str = "64f1c0a2e9b1d3f4a5b6c7d8";
 
 struct PendingCode {
     challenge: String,
@@ -221,6 +250,69 @@ impl FakeSso {
         self.lock().refresh_token.clone()
     }
 
+    /// Creates a calendar on the side service, empty, and returns its
+    /// collection path (`/dav/calendars/<owner>/<id>/`).
+    pub fn create_calendar(&self, id: &str, name: &str) -> String {
+        let mut guard = self.lock();
+        guard.versions += 1;
+        let ctag = format!("http://sabre.io/ns/sync/{}", guard.versions);
+        guard.calendars.insert(
+            id.to_owned(),
+            FakeCalendar {
+                name: name.to_owned(),
+                ctag,
+                resources: Default::default(),
+            },
+        );
+        format!("/dav/calendars/{OWNER_ID}/{id}/")
+    }
+
+    /// Puts an event into a calendar, creating or replacing the resource
+    /// `<name>.ics`: a new ETag for it, a new CTag for the calendar. Returns
+    /// the ETag, quoted, as the server would answer it.
+    pub fn put_event(&self, calendar: &str, name: &str, ics: &str) -> String {
+        let mut guard = self.lock();
+        guard.versions += 1;
+        let version = guard.versions;
+        let etag = format!("\"{version}\"");
+        let entry = guard
+            .calendars
+            .get_mut(calendar)
+            .expect("the test created the calendar before writing into it");
+        entry.ctag = format!("http://sabre.io/ns/sync/{version}");
+        entry
+            .resources
+            .insert(format!("{name}.ics"), (etag.clone(), ics.to_owned()));
+        etag
+    }
+
+    /// Removes an event's resource from a calendar: a new CTag, and the
+    /// resource is no longer listed. Returns the new CTag.
+    pub fn remove_event(&self, calendar: &str, name: &str) -> String {
+        let mut guard = self.lock();
+        guard.versions += 1;
+        let version = guard.versions;
+        let entry = guard
+            .calendars
+            .get_mut(calendar)
+            .expect("the test created the calendar before removing from it");
+        entry.ctag = format!("http://sabre.io/ns/sync/{version}");
+        entry.resources.remove(&format!("{name}.ics"));
+        entry.ctag.clone()
+    }
+
+    /// A calendar's current CTag.
+    pub fn ctag(&self, calendar: &str) -> String {
+        self.lock().calendars[calendar].ctag.clone()
+    }
+
+    /// Stands this fake in for the Companion Gateway as well: the document
+    /// `GET /api/consent/snapshot` answers (`connections[]`, `entries[]`,
+    /// `next_stream_sequence`), with any bearer.
+    pub fn serve_gateway_snapshot(&self, document: Value) {
+        self.lock().gateway_snapshot = Some(document);
+    }
+
     /// Every refresh token the collector presented, in order.
     pub fn refresh_tokens_presented(&self) -> Vec<String> {
         self.lock().refresh_tokens_presented.clone()
@@ -258,17 +350,46 @@ struct RawRequest {
     body: String,
 }
 
+/// What the fake answers: a status line, a media type, bytes.
+struct Response {
+    status: &'static str,
+    content_type: &'static str,
+    body: Vec<u8>,
+}
+
+impl Response {
+    fn json(status: &'static str, body: Value) -> Self {
+        Self {
+            status,
+            content_type: "application/json",
+            body: serde_json::to_vec(&body).expect("a JSON value serialises"),
+        }
+    }
+
+    fn xml(status: &'static str, body: String) -> Self {
+        Self {
+            status,
+            content_type: "application/xml; charset=utf-8",
+            body: body.into_bytes(),
+        }
+    }
+}
+
 async fn serve_connection(mut stream: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
     let Some(request) = read_request(&mut stream).await? else {
         return Ok(());
     };
-    let Some((status, body)) = respond(&request, &state) else {
+    let Some(Response {
+        status,
+        content_type,
+        body,
+    }) = respond(&request, &state)
+    else {
         // A silenced service: the connection closes with nothing said.
         return Ok(());
     };
-    let body = serde_json::to_vec(&body)?;
     let head = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
@@ -326,9 +447,21 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<RawRequest>> {
 }
 
 /// Routes one request. `None` is a silenced service.
-fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<(&'static str, Value)> {
+fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<Response> {
     let path = request.path.split('?').next().unwrap_or_default();
     let mut guard = state.lock().expect("the fake SSO is not poisoned");
+    if let Some(rest) = path.strip_prefix("/dav/calendars/") {
+        return dav(request, rest, &mut guard);
+    }
+    let (status, body) = respond_json(request, path, &mut guard)?;
+    Some(Response::json(status, body))
+}
+
+fn respond_json(
+    request: &RawRequest,
+    path: &str,
+    guard: &mut State,
+) -> Option<(&'static str, Value)> {
     match (request.method.as_str(), path) {
         ("GET", "/.well-known/openid-configuration") => {
             let issuer = format!("http://127.0.0.1:{}", guard.port);
@@ -342,18 +475,27 @@ fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<(&'static 
                 }),
             ))
         }
-        ("POST", "/token") => Some(token(&request.body, &mut guard)),
+        ("POST", "/token") => Some(token(&request.body, guard)),
         ("GET", "/jmap/session") => service(
             "jmap",
             request,
-            &mut guard,
+            guard,
             |account| json!({ "username": account, "apiUrl": "http://jmap.invalid/api" }),
         ),
+        // The OpenPaaS shape: the owner's id (what the calendar paths are
+        // under) and `preferredEmail`.
+        ("GET", "/api/consent/snapshot") => Some(match guard.gateway_snapshot.clone() {
+            Some(document) => ("200 OK", document),
+            None => (
+                "404 Not Found",
+                json!({ "error": "not_found", "detail": "this fake stands in for no Companion Gateway" }),
+            ),
+        }),
         ("GET", "/api/user") => service(
             "caldav",
             request,
-            &mut guard,
-            |account| json!({ "email": account, "id": "user-1" }),
+            guard,
+            |account| json!({ "_id": OWNER_ID, "preferredEmail": account, "emails": [account] }),
         ),
         _ => Some((
             "404 Not Found",
@@ -448,8 +590,30 @@ fn service(
     guard: &mut State,
     document: impl Fn(&str) -> Value,
 ) -> Option<(&'static str, Value)> {
+    match admit(name, request, guard) {
+        Admission::Silent => None,
+        Admission::Refused(status, body) => Some((status, body)),
+        Admission::Account(account) => Some(("200 OK", document(&account))),
+    }
+}
+
+enum Admission {
+    Silent,
+    Refused(&'static str, Value),
+    Account(String),
+}
+
+/// One bearer check for every route of a service: silenced, refusing,
+/// unauthenticated, or the account the token belongs to.
+fn admit(name: &'static str, request: &RawRequest, guard: &State) -> Admission {
     if guard.silent.contains(&name) {
-        return None;
+        return Admission::Silent;
+    }
+    if guard.refusing.contains(&name) {
+        return Admission::Refused(
+            "403 Forbidden",
+            json!({ "error": "forbidden", "detail": format!("{name} wants an audience this token does not carry") }),
+        );
     }
     let bearer = request
         .authorization
@@ -457,22 +621,140 @@ fn service(
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, token)| token.trim().to_owned());
-    if guard.refusing.contains(&name) {
-        return Some((
-            "403 Forbidden",
-            json!({ "error": "forbidden", "detail": format!("{name} wants an audience this token does not carry") }),
-        ));
-    }
     match bearer {
         Some(token) if guard.access_tokens.contains_key(&token) => {
-            let account = guard.account.clone();
-            Some(("200 OK", document(&account)))
+            Admission::Account(guard.account.clone())
         }
-        _ => Some((
+        _ => Admission::Refused(
             "401 Unauthorized",
             json!({ "error": "unauthenticated", "detail": "no live access token" }),
+        ),
+    }
+}
+
+/// The owner's calendars on the side service (#280), under
+/// `/dav/calendars/`: the HAL list, `PROPFIND` on a collection, `REPORT
+/// calendar-multiget` on it. The same bearer rule as `/api/user` — it is
+/// the same service — so a token the side service refuses is refused on
+/// every one of its routes.
+fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> {
+    let account = match admit("caldav", request, guard) {
+        Admission::Silent => return None,
+        Admission::Refused(status, body) => return Some(Response::json(status, body)),
+        Admission::Account(account) => account,
+    };
+    let not_found = || {
+        Some(Response::json(
+            "404 Not Found",
+            json!({ "error": "not_found", "detail": format!("no such calendar resource: /dav/calendars/{rest}") }),
+        ))
+    };
+    // `<owner>.json`: the HAL list of the owner's calendars.
+    if let Some(owner) = rest.strip_suffix(".json") {
+        if owner != OWNER_ID || request.method != "GET" {
+            return not_found();
+        }
+        let calendars: Vec<Value> = guard
+            .calendars
+            .iter()
+            .map(|(id, calendar)| {
+                json!({
+                    "_links": { "self": { "href": format!("/dav/calendars/{OWNER_ID}/{id}.json") } },
+                    "dav:name": calendar.name,
+                    "calendarserver:ctag": calendar.ctag,
+                    "apple:color": "#3A87AD",
+                })
+            })
+            .collect();
+        return Some(Response::json(
+            "200 OK",
+            json!({
+                "_links": { "self": { "href": format!("/dav/calendars/{OWNER_ID}.json") } },
+                "_embedded": { "dav:calendar": calendars },
+            }),
+        ));
+    }
+    // `<owner>/<calendar>/`: the collection.
+    let mut parts = rest.trim_end_matches('/').splitn(2, '/');
+    let owner = parts.next().unwrap_or_default();
+    let calendar_id = parts.next().unwrap_or_default();
+    if owner != OWNER_ID || calendar_id.contains('/') {
+        return not_found();
+    }
+    let Some(calendar) = guard.calendars.get(calendar_id) else {
+        return not_found();
+    };
+    let collection = format!("/dav/calendars/{OWNER_ID}/{calendar_id}/");
+    let _ = account;
+    match request.method.as_str() {
+        "PROPFIND" => {
+            let mut body = String::from(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:cs=\"http://calendarserver.org/ns/\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n",
+            );
+            body.push_str(&format!(
+                "<d:response><d:href>{collection}</d:href><d:propstat><d:prop><cs:getctag>{}</cs:getctag><d:resourcetype><d:collection/><cal:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
+                xml_escape(&calendar.ctag)
+            ));
+            for (name, (etag, _)) in &calendar.resources {
+                body.push_str(&format!(
+                    "<d:response><d:href>{collection}{name}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><cs:getctag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
+                    xml_escape(etag)
+                ));
+            }
+            body.push_str("</d:multistatus>\n");
+            Some(Response::xml("207 Multi-Status", body))
+        }
+        "REPORT" => {
+            // calendar-multiget: every <d:href> asked for, answered with its
+            // ETag and its iCalendar text; one not there answers 404 in its
+            // own response, as RFC 4791 §7.9 has it.
+            let asked: Vec<String> = request
+                .body
+                .split("<d:href>")
+                .skip(1)
+                .filter_map(|part| part.split("</d:href>").next())
+                .map(|href| xml_unescape(href.trim()))
+                .collect();
+            let mut body = String::from(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n",
+            );
+            for href in asked {
+                let name = href.strip_prefix(collection.as_str()).unwrap_or_default();
+                match calendar.resources.get(name) {
+                    Some((etag, ics)) => body.push_str(&format!(
+                        "<d:response><d:href>{}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag><cal:calendar-data>{}</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n",
+                        xml_escape(&href),
+                        xml_escape(etag),
+                        xml_escape(ics)
+                    )),
+                    None => body.push_str(&format!(
+                        "<d:response><d:href>{}</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>\n",
+                        xml_escape(&href)
+                    )),
+                }
+            }
+            body.push_str("</d:multistatus>\n");
+            Some(Response::xml("207 Multi-Status", body))
+        }
+        _ => Some(Response::json(
+            "405 Method Not Allowed",
+            json!({ "error": "method_not_allowed", "detail": format!("{} on a calendar collection", request.method) }),
         )),
     }
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn xml_unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
 }
 
 /// `application/x-www-form-urlencoded`, decoded.

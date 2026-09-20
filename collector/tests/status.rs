@@ -26,10 +26,14 @@ struct Run {
     dir: tempfile::TempDir,
     mail: String,
     calendar: String,
+    /// The bus's head when the run was prepared: what it publishes is after
+    /// it, and the shared bus's history is not walked at every read.
+    since: u64,
 }
 
 impl Run {
     async fn prepare(name: &str) -> Result<Self> {
+        let since = Bus::connect().await?.head(STREAM).await?;
         let sso = FakeSso::start(OWNER).await?;
         let dir = tempfile::tempdir()?;
         write_client_secret(dir.path())?;
@@ -43,6 +47,7 @@ impl Run {
             dir,
             mail: format!("mail-{name}-{unique}"),
             calendar: format!("calendar-{name}-{unique}"),
+            since,
         })
     }
 
@@ -161,22 +166,23 @@ impl CollectorProc {
     }
 }
 
-/// The status events about one connection on the bus, in order.
-async fn states_of(bus: &Bus, connection: &str) -> Result<Vec<Value>> {
+/// The status events about one connection on the bus, in order, from this
+/// run's start.
+async fn states_of(bus: &Bus, run: &Run, connection: &str) -> Result<Vec<Value>> {
     Ok(bus
-        .fetch_all(STREAM, STATUS_SUBJECT)
+        .fetch_since(STREAM, STATUS_SUBJECT, run.since)
         .await?
         .into_iter()
         .filter(|event| event["subject"].as_str() == Some(connection))
         .collect())
 }
 
-async fn wait_for_state(bus: &Bus, connection: &str, state: &str) -> Result<Value> {
+async fn wait_for_state(bus: &Bus, run: &Run, connection: &str, state: &str) -> Result<Value> {
     let connection = connection.to_owned();
     let state = state.to_owned();
     poll_until(
         || async {
-            states_of(bus, &connection)
+            states_of(bus, run, &connection)
                 .await
                 .ok()?
                 .into_iter()
@@ -196,7 +202,7 @@ async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_r
     run.authorize().await?;
     let collector = run.start()?;
 
-    let connected = wait_for_state(&bus, &run.mail, "connected").await?;
+    let connected = wait_for_state(&bus, &run, &run.mail, "connected").await?;
     validate_against_contract(&connected, "connection.status.changed")?;
     assert_eq!(
         connected["data"]["from_state"], "unknown",
@@ -209,7 +215,7 @@ async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_r
         format!("collector://collector.test/connections/{}", run.mail)
     );
     // The calendar connection of the same grant: its own event.
-    let calendar = wait_for_state(&bus, &run.calendar, "connected").await?;
+    let calendar = wait_for_state(&bus, &run, &run.calendar, "connected").await?;
     assert_eq!(calendar["data"]["kind"], "calendar");
 
     // The SSO revokes the grant while the collector's access token is
@@ -219,11 +225,11 @@ async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_r
     // `invalid_grant`, and that is `reconnect_required`, from `connected`,
     // in the same run, without a restart.
     run.sso.revoke();
-    let refused = wait_for_state(&bus, &run.mail, "reconnect_required").await?;
+    let refused = wait_for_state(&bus, &run, &run.mail, "reconnect_required").await?;
     validate_against_contract(&refused, "connection.status.changed")?;
     assert_eq!(refused["data"]["from_state"], "connected");
     assert!(
-        states_of(&bus, &run.mail)
+        states_of(&bus, &run, &run.mail)
             .await?
             .iter()
             .all(|event| event["data"]["to_state"] != "pending_operator"),
@@ -252,7 +258,7 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
     run.sso.refuse("caldav");
     let collector = run.start()?;
 
-    let calendar = wait_for_state(&bus, &run.calendar, "pending_operator").await?;
+    let calendar = wait_for_state(&bus, &run, &run.calendar, "pending_operator").await?;
     validate_against_contract(&calendar, "connection.status.changed")?;
     assert_eq!(calendar["data"]["service"], "caldav");
     assert!(
@@ -263,10 +269,10 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
         "{calendar}"
     );
     // The mail connection is fine: the grant stands and JMAP takes it.
-    let mail = wait_for_state(&bus, &run.mail, "connected").await?;
+    let mail = wait_for_state(&bus, &run, &run.mail, "connected").await?;
     assert!(mail["data"].get("hint").is_none());
     assert!(
-        states_of(&bus, &run.mail)
+        states_of(&bus, &run, &run.mail)
             .await?
             .iter()
             .all(|event| event["data"]["to_state"] != "pending_operator"),
@@ -275,10 +281,10 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
 
     // Restored: the transition back is published, once.
     run.sso.restore("caldav");
-    wait_for_state(&bus, &run.calendar, "connected").await?;
+    wait_for_state(&bus, &run, &run.calendar, "connected").await?;
     // And a service that does not answer is unreachable, which is neither.
     run.sso.silence("jmap");
-    let silent = wait_for_state(&bus, &run.mail, "unreachable").await?;
+    let silent = wait_for_state(&bus, &run, &run.mail, "unreachable").await?;
     assert_eq!(silent["data"]["service"], "jmap");
     collector.stop().await;
     Ok(())
@@ -294,7 +300,7 @@ async fn a_grant_for_another_account_publishes_nothing_and_names_the_account() -
     run.authorize().await?;
     let collector = run.start()?;
 
-    let pending = wait_for_state(&bus, &run.mail, "pending_operator").await?;
+    let pending = wait_for_state(&bus, &run, &run.mail, "pending_operator").await?;
     assert!(
         pending["data"]["hint"]
             .as_str()
