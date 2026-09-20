@@ -4,6 +4,8 @@
 /companion-gateway/target/
 /tests/harness/target/
 .env
+# Backups a deploy edit leaves beside it: the same secrets, never versioned
+.env.bak*
 
 # Python bytecode, from running the SDK's own unit tests
 __pycache__/
