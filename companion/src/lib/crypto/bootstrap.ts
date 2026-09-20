@@ -38,6 +38,7 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { GeneratedSecretStorageKey } from 'matrix-js-sdk/lib/crypto-api';
 
+import type { HandoverCrypto } from '$lib/matrix/handover';
 import { groupRecoveryKey } from '$lib/recovery/key';
 
 /** The Matrix session the bootstrap runs in. */
@@ -453,6 +454,55 @@ async function startClient(
 	await client.initRustCrypto();
 	current = { client, session };
 	return client;
+}
+
+/**
+ * The three moves the handover room needs from the crypto stack, and no others
+ * (`$lib/matrix/handover.ts`, ticket #226). Here because this module is the one
+ * place in the app that touches matrix-js-sdk.
+ *
+ * `null` when no bootstrap has run in this tab, which is a caller's mistake and
+ * not an error worth throwing over.
+ *
+ * **Why a sync loop at all**, when the module docs above say this app runs
+ * none: the crypto machine learns which users to track from `RoomEncryptor`,
+ * and `RoomEncryptor` is built by `RustCrypto.onCryptoEvent`, which in the
+ * installed SDK is called from exactly one place — the sync loop
+ * (`lib/sync.js`). So a browser that created an encrypted room with the Sensor
+ * and never synced would still not track it, and ADR 0034's later credential
+ * send would still put an empty batch on the wire and resolve successfully.
+ * One bounded sync, started and stopped by the handover, is what makes the
+ * room do the job it was created for.
+ */
+export function handoverCrypto(): HandoverCrypto | null {
+	const client = currentClient();
+	if (client === null) {
+		return null;
+	}
+	return {
+		async startSync(): Promise<void> {
+			// One message per room is all this needs: it is here for the state
+			// and the membership, not for any history.
+			await client.startClient({ initialSyncLimit: 1 });
+		},
+		stopSync(): void {
+			client.stopClient();
+		},
+		async trackedDeviceCount(userId: string): Promise<number> {
+			const crypto = client.getCrypto();
+			if (crypto === undefined) {
+				return 0;
+			}
+			// `downloadUncached` is **false**, and that is the whole assertion.
+			// With `true` the SDK falls back to a plain HTTP `/keys/query` whose
+			// answer the Olm machine never sees, so it would report devices for
+			// a user the machine does not track — which is exactly the state in
+			// which the credential send goes out empty. False means the answer
+			// comes from the machine's own store or not at all.
+			const devices = await crypto.getUserDeviceInfo([userId], false);
+			return devices.get(userId)?.size ?? 0;
+		}
+	};
 }
 
 /**

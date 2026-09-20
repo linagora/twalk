@@ -53,6 +53,7 @@ import { connectionOf } from '$lib/networks/connection';
 export type ConfiguredBridge = components['schemas']['ConfiguredBridge'];
 export type ConsentEntry = components['schemas']['ConsentStateEntry'];
 export type Device = components['schemas']['Device'];
+export type PortalMove = components['schemas']['PortalMove'];
 
 /**
  * What a bridge row says — the state of the **link** the bridge holds, in the
@@ -356,8 +357,29 @@ export function activityFeed(options: {
 	bridges: readonly ConfiguredBridge[];
 	consent: readonly ConsentEntry[];
 	devices: readonly Device[];
+	/** The register's moves (#255); absent when the deployment keeps none. */
+	moves?: readonly PortalMove[];
 }): ActivityEntry[] {
 	const entries: ActivityEntry[] = [];
+
+	// A conversation's room was replaced while the user observed it (ADR
+	// 0029): the register either followed the decision into the new room or
+	// returned it to the chooser as a crowd. Said here because a deployment
+	// that changed rooms under the user without being able to say so is one
+	// whose history they cannot check. Numbers and nothing else — no room
+	// name, which is a contact's name for a one-to-one conversation.
+	for (const move of options.moves ?? []) {
+		entries.push({
+			id: `move:${move.successor}`,
+			icon: 'observing',
+			tone: move.followed ? 'ok' : 'idle',
+			at: move.decided_at,
+			messageKey: move.followed
+				? 'dashboard.feed.move.followed'
+				: 'dashboard.feed.move.returned',
+			values: { members: String(move.members), threshold: String(move.crowd_threshold) }
+		});
+	}
 
 	for (const bridge of options.bridges) {
 		const login = bridge.login;

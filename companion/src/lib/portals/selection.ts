@@ -28,11 +28,19 @@
 
 import type { ConversationRow } from './conversations';
 
-
 /** One conversation, reduced to what a consequence needs to name it. */
 export interface Named {
 	readonly label: string;
 	readonly members: number;
+	/**
+	 * Whether this crowd is a conversation that **moved** here (#256): the
+	 * user had observed it, its room was replaced by one whose audience
+	 * crosses the threshold, and the register returned the decision to them
+	 * (ADR 0029). The acknowledgement then says where it comes from, because
+	 * "a crowd you never ticked" and "a conversation you observe, grown" are
+	 * two different things to acknowledge.
+	 */
+	readonly moved: boolean;
 }
 
 /** What applying the current selection would do, and to how many people. */
@@ -102,7 +110,7 @@ export function consequence(
 	const removing = rows.filter((row) => !selected.has(row.roomId) && isObserved(row));
 	const people = adding.reduce((sum, row) => sum + row.members, 0);
 	const named = adding
-		.map((row) => ({ label: row.label, members: row.members }))
+		.map((row) => ({ label: row.label, members: row.members, moved: row.movedFrom !== null }))
 		.sort((left, right) => right.members - left.members);
 	const crowds = named.filter((row) => row.members >= crowdThreshold);
 	return {

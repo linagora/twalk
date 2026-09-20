@@ -1686,10 +1686,12 @@ paths:
                         enum: [suggestion_not_found, trigger_not_found]
         "409":
           description: |
-            The suggestion exists and cannot be approved. Six situations,
-            six codes: each one is a different sentence for the user, and
+            The suggestion exists and cannot be approved. Seven situations,
+            seven codes: each one is a different sentence for the user, and
             collapsing them would be the defect that cost this project seven
-            incidents in two days.
+            incidents in two days. Six are about the suggestion or the
+            sender's consent; the seventh, `trigger_has_no_room`, is about
+            the message it answers.
 
             - `suggestion_expired` - its `expires_at` has passed. A stale
               suggestion cannot be approved late (the policy that sets it is
@@ -2740,6 +2742,59 @@ paths:
         "503":
           $ref: "#/components/responses/PortalsNotConfigured"
 
+  /api/portals/moves:
+    get:
+      operationId: listPortalMoves
+      tags: [portals]
+      summary: The conversations whose room was replaced while the Sensor was in them, and what the register decided.
+      description: |
+        The register's journal of **moves** (ADR 0029, #255). A conversation's
+        room can be replaced — a Telegram group promoted to a supergroup, a
+        Matrix room upgraded — while the user's decision to observe it is on
+        record. The register follows `m.room.tombstone` to the successor and
+        decides what that decision now means: **followed** when the successor's
+        audience is under the crowd threshold (the Sensor is invited there),
+        **returned to the chooser** when it is not (the conversation stays
+        `moved` and asks to be acknowledged again as a crowd).
+
+        Either way the move is said here, once per successor, with the numbers
+        it was decided on. A deployment that changed rooms under the user
+        without being able to say so is one whose history they cannot check;
+        the dashboard's activity feed draws from this. Read from the Gateway's
+        store alone — no homeserver call.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The most recent moves, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [moves]
+                additionalProperties: false
+                properties:
+                  moves:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PortalMove"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "503":
+          description: |
+            `portals_not_configured` — as for `GET /api/portals`. Or
+            `moves_not_journaled` — this Gateway has a register but no store
+            (no consent configured), so moves are decided and logged but not
+            kept; `detail` names what to configure.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [portals_not_configured, moves_not_journaled]
+
   /api/portals/observation:
     post:
       operationId: setPortalObservation
@@ -3479,9 +3534,10 @@ components:
                     enum: [no_login_in_flight, unknown_bridge]
     BridgeUnavailable:
       description: |
-        The bridge itself is the problem, not the request. The three codes
-        are three different investigations, and telling them apart without
-        reading `detail` is the point of having three.
+        The bridge itself, or this build's conversation with it, is the
+        problem — never the user's values. The four codes are four different
+        investigations, and telling them apart without reading `detail` is
+        the point of having four.
 
         - `bridge_unreachable` — **nothing answered**: connection refused,
           timeout, no route. This is the one an operator checks containers,
@@ -3496,6 +3552,16 @@ components:
           Twalk's reading of that bridge's provisioning API rather than a
           broken deployment, and nothing about the deployment will explain
           it. `detail` names the provisioning call and what was looked for.
+        - `bridge_request_unusable` — the mirror: it answered `400
+          M_NOT_JSON`, meaning it could not read what **this build sent**.
+          bridgev2 refuses the body before any connector runs, so the
+          network saw nothing, refused nothing, and the login is still
+          waiting on the same step. A defect in Twalk's writing of the
+          provisioning API; `detail` says so and names the code. It exists
+          because a cookie jar sent as a nested map arrived here as
+          `invalid_request` — *"the network refused what was submitted,
+          start the login again"* — and sent a user round the same paste
+          three times (#221).
 
           It exists because it used to be `bridge_unreachable` (#116): the
           first live WhatsApp login failed here, was reported as a bridge
@@ -3514,7 +3580,12 @@ components:
               - properties:
                   error:
                     enum:
-                      [bridge_unreachable, bridge_refused, bridge_answer_unusable]
+                      [
+                        bridge_unreachable,
+                        bridge_refused,
+                        bridge_answer_unusable,
+                        bridge_request_unusable,
+                      ]
 
     ConsentNotConfigured:
       description: |
@@ -4546,6 +4617,42 @@ components:
             tombstone that points into the dark is a fact, not a reason to
             fold the conversation into nothing.
 
+    PortalMove:
+      type: object
+      description: One conversation's move, as the register decided it (#255).
+      required:
+        [successor, predecessor, bridge_id, members, crowd_threshold, followed, decided_at]
+      additionalProperties: false
+      properties:
+        successor:
+          type: string
+          description: The room the conversation lives in now.
+        predecessor:
+          type: string
+          description: The room it left — the one the user's decision named.
+        bridge_id:
+          type: string
+        members:
+          type: integer
+          minimum: 0
+          description: |
+            People in the successor when the register decided, bridge bot
+            and Sensor excluded — the number the threshold was applied to.
+        crowd_threshold:
+          type: integer
+          minimum: 2
+          description: The threshold applied, kept so the entry stays readable after the operator changes it.
+        followed:
+          type: boolean
+          description: |
+            `true` — the Sensor was invited into the successor: the decision
+            followed the conversation. `false` — the successor's audience is
+            at or above the threshold, so the conversation went back to the
+            chooser as a crowd, `moved`, for the user to acknowledge again.
+        decided_at:
+          type: string
+          format: date-time
+
     PortalSummary:
       type: object
       description: |
@@ -4793,7 +4900,7 @@ components:
     Session:
       type: object
       description: Who is signed in, on which device.
-      required: [owner, homeserver, device]
+      required: [owner, homeserver, device, sensor]
       additionalProperties: false
       properties:
         owner:
@@ -4806,6 +4913,8 @@ components:
           description: The homeserver name that identity belongs to.
         device:
           $ref: "#/components/schemas/Device"
+        sensor:
+          $ref: "#/components/schemas/SensorUserId"
 
     IssuedSession:
       type: object
@@ -4818,7 +4927,7 @@ components:
         (`additionalProperties: false`) is what makes the conformance test
         catch a response member nobody described, and that keyword cannot
         see through an `allOf`.
-      required: [owner, homeserver, device, expires_in]
+      required: [owner, homeserver, device, sensor, expires_in]
       additionalProperties: false
       properties:
         owner:
@@ -4831,6 +4940,8 @@ components:
           description: The homeserver name that identity belongs to.
         device:
           $ref: "#/components/schemas/Device"
+        sensor:
+          $ref: "#/components/schemas/SensorUserId"
         expires_in:
           type: integer
           minimum: 1
@@ -4838,6 +4949,31 @@ components:
             Seconds the device token stays valid from now. The refresh
             token lives longer; its lifetime is not reported, because
             the client's only move when it expires is to sign in again.
+
+    SensorUserId:
+      type: [string, "null"]
+      description: |
+        The Matrix ID of the Sensor this deployment runs
+        (`GATEWAY_SENSOR_USER_ID`), and `null` when the operator configured
+        none.
+
+        Here because the Companion has to **create a room with it** during
+        onboarding (ticket #226, ADR 0034): the browser hands the Sensor a
+        device credential as an Olm-encrypted to-device message, and that
+        send is a silent no-op unless the two accounts already share an
+        encrypted room. A browser that has to name the Sensor cannot derive
+        it — `@sensor:<server>` is a deployment's convention and not a fact,
+        which is the refusal ADR 0018 made about the owner's network ghosts
+        and ADR 0024 about a bridge bot's localpart.
+
+        Said in the session document rather than in a new operation, and only
+        to a signed-in device: it is a fact about the deployment the owner
+        already knows, and `GET /api/deployment` deliberately names no
+        identity to an unauthenticated caller. The alternative on offer was
+        `POST /api/bootstrap/rooms` with an empty room list, which answers
+        `sensor` today — and which would mean handing the Gateway the user's
+        own Matrix access token to read a configured string, for no other
+        reason.
 
     Device:
       type: object

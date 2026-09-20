@@ -46,6 +46,7 @@ use crate::portals::{Observation, PortalRefusal, Register};
 pub fn routes() -> Router<Gateway> {
     Router::new()
         .route("/api/portals", get(portals))
+        .route("/api/portals/moves", get(moves))
         .route("/api/portals/observation", post(observation))
 }
 
@@ -67,6 +68,34 @@ struct ObservationRequest {
     #[serde(default)]
     rooms: Vec<String>,
     observed: bool,
+}
+
+/// How many moves one read of the journal returns: the dashboard's feed
+/// shows the last ten events of every kind, so ten moves is more than it can
+/// show and few enough to be one small answer.
+const MOVES_LIMIT: usize = 50;
+
+/// `GET /api/portals/moves` — the register's journal of moves (#255): every
+/// conversation whose room was replaced while the Sensor was in it, and what
+/// the register decided about it. Read from the store alone; no homeserver
+/// call.
+async fn moves(State(gateway): State<Gateway>) -> Response {
+    let Some(portals) = gateway.portals() else {
+        return not_configured();
+    };
+    if !portals.journals_moves() {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "moves_not_journaled",
+            "this Gateway keeps no journal of moves: it has no store, because no consent is \
+             configured (GATEWAY_NATS_URL and a sign-in). Moves are still decided and logged.",
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "moves": portals.moves(MOVES_LIMIT) })),
+    )
+        .into_response()
 }
 
 /// `POST /api/portals/observation` — the decision.
@@ -227,6 +256,10 @@ mod tests {
         };
         let body = register_json(&register, 20);
         assert_eq!(body["summary"]["total"], 3);
+        assert_eq!(
+            body["crowd_threshold"], 20,
+            "the threshold is served, not assumed by the screen (#252)"
+        );
         assert_eq!(body["summary"]["observing"], 1);
         assert_eq!(body["summary"]["absent"], 2);
         assert_eq!(body["summary"]["invited"], 0);

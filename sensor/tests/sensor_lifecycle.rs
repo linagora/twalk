@@ -4,14 +4,21 @@
 
 //! Ticket 02, lifecycle: the Sensor joins rooms on invitation from an
 //! allowed inviter, ignores everyone else, and stops observing a room
-//! after being removed from it.
+//! after being removed from it — and, since #254, leaves a room another
+//! joined room replaced.
+//!
+//! Isolation is the suite's (`TWALK_TEST_STACK`, `TWALK_TEST_SYNAPSE_PORT`,
+//! `TWALK_TEST_NATS_PORT`; `sensor/tests/harness/mod.rs`). The replaced-room
+//! test also serves the Sensor's metrics, on a port of its own so a parallel
+//! worktree running `observability.rs` (19010) or `owner_device.rs` (19011)
+//! never collides with it.
 
 mod harness;
 
 use anyhow::Result;
 use harness::{
-    ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sensor_env_with, Bot, Bus,
-    SensorProc, SENSOR_USER_ID,
+    ensure_stack, make_whatsapp_portal, poll_until, sensor_env, sensor_env_with,
+    whatsapp_bridge_state, Bot, Bus, SensorProc, SENSOR_LOCK, SENSOR_USER_ID,
 };
 
 const STREAM: &str = "twalk";
@@ -20,7 +27,7 @@ const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 #[tokio::test]
 async fn joins_when_invited_by_an_allowed_inviter_and_ignores_others() -> Result<()> {
     ensure_stack().await?;
-    let _guard = harness::SENSOR_LOCK.lock().await;
+    let _guard = SENSOR_LOCK.lock().await;
     let sensor = SensorProc::start(&sensor_env())?;
     let alpha = Bot::login("bot_alpha").await?;
     let beta = Bot::login("bot_beta").await?;
@@ -51,7 +58,7 @@ async fn joins_when_invited_by_an_allowed_inviter_and_ignores_others() -> Result
 #[tokio::test]
 async fn leaves_the_room_after_being_removed() -> Result<()> {
     ensure_stack().await?;
-    let _guard = harness::SENSOR_LOCK.lock().await;
+    let _guard = SENSOR_LOCK.lock().await;
     let sensor = SensorProc::start(&sensor_env())?;
     let alpha = Bot::login("bot_alpha").await?;
 
@@ -81,11 +88,12 @@ async fn leaves_the_room_after_being_removed() -> Result<()> {
 /// a dead room in that count is #232's drift, one migration at a time.
 #[tokio::test]
 async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined() -> Result<()> {
+    // Unique to this test: see the module doc for the other suites' ports.
     const METRICS_LISTEN: &str = "127.0.0.1:19012";
     const METRICS_URL: &str = "http://127.0.0.1:19012/metrics";
 
     ensure_stack().await?;
-    let _guard = harness::SENSOR_LOCK.lock().await;
+    let _guard = SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
     let sensor = SensorProc::start(&sensor_env_with(&[(
         "SENSOR_METRICS_LISTEN",
@@ -94,12 +102,12 @@ async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined(
     let alpha = Bot::login("bot_alpha").await?;
     let contact = Bot::login("bot_beta").await?;
 
-    let old = make_whatsapp_portal(&alpha, "portal-that-moves").await?;
-    alpha.invite(&old, SENSOR_USER_ID).await?;
-    alpha.invite(&old, contact.user_id()).await?;
-    contact.join_room(&old).await?;
+    let predecessor = make_whatsapp_portal(&alpha, "portal-that-moves").await?;
+    alpha.invite(&predecessor, SENSOR_USER_ID).await?;
+    alpha.invite(&predecessor, contact.user_id()).await?;
+    contact.join_room(&predecessor).await?;
     alpha
-        .wait_for_membership(&old, SENSOR_USER_ID, "join")
+        .wait_for_membership(&predecessor, SENSOR_USER_ID, "join")
         .await?;
     // The room counts, and a message in it reaches the bus: the baseline.
     let counted = poll_until(
@@ -110,11 +118,13 @@ async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined(
         "the observed-rooms gauge",
     )
     .await?;
-    contact.send_message(&old, "before the move").await?;
-    bus.wait_for_room_message(STREAM, MESSAGE_SUBJECT, &old)
+    contact
+        .send_message(&predecessor, "before the move")
+        .await?;
+    bus.wait_for_room_message(STREAM, MESSAGE_SUBJECT, &predecessor)
         .await?;
     let published_before = bus
-        .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &old)
+        .fetch_room_messages(STREAM, MESSAGE_SUBJECT, &predecessor)
         .await?
         .len();
 
@@ -123,17 +133,17 @@ async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined(
     // thing that can still speak in a dead room is the bridge itself, as its
     // bot does when it leaves a notice behind. The bridge re-marks the
     // successor.
-    let new = alpha.upgrade_room(&old).await?;
-    let (state_key, content) = harness::whatsapp_bridge_state(alpha.user_id(), "portal-that-moves");
+    let successor = alpha.upgrade_room(&predecessor).await?;
+    let (state_key, content) = whatsapp_bridge_state(alpha.user_id(), "portal-that-moves");
     alpha
-        .send_state_event(&new, "m.bridge", &state_key, content)
+        .send_state_event(&successor, "m.bridge", &state_key, content)
         .await?;
     alpha
-        .send_message(&old, "shouting into a dead room")
+        .send_message(&predecessor, "shouting into a dead room")
         .await?;
     // Something the Sensor *does* publish, sent after the stray one, proves
     // the stray was seen and dropped rather than not yet processed.
-    let dropped = poll_until(
+    poll_until(
         || async {
             let body = reqwest::get(METRICS_URL).await.ok()?.text().await.ok()?;
             sample_of(
@@ -145,9 +155,8 @@ async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined(
         "the stray message to be counted as dropped",
     )
     .await?;
-    assert!(dropped >= 1);
     assert_eq!(
-        bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &old)
+        bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &predecessor)
             .await?
             .len(),
         published_before,
@@ -157,12 +166,12 @@ async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined(
     // The register would invite the Sensor into the successor (#255); the
     // bridge bot does it here. Joining the successor is what makes the Sensor
     // leave the room it replaced.
-    alpha.invite(&new, SENSOR_USER_ID).await?;
+    alpha.invite(&successor, SENSOR_USER_ID).await?;
     alpha
-        .wait_for_membership(&new, SENSOR_USER_ID, "join")
+        .wait_for_membership(&successor, SENSOR_USER_ID, "join")
         .await?;
     alpha
-        .wait_for_membership(&old, SENSOR_USER_ID, "leave")
+        .wait_for_membership(&predecessor, SENSOR_USER_ID, "leave")
         .await?;
     let after = poll_until(
         || async {
@@ -174,11 +183,29 @@ async fn a_dead_room_publishes_nothing_and_is_left_once_the_successor_is_joined(
     .await?;
     assert_eq!(after, counted, "one conversation, one room counted");
 
+    // Each fact is said once, naming both rooms. Scoped to this test's
+    // predecessor: the stack persists, so a fresh Sensor's first sync may
+    // also meet the replaced rooms of earlier runs and say so about each.
     let logs = sensor.logs().await;
-    assert!(
+    let said = |needle: &str| {
         logs.iter()
-            .any(|line| line.contains("left the room it replaced")),
-        "the departure is logged once, naming both rooms: {logs:?}"
+            .filter(|line| line.contains(needle) && line.contains(&predecessor))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let left = said("left the room it replaced");
+    assert_eq!(left.len(), 1, "the departure is logged once: {logs:?}");
+    assert!(
+        left[0].contains(&successor) && left[0].contains(&predecessor),
+        "the departure names both rooms: {}",
+        left[0]
+    );
+    let dropped = said("arrived in a room that was replaced");
+    assert_eq!(dropped.len(), 1, "the drop is announced once: {logs:?}");
+    assert!(
+        dropped[0].contains(&successor) && dropped[0].contains(&predecessor),
+        "the drop names both rooms: {}",
+        dropped[0]
     );
 
     sensor.stop().await;
@@ -202,7 +229,7 @@ fn sample_of(body: &str, prefix: &str) -> Option<u64> {
 #[tokio::test]
 async fn starts_from_a_configured_access_token_without_a_password() -> Result<()> {
     ensure_stack().await?;
-    let _guard = harness::SENSOR_LOCK.lock().await;
+    let _guard = SENSOR_LOCK.lock().await;
     let credentials = Bot::login("sensor").await?;
     let sensor = SensorProc::start(&harness::sensor_env_with(&[
         ("SENSOR_PASSWORD", ""),

@@ -483,6 +483,19 @@ pub enum BridgeRefusal {
     NotFoundOnBridge { errcode: String },
     /// The bridge refused, with its own error code.
     BridgeRefused { errcode: String, status: u16 },
+    /// **The bridge could not read what this Gateway sent it** (issue #221):
+    /// `400 M_NOT_JSON`, which bridgev2 answers when the submit body does not
+    /// decode into its `map[string]string` — and answers **before** the
+    /// connector runs, so the login process is untouched and the network saw
+    /// nothing. The mirror of [`Self::BridgeAnswerUnusable`]: that one is a
+    /// defect in Twalk's reading of the bridge, this one in its writing, and
+    /// neither is the user's, the network's or the deployment's.
+    ///
+    /// Its own variant because the alternative was the defect itself: read
+    /// as a `400`, it rendered *"the network refused what was submitted,
+    /// start the login again"* — four wrong sentences, the last of which sent
+    /// the user round the same paste three times.
+    RequestUnreadable { errcode: String },
     /// **Nothing answered.** The connection was refused, timed out, found no
     /// route, or died mid-body. The bridge is down, or the Gateway is
     /// pointed at the wrong address.
@@ -540,6 +553,7 @@ impl BridgeRefusal {
             BridgeRefusal::StepCancelled => "step_cancelled",
             BridgeRefusal::NotFoundOnBridge { .. } => "not_found_on_bridge",
             BridgeRefusal::BridgeRefused { .. } => "bridge_refused",
+            BridgeRefusal::RequestUnreadable { .. } => "bridge_request_unusable",
             BridgeRefusal::BridgeUnreachable { .. } => "bridge_unreachable",
             BridgeRefusal::BridgeAnswerUnusable { .. } => "bridge_answer_unusable",
         }
@@ -1156,6 +1170,11 @@ impl Bridges {
             .await;
         let answer = match answer {
             Ok(answer) => answer,
+            // A body the bridge could not read never reached a connector, so
+            // the bridge still holds the process at the same step: recording
+            // a failure here would end, on this side, a login the other side
+            // kept — and tell a polling browser to start again (#221).
+            Err(refusal @ BridgeRefusal::RequestUnreadable { .. }) => return Err(refusal),
             Err(refusal) => {
                 record_refusal(&active, &refusal);
                 return Err(refusal);
@@ -1705,6 +1724,12 @@ async fn call_bridge(
         (409, "FI.MAU.LOGIN_STEP_CANCELLED") => BridgeRefusal::StepCancelled,
         (410, _) => BridgeRefusal::LoginExpired { errcode },
         (404, _) => BridgeRefusal::NotFoundOnBridge { errcode },
+        // bridgev2's decoder refusing the body, before any connector saw it
+        // (`provisioninglogin.go`: `MNotJSON` on decode failure, then
+        // `doLoginStep`). Not the network, not the user, and the login is
+        // still there — so not the arm below, whose every sentence would be
+        // wrong for it (#221).
+        (400, "M_NOT_JSON" | "M_BAD_JSON") => BridgeRefusal::RequestUnreadable { errcode },
         // The network itself would not take what was submitted — a phone
         // number it calls too short, a cookie it will not accept. The user
         // can act on that, so it must not arrive as a bad gateway. The

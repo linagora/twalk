@@ -5,11 +5,14 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { HANDOVER_ROOM_TYPE } from './handover';
 import {
+	isConversation,
 	matchesQuery,
 	resolveDisplayNames,
 	roomLabel,
 	roomsFromSync,
+	ROOM_LIST_FILTER,
 	scopedBulkControl,
 	type RoomSummary
 } from './rooms';
@@ -30,6 +33,7 @@ function room(overrides: Partial<RoomSummary> = {}): RoomSummary {
 		encrypted: false,
 		heroes: [],
 		joinedMembers: null,
+		type: null,
 		...overrides
 	};
 }
@@ -57,7 +61,8 @@ describe('reading the rooms out of a sync', () => {
 				alias: '#family:example.com',
 				encrypted: true,
 				heroes: [],
-				joinedMembers: 4
+				joinedMembers: 4,
+				type: null
 			}
 		]);
 	});
@@ -116,6 +121,52 @@ describe('reading the rooms out of a sync', () => {
 		expect(roomsFromSync('not a sync')).toEqual([]);
 	});
 
+	it('leaves out a room that is not a conversation', () => {
+		// The property #226 exists for. Consent in Twalk is a membership fact
+		// (ADR 0024), so a room the Sensor is joined to that this chooser
+		// offered would be a conversation nobody has, and ticking it would be
+		// consent nobody granted. The handover room is therefore not in the
+		// list at all — and neither is a space, by the same one rule.
+		const rooms = roomsFromSync(
+			sync({
+				'!conversation:example.com': {
+					state: {
+						events: [
+							stateEvent('m.room.create', { room_version: '11' }),
+							stateEvent('m.room.name', { name: 'Family' })
+						]
+					}
+				},
+				'!handover:example.com': {
+					state: {
+						events: [
+							stateEvent('m.room.create', { room_version: '11', type: HANDOVER_ROOM_TYPE }),
+							stateEvent('m.room.name', { name: 'Twalk' }),
+							stateEvent('m.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' })
+						]
+					}
+				},
+				'!space:example.com': {
+					state: { events: [stateEvent('m.room.create', { room_version: '11', type: 'm.space' })] }
+				}
+			})
+		);
+		expect(rooms.map((entry) => entry.roomId)).toEqual(['!conversation:example.com']);
+	});
+
+	it('asks the homeserver for the state that decides it', () => {
+		// A filter that did not ask for `m.room.create` would answer `type:
+		// null` for every room, and the exclusion above would silently stop
+		// working with nothing to notice.
+		expect(ROOM_LIST_FILTER.room.state.types).toContain('m.room.create');
+	});
+
+	it('reads a type off m.room.create, and null for an ordinary room', () => {
+		expect(isConversation({ ...room(), type: null })).toBe(true);
+		expect(isConversation({ ...room(), type: HANDOVER_ROOM_TYPE })).toBe(false);
+		expect(isConversation({ ...room(), type: 'm.space' })).toBe(false);
+	});
+
 	it('sorts by what the user will read', () => {
 		const rooms = roomsFromSync(
 			sync({
@@ -165,7 +216,8 @@ describe('naming a room without a name', () => {
 		alias: null,
 		encrypted: true,
 		heroes,
-		joinedMembers: heroes.length + 1
+		joinedMembers: heroes.length + 1,
+		type: null
 	});
 
 	it('uses the display names the homeserver gave', () => {
@@ -197,7 +249,8 @@ describe('matchesQuery', () => {
 		alias: null,
 		encrypted: true,
 		heroes: ['@jplorre:linagora.com'],
-		joinedMembers: 2
+		joinedMembers: 2,
+		type: null
 	};
 	const directory = new Map([['@jplorre:linagora.com', 'Jean-Pierre LORRÉ']]);
 

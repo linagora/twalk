@@ -27,7 +27,7 @@ mod harness;
 
 use anyhow::{Context, Result};
 use harness::{
-    companion_build, ensure_stack, gateway_env_with_portals, parse_exposition,
+    companion_build, ensure_stack, gateway_env_with_portals, nats_url, parse_exposition,
     signed_in_device_token, GatewayProc, MatrixUser, OWNER_LOCALPART, PORTALS_APPSERVICE_SENDER,
     PORTAL_BRIDGE_ID, PORTAL_SENDER_BRIDGE_ID, PORTAL_TOKENLESS_BRIDGE_ID, SENSOR_USER_ID,
 };
@@ -49,6 +49,13 @@ struct Running {
 
 impl Running {
     async fn start(test_name: &str) -> Result<Self> {
+        Self::start_with(test_name, &[]).await
+    }
+
+    /// [`Self::start`] with more environment for the Gateway — a crowd
+    /// threshold of two, say, so a conversation of two people is a crowd and
+    /// a test stages one without twenty accounts.
+    async fn start_with(test_name: &str, extra: &[(&str, &str)]) -> Result<Self> {
         ensure_stack().await?;
         // The bridge bot, acting through the test stack's **appservice**
         // token, exactly as a mautrix bot does. Not an ordinary account: the
@@ -59,7 +66,14 @@ impl Running {
         let owner = MatrixUser::login(OWNER_LOCALPART).await?;
         let sensor = MatrixUser::login("sensor").await?;
         let static_dir = companion_build(test_name)?;
-        let gateway = GatewayProc::start(&gateway_env_with_portals(&static_dir, &bridge_bot))?;
+        // With the bus configured the Gateway opens its store, which is where
+        // the register journals a conversation's move (#255).
+        let mut env = gateway_env_with_portals(&static_dir, &bridge_bot);
+        env.push(("GATEWAY_NATS_URL".to_owned(), nats_url()));
+        for (key, value) in extra {
+            env.push(((*key).to_owned(), (*value).to_owned()));
+        }
+        let gateway = GatewayProc::start(&env)?;
         let base = gateway.base_url().await?;
         let cookie = signed_in_device_token(&base).await?;
         Ok(Self {
@@ -99,6 +113,14 @@ impl Running {
         Ok(new)
     }
 
+    /// One more person in the conversation — a fresh account the bridge bot
+    /// pulls in, as a bridge does when somebody joins a group.
+    async fn grow(&self, room_id: &str) -> Result<()> {
+        let newcomer = MatrixUser::register_fresh("newcomer").await?;
+        self.bridge_bot.invite(room_id, &newcomer.user_id).await?;
+        newcomer.join(room_id).await
+    }
+
     async fn register(&self) -> Result<Value> {
         let body: Value = reqwest::Client::new()
             .get(format!("{}/api/portals", self.base))
@@ -114,6 +136,25 @@ impl Running {
             .json()
             .await
             .context("the register is not JSON")?;
+        Ok(body)
+    }
+
+    /// The register's journal of moves, newest first.
+    async fn moves(&self) -> Result<Value> {
+        let body: Value = reqwest::Client::new()
+            .get(format!("{}/api/portals/moves", self.base))
+            .header(
+                reqwest::header::COOKIE,
+                format!("twalk_device={}", self.cookie),
+            )
+            .send()
+            .await
+            .context("failed to read the moves")?
+            .error_for_status()
+            .context("the Gateway refused to serve the moves")?
+            .json()
+            .await
+            .context("the moves are not JSON")?;
         Ok(body)
     }
 
@@ -312,9 +353,13 @@ async fn every_conversation_is_offered_and_the_sensor_is_inside_none_of_them() -
 /// Sensor is not in the new room"* instead of a silent zero — which is #105's
 /// failure happening to a decision already on record. A room the Sensor was
 /// never in moves too, and stays what it was: `absent`.
+///
+/// The threshold is two and the successor holds two people, so the register
+/// does not follow the move (#255) and what is asserted here is the fact of
+/// the move alone.
 #[tokio::test]
 async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() -> Result<()> {
-    let running = Running::start("portals-moved").await?;
+    let running = Running::start_with("portals-moved", &[("GATEWAY_CROWD_THRESHOLD", "2")]).await?;
 
     let chosen = running.build_portal("Maria (moves)").await?;
     let ignored = running.build_portal("Chess club (moves)").await?;
@@ -336,6 +381,7 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
         successors.push(running.replace_portal(old, "moved").await?);
     }
     let (chosen_successor, ignored_successor) = (&successors[0], &successors[1]);
+    running.grow(chosen_successor).await?;
 
     let register = running.register().await?;
     // Once, at the successor: two rows would make "the Sensor is outside 30
@@ -353,8 +399,8 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
     assert_eq!(moved["moved_from"], json!(chosen), "{moved}");
     assert_eq!(
         moved["members"],
-        json!(1),
-        "the owner, and nobody else: {moved}"
+        json!(2),
+        "the owner and the newcomer: {moved}"
     );
     let untouched = portal(&register, ignored_successor).context("the successor is listed")?;
     assert_eq!(
@@ -411,7 +457,8 @@ async fn a_conversation_whose_room_was_replaced_appears_once_at_its_successor() 
 #[tokio::test]
 async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_named() -> Result<()>
 {
-    let running = Running::start("portals-moved-chain").await?;
+    let running =
+        Running::start_with("portals-moved-chain", &[("GATEWAY_CROWD_THRESHOLD", "2")]).await?;
 
     let first = running.build_portal("Maria (chain)").await?;
     running.set_observation(&[&first], true).await?;
@@ -424,6 +471,7 @@ async fn a_chain_of_replacements_ends_at_the_last_room_and_an_unreadable_one_is_
         .mark_as_portal(&second, "whatsapp", "chain-2")
         .await?;
     let third = running.replace_portal(&second, "chain-3").await?;
+    running.grow(&third).await?;
 
     let register = running.register().await?;
     assert!(portal(&register, &first).is_none(), "{register}");
@@ -518,6 +566,122 @@ async fn the_register_serves_the_crowd_threshold_it_is_configured_with() -> Resu
             logs.join("\n")
         );
     }
+    Ok(())
+}
+
+/// Issue #255 / ADR 0029: the decision follows the conversation. A room the
+/// Sensor was **observing** is replaced; its successor is under the crowd
+/// threshold, so the register — the consent writer, not the Sensor — invites
+/// the Sensor there without anybody ticking anything: the user's decision was
+/// about the conversation and not the room. And the move is **said**: the
+/// journal records it as followed, so a deployment that changed rooms under
+/// the user can say so. A room the Sensor was never in moves without any of
+/// this — nothing was decided about it, so nothing is journaled.
+#[tokio::test]
+async fn an_observed_conversation_under_the_threshold_is_followed_to_its_successor() -> Result<()> {
+    let running = Running::start("portals-followed").await?;
+
+    let chosen = running.build_portal("Maria (followed)").await?;
+    let ignored = running.build_portal("Chess club (ignored)").await?;
+    running.set_observation(&[&chosen], true).await?;
+    running.sensor.join(&chosen).await?;
+
+    let chosen_successor = running.replace_portal(&chosen, "followed").await?;
+    let ignored_successor = running.replace_portal(&ignored, "ignored").await?;
+
+    // Reading the register is what notices; the register is what decides.
+    let register = running.register().await?;
+    let followed = portal(&register, &chosen_successor).context("the successor is listed")?;
+    assert_eq!(
+        followed["observation"],
+        json!("invited"),
+        "under the threshold the Sensor is invited where the conversation now lives: {followed}"
+    );
+    assert_eq!(
+        running
+            .sensor_membership(&chosen_successor)
+            .await?
+            .as_deref(),
+        Some("invite"),
+        "the homeserver agrees"
+    );
+    assert_eq!(
+        running.sensor_membership(&ignored_successor).await?,
+        None,
+        "a conversation nobody chose is not followed anywhere"
+    );
+
+    let moves = running.moves().await?;
+    let entries = moves["moves"].as_array().context("a list of moves")?;
+    let entry = entries
+        .iter()
+        .find(|entry| entry["successor"] == json!(chosen_successor))
+        .context("the move is journaled")?;
+    assert_eq!(entry["predecessor"], json!(chosen), "{entry}");
+    assert_eq!(entry["followed"], json!(true), "{entry}");
+    assert_eq!(entry["members"], json!(1), "{entry}");
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry["successor"] == json!(ignored_successor)),
+        "nothing was decided about a conversation nobody chose, so nothing is journaled: {moves}"
+    );
+
+    // Said once: a second read invites nobody again and adds no entry.
+    running.register().await?;
+    let again = running.moves().await?;
+    assert_eq!(
+        again["moves"].as_array().map(Vec::len),
+        Some(entries.len()),
+        "{again}"
+    );
+
+    running.stop().await;
+    Ok(())
+}
+
+/// Above the threshold, the decision returns to the user: the successor stays
+/// `moved`, nobody is invited, and the journal says so and says how many they
+/// are now — a threshold that applied only at the moment of ticking would be
+/// one it suffices to wait out.
+#[tokio::test]
+async fn an_observed_conversation_over_the_threshold_returns_to_the_chooser() -> Result<()> {
+    // A Gateway whose threshold is two: a conversation of two people is a
+    // crowd, which lets the test stage one without twenty accounts.
+    let running =
+        Running::start_with("portals-returned", &[("GATEWAY_CROWD_THRESHOLD", "2")]).await?;
+
+    let chosen = running.build_portal("Book club (grows)").await?;
+    running.set_observation(&[&chosen], true).await?;
+    running.sensor.join(&chosen).await?;
+    // The successor holds one more person than the room the user ticked.
+    let successor = running.replace_portal(&chosen, "grows").await?;
+    running.grow(&successor).await?;
+
+    let register = running.register().await?;
+    let returned = portal(&register, &successor).context("the successor is listed")?;
+    assert_eq!(returned["observation"], json!("moved"), "{returned}");
+    assert_eq!(returned["members"], json!(2), "{returned}");
+    assert_eq!(
+        running.sensor_membership(&successor).await?,
+        None,
+        "nobody was invited"
+    );
+
+    let moves = running.moves().await?;
+    let entry = moves["moves"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["successor"] == json!(successor))
+        })
+        .context("the move is journaled even though it was not followed")?;
+    assert_eq!(entry["followed"], json!(false), "{entry}");
+    assert_eq!(entry["members"], json!(2), "{entry}");
+    assert_eq!(entry["crowd_threshold"], json!(2), "{entry}");
+
+    running.stop().await;
     Ok(())
 }
 
@@ -806,6 +970,99 @@ async fn nothing_but_a_portal_is_offered_and_nothing_else_is_entered() -> Result
     assert_eq!(
         running.owner.membership(&private, SENSOR_USER_ID).await?,
         None
+    );
+
+    running.stop().await;
+    Ok(())
+}
+
+/// The handover room the Companion creates during onboarding (ticket #226) is
+/// **not** a conversation, and the register's observed count says so even
+/// though the Sensor is a joined member of it.
+///
+/// This is the assertion the ticket cares most about, and it is not the same as
+/// `nothing_but_a_portal_is_offered_and_nothing_else_is_entered`'s: that test's
+/// private room has no Sensor in it, so it could pass on a register that
+/// counted any room the Sensor is in. Consent in Twalk is a membership fact
+/// (ADR 0024) — the register answers "is this observed?" with the Sensor's own
+/// `m.room.member` event — so a room the Sensor joined that this count included
+/// would be consent nobody granted, for a conversation that does not exist.
+///
+/// Three things are asserted here, each against the homeserver's own state:
+///
+/// 1. the Sensor really is joined to the handover room, so the test is about
+///    the dangerous case and not about an absence;
+/// 2. it is in neither the portal list nor `observing`, while the one
+///    conversation that *is* observed still counts — a zero would pass by
+///    accident;
+/// 3. **nobody can post in it**, the room's own creator included, which is what
+///    makes "nothing is ever published on the bus from it" a fact about the
+///    deployment rather than a promise about the Sensor's code. The Sensor
+///    publishes what it reads in the rooms it is in, and would read this one as
+///    native Matrix traffic (`sensor/src/network.rs` resolves a room with no
+///    `m.bridge` to `matrix`); the reason it never publishes anything from here
+///    is that no event it could publish can exist.
+#[tokio::test]
+async fn the_room_the_sensor_shares_with_the_owner_is_not_a_conversation() -> Result<()> {
+    let running = Running::start("portals-handover").await?;
+    let chess = running.build_portal("Échecs en Yvelines").await?;
+
+    // One real conversation, really observed, so the count under test is a
+    // number rather than a zero that any bug would also produce.
+    running.set_observation(&[&chess], true).await?;
+    running.sensor.join(&chess).await?;
+
+    // And the handover room: the owner's own session creates it, exactly as the
+    // Companion's does in the browser, and the Sensor accepts the invitation as
+    // it accepts any from the owner (`SENSOR_ALLOWED_INVITERS`).
+    let handover = running
+        .owner
+        .make_handover_room("Twalk — internal", SENSOR_USER_ID)
+        .await?;
+    running.sensor.join(&handover).await?;
+    assert_eq!(
+        running.owner.membership(&handover, SENSOR_USER_ID).await?,
+        Some("join".to_owned()),
+        "the premise: the Sensor is a joined member, which is what makes this test worth having"
+    );
+
+    let register = running.register().await?;
+    assert!(
+        portal(&register, &handover).is_none(),
+        "the handover room is not offered as a conversation: {register}"
+    );
+    assert_eq!(
+        register["summary"]["total"], 1,
+        "the deployment has one conversation, not two: {register}"
+    );
+    assert_eq!(
+        register["summary"]["observing"], 1,
+        "and the count of observed conversations is the one the user chose: {register}"
+    );
+
+    // Asking to observe it is refused without the appservice credential being
+    // used anywhere: a room id in a request is never a reason to widen its
+    // reach (ADR 0024).
+    let answer = running.set_observation(&[&handover], true).await?;
+    assert_eq!(
+        outcome_for(&answer, &handover).as_deref(),
+        Some("unknown_portal"),
+        "{answer}"
+    );
+
+    // And nobody can put an event in it. Both members are tried, because the
+    // property is about the room and not about a permission one account lacks:
+    // the owner holds power level 100 and the Sensor 0, and `events_default` is
+    // 101.
+    assert_eq!(
+        running.owner.refusal_to_send(&handover, "hello").await?,
+        Some("M_FORBIDDEN".to_owned()),
+        "the room's own creator cannot post in it"
+    );
+    assert_eq!(
+        running.sensor.refusal_to_send(&handover, "hello").await?,
+        Some("M_FORBIDDEN".to_owned()),
+        "and neither can the Sensor"
     );
 
     running.stop().await;

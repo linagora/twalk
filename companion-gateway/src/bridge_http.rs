@@ -508,6 +508,24 @@ fn refused(refusal: BridgeRefusal) -> Response {
         // says the bridge replied, it names the call and the field, and it
         // says whose defect this is. It names nothing out of the answer —
         // the variant cannot carry any of it.
+        // The mirror of the arm below: the bridge is reachable and replied,
+        // and what it could not read is what *this* build sent. Nothing here
+        // blames the network, nothing here says to start again — bridgev2
+        // refuses the body before the connector runs, so the login is still
+        // waiting on the same step (#221).
+        BridgeRefusal::RequestUnreadable { errcode } => api_error(
+            StatusCode::BAD_GATEWAY,
+            "bridge_request_unusable",
+            &format!(
+                "the bridge could not read the request this Gateway sent it ({errcode}). The \
+                 network saw nothing and refused nothing: this is a defect in Twalk's writing \
+                 of that bridge's provisioning API, not in your account, the network or the \
+                 deployment — checking containers, ports or the provisioning secret will find \
+                 nothing, and submitting the same values again will fail the same way. The \
+                 login is unchanged and still waiting on this step. Please report it with this \
+                 message and the bridge's version"
+            ),
+        ),
         BridgeRefusal::BridgeAnswerUnusable { call, looked_for } => api_error(
             StatusCode::BAD_GATEWAY,
             "bridge_answer_unusable",

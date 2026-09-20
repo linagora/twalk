@@ -242,7 +242,13 @@ async fn sign_in(
                 device_name = %issued.device.name,
                 "a device signed in"
             );
-            session_response(StatusCode::OK, &sessions, &issued, &headers)
+            session_response(
+                StatusCode::OK,
+                &sessions,
+                &issued,
+                &headers,
+                sensor_user_id(&gateway),
+            )
         }
         Err(refusal) => {
             gateway.metrics().record_sign_in(refusal.label());
@@ -303,7 +309,13 @@ async fn refresh(State(gateway): State<Gateway>, headers: HeaderMap) -> Response
         return refused(StatusCode::UNAUTHORIZED, "unauthenticated");
     };
     match sessions.refresh(token) {
-        Some(issued) => session_response(StatusCode::OK, &sessions, &issued, &headers),
+        Some(issued) => session_response(
+            StatusCode::OK,
+            &sessions,
+            &issued,
+            &headers,
+            sensor_user_id(&gateway),
+        ),
         None => refused(StatusCode::UNAUTHORIZED, "unauthenticated"),
     }
 }
@@ -355,8 +367,23 @@ async fn current(State(gateway): State<Gateway>, Extension(device): Extension<De
         "owner": sessions.owner(),
         "homeserver": sessions.homeserver_name(),
         "device": device_document(&device, Some(&device)),
+        "sensor": sensor_user_id(&gateway),
     }))
     .into_response()
+}
+
+/// The Sensor this deployment runs, as the session document states it.
+///
+/// Read from the bootstrap configuration rather than assembled: the Companion
+/// creates a room with this account during onboarding (#226), and
+/// `@sensor:<server>` is a deployment's convention and not a fact — the same
+/// refusal ADR 0024 records about a bridge bot's localpart. `None` when the
+/// operator configured no Sensor, which is a deployment with nothing to hand a
+/// credential to and not an error.
+fn sensor_user_id(gateway: &Gateway) -> Option<String> {
+    gateway
+        .bootstrap()
+        .and_then(|bootstrap| bootstrap.sensor_user_id().map(str::to_owned))
 }
 
 /// `DELETE /api/session` — sign this device out, which revokes it: a device
@@ -451,6 +478,7 @@ fn session_response(
     sessions: &Sessions,
     issued: &Issued,
     headers: &HeaderMap,
+    sensor: Option<String>,
 ) -> Response {
     let secure = secure_origin(headers);
     (
@@ -475,6 +503,7 @@ fn session_response(
             "owner": sessions.owner(),
             "homeserver": sessions.homeserver_name(),
             "device": device_document(&issued.device, Some(&issued.device)),
+            "sensor": sensor,
             // So the Companion knows when to refresh rather than discovering
             // it from a 401.
             "expires_in": issued.device_token_ttl_seconds,

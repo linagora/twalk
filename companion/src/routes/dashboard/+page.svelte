@@ -119,7 +119,8 @@
 		activityFeed({
 			bridges: snapshot.bridges ?? [],
 			consent: snapshot.consent ?? [],
-			devices: snapshot.devices ?? []
+			devices: snapshot.devices ?? [],
+			moves: snapshot.moves ?? []
 		})
 	);
 	const health = $derived(

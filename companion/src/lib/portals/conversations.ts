@@ -163,6 +163,13 @@ export interface ConversationRow {
 	readonly members: number;
 	readonly observation: Observation;
 	/**
+	 * The room this conversation lived in before it was replaced, or `null`
+	 * for one that never moved (ADR 0029, #256). The screen says so on the
+	 * row — a deployment that changed rooms under the user must be able to
+	 * say it — and never lists the dead room: the register already folded it.
+	 */
+	readonly movedFrom: string | null;
+	/**
 	 * The very summary [`asRoom`] built, carried rather than rebuilt.
 	 *
 	 * So that labelling and searching are two calls against **one** adapted
@@ -190,6 +197,11 @@ export interface ConversationRow {
  *   makes searching "on a participant's display name" work at all here.
  * - `encrypted` is true: a portal room is end-to-end encrypted by
  *   construction (`CONTEXT.md`), so this is a fact and not a default.
+ * - `type` is `null`: a portal is an ordinary room a bridge marked with
+ *   `m.bridge`, not a room Matrix types as something other than a
+ *   conversation. Every portal the register hands over *is* a conversation —
+ *   that is what the register's `m.bridge` check already decided — so this is
+ *   a fact about portals and not a default either.
  */
 export function asRoom(portal: Portal): RoomSummary {
 	return {
@@ -198,7 +210,8 @@ export function asRoom(portal: Portal): RoomSummary {
 		alias: portal.network_conversation_id,
 		encrypted: true,
 		heroes: [],
-		joinedMembers: portal.members
+		joinedMembers: portal.members,
+		type: null
 	};
 }
 
@@ -223,7 +236,8 @@ export function rows(portals: readonly Portal[]): ConversationRow[] {
 				kind: conversationKind(portal.network_conversation_id),
 				networkConversationId: portal.network_conversation_id,
 				members: portal.members,
-				observation: portal.observation
+				observation: portal.observation,
+				movedFrom: portal.moved_from
 			};
 		})
 		.sort(byLabel);

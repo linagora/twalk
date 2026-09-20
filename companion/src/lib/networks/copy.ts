@@ -107,6 +107,33 @@ export const SIGNAL: LoginScreenCopy = {
 	troubleshooting: ['qr.signal.trouble1', 'qr.signal.trouble2']
 };
 
+export const TELEGRAM: LoginScreenCopy = {
+	network: 'telegram',
+	title: 'qr.telegram.title',
+	badge: null,
+	caption: 'qr.telegram.caption',
+	intro: null,
+	// No disclosure, for Signal's reason rather than WhatsApp's: Telegram
+	// supports several sessions on one account as a documented feature, so
+	// there is no ban risk to warn about and an amber card would be theatre.
+	disclosure: null,
+	prefer: 'qr',
+	steps: ['qr.telegram.step1', 'qr.telegram.step2', 'qr.telegram.step3', 'qr.telegram.step4'],
+	note: 'qr.telegram.note',
+	qrAlt: 'qr.telegram.alt',
+	success: 'qr.telegram.success',
+	successNote: 'qr.telegram.successNote',
+	failure: null,
+	// Nothing to add to Telegram's own steps. A QR login by an account with
+	// two-step verification interjects a `password` step, and Telegram's own
+	// wording for it is accurate; what this project adds is the one fact the
+	// bridge will not say — that the password asked for is Telegram's and not
+	// Twalk's — and that belongs in troubleshooting, beside the login, rather
+	// than as an override of a step that is already clear.
+	stepCopy: [],
+	troubleshooting: ['qr.telegram.trouble1', 'qr.telegram.trouble2', 'qr.telegram.trouble3']
+};
+
 /**
  * The Google cookie step, in this project's words rather than the bridge's
  * eleven.

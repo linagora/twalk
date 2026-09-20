@@ -103,6 +103,85 @@ pub fn invitation(inviter: &str, bridge_bots: &BridgeBots) -> Invitation {
     }
 }
 
+/// What the homeserver answered a join with, reduced to the two facts that
+/// decide whether trying again can ever change the answer.
+///
+/// Plain data rather than matrix-sdk's error type, so the decision below can
+/// be made — and tested — from what was *answered*, which is the only thing
+/// the decision is allowed to rest on (issue #237: attempt counts alone told
+/// the loop nothing, and it ran a permanent refusal at sync frequency).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinAnswer {
+    /// The HTTP status, when the request reached a homeserver at all.
+    pub status: Option<u16>,
+    /// The Matrix `errcode` (`M_FORBIDDEN`, `M_UNKNOWN`…), when the body had one.
+    pub errcode: Option<String>,
+}
+
+/// Whether a failed join is worth trying again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinFailure {
+    /// The homeserver said no in a way that will not change: the room is gone
+    /// or unreachable, the invitation is no longer valid, the request itself
+    /// is refused. Said once, counted once, never retried in this process.
+    Permanent,
+    /// Nothing about the room was decided — the request was throttled, the
+    /// server or the network failed. Retried, with a delay that grows.
+    Transient,
+}
+
+/// Decides, from what the homeserver answered, whether a join can ever succeed.
+///
+/// The one this was written for is `404 M_UNKNOWN "Can't join remote room
+/// because no servers that are in the room have been provided"`: an orphan
+/// portal every member has left, which the homeserver has no route into and
+/// never will. Treating it as a blip is what produced seventy-eight attempts
+/// in five minutes, at `ERROR`, for one room — a log an operator stops
+/// reading, in which the *next* real failure arrives unread.
+///
+/// The rule is on the **status class**, and the errcode only refines it:
+///
+/// - `429` is a throttle, whatever its body says, and clears on its own;
+/// - every other `4xx` is the homeserver saying this request, for this room,
+///   as this user, is refused — not found, not invited any more, banned,
+///   restricted and ungrantable, malformed. Nothing this loop does changes any
+///   of that, so trying again is noise;
+/// - `5xx` and no status at all (the request never got an answer) say nothing
+///   about the room, so they are retried.
+///
+/// The human-readable `error` string is deliberately not consulted: it is
+/// prose, it differs between homeservers, and a decision that greps it is a
+/// decision that silently stops working on the next Synapse release.
+pub fn join_failure(answer: &JoinAnswer) -> JoinFailure {
+    match answer.status {
+        Some(429) => JoinFailure::Transient,
+        // A throttle can also arrive as `M_LIMIT_EXCEEDED` behind a proxy that
+        // rewrote the status; it is a throttle all the same.
+        Some(status)
+            if (400..500).contains(&status)
+                && answer.errcode.as_deref() != Some("M_LIMIT_EXCEEDED") =>
+        {
+            JoinFailure::Permanent
+        }
+        _ => JoinFailure::Transient,
+    }
+}
+
+/// How long to wait before the `attempt`-th retry of a transiently failed join
+/// (the first retry is attempt 1).
+///
+/// Doubles from thirty seconds and stops growing at thirty minutes: a portal
+/// whose homeserver is down for an afternoon is picked up within half an hour
+/// of its return, and a portal that fails transiently for ever costs the log
+/// two lines an hour rather than sixteen a minute. The base is the sync
+/// timeout, because a retry sooner than that cannot have new information.
+pub fn retry_delay(attempt: u32) -> std::time::Duration {
+    const BASE_SECS: u64 = 30;
+    const CAP_SECS: u64 = 30 * 60;
+    let doubled = BASE_SECS.saturating_mul(1u64 << attempt.saturating_sub(1).min(16));
+    std::time::Duration::from_secs(doubled.min(CAP_SECS))
+}
+
 /// What a reply the Sensor has just posted reached — the distinction issue #216
 /// is about, which was invisible before this: an event id existed, a stream
 /// position existed, every component reported itself healthy, and the contact
@@ -209,6 +288,84 @@ mod tests {
             invitation(WHATSAPP_BOT, &BridgeBots::new(Vec::<String>::new())),
             Invitation::Refuse(Refusal::NoBridgeBotsConfigured)
         );
+    }
+
+    fn answer(status: Option<u16>, errcode: Option<&str>) -> JoinAnswer {
+        JoinAnswer {
+            status,
+            errcode: errcode.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn an_orphan_portal_is_given_up_on_from_what_synapse_answered() {
+        // Issue #237, verbatim from the reference deployment: every member had
+        // left, the homeserver had no server to join through, and it said so
+        // with a 404 — seventy-eight times in five minutes, because the loop
+        // read none of it.
+        assert_eq!(
+            join_failure(&answer(Some(404), Some("M_UNKNOWN"))),
+            JoinFailure::Permanent
+        );
+        // The invitation was withdrawn, or the owner was banned: not this
+        // device's to change either.
+        assert_eq!(
+            join_failure(&answer(Some(403), Some("M_FORBIDDEN"))),
+            JoinFailure::Permanent
+        );
+        assert_eq!(
+            join_failure(&answer(Some(404), Some("M_NOT_FOUND"))),
+            JoinFailure::Permanent
+        );
+        assert_eq!(
+            join_failure(&answer(Some(400), Some("M_UNABLE_TO_GRANT_JOIN"))),
+            JoinFailure::Permanent
+        );
+        // A 4xx with no parsable body is still the homeserver refusing.
+        assert_eq!(
+            join_failure(&answer(Some(404), None)),
+            JoinFailure::Permanent
+        );
+    }
+
+    #[test]
+    fn a_throttle_a_server_error_and_no_answer_at_all_are_retried() {
+        assert_eq!(
+            join_failure(&answer(Some(429), Some("M_LIMIT_EXCEEDED"))),
+            JoinFailure::Transient
+        );
+        // The same throttle with its status rewritten by a proxy in front.
+        assert_eq!(
+            join_failure(&answer(Some(400), Some("M_LIMIT_EXCEEDED"))),
+            JoinFailure::Transient
+        );
+        assert_eq!(
+            join_failure(&answer(Some(502), None)),
+            JoinFailure::Transient
+        );
+        assert_eq!(
+            join_failure(&answer(Some(500), Some("M_UNKNOWN"))),
+            JoinFailure::Transient
+        );
+        // The request never reached a homeserver: nothing about the room is known.
+        assert_eq!(join_failure(&answer(None, None)), JoinFailure::Transient);
+    }
+
+    #[test]
+    fn the_retry_delay_doubles_from_the_sync_timeout_and_stops_at_half_an_hour() {
+        use std::time::Duration;
+        assert_eq!(retry_delay(1), Duration::from_secs(30));
+        assert_eq!(retry_delay(2), Duration::from_secs(60));
+        assert_eq!(retry_delay(3), Duration::from_secs(120));
+        assert_eq!(retry_delay(7), Duration::from_secs(30 * 60));
+        assert_eq!(retry_delay(8), Duration::from_secs(30 * 60), "capped");
+        assert_eq!(
+            retry_delay(u32::MAX),
+            Duration::from_secs(30 * 60),
+            "no overflow"
+        );
+        // Attempt 0 is not a retry; treated as the first.
+        assert_eq!(retry_delay(0), Duration::from_secs(30));
     }
 
     #[test]

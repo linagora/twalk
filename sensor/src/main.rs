@@ -1,10 +1,10 @@
 //! The Twalk Sensor binary. All the decision logic lives in the library
 //! modules; this file only wires them to matrix-sdk and NATS JetStream.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -291,6 +291,10 @@ async fn main() -> Result<()> {
     // the set is the whole of what makes the suppression correct, and because
     // a silent empty set is how this defect survives a release.
     let bridge_bots = config.bridge_bots();
+    // Rooms whose replacement has been announced once (issue #254): the first
+    // stray event in a replaced room is a line, the rest are the same fact.
+    let replaced_rooms: Arc<Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>> =
+        Arc::new(Mutex::new(HashSet::new()));
     if bridge_bots.is_empty() {
         info!(
             "no bridge bots configured (SENSOR_BRIDGE_BOTS): a bridge's own bot is published as \
@@ -411,35 +415,33 @@ async fn main() -> Result<()> {
     // arrive any more. The create event comes with the join's own state, so
     // this runs once per successor joined, and again harmlessly after a
     // restart's initial sync if the predecessor is somehow still held.
-    {
-        client.add_event_handler(move |event: OriginalSyncRoomCreateEvent, room: Room, client: Client| {
-            async move {
-                let Some(predecessor) = event.content.predecessor else {
-                    return;
-                };
-                let Some(dead) = client.get_room(&predecessor.room_id) else {
-                    return;
-                };
-                if dead.state() != RoomState::Joined {
-                    return;
-                }
-                match dead.leave().await {
-                    Ok(()) => info!(
-                        room = %room.room_id(),
-                        predecessor = %predecessor.room_id,
-                        "joined a room that replaced another the Sensor was in, so it left the room it \
-                         replaced: one conversation, one membership, one room counted"
-                    ),
-                    Err(error) => warn!(
-                        room = %room.room_id(),
-                        predecessor = %predecessor.room_id,
-                        %error,
-                        "could not leave the room this one replaced; it stays counted until it can"
-                    ),
-                }
+    client.add_event_handler(
+        move |event: OriginalSyncRoomCreateEvent, room: Room, client: Client| async move {
+            let Some(predecessor) = event.content.predecessor else {
+                return;
+            };
+            let Some(dead) = client.get_room(&predecessor.room_id) else {
+                return;
+            };
+            if dead.state() != RoomState::Joined {
+                return;
             }
-        });
-    }
+            match dead.leave().await {
+                Ok(()) => info!(
+                    room = %room.room_id(),
+                    predecessor = %predecessor.room_id,
+                    "joined a room that replaced another the Sensor was in, so it left the room it \
+                     replaced: one conversation, one membership, one room counted"
+                ),
+                Err(error) => warn!(
+                    room = %room.room_id(),
+                    predecessor = %predecessor.room_id,
+                    %error,
+                    "could not leave the room this one replaced; it stays counted until it can"
+                ),
+            }
+        },
+    );
 
     // Inbound messages: normalize and publish. Text, media (image, video,
     // audio, file), sticker (relayed by some bridges as an m.room.message
@@ -450,6 +452,7 @@ async fn main() -> Result<()> {
         let own_user = own_user.clone();
         let owner = owner.clone();
         let bridge_bots = bridge_bots.clone();
+        let replaced_rooms = replaced_rooms.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -458,6 +461,7 @@ async fn main() -> Result<()> {
             let own_user = own_user.clone();
             let owner = owner.clone();
             let bridge_bots = bridge_bots.clone();
+            let replaced_rooms = replaced_rooms.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -465,7 +469,7 @@ async fn main() -> Result<()> {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
                 }
-                if dropped_as_a_dead_room(&room, "message", &metrics).await {
+                if dropped_as_a_replaced_room(&room, "message", &metrics, &replaced_rooms).await {
                     return;
                 }
                 // A bridge's own bot posts into the portal rooms it maintains
@@ -664,6 +668,7 @@ async fn main() -> Result<()> {
         let own_user = own_user.clone();
         let owner = owner.clone();
         let bridge_bots = bridge_bots.clone();
+        let replaced_rooms = replaced_rooms.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -672,6 +677,7 @@ async fn main() -> Result<()> {
             let own_user = own_user.clone();
             let owner = owner.clone();
             let bridge_bots = bridge_bots.clone();
+            let replaced_rooms = replaced_rooms.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -679,7 +685,8 @@ async fn main() -> Result<()> {
                 if event.sender == own_user {
                     return; // never loop on our own outbound traffic
                 }
-                if dropped_as_a_dead_room(&room, "reaction", &metrics).await {
+                if dropped_as_a_replaced_room(&room, "reaction", &metrics, &replaced_rooms).await
+                {
                     return;
                 }
                 // A bridge's own bot reacts: mautrix answers a command with
@@ -919,6 +926,12 @@ async fn main() -> Result<()> {
                     let Some(candidate) = client.get_room(room_id) else {
                         continue;
                     };
+                    // A replaced room is not a conversation's address any
+                    // more (ADR 0029): until the Sensor has left it, it must
+                    // not be the room a presence is attributed to.
+                    if replacement_room(&candidate).await.is_some() {
+                        continue;
+                    }
                     if let Some(network) = resolve_network(&candidate, &sender).await {
                         attributed.push((candidate, network));
                     }
@@ -1079,6 +1092,9 @@ async fn main() -> Result<()> {
     // sync-age gauge (the operator's lag signal). Boxed so the shutdown path
     // can drop the loop itself, not just a pinned reference to it.
     let sync_metrics = metrics.clone();
+    // One sweep for predecessors still held across a restart (issue #254),
+    // after the first sync has told the store what is joined.
+    let swept_predecessors = Arc::new(AtomicBool::new(false));
     let mut sync = Box::pin(client.sync_with_callback(SyncSettings::default(), {
         let client = client.clone();
         move |_response| {
@@ -1088,8 +1104,20 @@ async fn main() -> Result<()> {
             // worth exposing rather than inferring from a silence
             // (#105). Read from the SDK's own state, after the sync
             // that may have changed it.
-            sync_metrics.record_observed_rooms(client.joined_rooms().len() as u64);
-            async { LoopCtrl::Continue }
+            let sweep = if swept_predecessors.swap(true, Ordering::Relaxed) {
+                None
+            } else {
+                Some(client.clone())
+            };
+            let sync_metrics = sync_metrics.clone();
+            let client = client.clone();
+            async move {
+                if let Some(client) = sweep {
+                    leave_replaced_predecessors(&client).await;
+                }
+                sync_metrics.record_observed_rooms(client.joined_rooms().len() as u64);
+                LoopCtrl::Continue
+            }
         }
     }));
     tokio::select! {
@@ -1517,13 +1545,13 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
     // counter would otherwise repeat forever. Each room is decided once per
     // process; the bounded memory cost is one room id per invitation the owner
     // holds, which is the same order as the number the homeserver already keeps.
-    let mut already_refused: HashSet<matrix_sdk::ruma::OwnedRoomId> = HashSet::new();
+    let mut decided = Decided::default();
     loop {
         match client.sync_once(settings.clone()).await {
             Ok(_) => {
-                join_portal_invitations(&client, &bridge_bots, &metrics, &mut already_refused)
-                    .await;
+                join_portal_invitations(&client, &bridge_bots, &metrics, &mut decided).await;
                 metrics.record_owner_device_rooms(client.joined_rooms().len() as u64);
+                metrics.record_owner_device_unjoinable_portals(decided.unjoinable.len() as u64);
             }
             Err(error) => {
                 warn!(
@@ -1537,19 +1565,62 @@ async fn run_owner_device(client: Client, bridge_bots: BridgeBots, metrics: Arc<
     }
 }
 
+/// What the owner-device loop has already decided about the invitations it
+/// holds, so that nothing is said twice and nothing permanent is retried.
+///
+/// Per process, like the homeserver's own list of pending invitations it
+/// mirrors: a restart re-decides each room once, which is one log line per
+/// room per restart and not one per sync (issue #237).
+#[derive(Default)]
+struct Decided {
+    /// Invitations refused on their inviter: decided once, never looked at again.
+    refused: HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    /// Portals the homeserver refused to let the device join, in a way that
+    /// will not change. Given up on, once. Their count is the gauge
+    /// `twalk_sensor_owner_device_unjoinable_portals`.
+    unjoinable: HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    /// Portals whose join failed transiently: how many times, and when the
+    /// next attempt may be made. Removed on success, or when the failure
+    /// turns out to be permanent.
+    retrying: HashMap<matrix_sdk::ruma::OwnedRoomId, (u32, tokio::time::Instant)>,
+}
+
+/// Reduces a failed join to what the homeserver answered, for
+/// `owner_device::join_failure` to decide on.
+fn join_answer(error: &matrix_sdk::Error) -> owner_device::JoinAnswer {
+    let api_error = error.as_client_api_error();
+    owner_device::JoinAnswer {
+        status: api_error.map(|error| error.status_code.as_u16()),
+        errcode: api_error
+            .and_then(|error| error.error_kind())
+            .map(|kind| kind.errcode().to_string()),
+    }
+}
+
 /// Accepts the pending invitations that are portals of a configured bridge, and
 /// refuses every other one.
 ///
 /// The policy — and the reason a room id in an invitation may not be trusted —
-/// is `twalk_sensor::owner_device::invitation`, which is where to argue with it.
-/// What is here is the I/O and what gets said about it.
+/// is `twalk_sensor::owner_device::invitation`, which is where to argue with it;
+/// whether a failed join is worth another try is
+/// `twalk_sensor::owner_device::join_failure`. What is here is the I/O and what
+/// gets said about it.
 async fn join_portal_invitations(
     client: &Client,
     bridge_bots: &BridgeBots,
     metrics: &Metrics,
-    already_refused: &mut HashSet<matrix_sdk::ruma::OwnedRoomId>,
+    decided: &mut Decided,
 ) {
     for room in client.invited_rooms() {
+        let room_id = room.room_id().to_owned();
+        if decided.refused.contains(&room_id) || decided.unjoinable.contains(&room_id) {
+            continue;
+        }
+        if let Some((_, not_before)) = decided.retrying.get(&room_id) {
+            if tokio::time::Instant::now() < *not_before {
+                continue;
+            }
+        }
         let inviter = match room.invite_details().await {
             Ok(invite) => invite.inviter_id.to_string(),
             Err(error) => {
@@ -1573,6 +1644,7 @@ async fn join_portal_invitations(
                     .map(|network| network.as_str());
                 match room.join().await {
                     Ok(()) => {
+                        decided.retrying.remove(&room_id);
                         let joined = metrics.record_owner_device_invite(OwnerDeviceInvite::Joined);
                         info!(
                             room = %room.room_id(),
@@ -1583,19 +1655,46 @@ async fn join_portal_invitations(
                              posted here are relayed to the network as the user's own"
                         );
                     }
-                    Err(error) => {
-                        metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
-                        warn!(
-                            room = %room.room_id(),
-                            %inviter,
-                            %error,
-                            "the owner's device failed to join a portal; retrying on the next sync"
-                        );
-                    }
+                    Err(error) => match owner_device::join_failure(&join_answer(&error)) {
+                        owner_device::JoinFailure::Permanent => {
+                            decided.retrying.remove(&room_id);
+                            decided.unjoinable.insert(room_id);
+                            let unjoinable =
+                                metrics.record_owner_device_invite(OwnerDeviceInvite::Unjoinable);
+                            warn!(
+                                room = %room.room_id(),
+                                %inviter,
+                                network,
+                                %error,
+                                unjoinable,
+                                "this portal can never be joined by the owner's device — the \
+                                 homeserver's answer will not change — so an approved reply in \
+                                 this conversation cannot be delivered as the user. Not retrying; \
+                                 twalk_sensor_owner_device_unjoinable_portals counts it"
+                            );
+                        }
+                        owner_device::JoinFailure::Transient => {
+                            let attempt = decided.retrying.get(&room_id).map_or(1, |(n, _)| n + 1);
+                            let delay = owner_device::retry_delay(attempt);
+                            decided
+                                .retrying
+                                .insert(room_id, (attempt, tokio::time::Instant::now() + delay));
+                            metrics.record_owner_device_invite(OwnerDeviceInvite::Failed);
+                            warn!(
+                                room = %room.room_id(),
+                                %inviter,
+                                %error,
+                                attempt,
+                                retry_in_secs = delay.as_secs(),
+                                "the owner's device failed to join a portal for a reason that can \
+                                 clear; retrying"
+                            );
+                        }
+                    },
                 }
             }
             owner_device::Invitation::Refuse(reason) => {
-                if !already_refused.insert(room.room_id().to_owned()) {
+                if !decided.refused.insert(room_id) {
                     continue;
                 }
                 let refused = metrics.record_owner_device_invite(OwnerDeviceInvite::Refused);
@@ -1781,27 +1880,105 @@ fn dropped_as_a_bridge_bot(
     true
 }
 
-/// A room carrying an `m.room.tombstone` is dead: it was replaced, the bridge
-/// posts to the successor, and what still arrives here is stray — a notice
-/// the bot left behind, a client that did not follow. Publishing it would
-/// attribute a conversation to a room the register no longer lists (ADR 0029,
-/// issue #254). Counted under its own reason, so the silence has a number.
-async fn dropped_as_a_dead_room(room: &Room, what: &str, metrics: &Metrics) -> bool {
-    let tombstoned = room
+/// A room carrying an `m.room.tombstone` was **replaced**: the bridge posts
+/// to the successor, and what still arrives here is stray — a notice the bot
+/// left behind, a client that did not follow. Publishing it would attribute a
+/// conversation to a room the register no longer lists (ADR 0029, issue
+/// #254). Counted under its own reason, so the silence has a number, and
+/// **said once per room**, naming the successor: the first stray event is the
+/// fact worth a line, the rest are the same fact.
+async fn dropped_as_a_replaced_room(
+    room: &Room,
+    what: &str,
+    metrics: &Metrics,
+    announced: &Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>,
+) -> bool {
+    let Some(successor) = replacement_room(room).await else {
+        return false;
+    };
+    let dropped = metrics.record_dropped(DropReason::TombstonedRoom);
+    let first_time = announced
+        .lock()
+        .expect("the announced-rooms set is never poisoned")
+        .insert(room.room_id().to_owned());
+    if first_time {
+        info!(
+            room = %room.room_id(),
+            successor = %successor,
+            dropped,
+            "a {what} arrived in a room that was replaced: nothing from it is published, the \
+             conversation lives in its successor"
+        );
+    } else {
+        tracing::debug!(room = %room.room_id(), %successor, dropped, "another {what} in a replaced room");
+    }
+    true
+}
+
+/// The room an `m.room.tombstone` names as this room's replacement, when the
+/// room carries one. An empty or absent `replacement_room` is not a
+/// replacement, whatever else the tombstone says.
+async fn replacement_room(room: &Room) -> Option<String> {
+    let events = room
         .get_state_events("m.room.tombstone".into())
         .await
-        .map(|events| !events.is_empty())
-        .unwrap_or(false);
-    if !tombstoned {
-        return false;
+        .ok()?;
+    events.iter().find_map(|raw| {
+        let json = match raw {
+            RawAnySyncOrStrippedState::Sync(raw) => raw.json().get(),
+            RawAnySyncOrStrippedState::Stripped(raw) => raw.json().get(),
+        };
+        serde_json::from_str::<serde_json::Value>(json)
+            .ok()?
+            .get("content")?
+            .get("replacement_room")?
+            .as_str()
+            .filter(|successor| !successor.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// Leaves every joined room that another joined room names as its
+/// predecessor (ADR 0029, issue #254). The `m.room.create` handler does this
+/// as a successor is joined; this is the same rule applied to what the store
+/// already holds, because a sync resumed from a stored token does not deliver
+/// a create event again, so a predecessor still held across a restart would
+/// otherwise stay counted for ever.
+async fn leave_replaced_predecessors(client: &Client) {
+    let joined: HashSet<matrix_sdk::ruma::OwnedRoomId> = client
+        .joined_rooms()
+        .iter()
+        .map(|room| room.room_id().to_owned())
+        .collect();
+    for room in client.joined_rooms() {
+        let Some(predecessor) = room
+            .create_content()
+            .and_then(|create| create.predecessor)
+            .map(|previous| previous.room_id)
+        else {
+            continue;
+        };
+        if !joined.contains(&predecessor) {
+            continue;
+        }
+        let Some(dead) = client.get_room(&predecessor) else {
+            continue;
+        };
+        match dead.leave().await {
+            Ok(()) => info!(
+                room = %room.room_id(),
+                predecessor = %predecessor,
+                "still in a room that another joined room replaced (a restart resumed past its \
+                 create event): left the room it replaced"
+            ),
+            Err(error) => warn!(
+                room = %room.room_id(),
+                predecessor = %predecessor,
+                %error,
+                "could not leave the room this one replaced; it stays counted until it can"
+            ),
+        }
     }
-    let dropped = metrics.record_dropped(DropReason::TombstonedRoom);
-    tracing::debug!(
-        room = %room.room_id(),
-        dropped,
-        "dropping a {what} in a room that was replaced: the conversation lives in its successor"
-    );
-    true
 }
 
 /// Defers to the pure attribution policy in `network::resolve`.

@@ -73,7 +73,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 5] = [
+pub const MIGRATIONS: [&str; 6] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -399,7 +399,52 @@ pub const MIGRATIONS: [&str; 5] = [
 
     CREATE INDEX approval_suggestion ON approval (suggestion_event_id);
     "#,
+    // v6 — the moves the portal register decided on (issue #255, ADR 0029).
+    //
+    // One row per conversation whose room was replaced while the Sensor was
+    // in it, keyed on the successor: what the register did about it —
+    // followed the decision there, or returned it to the chooser because the
+    // successor's audience crossed the threshold — and the numbers it did it
+    // on. A deployment that changed rooms under the user without being able
+    // to say so is one whose history they cannot check; this is where it is
+    // said. Keyed on the successor so that a move is decided once, however
+    // many times the register reads the same tombstone.
+    r#"
+    CREATE TABLE portal_move (
+        successor       TEXT NOT NULL PRIMARY KEY,
+        predecessor     TEXT NOT NULL,
+        bridge_id       TEXT NOT NULL,
+        members         INTEGER NOT NULL,
+        crowd_threshold INTEGER NOT NULL,
+        followed        INTEGER NOT NULL CHECK (followed IN (0, 1)),
+        decided_at      TEXT NOT NULL
+    ) WITHOUT ROWID;
+
+    CREATE INDEX portal_move_decided_at ON portal_move (decided_at);
+    "#,
 ];
+
+/// One conversation's move, as the register decided it (issue #255).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PortalMove {
+    /// The room the conversation lives in now.
+    pub successor: String,
+    /// The room it left — the one the user's decision named.
+    pub predecessor: String,
+    pub bridge_id: String,
+    /// People in the successor when the register decided, bridge bot and
+    /// Sensor excluded — the number the threshold was applied to.
+    pub members: u64,
+    /// The threshold applied, so the entry stays readable after the operator
+    /// changes it.
+    pub crowd_threshold: u64,
+    /// Whether the Sensor was invited into the successor (the decision
+    /// followed the conversation), or the conversation went back to the
+    /// chooser as a crowd.
+    pub followed: bool,
+    /// RFC 3339.
+    pub decided_at: String,
+}
 
 /// The consent store. One connection behind a mutex: a decision is a handful
 /// of small local statements, so the contention a pool would relieve does not
@@ -1212,6 +1257,66 @@ impl Store {
     /// id, exactly as a replayed decision does. That is the second line of
     /// defence behind the state comparison: mautrix retries a push with
     /// backoff, so the same body genuinely does arrive twice.
+    /// Journals one move, once: a second record about the same successor is
+    /// a replay of the same decision and changes nothing. Returns whether
+    /// this call was the one that recorded it.
+    pub fn record_portal_move(&self, portal_move: &PortalMove) -> Result<bool> {
+        let inserted = self
+            .connection()
+            .execute(
+                "INSERT INTO portal_move                  (successor, predecessor, bridge_id, members, crowd_threshold, followed,                   decided_at)                  VALUES (?, ?, ?, ?, ?, ?, ?)                  ON CONFLICT (successor) DO NOTHING",
+                rusqlite::params![
+                    portal_move.successor,
+                    portal_move.predecessor,
+                    portal_move.bridge_id,
+                    portal_move.members as i64,
+                    portal_move.crowd_threshold as i64,
+                    i64::from(portal_move.followed),
+                    portal_move.decided_at,
+                ],
+            )
+            .context("failed to record a portal move")?;
+        Ok(inserted == 1)
+    }
+
+    /// Whether a move onto this successor has already been decided.
+    pub fn portal_move_decided(&self, successor: &str) -> Result<bool> {
+        let count: i64 = self
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM portal_move WHERE successor = ?",
+                [successor],
+                |row| row.get(0),
+            )
+            .context("failed to look up a portal move")?;
+        Ok(count > 0)
+    }
+
+    /// The most recent moves, newest first.
+    pub fn portal_moves(&self, limit: usize) -> Result<Vec<PortalMove>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT successor, predecessor, bridge_id, members, crowd_threshold, followed,                  decided_at FROM portal_move ORDER BY decided_at DESC, successor LIMIT ?",
+            )
+            .context("failed to prepare the portal moves query")?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok(PortalMove {
+                    successor: row.get(0)?,
+                    predecessor: row.get(1)?,
+                    bridge_id: row.get(2)?,
+                    members: row.get::<_, i64>(3)? as u64,
+                    crowd_threshold: row.get::<_, i64>(4)? as u64,
+                    followed: row.get::<_, i64>(5)? == 1,
+                    decided_at: row.get(6)?,
+                })
+            })
+            .context("failed to read the portal moves")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read a portal move row")
+    }
+
     pub fn record_bridge_status(
         &self,
         transition: &crate::bridge_status::Transition,

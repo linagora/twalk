@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use harness::{
     companion_build, ensure_stack, gateway_env, gateway_env_without_sign_in, gateway_state_dir,
     owner_user_id, poll_until, GatewayProc, MatrixUser, OTHER_LOCALPART, OWNER_LOCALPART,
-    SERVER_NAME,
+    SENSOR_USER_ID, SERVER_NAME,
 };
 
 /// The Gateway under test, its origin, and the directory it keeps its store
@@ -197,6 +197,14 @@ async fn the_owners_openid_token_signs_in_and_the_cookie_authenticates() -> Resu
         document["expires_in"].as_u64().is_some_and(|ttl| ttl > 0),
         "the Companion is told when to refresh: {document}"
     );
+    // And which Sensor this deployment runs (#226). The Companion has to create
+    // a room with that account during onboarding, and it cannot derive the
+    // Matrix ID: `@sensor:<server>` is a deployment's convention and not a fact.
+    assert_eq!(
+        document["sensor"].as_str(),
+        Some(SENSOR_USER_ID),
+        "the session names the Sensor to invite: {document}"
+    );
 
     // The device token is what every other endpoint takes.
     let session = get_with_device(&client, &base, "/api/session", &device_token).await?;
@@ -206,6 +214,11 @@ async fn the_owners_openid_token_signs_in_and_the_cookie_authenticates() -> Resu
         session["device"]["current"].as_bool(),
         Some(true),
         "the session names the device that asked: {session}"
+    );
+    assert_eq!(
+        session["sensor"].as_str(),
+        Some(SENSOR_USER_ID),
+        "and states the Sensor on every read, not only on the sign-in: {session}"
     );
 
     let devices =

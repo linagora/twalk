@@ -961,13 +961,21 @@ async fn step(
         .refuse_step
         .pop_front();
     if let Some((status, errcode)) = refused {
-        // A `400` **destroys the login process**: the capture is explicit that
-        // every later call against it, the step cancel and the process cancel
-        // included, answered `404 M_NOT_FOUND` (`fixtures/*/login-step.json`,
-        // answer `rejected_user_input`). So there is no retrying a refused
-        // step, and a stub that let one be retried would be inviting the
-        // Companion to offer exactly that.
-        if status == 400 {
+        // A connector's `400` **destroys the login process**: the capture is
+        // explicit that every later call against it, the step cancel and the
+        // process cancel included, answered `404 M_NOT_FOUND`
+        // (`fixtures/*/login-step.json`, answer `rejected_user_input`). So
+        // there is no retrying a refused step, and a stub that let one be
+        // retried would be inviting the Companion to offer exactly that.
+        //
+        // Except the decoder's own `400`: bridgev2 answers `M_NOT_JSON` when
+        // the body does not decode into its `map[string]string`, **before**
+        // `doLoginStep` runs, and only a connector error reaches `deleteLogin`
+        // (`bridgev2/matrix/provisioninglogin.go`). The process is untouched
+        // and the same step is still waiting — which is what #221 needs a
+        // Gateway to say, so it is what this stub does.
+        let decoder_refusal = matches!(errcode.as_str(), "M_NOT_JSON" | "M_BAD_JSON");
+        if status == 400 && !decoder_refusal {
             state
                 .inner
                 .lock()

@@ -980,6 +980,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/portals/moves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The conversations whose room was replaced while the Sensor was in them, and what the register decided.
+         * @description The register's journal of **moves** (ADR 0029, #255). A conversation's
+         *     room can be replaced — a Telegram group promoted to a supergroup, a
+         *     Matrix room upgraded — while the user's decision to observe it is on
+         *     record. The register follows `m.room.tombstone` to the successor and
+         *     decides what that decision now means: **followed** when the successor's
+         *     audience is under the crowd threshold (the Sensor is invited there),
+         *     **returned to the chooser** when it is not (the conversation stays
+         *     `moved` and asks to be acknowledged again as a crowd).
+         *
+         *     Either way the move is said here, once per successor, with the numbers
+         *     it was decided on. A deployment that changed rooms under the user
+         *     without being able to say so is one whose history they cannot check;
+         *     the dashboard's activity feed draws from this. Read from the Gateway's
+         *     store alone — no homeserver call.
+         */
+        get: operations["listPortalMoves"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/portals/observation": {
         parameters: {
             query?: never;
@@ -2392,6 +2425,7 @@ export interface components {
              *     (`GATEWAY_OWNER`).
              */
             owner: string;
+            sensor: components["schemas"]["SensorUserId"];
         };
         /** @description The user's native language, and the choices. */
         LanguagePreference: {
@@ -2717,6 +2751,30 @@ export interface components {
              */
             readable: boolean;
         };
+        /** @description One conversation's move, as the register decided it (#255). */
+        PortalMove: {
+            bridge_id: string;
+            /** @description The threshold applied, kept so the entry stays readable after the operator changes it. */
+            crowd_threshold: number;
+            /** Format: date-time */
+            decided_at: string;
+            /**
+             * @description `true` — the Sensor was invited into the successor: the decision
+             *     followed the conversation. `false` — the successor's audience is
+             *     at or above the threshold, so the conversation went back to the
+             *     chooser as a crowd, `moved`, for the user to acknowledge again.
+             */
+            followed: boolean;
+            /**
+             * @description People in the successor when the register decided, bridge bot
+             *     and Sensor excluded — the number the threshold was applied to.
+             */
+            members: number;
+            /** @description The room it left — the one the user's decision named. */
+            predecessor: string;
+            /** @description The room the conversation lives in now. */
+            successor: string;
+        };
         /** @description One outcome per room asked about, in the order asked. */
         PortalObservation: {
             /** @description The decision that was applied, echoed back. */
@@ -2912,6 +2970,30 @@ export interface components {
              */
             sensor: string | null;
         };
+        /**
+         * @description The Matrix ID of the Sensor this deployment runs
+         *     (`GATEWAY_SENSOR_USER_ID`), and `null` when the operator configured
+         *     none.
+         *
+         *     Here because the Companion has to **create a room with it** during
+         *     onboarding (ticket #226, ADR 0034): the browser hands the Sensor a
+         *     device credential as an Olm-encrypted to-device message, and that
+         *     send is a silent no-op unless the two accounts already share an
+         *     encrypted room. A browser that has to name the Sensor cannot derive
+         *     it — `@sensor:<server>` is a deployment's convention and not a fact,
+         *     which is the refusal ADR 0018 made about the owner's network ghosts
+         *     and ADR 0024 about a bridge bot's localpart.
+         *
+         *     Said in the session document rather than in a new operation, and only
+         *     to a signed-in device: it is a fact about the deployment the owner
+         *     already knows, and `GET /api/deployment` deliberately names no
+         *     identity to an unauthenticated caller. The alternative on offer was
+         *     `POST /api/bootstrap/rooms` with an empty room list, which answers
+         *     `sensor` today — and which would mean handing the Gateway the user's
+         *     own Matrix access token to read a configured string, for no other
+         *     reason.
+         */
+        SensorUserId: string | null;
         /** @description Who is signed in, on which device. */
         Session: {
             device: components["schemas"]["Device"];
@@ -2922,6 +3004,7 @@ export interface components {
              *     (`GATEWAY_OWNER`).
              */
             owner: string;
+            sensor: components["schemas"]["SensorUserId"];
         };
         SignInRequest: {
             /**
@@ -3149,9 +3232,10 @@ export interface components {
             };
         };
         /**
-         * @description The bridge itself is the problem, not the request. The three codes
-         *     are three different investigations, and telling them apart without
-         *     reading `detail` is the point of having three.
+         * @description The bridge itself, or this build's conversation with it, is the
+         *     problem — never the user's values. The four codes are four different
+         *     investigations, and telling them apart without reading `detail` is
+         *     the point of having four.
          *
          *     - `bridge_unreachable` — **nothing answered**: connection refused,
          *       timeout, no route. This is the one an operator checks containers,
@@ -3166,6 +3250,16 @@ export interface components {
          *       Twalk's reading of that bridge's provisioning API rather than a
          *       broken deployment, and nothing about the deployment will explain
          *       it. `detail` names the provisioning call and what was looked for.
+         *     - `bridge_request_unusable` — the mirror: it answered `400
+         *       M_NOT_JSON`, meaning it could not read what **this build sent**.
+         *       bridgev2 refuses the body before any connector runs, so the
+         *       network saw nothing, refused nothing, and the login is still
+         *       waiting on the same step. A defect in Twalk's writing of the
+         *       provisioning API; `detail` says so and names the code. It exists
+         *       because a cookie jar sent as a nested map arrived here as
+         *       `invalid_request` — *"the network refused what was submitted,
+         *       start the login again"* — and sent a user round the same paste
+         *       three times (#221).
          *
          *       It exists because it used to be `bridge_unreachable` (#116): the
          *       first live WhatsApp login failed here, was reported as a bridge
@@ -3184,7 +3278,7 @@ export interface components {
             content: {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
-                    error?: "bridge_unreachable" | "bridge_refused" | "bridge_answer_unusable";
+                    error?: "bridge_unreachable" | "bridge_refused" | "bridge_answer_unusable" | "bridge_request_unusable";
                 };
             };
         };
@@ -3933,10 +4027,12 @@ export interface operations {
                 };
             };
             /**
-             * @description The suggestion exists and cannot be approved. Six situations,
-             *     six codes: each one is a different sentence for the user, and
+             * @description The suggestion exists and cannot be approved. Seven situations,
+             *     seven codes: each one is a different sentence for the user, and
              *     collapsing them would be the defect that cost this project seven
-             *     incidents in two days.
+             *     incidents in two days. Six are about the suggestion or the
+             *     sender's consent; the seventh, `trigger_has_no_room`, is about
+             *     the message it answers.
              *
              *     - `suggestion_expired` - its `expires_at` has passed. A stale
              *       suggestion cannot be approved late (the policy that sets it is
@@ -5215,6 +5311,46 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             503: components["responses"]["PortalsNotConfigured"];
+        };
+    };
+    listPortalMoves: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The most recent moves, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        moves: components["schemas"]["PortalMove"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `portals_not_configured` — as for `GET /api/portals`. Or
+             *     `moves_not_journaled` — this Gateway has a register but no store
+             *     (no consent configured), so moves are decided and logged but not
+             *     kept; `detail` names what to configure.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "portals_not_configured" | "moves_not_journaled";
+                    };
+                };
+            };
         };
     };
     setPortalObservation: {
