@@ -1007,5 +1007,18 @@
 
 	"api.trouble.unreachable": "Your Twalk server could not be reached: nothing answered at all. Check that it is running, and check your connection.",
 	"api.trouble.sessionRefused": "Your Twalk server answered, and would not accept this session. Sign in again to carry on — nothing else is wrong.",
-	"api.trouble.refused": "Your Twalk server answered, but could not do this. Try again, and open the diagnostics if it persists."
+	"api.trouble.refused": "Your Twalk server answered, but could not do this. Try again, and open the diagnostics if it persists.",
+	"network.email.name": "Mailbox",
+	"network.email.subtitle": "Your own mailbox, read by the collector with the grant you gave",
+	"network.calendar.name": "Calendar",
+	"network.calendar.subtitle": "Your own calendars, read by the collector with the same grant",
+	"networks.card.noCollector": "No collector for this account is configured on your Twalk server.",
+	"networks.collector.unreachable": "Unreachable — retrying",
+	"networks.collector.reconnectRequired": "Sign in again on the server",
+	"networks.collector.pendingOperator": "Needs the operator",
+	"dashboard.feed.connection.connected": "The connection {connection} is connected again",
+	"dashboard.feed.connection.unreachable": "The connection {connection} cannot reach its service; the collector retries",
+	"dashboard.feed.connection.reconnect_required": "The connection {connection} needs the operator to sign in again on the server",
+	"dashboard.feed.connection.pending_operator": "The connection {connection} needs the operator to change its client",
+	"approvals.refusal.connection_not_connected": "The account this reply would leave from is not connected right now, so nothing was sent. The operator has to reconnect it on the server; the reply stays here."
 }

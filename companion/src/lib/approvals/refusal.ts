@@ -119,6 +119,13 @@ const TABLE: Record<string, Row> = {
 	},
 	already_approved: { cause: 'approvals.refusal.already_approved', remedy: 'reload' },
 	trigger_has_no_room: { cause: 'approvals.refusal.trigger_has_no_room', remedy: 'none' },
+	// The connection the reply would leave by cannot send right now (#275):
+	// its collector said so, and the Gateway believed it before publishing.
+	// The operator's, not the user's: the remedy is on the server.
+	connection_not_connected: {
+		cause: 'approvals.refusal.connection_not_connected',
+		remedy: 'none'
+	},
 	suggestion_unreadable: { cause: 'approvals.refusal.suggestion_unreadable', remedy: 'none' },
 
 	// The things behind the Gateway.

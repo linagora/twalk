@@ -1787,6 +1787,13 @@ paths:
             - `trigger_has_no_room` - the message the suggestion answers
               does not name a portal room, so there is nowhere to send the
               reply.
+            - `connection_not_connected` - the connection the reply would
+              leave by last said it cannot send (#275): its collector
+              published `reconnect_required`, `pending_operator` or
+              `unreachable`, so the reply would sit on the bus for a sender
+              that will not take it. The detail carries the state and the
+              operator's own hint. A connection that never said anything
+              is not refused on this ground.
             - `suggestion_unreadable` - the suggestion is on the bus and
               this build cannot read it (an unknown network, an unknown
               consent state, a content type the contract does not name — or,
@@ -1810,6 +1817,7 @@ paths:
                             suggestion_was_never_consented,
                             already_approved,
                             trigger_has_no_room,
+                            connection_not_connected,
                             suggestion_unreadable,
                           ]
         "410":
@@ -2885,6 +2893,16 @@ paths:
 
         The Companion draws a card per connection and decides per connection
         (#272); `network` on a card is its kind.
+
+        Since #275 an entry carries `status` when the connection's own
+        collector has said what state it is in (`connection.status.changed.v1`,
+        read off the bus): one of the contract's four states, when it was
+        observed, the service it is about and the operator's hint — the
+        Companion's card shows the state as one of four sentences, never one.
+        A connection nobody has spoken for (a bridge's, whose state is
+        `GET /api/bridges`'s; a collector that has not run) has no `status`.
+        `transitions` lists the most recent state changes, newest first, for
+        the dashboard's activity feed.
       security:
         - deviceToken: []
       responses:
@@ -2894,13 +2912,28 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [connections]
+                required: [connections, transitions]
                 additionalProperties: false
                 properties:
                   connections:
                     type: array
                     items:
                       $ref: "#/components/schemas/Connection"
+                  transitions:
+                    type: array
+                    description: The most recent connection state changes, newest first; empty when none was ever recorded.
+                    items:
+                      $ref: "#/components/schemas/ConnectionTransition"
+        "503":
+          description: The Gateway's store could not be read.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [store_unavailable]
         "401":
           $ref: "#/components/responses/Unauthenticated"
 
@@ -5243,6 +5276,68 @@ components:
             the Sensor recognises a portal of this connection by. Absent when
             the operator named none; the Sensor then resolves the connection
             by kind when the kind has exactly one.
+        status:
+          $ref: "#/components/schemas/ConnectionStatus"
+
+    ConnectionStatus:
+      type: object
+      description: |
+        What the connection's collector last said about it (#275,
+        `connection.status.changed.v1`). Present only on a connection that
+        spoke for itself.
+      required: [state, occurred_at]
+      additionalProperties: false
+      properties:
+        state:
+          $ref: "#/components/schemas/ConnectionState"
+        occurred_at:
+          type: string
+          format: date-time
+          description: When the collector observed the transition into this state.
+        service:
+          type: [string, "null"]
+          enum: [sso, jmap, caldav, null]
+          description: Which service the state is about, when one is; absent or null on `connected`.
+        hint:
+          type: [string, "null"]
+          description: The operator's next step, in one sentence, as the collector said it. The Companion shows it beside the state; it never names a token.
+
+    ConnectionState:
+      type: string
+      description: |
+        The contract's four states of a connection
+        (`connection.status.changed.schema.json`, `data.to_state`): `connected`;
+        `unreachable`, a service did not answer and the collector retries;
+        `reconnect_required`, the SSO refused the grant and the operator has
+        to authorize again; `pending_operator`, a service refused a fresh
+        token and the operator has to change the client. Copied from the
+        contract and tested against it; four sentences in the Companion, never one.
+      enum: [connected, unreachable, reconnect_required, pending_operator]
+
+    ConnectionTransition:
+      type: object
+      description: One recorded state change of a connection, for the dashboard's feed.
+      required: [connection, kind, from_state, to_state, occurred_at]
+      additionalProperties: false
+      properties:
+        connection:
+          $ref: "#/components/schemas/ConnectionId"
+        kind:
+          $ref: "#/components/schemas/Kind"
+        from_state:
+          type: string
+          enum: [unknown, connected, unreachable, reconnect_required, pending_operator]
+          description: The state before; `unknown` on the first publication of a collector's run.
+        to_state:
+          $ref: "#/components/schemas/ConnectionState"
+        occurred_at:
+          type: string
+          format: date-time
+        service:
+          type: [string, "null"]
+          enum: [sso, jmap, caldav, null]
+        hint:
+          type: [string, "null"]
 
     ConnectionId:
       type: string

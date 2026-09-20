@@ -147,6 +147,96 @@ impl Bus {
         }
     }
 
+    /// The stream sequence of the last message stored on a subject, or `0`
+    /// when none was: what a Companion Gateway that has published every decision it
+    /// holds would name as its position, read from the stream's index
+    /// rather than by replaying the subject.
+    pub async fn last_sequence(&self, stream: &str, subject: &str) -> Result<u64> {
+        use async_nats::jetstream::stream::LastRawMessageErrorKind;
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        match stream.get_last_raw_message_by_subject(subject).await {
+            Ok(message) => Ok(message.sequence),
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(0),
+            Err(e) => Err(e).context("failed to fetch the last message"),
+        }
+    }
+
+    /// The stream's last sequence, whatever the subject: the position a test
+    /// notes before it starts the process under test, so that `fetch_since`
+    /// reads only what that process published — on a long-lived bus,
+    /// walking a subject from sequence 1 is a minute per read.
+    pub async fn head(&self, stream: &str) -> Result<u64> {
+        let mut stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        Ok(stream
+            .info()
+            .await
+            .context("failed to read the stream's info")?
+            .state
+            .last_sequence)
+    }
+
+    /// Every message stored on a subject after `after` (a sequence from
+    /// `head`), in stream order.
+    pub async fn fetch_since(&self, stream: &str, subject: &str, after: u64) -> Result<Vec<Value>> {
+        Ok(self
+            .fetch_since_with_headers(stream, subject, after)
+            .await?
+            .into_iter()
+            .map(|message| message.payload)
+            .collect())
+    }
+
+    /// Like `fetch_since`, keeping the NATS headers — the collector's reach
+    /// reports and dead letters say what happened in headers (#216, #278).
+    pub async fn fetch_since_with_headers(
+        &self,
+        stream: &str,
+        subject: &str,
+        after: u64,
+    ) -> Result<Vec<StoredMessage>> {
+        use async_nats::jetstream::stream::LastRawMessageErrorKind;
+        let stream = self
+            .jetstream
+            .get_stream(stream)
+            .await
+            .context("failed to get stream")?;
+        let last = match stream.get_last_raw_message_by_subject(subject).await {
+            Ok(message) => message.sequence,
+            Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).context("failed to fetch last message"),
+        };
+        let mut out = Vec::new();
+        for sequence in (after + 1)..=last {
+            match stream.get_raw_message(sequence).await {
+                Ok(message) if message.subject.as_str() == subject => out.push(StoredMessage {
+                    headers: message
+                        .headers
+                        .iter()
+                        .flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(move |value| (name.to_string(), value.to_string()))
+                        })
+                        .collect(),
+                    payload: serde_json::from_slice(&message.payload)?,
+                    sequence: message.sequence,
+                }),
+                Ok(_) => {}
+                Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
+                Err(e) => return Err(e).context("failed to fetch message"),
+            }
+        }
+        Ok(out)
+    }
+
     /// Fetches every message stored on a subject, in stream order: the
     /// harness's "consume a subject" primitive. Tests assert on whole
     /// sequences (e.g. no duplicate ids after a replay).

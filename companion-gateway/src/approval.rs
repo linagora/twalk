@@ -411,23 +411,74 @@ pub struct Suggestion {
     pub stream_sequence: u64,
 }
 
-/// The half of the trigger event an approval needs: who wrote, and which
-/// room to answer in.
+/// The half of the trigger event an approval needs: who wrote, and where to
+/// answer.
 ///
 /// Four values, and the struct has no `data` member — so the trigger's body,
 /// its attachments and the contact's `network_identifier` never become values
-/// in this process, exactly as they do not on the pending-contact path.
+/// in this process, exactly as they do not on the pending-contact path. The
+/// one field read under `data` is a mail's `message_id` (#278): an
+/// identifier the sending server minted, not the sender's words, and the
+/// only thing a reply to a mail can be threaded under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trigger {
-    /// The sender's Matrix user ID: the contact whose consent is checked.
+    /// The sender: a Matrix user ID, or a `mailto:` on the mail connection
+    /// (#276) — the contact whose consent is checked.
     pub contact: String,
     /// The perimeter the message arrived on — what the consent is read
     /// against (#270).
     pub connection: String,
     pub network: Network,
-    /// The portal room the reply is posted into, from the event's
-    /// `matrix://<homeserver>/<room id>` source.
-    pub room_id: String,
+    /// Where the reply goes: the portal room, or the mail connection.
+    pub target: Target,
+}
+
+/// Where an approved reply is sent, by whom (ADR 0033: one shape per kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A portal room, from the event's `matrix://<homeserver>/<room id>`
+    /// source: the Sensor posts it as the owner's device.
+    Room { room_id: String },
+    /// A mail connection, from a `jmap://` source (#278): the collector
+    /// holding the connection sends it from the owner's own mailbox, in
+    /// reply to the trigger mail's Message-ID.
+    Mail {
+        connection: String,
+        in_reply_to: String,
+        /// The trigger's `subject` — the sender whose consent this approval
+        /// checked — carried as the one address the reply goes to. The
+        /// collector finds the original again by Message-ID, and a
+        /// Message-ID is the sender's to choose: without this, a stranger
+        /// mailing the owner under another mail's Message-ID is who the
+        /// owner's approved words would be sent to.
+        recipient: String,
+    },
+}
+
+impl Target {
+    /// The contract's `data.target`.
+    pub fn json(&self) -> Value {
+        match self {
+            Target::Room { room_id } => json!({ "room_id": room_id }),
+            Target::Mail {
+                connection,
+                in_reply_to,
+                recipient,
+            } => json!({
+                "connection": connection,
+                "in_reply_to": in_reply_to,
+                "recipient": recipient,
+            }),
+        }
+    }
+
+    /// One word for the log line.
+    pub fn describe(&self) -> String {
+        match self {
+            Target::Room { room_id } => format!("room {room_id}"),
+            Target::Mail { connection, .. } => format!("mail connection {connection}"),
+        }
+    }
 }
 
 /// The connection an event on the bus belongs to: the one it carries — which
@@ -447,6 +498,46 @@ pub fn connection_of(
         .map_err(|why| {
             Refusal::SuggestionUnreadable(format!("its connection cannot be told: {why}"))
         })
+}
+
+/// Whether a connection can take a reply (#275): it last said it was
+/// `connected`; or it is a bridge's, which says nothing on the status
+/// subject and is not refused here — its reach is #216's `.posted` report. A
+/// collector's connection (kind `email` or `calendar`) that never spoke
+/// cannot: no collector is holding it, and the reply would sit on the bus
+/// for nobody.
+pub fn connection_can_send(
+    store: &Store,
+    connections: &crate::connections::Registry,
+    connection: &str,
+) -> Result<(), Refusal> {
+    match store.connection_status(connection) {
+        Ok(Some(current)) if !current.is_connected() => Err(Refusal::ConnectionNotConnected {
+            connection: connection.to_owned(),
+            state: current.state,
+            hint: current.hint,
+        }),
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            let a_collectors = connections
+                .get(connection)
+                .is_some_and(|known| matches!(known.kind.as_str(), "email" | "calendar"));
+            if a_collectors {
+                Err(Refusal::ConnectionNotConnected {
+                    connection: connection.to_owned(),
+                    state: "unknown".to_owned(),
+                    hint: Some(
+                        "No collector has reported this connection yet: start the collector \
+                         that holds it, or check its log"
+                            .to_owned(),
+                    ),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) => Err(Refusal::StoreUnavailable(format!("{error:#}"))),
+    }
 }
 
 /// The room id out of an inbound event's `source`
@@ -527,6 +618,16 @@ struct TriggerDocument {
     /// The perimeter (#269); absent on an event older than it.
     #[serde(default)]
     connection: Option<String>,
+    /// The one member of `data` this path reads: a mail's own Message-ID
+    /// (#278). Every other member is left in the bytes.
+    #[serde(default)]
+    data: TriggerData,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct TriggerData {
+    #[serde(default)]
+    message_id: Option<String>,
 }
 
 /// The trigger event as a suggestion built **outside** a persona needs it
@@ -624,12 +725,14 @@ impl Approval {
     /// event carries the one the contract asks for: "consent state of the
     /// original sender, copied from the trigger event".
     ///
-    /// `target.reply_to_event_id` is deliberately absent. The contract's
-    /// inbound event does not carry its own Matrix event ID — only the id of
-    /// a message it was itself a reply to — so there is nothing here to
-    /// thread under, and the contract makes the field optional. The reply
-    /// lands in the room; it is not a native Matrix reply. Inventing an id
-    /// would be worse than the gap, and the gap is named in ADR 0022.
+    /// On a room target, `reply_to_event_id` is deliberately absent. The
+    /// contract's inbound event does not carry its own Matrix event ID — only
+    /// the id of a message it was itself a reply to — so there is nothing
+    /// there to thread under, and the contract makes the field optional. The
+    /// reply lands in the room; it is not a native Matrix reply. Inventing an
+    /// id would be worse than the gap, and the gap is named in ADR 0022. A
+    /// mail target (#278) has what a room does not: the mail's own
+    /// Message-ID, so a reply to a mail *is* threaded.
     ///
     /// `final.body` is what the contact receives: the approved body, then —
     /// when [`Self::disclosure`] is set — a newline and the sentence, which
@@ -661,7 +764,7 @@ impl Approval {
                     "format": self.content.format.as_str(),
                 },
                 "edited": self.edited,
-                "target": { "room_id": self.trigger.room_id },
+                "target": self.trigger.target.json(),
             }
         });
         if let Some(sentence) = &self.disclosure {
@@ -706,8 +809,8 @@ pub enum Refusal {
         trigger_event_id: String,
         window: u64,
     },
-    /// The trigger event's `source` is not a portal room, so there is
-    /// nowhere to send the reply.
+    /// The trigger event's `source` is neither a portal room nor a mailbox,
+    /// so there is nowhere to send the reply.
     TriggerHasNoRoom { source: String },
     /// The suggestion is on the bus and this build cannot read it — an
     /// unknown network, an unknown consent state, a content type the
@@ -728,6 +831,16 @@ pub enum Refusal {
     /// "not yet". A different sentence for the user from a revocation, so a
     /// different code.
     ConsentPending { contact: String, network: Network },
+    /// The connection the reply would leave by last said it cannot send
+    /// (#275): the collector holding it published `reconnect_required`,
+    /// `pending_operator` or `unreachable`, and an approval published now
+    /// would sit on the bus for a sender that will not take it. The state
+    /// and the operator's own hint travel in the detail.
+    ConnectionNotConnected {
+        connection: String,
+        state: String,
+        hint: Option<String>,
+    },
     /// This suggestion has already been approved by this person. The answer
     /// carries the first approval, so a client that lost the first response
     /// learns where the reply went rather than being told to try again.
@@ -759,6 +872,7 @@ impl Refusal {
             Refusal::NeverConsented { .. } => "suggestion_was_never_consented",
             Refusal::ConsentRevoked { .. } => "consent_revoked",
             Refusal::ConsentPending { .. } => "consent_pending",
+            Refusal::ConnectionNotConnected { .. } => "connection_not_connected",
             Refusal::AlreadyApproved(_) => "already_approved",
             Refusal::BusUnreachable(_) => "bus_unreachable",
             Refusal::StoreUnavailable(_) => "store_unavailable",
@@ -793,7 +907,9 @@ impl Refusal {
             Refusal::SuggestionUnreadable(_) => StatusCode::CONFLICT,
             Refusal::Expired { .. } => StatusCode::CONFLICT,
             Refusal::NeverConsented { .. } => StatusCode::CONFLICT,
-            Refusal::ConsentRevoked { .. } | Refusal::ConsentPending { .. } => StatusCode::CONFLICT,
+            Refusal::ConsentRevoked { .. }
+            | Refusal::ConsentPending { .. }
+            | Refusal::ConnectionNotConnected { .. } => StatusCode::CONFLICT,
             Refusal::AlreadyApproved(_) => StatusCode::CONFLICT,
             Refusal::BusUnreachable(_) => StatusCode::BAD_GATEWAY,
             Refusal::StoreUnavailable(_) | Refusal::Unrecorded(_) => {
@@ -833,8 +949,9 @@ impl Refusal {
                  searched. GATEWAY_APPROVAL_LOOKUP_WINDOW widens the search"
             ),
             Refusal::TriggerHasNoRoom { source } => format!(
-                "the trigger event names the source {source:?}, which is not a portal room \
-                 (matrix://<homeserver>/<room id>): there is nowhere to send the reply"
+                "the trigger event names the source {source:?}, which is neither a portal room \
+                 (matrix://<homeserver>/<room id>) nor a mailbox (jmap://<host>/<account>/<inbox>): \
+                 there is nowhere to send the reply"
             ),
             Refusal::SuggestionUnreadable(detail) => format!(
                 "the suggestion is on the bus and this Gateway cannot read it: {detail}. Nothing \
@@ -859,6 +976,17 @@ impl Refusal {
                 "consent for {contact} on {} is pending: nothing may be sent to a contact the \
                  user has not granted. Decide about this contact first",
                 network.as_str()
+            ),
+            Refusal::ConnectionNotConnected {
+                connection,
+                state,
+                hint,
+            } => format!(
+                "the connection {connection} is {state}, not connected: the reply would sit on \
+                 the bus for a sender that cannot take it, so nothing was published. {}",
+                hint.as_deref().unwrap_or(
+                    "The collector holding the connection says what to do next in its log"
+                )
             ),
             Refusal::AlreadyApproved(approval) => format!(
                 "this suggestion was already approved by {} at {}, and published on the bus as \
@@ -1321,6 +1449,15 @@ impl Approvals {
                 return Err(Refusal::StoreUnavailable(format!("{error:#}")));
             }
         }
+        // And the connection itself (#275): a collector that said its
+        // connection cannot send is believed, before anything is published —
+        // after the store's answer, so a second click on a reply that
+        // already left while the connection was up is told where it went
+        // rather than that the connection is down now. A bridge's connection
+        // says nothing here and is not refused; its reach is #216's
+        // `.posted` report. A collector's connection that has never spoken
+        // is refused too: nothing is holding it.
+        self.connection_can_send(&approval.trigger.connection)?;
 
         let envelope = approval.envelope(&now);
         // Recorded first, unpublished, so that a crash between the write and
@@ -1366,7 +1503,7 @@ impl Approvals {
             suggestion = %approval.suggestion.event_id,
             persona = %approval.suggestion.persona_id,
             network = approval.trigger.network.as_str(),
-            room = %approval.trigger.room_id,
+            target = %approval.trigger.target.describe(),
             edited = approval.edited,
             disclosed = approval.disclosure.is_some(),
             stream_sequence = sequence,
@@ -1507,16 +1644,52 @@ impl Approvals {
                 })
             }
         };
-        let room_id = room_from_source(&document.source).ok_or(Refusal::TriggerHasNoRoom {
-            source: document.source.clone(),
-        })?;
         let network = Network::parse(&document.network).unwrap_or(suggestion.network);
+        let connection = connection_of(&self.connections, document.connection.as_deref(), network)?;
+        // A room to post into, or a mail to reply to: the source says which
+        // (ADR 0033), and a mail without its Message-ID cannot be answered
+        // in its thread — refused rather than sent as a new conversation.
+        let target = match room_from_source(&document.source) {
+            Some(room_id) => Target::Room { room_id },
+            None if document.source.starts_with("jmap://") => Target::Mail {
+                connection: connection.clone(),
+                in_reply_to: document.data.message_id.clone().ok_or_else(|| {
+                    Refusal::SuggestionUnreadable(
+                        "the trigger is a mail without a Message-ID: the reply has nothing to \
+                         thread under"
+                            .to_owned(),
+                    )
+                })?,
+                // The address is the sender the consent check is about, and
+                // nothing the collector could look up: a mail's subject on
+                // this source is its sender's `mailto:` by contract.
+                recipient: if document.subject.starts_with("mailto:") {
+                    document.subject.clone()
+                } else {
+                    return Err(Refusal::SuggestionUnreadable(format!(
+                        "the trigger is a mail whose subject {:?} is not a mailto: address",
+                        document.subject
+                    )));
+                },
+            },
+            None => {
+                return Err(Refusal::TriggerHasNoRoom {
+                    source: document.source.clone(),
+                })
+            }
+        };
         Ok(Trigger {
             contact: document.subject,
-            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
+            connection,
             network,
-            room_id,
+            target,
         })
+    }
+
+    /// Whether the connection can take a reply (#275); see
+    /// [`connection_can_send`].
+    fn connection_can_send(&self, connection: &str) -> Result<(), Refusal> {
+        connection_can_send(&self.store, &self.connections, connection)
     }
 
     /// Reads one subject from `start` forward, for at most the window, and
@@ -1778,7 +1951,9 @@ mod tests {
             contact: "@whatsapp_33612345678:example.com".to_owned(),
             connection: "whatsapp".to_owned(),
             network: Network::Whatsapp,
-            room_id: "!abcXYZ123:example.com".to_owned(),
+            target: Target::Room {
+                room_id: "!abcXYZ123:example.com".to_owned(),
+            },
         }
     }
 
@@ -1798,6 +1973,71 @@ mod tests {
         // And it carries no clock, so the same approval given twice is one
         // event on the bus.
         assert_eq!(approval.event_id(), approval.event_id());
+    }
+
+    #[test]
+    fn a_connection_can_send_when_it_said_connected_or_is_a_bridges_and_not_otherwise() {
+        // #275: three connections in a registry — a bridge's, which never
+        // speaks on the status subject, and two of the collector's kinds, one
+        // that said `reconnect_required` and one that never spoke.
+        let dir = std::env::temp_dir().join(format!(
+            "gateway-approval-connection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let owner = Arc::new(crate::owner::Owner::new("@michel:example.com", []));
+        let store = Store::open(&dir, owner).unwrap();
+        let registry = crate::connections::Registry::from_config(
+            Some("whatsapp=whatsapp,mail-linagora=email,agenda-linagora=calendar"),
+            &[],
+            "example.com",
+        )
+        .unwrap();
+        let mut down = crate::connection_status::Change {
+            event_id: "e1".to_owned(),
+            connection: "mail-linagora".to_owned(),
+            kind: "email".to_owned(),
+            from_state: "connected".to_owned(),
+            to_state: "reconnect_required".to_owned(),
+            occurred_at: "2026-09-20T09:00:00Z".to_owned(),
+            service: Some("sso".to_owned()),
+            hint: Some("Run `twalk-collector authorize --renew`.".to_owned()),
+        };
+        store
+            .record_connection_status_change(&down, "2026-09-20T09:00:01Z")
+            .unwrap();
+
+        assert!(
+            connection_can_send(&store, &registry, "whatsapp").is_ok(),
+            "a bridge's says nothing here"
+        );
+        match connection_can_send(&store, &registry, "mail-linagora") {
+            Err(Refusal::ConnectionNotConnected { state, hint, .. }) => {
+                assert_eq!(state, "reconnect_required");
+                assert!(hint.unwrap().contains("authorize --renew"));
+            }
+            other => panic!("a connection that said it cannot send is refused: {other:?}"),
+        }
+        match connection_can_send(&store, &registry, "agenda-linagora") {
+            Err(Refusal::ConnectionNotConnected { state, hint, .. }) => {
+                assert_eq!(state, "unknown");
+                assert!(hint.unwrap().contains("No collector has reported"));
+            }
+            other => panic!("a collector's connection nobody spoke for is refused: {other:?}"),
+        }
+        down.event_id = "e2".to_owned();
+        down.from_state = "reconnect_required".to_owned();
+        down.to_state = "connected".to_owned();
+        down.occurred_at = "2026-09-20T10:00:00Z".to_owned();
+        store
+            .record_connection_status_change(&down, "2026-09-20T10:00:01Z")
+            .unwrap();
+        assert!(connection_can_send(&store, &registry, "mail-linagora").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1916,6 +2156,56 @@ mod tests {
             &"x".repeat(CONTRACT_MAX_BODY - sentence.chars().count()),
             sentence
         ));
+    }
+
+    #[test]
+    fn a_mail_triggers_approval_targets_the_mail_connection_in_its_thread() {
+        // #278: the contract's second target shape, which the collector
+        // sends and the Sensor leaves alone. The fixture's data is the
+        // Gateway's own.
+        let approval = Approval {
+            suggestion: suggestion(),
+            trigger: Trigger {
+                contact: "mailto:alice@example.org".to_owned(),
+                connection: "mail-linagora".to_owned(),
+                network: Network::Email,
+                target: Target::Mail {
+                    connection: "mail-linagora".to_owned(),
+                    in_reply_to: "<9b8c7d6e-1@example.org>".to_owned(),
+                    recipient: "mailto:alice@example.org".to_owned(),
+                },
+            },
+            approved_by: "@michel:example.com".to_owned(),
+            content: Content {
+                body: "Oui, lundi 9h me va.".to_owned(),
+                format: Format::Plain,
+            },
+            edited: false,
+            // The switch is not what this test is about; a mail reply
+            // carries the disclosure exactly as a room reply does (#121).
+            disclosure: None,
+        };
+        let event = approval.envelope("2026-09-21T08:20:11Z");
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../contracts/cloudevents/v1/fixtures/variants/persona.reply.approved/mail.json"
+        ))
+        .unwrap();
+        assert_eq!(event["data"]["target"], fixture["data"]["target"]);
+        assert!(event["data"]["target"].get("room_id").is_none());
+        // And the reader: a mailbox source with a Message-ID is a mail
+        // target; without one, refused rather than answered out of thread.
+        let with: TriggerDocument = serde_json::from_value(json!({
+            "id": "x", "source": "jmap://mail.example.com/u1/inbox-1",
+            "subject": "mailto:alice@example.org", "network": "email",
+            "connection": "mail-linagora",
+            "data": { "message_id": "<9b8c7d6e-1@example.org>", "body": "never a value here" }
+        }))
+        .unwrap();
+        assert_eq!(
+            with.data.message_id.as_deref(),
+            Some("<9b8c7d6e-1@example.org>")
+        );
+        assert!(room_from_source(&with.source).is_none());
     }
 
     #[test]

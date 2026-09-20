@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
   "title": "fr.linagora.twalk.inbound.message.received.v1",
-  "description": "A message received from an external messaging network, decrypted by the Sensor and normalized as a CloudEvents 1.0 envelope. Produced by the Sensor after successful Megolm decryption of an m.room.message event in a Matrix portal room. Consumed by Hermes personas subscribed to the inbound.message.received.* subject on NATS JetStream. One event of this type has two shapes, selected by the sender's consent state: the full shape, and the reduced shape a 'revoked' sender's message is published in — same envelope, same relations, no content (see the 'A revoked sender's message carries no content' rule at the end of this schema, and ADR 0012).",
+  "description": "A message received from another person, normalized as a CloudEvents 1.0 envelope. Produced by the Sensor after successful Megolm decryption of an m.room.message event in a Matrix portal room — a bridged network, or native Matrix — and, since #276 (ADR 0033: email reuses the message types), by the collector for a mail delivered to the owner's INBOX. Consumed by Hermes personas subscribed to the inbound.message.received.* subject on NATS JetStream. One event of this type has two shapes, selected by the sender's consent state: the full shape, and the reduced shape a 'revoked' sender's message is published in — same envelope, same relations, no content (see the 'A revoked sender's message carries no content' rule at the end of this schema, and ADR 0012).",
   "type": "object",
   "required": [
     "specversion",
@@ -27,15 +27,25 @@
     "id": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$",
-      "description": "Deterministic identifier computed as sha256(matrix_event_id + ':' + matrix_room_id). Ensures idempotent replay: the same underlying Matrix event always produces the same CloudEvents id, so consumers can deduplicate safely across bus resynchronizations."
+      "description": "Deterministic identifier. For a message the Sensor read in a Matrix room: sha256(matrix_event_id + ':' + matrix_room_id). For a mail the collector read in the owner's mailbox (#276): sha256('jmap:' + accountId + ':' + emailId), the JMAP account and the Email object's id, which a server keeps stable across a resynchronisation. Either way the same underlying message always produces the same CloudEvents id, so consumers can deduplicate safely across bus resynchronizations."
     },
     "source": {
       "type": "string",
       "format": "uri-reference",
-      "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
-      "description": "URI identifying the Matrix room where the event originated. Format: matrix://<homeserver>/<room_id>. The homeserver is the Synapse instance operated by Twalk; the room_id is the portal room maintained by the Mautrix bridge.",
+      "oneOf": [
+        {
+          "pattern": "^matrix://[^/]+/![A-Za-z0-9]+:[^/]+$",
+          "description": "The Matrix room the message was read in: matrix://<homeserver>/<room_id>, the portal room the bridge maintains for the conversation, on the Synapse the deployment operates."
+        },
+        {
+          "pattern": "^jmap://[^/]+/[^/]+/[^/]+$",
+          "description": "The mailbox the mail was delivered to (#276): jmap://<mail host>/<accountId>/<mailbox id>, the owner's INBOX on the JMAP server the collector reads through — one source per mailbox, as one source per room, so a consumer that filters on it filters on the conversation's container and not on the sender."
+        }
+      ],
+      "description": "URI identifying where the message was observed: the portal room for a bridged network, the mailbox for email (ADR 0033: one shape per kind, one field). What it names is the conversation's container, never the person.",
       "examples": [
-        "matrix://matrix.example.com/!abcXYZ123:example.com"
+        "matrix://matrix.example.com/!abcXYZ123:example.com",
+        "jmap://mail.example.com/u1/inbox-1"
       ]
     },
     "type": {
@@ -46,15 +56,26 @@
     "time": {
       "type": "string",
       "format": "date-time",
-      "description": "RFC 3339 timestamp of when the Sensor produced the event, not the original network timestamp. The original network timestamp is preserved in data.network_timestamp when available."
+      "description": "RFC 3339 timestamp of when the producer — the Sensor, or the collector — produced the event, not the original network timestamp. The original network timestamp is preserved in data.network_timestamp when available."
     },
     "subject": {
       "type": "string",
-      "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
-      "description": "Matrix user ID of the observed sender, as materialized by the bridge (e.g. @whatsapp_33612345678:example.com). Used for routing and for consent evaluation. Always a person the bridge stands in for — a ghost, or a native Matrix account (ADR 0009) — and never the deployment owner (ADR 0021) nor a bridge's own bot, the appservice service identity named by its sender_localpart (ADR 0026): neither is a contact, neither has a consent state, and nothing is published about a bridge bot on any type.",
+      "oneOf": [
+        {
+          "pattern": "^@[a-zA-Z0-9._=/+-]+:[^/]+$",
+          "description": "Matrix user ID of the observed sender, as materialized by the bridge (e.g. @whatsapp_33612345678:example.com): a ghost, or a native Matrix account (ADR 0009)."
+        },
+        {
+          "pattern": "^mailto:[^@\\s]+@[^@\\s]+$",
+          "maxLength": 512,
+          "description": "The sender of a mail, as a `mailto:` URI (RFC 6068) with the address lower-cased by the producer (#276): one string for one person on the mail connection, and the same string the calendar types name a participant by, so a decision about a sender is a decision about the person in the owner's meetings too (ADR 0033: structural, not an inferred merge)."
+        }
+      ],
+      "description": "The observed sender — a Matrix user ID for a bridged network, a `mailto:` for email — used for routing and for consent evaluation. Always a person, and never the deployment owner (ADR 0021) nor a bridge's own bot, the appservice service identity named by its sender_localpart (ADR 0026): neither is a contact, neither has a consent state, and nothing is published about a bridge bot on any type.",
       "examples": [
         "@whatsapp_33612345678:example.com",
-        "@telegram_987654321:example.com"
+        "@telegram_987654321:example.com",
+        "mailto:alice@example.org"
       ]
     },
     "datacontenttype": {
@@ -127,9 +148,23 @@
                   "description": "A short excerpt of the replied-to message for context, so consumers do not need to look it up to reason about the reply. Required unless the sender's consent is 'revoked', in which case a producer MUST omit it: an excerpt is message content, quoted rather than sent, and the relation alone (matrix_event_id) is what the reduced event keeps."
                 }
               }
+            },
+            {
+              "type": "object",
+              "required": ["message_id"],
+              "additionalProperties": false,
+              "properties": {
+                "message_id": {
+                  "type": "string",
+                  "maxLength": 998,
+                  "pattern": "^<[^<>\\s]+>$",
+                  "description": "The Message-ID the mail's In-Reply-To header names (RFC 5322 §3.6.4), angle brackets kept, as a mail client would write it back into In-Reply-To (#276). The relation alone: what the replied-to mail said is not quoted here."
+                }
+              },
+              "description": "A mail's reply relation. No excerpt: a mail carries its quoted text in its own body, which is the sender's message and goes through the body's own rule."
             }
           ],
-          "description": "If the message is a reply to a previous one, structured reference to the parent. Null otherwise."
+          "description": "If the message is a reply to a previous one, structured reference to the parent — a Matrix event for a bridged network, a Message-ID for email. Null otherwise."
         },
         "attachments": {
           "type": "array",
@@ -250,7 +285,7 @@
               }
             }
           },
-          "description": "Ordered list of attachments carried by the message. Only references and decryption material ever transit the bus; the bytes stay in Matrix media storage."
+          "description": "Ordered list of attachments carried by the message. Only references and decryption material ever transit the bus — for a bridged message, whose bytes stay in Matrix media storage; a mail's attachment carries neither, its bytes stay in the mailbox — and never a filename."
         },
         "contact": {
           "type": "object",
@@ -273,17 +308,43 @@
               "description": "Optional Matrix content URI for the contact's avatar."
             }
           },
-          "description": "Structured information about the sender, resolved by Sensor from the Matrix membership state and bridge metadata."
+          "description": "Structured information about the sender: resolved by the Sensor from the Matrix membership state and bridge metadata, or by the collector from a mail's From header (the display name is the name From carries, or the address itself when it carries none)."
         },
         "network_timestamp": {
           "type": "string",
           "format": "date-time",
-          "description": "Optional RFC 3339 timestamp of the original event as reported by the source network, when the bridge provides it. Distinct from the top-level 'time' attribute, which is the Sensor's own timestamp."
+          "description": "Optional RFC 3339 timestamp of the original event as reported by the source network — the bridge's timestamp, or a mail's receivedAt. Distinct from the top-level 'time' attribute, which is the producer's own timestamp."
         },
         "thread_root": {
           "type": "string",
-          "pattern": "^\\$[A-Za-z0-9_-]+$",
-          "description": "Optional Matrix event ID of the thread root, if the message is part of a Matrix thread."
+          "oneOf": [
+            {
+              "pattern": "^\\$[A-Za-z0-9_-]+$",
+              "description": "The Matrix event ID of the thread root."
+            },
+            {
+              "pattern": "^<[^<>\\s]+>$",
+              "maxLength": 998,
+              "description": "The first Message-ID the mail's References header names (#276): the root of the mail thread, as clients build the header."
+            }
+          ],
+          "description": "Optional: the root of the thread the message is part of — a Matrix event for a Matrix thread, a Message-ID for a mail thread."
+        },
+        "message_id": {
+          "type": "string",
+          "maxLength": 998,
+          "pattern": "^<[^<>\\s]+>$",
+          "description": "Optional (#276, #278): the mail's own Message-ID (RFC 5322 §3.6.4), angle brackets kept — the mail's identity in every client's threading, and what a reply's In-Reply-To names. Not the sender's words: an identifier the sending server minted. A bridged message has none; its identity is the Matrix event the id is derived from."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Optional (#276): the mail's Subject line, decoded, as the sender wrote it. A bridged message has none. The sender's words, so it goes with the body: never published when the sender's consent is 'revoked'."
+        },
+        "audience": {
+          "type": "string",
+          "enum": ["direct", "group"],
+          "description": "Optional (#276): whether the owner was the only recipient (`direct`: the owner alone in To with nobody in Cc) or one of several (`group`). What a bridged network says through its room — a direct chat or a group — a mail says through its recipients, and a persona answering a group mail should know it writes to a group."
         }
       }
     }
@@ -291,7 +352,7 @@
   "allOf": [
     {
       "title": "A revoked sender's message carries no content",
-      "description": "The two shapes of this event type, made checkable so a third-party producer reduces exactly like the Sensor (ADR 0012). The branch reads the envelope's own 'consent' extension — the top-level attribute, not a field of 'data' — so a validator decides from the event alone, with no outside lookup. When it is 'revoked', every field that carries the message is forbidden: data.body, data.reply_to.excerpt, and each attachment's mxc_uri, encryption and caption. What stays is the evidence that a message arrived — the deterministic id, the network, both timestamps, the room and sender references, the reply and thread relations, the contact's display name — plus each attachment's shape. Otherwise ('granted' or 'pending') the full shape applies and those fields are required as they were in v1 before this rule: a pending sender's message is labelled, never reduced.",
+      "description": "The two shapes of this event type, made checkable so a third-party producer reduces exactly like the Sensor (ADR 0012). The branch reads the envelope's own 'consent' extension — the top-level attribute, not a field of 'data' — so a validator decides from the event alone, with no outside lookup. When it is 'revoked', every field that carries the message is forbidden: data.body, data.title, data.reply_to.excerpt, and each attachment's mxc_uri, encryption and caption. What stays is the evidence that a message arrived — the deterministic id, the network, both timestamps, the room and sender references, the reply and thread relations, the contact's display name — plus each attachment's shape. Otherwise ('granted' or 'pending') the full shape applies and those fields are required as they were in v1 before this rule: a pending sender's message is labelled, never reduced.",
       "if": {
         "required": ["consent"],
         "properties": { "consent": { "const": "revoked" } }
@@ -301,6 +362,7 @@
           "data": {
             "properties": {
               "body": false,
+              "title": false,
               "reply_to": {
                 "if": { "type": "object" },
                 "then": { "properties": { "excerpt": false } }
@@ -324,11 +386,45 @@
             "required": ["body"],
             "properties": {
               "reply_to": {
-                "if": { "type": "object" },
+                "if": { "type": "object", "required": ["matrix_event_id"] },
                 "then": { "required": ["excerpt"] }
-              },
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "title": "A bridged attachment is a reference; a mail's attachment is a shape",
+      "description": "On a bridged network the bytes are in Matrix media storage and `mxc_uri` is what reaches them, so a full-shape event carries it (ADR 0012's reduction takes it away with the rest of the content). A mail's attachment bytes stay in the mailbox, and v1 publishes no reference to them at all (#276): an attachment is its kind, media type and size — never the filename, which is the sender's words — whatever the sender's consent. So `mxc_uri` is required on a `granted` or `pending` message whose network is not `email`, and never present on an `email` one.",
+      "if": {
+        "required": ["network"],
+        "properties": { "network": { "const": "email" } }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
               "attachments": {
-                "items": { "required": ["mxc_uri"] }
+                "items": { "properties": { "mxc_uri": false, "encryption": false } }
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "required": ["consent"],
+          "properties": { "consent": { "const": "revoked" } }
+        },
+        "then": {},
+        "else": {
+          "properties": {
+            "data": {
+              "properties": {
+                "attachments": {
+                  "items": { "required": ["mxc_uri"] }
+                }
               }
             }
           }

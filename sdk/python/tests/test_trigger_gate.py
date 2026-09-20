@@ -28,6 +28,7 @@ from fixtures import fixture, fixture_types, variant_fixture
 from twalk_sdk import (
     MESSAGE_RECEIVED_TYPE,
     OUTBOUND_MESSAGE_SENT_TYPE,
+    InboundMessage,
     OUTBOUND_REACTION_ADDED_TYPE,
     PERSONA_TRIGGER_TYPES,
     is_granted,
@@ -96,6 +97,67 @@ class TriggerGateTest(unittest.TestCase):
         )
         self.assertFalse(triggers_a_persona(event))
         self.assertFalse(is_granted(event), "and the consent gate could not have judged it")
+
+    def test_a_connections_state_change_names_nobody_and_wakes_no_persona(self) -> None:
+        # `connection.status.changed` (#274) is the collector saying whether
+        # it can reach a mailbox or a calendar: its subject is a connection,
+        # it carries no consent extension, and no persona is woken by it —
+        # by the allowlist, which cost the gate no edit.
+        event = fixture("connection.status.changed")
+        self.assertEqual(event["type"], "fr.linagora.twalk.connection.status.changed.v1")
+        self.assertNotIn("consent", event)
+        self.assertFalse(triggers_a_persona(event))
+        self.assertFalse(is_granted(event))
+
+    def test_the_owners_own_calendar_wakes_no_persona_and_passes_the_consent_gate_by_neither_door(
+        self,
+    ) -> None:
+        # The three `calendar.*` types (#280) are the owner's own agenda on
+        # the calendar connection: the subject is the owner, there is no
+        # consent extension to read — the people inside are governed by the
+        # participant rule of the contract, not by the envelope — and no
+        # suggestion-persona is woken by them, as none is by `outbound.*`.
+        # Both gates say no, and neither by accident: the type gate by the
+        # allowlist, the consent gate because there is nothing to read. A
+        # consumer that reacts to a moved meeting (the agent runtime of ADR
+        # 0032) reads the bus directly and is not this loop.
+        for name in ("created", "changed", "removed"):
+            with self.subTest(type=name):
+                event = fixture(f"calendar.event.{name}")
+                self.assertEqual(event["type"], f"fr.linagora.twalk.calendar.event.{name}.v1")
+                self.assertTrue(event["subject"].startswith("mailto:"))
+                self.assertNotIn("consent", event)
+                self.assertNotIn("network", event, "a calendar is a kind, not a network")
+                self.assertIn("connection", event)
+                self.assertFalse(triggers_a_persona(event))
+                self.assertFalse(is_granted(event))
+        withheld = variant_fixture("calendar.event.created", "withheld-participant")
+        self.assertEqual(withheld["data"]["participants_withheld"], 1)
+        self.assertFalse(triggers_a_persona(withheld))
+
+    def test_a_mail_from_a_granted_sender_reaches_the_persona_like_any_message(self) -> None:
+        # A mail is a message (ADR 0033, #276): the same type, a `mailto:`
+        # subject, `network=email`, and the two gates decide exactly as they
+        # do for a WhatsApp message — by type, then by consent. The two
+        # fields a mail adds are read when there, and are `None` on a
+        # bridged message and on a revoked sender's mail.
+        mail = variant_fixture("inbound.message.received", "email")
+        self.assertTrue(mail["subject"].startswith("mailto:"))
+        self.assertEqual(mail["network"], "email")
+        self.assertTrue(triggers_a_persona(mail))
+        self.assertTrue(is_granted(mail))
+        message = InboundMessage(mail)
+        self.assertEqual(message.title, "Re: Point hebdo")
+        self.assertEqual(message.audience, "direct")
+        self.assertTrue(message.is_reply)
+        self.assertEqual(message.connection, "mail-linagora")
+        reduced = InboundMessage(variant_fixture("inbound.message.received", "email-revoked-sender"))
+        self.assertIsNone(reduced.title)
+        self.assertIsNone(reduced.body)
+        self.assertFalse(is_granted(reduced.event))
+        bridged = InboundMessage(fixture("inbound.message.received"))
+        self.assertIsNone(bridged.title)
+        self.assertIsNone(bridged.audience)
 
     def test_a_type_the_contract_adds_later_does_not_trigger_a_persona(self) -> None:
         # The forward-compatible default is "no". A tenth type must not start

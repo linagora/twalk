@@ -16,6 +16,8 @@
 
 pub mod bus;
 pub mod contract;
+pub mod jmap_fake;
+pub mod sso;
 pub mod stack;
 pub mod stub_llm;
 mod wait;
@@ -27,6 +29,7 @@ pub use contract::{
     contract_types_about_a_person, contract_variant_fixture, contract_variant_fixtures,
     validate_against_contract, MATRIX_USER_ID_SUBJECT_PATTERN,
 };
+pub use sso::FakeSso;
 pub use stack::{
     ensure_stack, nats_url, synapse_url, PORTALS_APPSERVICE_AS_TOKEN, PORTALS_APPSERVICE_SENDER,
     SERVER_NAME,

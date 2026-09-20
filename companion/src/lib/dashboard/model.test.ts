@@ -398,6 +398,48 @@ describe('activityFeed', () => {
 		expect(JSON.stringify(feed.map((row) => row.values))).not.toContain('example.com');
 	});
 
+	it("carries a collector connection's state changes, by connection and state, with no hint", () => {
+		// #275: the owner's mailbox or calendar reachable again, or the grant
+		// to give again. The connection's id is configuration, never a
+		// person; the hint — the operator's words — is the card's, not the
+		// feed's.
+		const feed = activityFeed({
+			bridges: [],
+			consent: [],
+			devices: [],
+			transitions: [
+				{
+					connection: 'mail-linagora',
+					kind: 'email',
+					from_state: 'reconnect_required',
+					to_state: 'connected',
+					occurred_at: '2026-09-20T10:00:00Z',
+					service: null,
+					hint: null
+				},
+				{
+					connection: 'agenda-linagora',
+					kind: 'calendar',
+					from_state: 'connected',
+					to_state: 'pending_operator',
+					occurred_at: '2026-09-20T09:00:00Z',
+					service: 'caldav',
+					hint: 'caldav wants an audience this token does not carry'
+				}
+			]
+		});
+		expect(feed.map((row) => row.messageKey)).toEqual([
+			'dashboard.feed.connection.connected',
+			'dashboard.feed.connection.pending_operator'
+		]);
+		expect(feed[0].values).toEqual({ connection: 'mail-linagora' });
+		expect(feed[0].tone).toBe('ok');
+		expect(feed[0].icon).toBe('email');
+		expect(feed[1].tone).toBe('warn');
+		expect(feed[1].icon).toBe('calendar');
+		expect(JSON.stringify(feed)).not.toContain('audience');
+	});
+
 	it('carries bridge state, persona activity and device events, newest first', () => {
 		const feed = activityFeed({
 			bridges: [

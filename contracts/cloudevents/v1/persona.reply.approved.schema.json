@@ -130,21 +130,48 @@
         },
         "target": {
           "type": "object",
-          "required": ["room_id"],
-          "additionalProperties": false,
-          "properties": {
-            "room_id": {
-              "type": "string",
-              "pattern": "^![A-Za-z0-9]+:[^/]+$",
-              "description": "Matrix ID of the portal room the reply must be posted to; the bridge owning the room performs the outbound send."
+          "oneOf": [
+            {
+              "required": ["room_id"],
+              "additionalProperties": false,
+              "properties": {
+                "room_id": {
+                  "type": "string",
+                  "pattern": "^![A-Za-z0-9]+:[^/]+$",
+                  "description": "Matrix ID of the portal room the reply must be posted to; the bridge owning the room performs the outbound send, and the Sensor posts it as the owner's device (ADR 0025, ADR 0034)."
+                },
+                "reply_to_event_id": {
+                  "type": "string",
+                  "pattern": "^\\$[A-Za-z0-9_-]+$",
+                  "description": "Optional Matrix event ID the reply should be threaded under, normally the original inbound message."
+                }
+              },
+              "description": "A reply into a portal room: the Sensor's to send."
             },
-            "reply_to_event_id": {
-              "type": "string",
-              "pattern": "^\\$[A-Za-z0-9_-]+$",
-              "description": "Optional Matrix event ID the reply should be threaded under, normally the original inbound message."
+            {
+              "required": ["connection", "in_reply_to", "recipient"],
+              "additionalProperties": false,
+              "properties": {
+                "connection": {
+                  "$ref": "definitions/connection.schema.json",
+                  "description": "The mail connection the reply leaves from (#278): the collector holding it is the one that sends, from the owner's own mailbox, with the grant that already is the owner (ADR 0038). Mirrors the envelope's `connection` extension."
+                },
+                "in_reply_to": {
+                  "type": "string",
+                  "maxLength": 998,
+                  "pattern": "^<[^<>\\s]+>$",
+                  "description": "The Message-ID of the mail being answered — the trigger's `data.message_id` — as the reply's In-Reply-To header will carry it. It is also how the collector finds the mail again to continue its thread under `Re:` and the original subject, with References continued; the address is `recipient`'s, never the found mail's. Reply-all is a decision the owner did not take in v1."
+                },
+                "recipient": {
+                  "type": "string",
+                  "pattern": "^mailto:[^@\\s]+@[^@\\s]+$",
+                  "description": "The one address the reply goes to: the trigger's `subject`, the sender whose consent the Companion Gateway checked at the moment of approval. Carried rather than re-derived, because the collector finds the mail again by Message-ID and a Message-ID is the sender's to choose — a stranger who mails the owner under another mail's Message-ID must not be who an approved reply is addressed to. The collector sends to this address alone and refuses, for good, an original whose From is not it."
+                }
+              },
+              "description": "A reply to a mail: the collector's to send."
             }
-          },
-          "description": "Where the approved reply must be sent."
+          ],
+          "description": "Where the approved reply must be sent — a portal room for a bridged network, a mail connection for email (ADR 0033: one shape per kind). Whichever component holds the target sends it; the other acknowledges the approval as not its own and leaves it alone, so an approval is never dead-lettered for being the other's."
         },
         "disclosure": {
           "type": "string",

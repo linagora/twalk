@@ -87,6 +87,12 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "store_failed needs the Gateway's own SQLite file to fail under a running process: a fault-injection seam this suite does not have",
     ),
     (
+        "get",
+        "/api/connections",
+        "503",
+        "store_unavailable (#275) needs the Gateway's own SQLite file to fail under a running process: the same missing seam",
+    ),
+    (
         "delete",
         "/api/session",
         "500",
@@ -1071,6 +1077,27 @@ fn the_networks_the_description_names_are_the_contracts() -> Result<()> {
         description.doc["components"]["schemas"]["ConnectionId"]["pattern"].as_str(),
         Some(id_pattern.as_str()),
         "openapi.yaml's ConnectionId pattern disagrees with the contract"
+    );
+    // A connection's four states (#275): `connection.status.changed.v1`'s
+    // `to_state` is the authority, the description's `ConnectionState` a
+    // copy held to it — four sentences in the Companion, never one.
+    let states = twalk_test_harness::contract_schema("connection.status.changed")?;
+    let states: Vec<String> = states["properties"]["data"]["properties"]["to_state"]["enum"]
+        .as_array()
+        .context("the status contract enumerates to_state")?
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+    let states_copy: Vec<String> = description.doc["components"]["schemas"]["ConnectionState"]
+        ["enum"]
+        .as_array()
+        .context("components.schemas.ConnectionState.enum")?
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        states_copy, states,
+        "openapi.yaml's ConnectionState schema disagrees with the contract"
     );
     assert_eq!(
         text.matches(&format!("pattern: \"{id_pattern}\"")).count(),

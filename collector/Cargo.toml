@@ -1,0 +1,47 @@
+[package]
+name = "twalk-collector"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The Twalk collector: the process that holds one OIDC grant for the owner's own accounts — a mailbox, a calendar — and publishes what involves other people as typed CloudEvents on the bus (ADR 0033)."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "twalk-collector"
+path = "src/main.rs"
+
+[dependencies]
+# The consent cache every component that labels a sender shares (#273):
+# a participant in the owner's meeting is labelled by the decision taken
+# about them on the mail connection of the same account (#280).
+twalk-consent-cache = { path = "../consent-cache" }
+anyhow = "1"
+# A TZID on a DTSTART is an IANA zone; the offset it means on that day is
+# what RFC 3339 needs and what only a zone database can say.
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+# WebDAV multistatus answers are XML; a hand-rolled reader of them would be
+# the one piece of this crate that agreed with the fake for the wrong reasons.
+roxmltree = "0.20"
+async-nats = "0.50"
+futures = "0.3"
+getrandom = "0.3"
+# rustls only, as every other crate here: the collector talks to the SSO,
+# TMail and the calendar side service over TLS and needs no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+twalk-test-harness = { path = "../tests/harness" }
+tempfile = "3"

@@ -1,0 +1,40 @@
+{
+  "specversion": "1.0",
+  "id": "3e99c00185819b15ebb4d332828ebebdf243029911a63543e761ff207c529f7f",
+  "source": "caldav://calendar.example.com/dav/calendars/64f1c0a2e9b1d3f4a5b6c7d8/64f1c0a2e9b1d3f4a5b6c7d8/",
+  "type": "fr.linagora.twalk.calendar.event.created.v1",
+  "time": "2026-10-01T08:00:12Z",
+  "subject": "mailto:michel@example.com",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/calendar.event.created.schema.json",
+  "connection": "agenda-linagora",
+  "data": {
+    "uid": "8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8",
+    "title": "Weekly sync",
+    "start": "2026-10-05T09:00:00+02:00",
+    "end": "2026-10-05T09:30:00+02:00",
+    "all_day": false,
+    "timezone": "Europe/Paris",
+    "status": "confirmed",
+    "recurrence": "FREQ=WEEKLY;BYDAY=MO",
+    "organizer": {
+      "identity": "mailto:michel@example.com",
+      "name": "Michel Maudet"
+    },
+    "participants": [
+      {
+        "identity": "mailto:michel@example.com",
+        "name": "Michel Maudet",
+        "role": "chair",
+        "partstat": "accepted"
+      },
+      {
+        "identity": "mailto:alice@example.org",
+        "name": "Alice Martin",
+        "role": "required",
+        "partstat": "accepted"
+      }
+    ],
+    "participants_withheld": 1
+  }
+}

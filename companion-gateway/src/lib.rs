@@ -164,6 +164,7 @@ pub mod bridge_http;
 pub mod bridge_status;
 pub mod bridge_status_http;
 pub mod config;
+pub mod connection_status;
 pub mod connections;
 pub mod connections_http;
 pub mod consent;

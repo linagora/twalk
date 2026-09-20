@@ -1006,5 +1006,18 @@
 
 	"api.trouble.unreachable": "Votre serveur Twalk n’a pas pu être joint : rien n’a répondu du tout. Vérifiez qu’il fonctionne, et vérifiez votre connexion.",
 	"api.trouble.sessionRefused": "Votre serveur Twalk a répondu, et il a refusé cette session. Reconnectez-vous pour continuer — rien d’autre ne va mal.",
-	"api.trouble.refused": "Votre serveur Twalk a répondu, mais il n’a pas pu faire cela. Réessayez, et ouvrez le diagnostic si cela persiste."
+	"api.trouble.refused": "Votre serveur Twalk a répondu, mais il n’a pas pu faire cela. Réessayez, et ouvrez le diagnostic si cela persiste.",
+	"network.email.name": "Boîte mail",
+	"network.email.subtitle": "Votre propre boîte, lue par le collecteur avec l'accès que vous avez donné",
+	"network.calendar.name": "Agenda",
+	"network.calendar.subtitle": "Vos propres agendas, lus par le collecteur avec le même accès",
+	"networks.card.noCollector": "Aucun collecteur pour ce compte n'est configuré sur votre serveur Twalk.",
+	"networks.collector.unreachable": "Injoignable — nouvel essai en cours",
+	"networks.collector.reconnectRequired": "Reconnexion à faire sur le serveur",
+	"networks.collector.pendingOperator": "Action de l'opérateur requise",
+	"dashboard.feed.connection.connected": "La connexion {connection} est de nouveau connectée",
+	"dashboard.feed.connection.unreachable": "La connexion {connection} ne joint plus son service ; le collecteur réessaie",
+	"dashboard.feed.connection.reconnect_required": "La connexion {connection} attend que l'opérateur se reconnecte sur le serveur",
+	"dashboard.feed.connection.pending_operator": "La connexion {connection} attend que l'opérateur modifie son client",
+	"approvals.refusal.connection_not_connected": "Le compte d'où partirait cette réponse n'est pas connecté pour l'instant : rien n'a été envoyé. L'opérateur doit le reconnecter sur le serveur ; la réponse reste ici."
 }

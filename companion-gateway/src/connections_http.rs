@@ -22,11 +22,60 @@ pub fn routes() -> Router<Gateway> {
     Router::new().route("/api/connections", get(connections))
 }
 
-/// `GET /api/connections` — the registry, in the order declared.
+/// `GET /api/connections` — the registry, in the order declared, each entry
+/// with the state its collector last said it was in (#275) when one did,
+/// and the most recent transitions for the dashboard's feed.
 async fn connections(State(gateway): State<Gateway>) -> Response {
+    let mut connections: Vec<serde_json::Value> = gateway
+        .connections()
+        .connections()
+        .iter()
+        .map(|connection| serde_json::to_value(connection).expect("a connection serialises"))
+        .collect();
+    let mut transitions = Vec::new();
+    if let Some(store) = gateway.connection_statuses() {
+        let statuses = match store.connection_statuses() {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                tracing::warn!(%error, "the connection statuses could not be read");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "error": "store_unavailable",
+                        "detail": "the Gateway's store could not be read"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        for entry in &mut connections {
+            let id = entry["id"].as_str().unwrap_or_default();
+            if let Some(status) = statuses.iter().find(|status| status.connection == id) {
+                entry["status"] = status.json();
+            }
+        }
+        transitions =
+            match store.connection_status_changes(crate::connection_status::RECENT_TRANSITIONS) {
+                Ok(changes) => changes
+                    .iter()
+                    .map(crate::connection_status::Change::json)
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!(%error, "the connection transitions could not be read");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "store_unavailable",
+                            "detail": "the Gateway's store could not be read"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+    }
     (
         StatusCode::OK,
-        Json(json!({ "connections": gateway.connections().connections() })),
+        Json(json!({ "connections": connections, "transitions": transitions })),
     )
         .into_response()
 }

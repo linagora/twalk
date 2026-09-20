@@ -1,0 +1,33 @@
+{
+  "specversion": "1.0",
+  "id": "8d5959c3b0bcd54ea70f7d744f0264d84eccfb2054a08102c0ff19f5705f3d3d",
+  "source": "jmap://mail.example.com/u1/inbox-1",
+  "type": "fr.linagora.twalk.inbound.message.received.v1",
+  "time": "2026-09-21T08:15:03Z",
+  "subject": "mailto:alice@example.org",
+  "datacontenttype": "application/json",
+  "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
+  "network": "email",
+  "connection": "mail-linagora",
+  "consent": "revoked",
+  "data": {
+    "format": "text/plain",
+    "reply_to": {
+      "message_id": "<7a1e0c2b-9f3d-4b8e-a1c5-2d6f8e9b0c1a@example.com>"
+    },
+    "message_id": "<9b8c7d6e-1@example.org>",
+    "attachments": [
+      {
+        "kind": "file",
+        "mime_type": "application/pdf",
+        "size_bytes": 48213
+      }
+    ],
+    "contact": {
+      "display_name": "Alice Martin"
+    },
+    "network_timestamp": "2026-09-21T08:14:58Z",
+    "thread_root": "<c9d8e7f6-5a4b-3c2d-1e0f-9a8b7c6d5e4f@example.org>",
+    "audience": "direct"
+  }
+}

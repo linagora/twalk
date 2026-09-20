@@ -107,6 +107,8 @@ describe('the catalogues', () => {
 			detail: 'the homeserver said no',
 			date: '18/09/2026',
 			network: 'WhatsApp',
+			// A collector connection's state change in the dashboard feed (#275).
+			connection: 'mail-linagora',
 			// The register's moves in the dashboard feed (#255).
 			members: '24',
 			threshold: '20',

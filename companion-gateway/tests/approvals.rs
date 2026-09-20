@@ -63,6 +63,7 @@ const INBOUND_TYPE: &str = "fr.linagora.twalk.inbound.message.received.v1";
 const SUGGEST_SUBJECT: &str = "twalk.persona.suggest.produced.v1";
 const SUGGEST_TYPE: &str = "fr.linagora.twalk.persona.suggest.produced.v1";
 const APPROVED_SUBJECT: &str = "twalk.persona.reply.approved.v1";
+const CONNECTION_STATUS_SUBJECT: &str = "twalk.connection.status.changed.v1";
 
 /// The traceparent every fixture here carries, so the assertion that the
 /// approval continues the suggestion's trace is about a known value.
@@ -153,6 +154,40 @@ fn inbound_event(sender: &str, room_id: &str, consent: &str) -> Value {
         "connection": "whatsapp",
         "consent": consent,
         "data": data
+    });
+    validate_against_contract(&event, "inbound.message.received")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
+/// One `inbound.message.received.v1` as the collector publishes a mail
+/// (#276): a `mailto:` sender on the mail connection, a mailbox source, and
+/// the mail's own Message-ID — what a reply is threaded under (#278).
+fn mail_event(sender_email: &str, connection: &str) -> Value {
+    let at = in_seconds(-120);
+    let event = json!({
+        "specversion": "1.0",
+        "id": harness::sha256_hex(&format!("jmap:u1:{sender_email}:{at}")),
+        "source": "jmap://mail.example.com/u1/inbox-1",
+        "type": INBOUND_TYPE,
+        "time": at,
+        "subject": format!("mailto:{sender_email}"),
+        "datacontenttype": "application/json",
+        "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
+        "traceparent": TRACEPARENT,
+        "network": "email",
+        "connection": connection,
+        "consent": "granted",
+        "data": {
+            "body": "On se voit toujours lundi ?",
+            "format": "text/plain",
+            "reply_to": null,
+            "attachments": [],
+            "contact": { "display_name": "Alice Martin" },
+            "message_id": format!("<{}@example.org>", unique("mail")),
+            "title": "Point hebdo",
+            "audience": "direct"
+        }
     });
     validate_against_contract(&event, "inbound.message.received")
         .expect("the fixture is an event the contract allows");
@@ -1042,5 +1077,260 @@ async fn a_suggestion_nobody_approved_says_so_rather_than_nothing() -> Result<()
     let (status, answer) = running.get("/api/approvals/not-an-event-id").await?;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{answer}");
     assert_eq!(answer["error"], json!("malformed_request"));
+    Ok(())
+}
+
+/// #278: a suggestion whose trigger is a mail is approved towards the mail
+/// connection, in the mail's thread — the contract's second target shape,
+/// which the collector sends and the Sensor leaves alone. The Gateway holds
+/// the mail connection in its registry for this, and the sender was granted
+/// on it.
+#[tokio::test]
+async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let static_dir = companion_build("approve-mail")?;
+    let mut env = gateway_env_with_consent(&static_dir, &nats_url());
+    for (key, value) in env.iter_mut() {
+        if key == "GATEWAY_CONNECTIONS" {
+            *value = format!("{value},mail-linagora=email");
+        }
+    }
+    // The collector holding the mail connection has said it is connected
+    // (#275): a collector's connection that never spoke takes no reply.
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &connection_status_event_of_kind("mail-linagora", "email", "unknown", "connected", ""),
+    )
+    .await?;
+    let running = Running::start_with(static_dir, env).await?;
+    poll_until(
+        || async {
+            let (_, body) = running.get("/api/connections").await.ok()?;
+            body["connections"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"] == "mail-linagora")?
+                .pointer("/status/state")
+                .is_some()
+                .then_some(())
+        },
+        "the mail connection's status to be read off the bus",
+    )
+    .await?;
+    let sender = format!("{}@example.org", unique("alice"));
+    let (status, body) = running
+        .post(
+            "/api/consent/decisions",
+            &json!({
+                "subject": { "type": "contact", "id": format!("mailto:{sender}") },
+                "new_state": "granted",
+                "scope": { "connections": ["mail-linagora"] }
+            }),
+        )
+        .await?;
+    anyhow::ensure!(status == reqwest::StatusCode::CREATED, "{body}");
+    let trigger = mail_event(&sender, "mail-linagora");
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+    let suggestion = suggest_event(&trigger, "Oui, lundi 9h me va.", &in_seconds(3600));
+    bus.publish_event(SUGGEST_SUBJECT, &suggestion).await?;
+    let suggestion_id = suggestion["id"].as_str().unwrap();
+
+    let (status, answer) = running
+        .approve(&json!({ "suggestion_event_id": suggestion_id }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{answer}");
+    let sequence = answer["stream_sequence"].as_u64().context("no position")?;
+    let stored = stored_reply(&bus, sequence).await?;
+    validate_against_contract(&stored.payload, "persona.reply.approved")?;
+    let event = &stored.payload;
+    assert_eq!(event["network"], json!("email"));
+    assert_eq!(event["connection"], json!("mail-linagora"));
+    assert_eq!(
+        event["data"]["target"],
+        json!({
+            "connection": "mail-linagora",
+            "in_reply_to": trigger["data"]["message_id"],
+            "recipient": trigger["subject"]
+        }),
+        "the reply goes to the mail connection, in the mail's thread, to the sender the \
+         consent check was about: {event}"
+    );
+    assert!(event["data"]["target"].get("room_id").is_none());
+    Ok(())
+}
+
+/// One `connection.status.changed.v1` as a collector publishes it (#274)
+/// about a connection this deployment declares — the state a connection
+/// last said it was in is what #275 refuses an approval on.
+fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -> Value {
+    connection_status_event_of_kind(connection, "whatsapp", from, to, hint)
+}
+
+fn connection_status_event_of_kind(
+    connection: &str,
+    kind: &str,
+    from: &str,
+    to: &str,
+    hint: &str,
+) -> Value {
+    let at = in_seconds(-30);
+    let event = json!({
+        "specversion": "1.0",
+        "id": harness::sha256_hex(&format!("{connection}:{to}:{at}")),
+        "source": format!("collector://collector.test/connections/{connection}"),
+        "type": "fr.linagora.twalk.connection.status.changed.v1",
+        "time": at,
+        "subject": connection,
+        "datacontenttype": "application/json",
+        "connection": connection,
+        "data": {
+            "connection": connection,
+            "kind": kind,
+            "from_state": from,
+            "to_state": to,
+            "occurred_at": at,
+            "service": "sso",
+            "hint": hint
+        }
+    });
+    validate_against_contract(&event, "connection.status.changed")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
+/// #275: a connection whose collector last said `reconnect_required` takes
+/// no reply — the approval is refused before anything is published, with the
+/// state and the operator's hint — and takes one again once it says
+/// `connected`. The Gateway learns the state off the bus, and shows it on
+/// `GET /api/connections` with the transitions the feed draws from.
+#[tokio::test]
+async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_can() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    // The whatsapp connection of this run: its own id, so another run's
+    // status on the shared bus is not this connection's. A bridged kind,
+    // because the rule is per connection whatever its kind and a mail
+    // trigger has no room to answer in until #278 gives the approval a mail
+    // target — the mechanism is what this test proves.
+    let connection = format!(
+        "whatsapp-{}",
+        unique("c").replace(['.', '_'], "-").to_lowercase()
+    );
+    let static_dir = companion_build("approve-status")?;
+    let mut env = gateway_env_with_consent(&static_dir, &nats_url());
+    for (key, value) in env.iter_mut() {
+        if key == "GATEWAY_CONNECTIONS" {
+            *value = format!("{value},{connection}=whatsapp");
+        }
+    }
+    // The collector spoke before the Gateway started: the state is read
+    // from the beginning of the subject.
+    let hint = "Run `twalk-collector authorize --renew` on the host.";
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &connection_status_event(&connection, "connected", "reconnect_required", hint),
+    )
+    .await?;
+    let running = Running::start_with(static_dir, env).await?;
+
+    // The registry says so.
+    let registry = poll_until(
+        || async {
+            let (_, body) = running.get("/api/connections").await.ok()?;
+            body["connections"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"] == connection)?
+                .get("status")
+                .is_some()
+                .then_some(body)
+        },
+        "the connection's status on GET /api/connections",
+    )
+    .await?;
+    let entry = registry["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == connection)
+        .unwrap();
+    assert_eq!(entry["status"]["state"], "reconnect_required");
+    assert_eq!(entry["status"]["hint"], hint);
+    assert_eq!(entry["status"]["service"], "sso");
+    let transitions = registry["transitions"].as_array().unwrap();
+    assert!(
+        transitions
+            .iter()
+            .any(|t| t["connection"] == connection && t["to_state"] == "reconnect_required"),
+        "the transition is in the feed: {transitions:?}"
+    );
+    let matrix = registry["connections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "matrix")
+        .unwrap();
+    assert!(
+        matrix.get("status").is_none(),
+        "a connection nobody spoke for has no status"
+    );
+
+    // A suggestion answering a message on that connection: refused.
+    let mut replies = watch_replies(&bus).await?;
+    let contact = ghost("status");
+    let room_id = portal_room("status");
+    let (status, body) = running
+        .post(
+            "/api/consent/decisions",
+            &json!({
+                "subject": { "type": "contact", "id": contact },
+                "new_state": "granted",
+                "scope": { "connections": [connection] }
+            }),
+        )
+        .await?;
+    anyhow::ensure!(status == reqwest::StatusCode::CREATED, "{body}");
+    let mut trigger = inbound_event(&contact, &room_id, "granted");
+    trigger["connection"] = json!(connection);
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+    let suggestion = suggest_event(&trigger, "Pas de problème !", &in_seconds(3600));
+    bus.publish_event(SUGGEST_SUBJECT, &suggestion).await?;
+    let suggestion_id = suggestion["id"].as_str().unwrap();
+    let (status, answer) = running
+        .approve(&json!({ "suggestion_event_id": suggestion_id }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["error"], "connection_not_connected");
+    let detail = answer["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("reconnect_required") && detail.contains(hint),
+        "{detail}"
+    );
+    nothing_was_sent(&mut replies, suggestion_id, "a refused approval").await?;
+
+    // The collector says `connected` again: the same approval proceeds.
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &connection_status_event(&connection, "reconnect_required", "connected", ""),
+    )
+    .await?;
+    poll_until(
+        || async {
+            let (_, body) = running.get("/api/connections").await.ok()?;
+            (body["connections"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"] == connection)?["status"]["state"]
+                == "connected")
+                .then_some(())
+        },
+        "the connection back to connected",
+    )
+    .await?;
+    let (status, answer) = running
+        .approve(&json!({ "suggestion_event_id": suggestion_id }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{answer}");
     Ok(())
 }

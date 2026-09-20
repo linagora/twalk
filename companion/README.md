@@ -1079,3 +1079,15 @@ device-pairing flow and is not wired. MSC4108 sign-in by QR from another Matrix
 client is named on screen 3d rather than offered: it carries encryption secrets
 across and needs the crypto stack these screens do not load. Messagr pairing is
 shown on the dashboard as unavailable in v0.1, which it is.
+
+### A collector connection's card says what the collector said, in four sentences (#275)
+
+The owner's mailbox and calendars are connections the collector holds (ADR 0033), and since #275 each has a card on the networks screen like a bridge's connection has — `email` and `calendar` in `catalogue.ts`, `collector: true`. Three decisions in it.
+
+**The card has no route.** A bridge's card leads to a login journey because the browser can complete one: a QR code, a phone. A collector's grant is given by the operator at the server's terminal (`provision-connection.sh`), and nothing a browser could offer would be the truth about it — so the card reads, and does not lead. The one action it names is the collector's own hint, shown under the card.
+
+**Its badge is what the collector said, as four sentences and never one.** The state comes from `GET /api/connections`'s `status`, which the Companion Gateway read off `connection.status.changed.v1`; `connected` is the tick, `unreachable` a service not answering and retried by itself, `reconnect_required` and `pending_operator` the operator's — the grant to give again, the client to change — and those two look like warnings. A connection whose collector has not spoken is `unknown` and wears no badge, the same honesty as the bridge link's `unknown` in `connection.ts` and for the same reason: it is the state of our knowledge. A `link` a bridge would have is left `unknown` on purpose; `connected` on the card is the collector's word alone.
+
+**The feed says a connection moved; the card says what to do.** The dashboard's activity feed carries every transition (`dashboard.feed.connection.*`), by connection id and state, and never the hint: the operator's sentence is one thing to read, on one screen, and the feed names no person — a connection's id is configuration.
+
+The Gateway's refusal `connection_not_connected` — an approval towards a connection that cannot send — is a sentence in the five catalogues like every other code (`refusal.ts`), and the clerk's table carries it too, both held to the OpenAPI by their tests.

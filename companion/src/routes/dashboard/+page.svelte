@@ -130,7 +130,8 @@
 			bridges: snapshot.bridges ?? [],
 			consent: snapshot.consent ?? [],
 			devices: snapshot.devices ?? [],
-			moves: snapshot.moves ?? []
+			moves: snapshot.moves ?? [],
+			transitions: snapshot.transitions ?? []
 		})
 	);
 	const health = $derived(
