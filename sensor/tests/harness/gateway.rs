@@ -30,6 +30,10 @@ const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 #[derive(Default)]
 struct State {
     entries: Vec<Value>,
+    /// The registry of connections the snapshot hands over (#269). `None`
+    /// leaves the member out, which is a Gateway older than #269 and reads
+    /// as the implicit registry.
+    connections: Option<Vec<Value>>,
     /// The stream sequence the served state reflects; the document's
     /// `next_stream_sequence` is this plus one.
     stream_sequence: u64,
@@ -85,6 +89,14 @@ impl StubGateway {
 
     pub fn service_token(&self) -> &str {
         &self.service_token
+    }
+
+    /// Serves this registry of connections with the snapshot from now on.
+    pub fn serve_connections(&self, connections: Vec<Value>) {
+        self.state
+            .lock()
+            .expect("the stub is not poisoned")
+            .connections = Some(connections);
     }
 
     /// Serves this state from now on: the entries, and the stream sequence
@@ -301,17 +313,18 @@ fn respond(
             ),
         );
     }
-    (
-        "200 OK",
-        json!({
-            "stream": STREAM,
-            "subject": CONSENT_SUBJECT,
-            "stream_sequence": state.stream_sequence,
-            "next_stream_sequence": state.stream_sequence + 1,
-            "decision_sequence": state.entries.len(),
-            "entries": state.entries,
-        }),
-    )
+    let mut document = json!({
+        "stream": STREAM,
+        "subject": CONSENT_SUBJECT,
+        "stream_sequence": state.stream_sequence,
+        "next_stream_sequence": state.stream_sequence + 1,
+        "decision_sequence": state.entries.len(),
+        "entries": state.entries,
+    });
+    if let Some(connections) = &state.connections {
+        document["connections"] = json!(connections);
+    }
+    ("200 OK", document)
 }
 
 /// The Gateway's one error document (`openapi.yaml`'s `Error`).

@@ -45,6 +45,10 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY companion-gateway companion-gateway
 COPY tests/harness tests/harness
+# The contract's shared definitions are compiled into the binary
+# (`include_str!`): the kinds of connection have one authority (#268), and
+# the Gateway carries it rather than a copy.
+COPY contracts/cloudevents/v1/definitions contracts/cloudevents/v1/definitions
 # The revision the health endpoint reports. The build context carries no
 # .git (see .dockerignore), so pass it in — e.g.
 # `docker compose build --build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)`

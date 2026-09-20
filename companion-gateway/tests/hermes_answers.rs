@@ -100,6 +100,7 @@ fn inbound_event(sender: &str, room_id: &str, consent: &str) -> Value {
         "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
         "traceparent": TRACEPARENT,
         "network": "whatsapp",
+        "connection": "whatsapp",
         "consent": consent,
         "data": {
             "body": "On décale à 20h ?",
@@ -306,6 +307,7 @@ async fn an_answer_from_hermes_becomes_a_suggestion_the_approval_screen_can_read
     // what will fail when a field replaces it.
     assert_eq!(stored.header("Nats-Msg-Id"), Some(expected_id.as_str()));
     assert_eq!(stored.header("network"), Some("whatsapp"));
+    assert_eq!(stored.header("connection"), Some("whatsapp"));
     assert_eq!(stored.header("consent"), Some("granted"));
     assert_eq!(
         stored.header("language"),

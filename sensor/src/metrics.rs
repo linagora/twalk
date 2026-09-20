@@ -66,6 +66,7 @@ pub struct Metrics {
     dropped_bridge_bot: AtomicU64,
     dropped_unattributable_subject: AtomicU64,
     dropped_tombstoned_room: AtomicU64,
+    dropped_unknown_connection: AtomicU64,
     /// The owner's own device (ADR 0025, issue #123): whether the deployment
     /// has one at all, how many portal rooms it is joined to, and what became
     /// of the invitations it was sent.
@@ -115,6 +116,12 @@ pub enum DropReason {
     /// would attribute a conversation to a room the register no longer
     /// lists.
     TombstonedRoom,
+    /// No connection of the registry covers the event's room (ADR 0033,
+    /// #269): a bridge no connection names. Published under a guessed
+    /// perimeter, the event would be governed by decisions about another
+    /// account, so it is not published at all — and this counter is what
+    /// says so.
+    UnknownConnection,
 }
 
 impl DropReason {
@@ -124,6 +131,7 @@ impl DropReason {
             Self::BridgeBot => "bridge_bot",
             Self::UnattributableSubject => "unattributable_subject",
             Self::TombstonedRoom => "tombstoned_room",
+            Self::UnknownConnection => "unknown_connection",
         }
     }
 }
@@ -185,6 +193,7 @@ impl Metrics {
             dropped_bridge_bot: AtomicU64::new(0),
             dropped_unattributable_subject: AtomicU64::new(0),
             dropped_tombstoned_room: AtomicU64::new(0),
+            dropped_unknown_connection: AtomicU64::new(0),
             owner_device_present: AtomicBool::new(false),
             owner_device_rooms: AtomicU64::new(0),
             owner_device_invites_joined: AtomicU64::new(0),
@@ -204,6 +213,7 @@ impl Metrics {
             DropReason::BridgeBot => &self.dropped_bridge_bot,
             DropReason::UnattributableSubject => &self.dropped_unattributable_subject,
             DropReason::TombstonedRoom => &self.dropped_tombstoned_room,
+            DropReason::UnknownConnection => &self.dropped_unknown_connection,
         };
         counter.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -390,6 +400,10 @@ impl Metrics {
                 &self.dropped_unattributable_subject,
             ),
             (DropReason::TombstonedRoom, &self.dropped_tombstoned_room),
+            (
+                DropReason::UnknownConnection,
+                &self.dropped_unknown_connection,
+            ),
         ] {
             out.push_str(&format!(
                 "twalk_sensor_events_dropped_total{{reason=\"{}\"}} {}\n",
@@ -564,7 +578,12 @@ mod tests {
         // absent sample would read as "no bots on this deployment", which is
         // the misreading that leaves the defect in place.
         let body = Metrics::new().render(1_000);
-        for reason in ["bridge_bot", "unattributable_subject", "tombstoned_room"] {
+        for reason in [
+            "bridge_bot",
+            "unattributable_subject",
+            "tombstoned_room",
+            "unknown_connection",
+        ] {
             assert!(
                 body.contains(&format!(
                     "twalk_sensor_events_dropped_total{{reason=\"{reason}\"}} 0\n"

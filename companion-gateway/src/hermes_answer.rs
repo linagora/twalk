@@ -594,6 +594,7 @@ impl Answers {
         let envelope = self.envelope(&answer, &trigger, &suggestion_event_id, produced_at);
         let mut extensions = vec![
             ("network", trigger.network.as_str()),
+            ("connection", trigger.connection.as_str()),
             ("consent", trigger.consent_label.as_str()),
             // The provisional carrier for the one fact the contract has no
             // field for — see the module docstring.
@@ -691,6 +692,7 @@ impl Answers {
             "datacontenttype": "application/json",
             "dataschema": SUGGEST_PRODUCED_DATASCHEMA,
             "network": trigger.network.as_str(),
+            "connection": trigger.connection,
             "consent": trigger.consent_label.as_str(),
             "data": {
                 "persona_id": answer.reference.persona_id,

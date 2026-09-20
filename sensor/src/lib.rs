@@ -7,6 +7,7 @@
 
 pub mod bridge_bot;
 pub mod config;
+pub mod connection;
 pub mod consent;
 pub mod metrics;
 pub mod network;

@@ -373,6 +373,10 @@ fn insert(states: &mut States, entry: ConsentEntry) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentSnapshot {
     pub entries: Vec<ConsentEntry>,
+    /// The registry of connections the Gateway serves with the snapshot
+    /// (ADR 0033, #269) — `None` for a deployment with no Gateway, which has
+    /// the implicit registry, one connection per network named after it.
+    pub connections: Option<crate::connection::Registry>,
     /// Where the stream consumer starts — the Gateway's
     /// `next_stream_sequence`, which is `stream_sequence + 1`. Taken as the
     /// Gateway spells it out rather than recomputed here: that off-by-one is
@@ -387,6 +391,7 @@ impl ConsentSnapshot {
     pub fn empty() -> Self {
         Self {
             entries: Vec::new(),
+            connections: None,
             next_stream_sequence: 1,
         }
     }
@@ -418,6 +423,7 @@ impl ConsentSnapshot {
         }
         Ok(Self {
             entries: parsed,
+            connections: Some(crate::connection::Registry::from_snapshot(document)),
             next_stream_sequence,
         })
     }
@@ -606,6 +612,7 @@ mod tests {
     fn a_snapshot_entry_about_the_operator_is_refused_entry() {
         let cache = cache_with_an_owner();
         cache.apply_snapshot(&ConsentSnapshot {
+            connections: None,
             entries: vec![
                 ConsentEntry {
                     subject: ConsentSubject::Contact(
@@ -651,6 +658,7 @@ mod tests {
             &[Network::Whatsapp],
         ));
         cache.apply_snapshot(&ConsentSnapshot {
+            connections: None,
             entries: vec![
                 ConsentEntry {
                     subject: ConsentSubject::Contact("@signalbot:example.com".to_owned()),
@@ -1071,8 +1079,13 @@ mod tests {
     #[test]
     fn an_empty_snapshot_starts_the_consumer_at_the_beginning_of_the_stream() {
         let snapshot = ConsentSnapshot::parse(&snapshot_document(0, json!([]))).unwrap();
-        assert_eq!(snapshot, ConsentSnapshot::empty());
+        assert_eq!(snapshot.entries, ConsentSnapshot::empty().entries);
         assert_eq!(snapshot.next_stream_sequence, 1);
+        // A Gateway's snapshot hands a registry over, even an old Gateway's
+        // — read as the implicit one (#269); a deployment with no Gateway
+        // has none to hand.
+        assert!(snapshot.connections.is_some());
+        assert!(ConsentSnapshot::empty().connections.is_none());
     }
 
     #[test]

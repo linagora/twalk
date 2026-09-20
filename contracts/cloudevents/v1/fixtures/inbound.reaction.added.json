@@ -8,6 +8,7 @@
   "datacontenttype": "application/json",
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.reaction.added.schema.json",
   "network": "whatsapp",
+  "connection": "whatsapp",
   "consent": "granted",
   "data": {
     "reaction": "👍",

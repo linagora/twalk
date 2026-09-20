@@ -176,10 +176,37 @@ class NatsHeadersTest(unittest.TestCase):
             {
                 "Nats-Msg-Id": event["id"],
                 "network": "whatsapp",
+                "connection": "whatsapp",
                 "consent": "granted",
                 "traceparent": trigger().traceparent,
             },
         )
+
+    def test_the_connection_is_copied_from_the_trigger_and_never_derived(self) -> None:
+        # ADR 0033, #269: the perimeter the trigger arrived on is the one the
+        # persona's answer belongs to — a second WhatsApp account is a second
+        # connection, and only the trigger knows which.
+        raw = fixture("inbound.message.received")
+        raw["connection"] = "wa-work"
+        event = thinking_event(
+            persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
+        )
+        self.assertEqual(event["connection"], "wa-work")
+        self.assertEqual(nats_headers(event)["connection"], "wa-work")
+
+    def test_a_trigger_that_names_no_connection_is_refused_and_never_guessed(self) -> None:
+        # The bus may keep events published before #269, which carry no
+        # connection. The persona does not stand the network's name in for
+        # it: which perimeter that was is the registry's to say, not the
+        # persona's, and an envelope stamped with a guess is one the wrong
+        # decisions would govern.
+        raw = fixture("inbound.message.received")
+        del raw["connection"]
+        with self.assertRaises(EnvelopeError) as refused:
+            thinking_event(
+                persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
+            )
+        self.assertIn("connection", str(refused.exception))
 
     def test_the_traceparent_header_is_absent_when_the_event_has_none(self) -> None:
         raw = fixture("inbound.message.received")

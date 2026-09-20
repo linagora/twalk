@@ -9,6 +9,7 @@
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
   "traceparent": "00-7a4f1cdd0e5b44b9d1ed6a0d90a1f7a3-6d1cdd3b5a1f9ee3-01",
   "network": "whatsapp",
+  "connection": "whatsapp",
   "consent": "revoked",
   "data": {
     "format": "text/plain",

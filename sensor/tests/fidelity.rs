@@ -607,6 +607,10 @@ async fn a_native_matrix_room_publishes_with_the_matrix_network() -> Result<()> 
         Some("matrix"),
         "the bus header carries the network for server-side filtering"
     );
+    // #269: a native Matrix room is the `matrix` connection, on the envelope
+    // and on the header alike.
+    assert_eq!(event["connection"].as_str(), Some("matrix"));
+    assert_eq!(messages[0].header("connection"), Some("matrix"));
     assert!(
         event["data"]["contact"].get("network_identifier").is_none(),
         "on the Matrix network the Matrix user id is the identifier, and it is the subject"

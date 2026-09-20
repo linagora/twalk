@@ -13,6 +13,7 @@
     "subject",
     "datacontenttype",
     "network",
+    "connection",
     "consent",
     "data"
   ],
@@ -73,6 +74,10 @@
     "network": {
       "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Network of the trigger event, copied for server-side filtering on NATS without deserializing the data payload."
+    },
+    "connection": {
+      "$ref": "definitions/connection.schema.json",
+      "description": "Twalk extension (ADR 0033). The **connection** this event belongs to — the one configured account the deployment observed it on or acts through — by the id the Companion Gateway's registry gave it. `network` says what kind of thing that is; this says which one. Handed to the producer, never derived by it; see definitions/connection.schema.json."
     },
     "consent": {
       "type": "string",

@@ -357,6 +357,11 @@ pub struct Suggestion {
     /// `subject`).
     pub trigger_event_id: String,
     pub network: Network,
+    /// The connection the trigger arrived on (ADR 0033, #269), copied onto the
+    /// approved reply unchanged. A suggestion older than #269 carries none and
+    /// is read as its network's single connection — the id every existing
+    /// decision was migrated onto.
+    pub connection: String,
     /// The consent label the trigger carried when the Sensor observed it.
     /// The audit fact, checked as the spec asks — and not a substitute for
     /// the current state, which is checked separately.
@@ -383,6 +388,36 @@ pub struct Trigger {
     /// The portal room the reply is posted into, from the event's
     /// `matrix://<homeserver>/<room id>` source.
     pub room_id: String,
+}
+
+/// The connection an event on the bus belongs to: the one it carries, or —
+/// for an event published before #269, or by a producer that has not
+/// learned the extension yet — the registry's single connection of its
+/// kind. A lookup in the registry the Gateway keeps, never a name derived
+/// from the network: when the kind has no connection, or two, the Gateway
+/// does not guess which perimeter the event was about, and says so.
+pub fn connection_of(
+    registry: &crate::connections::Registry,
+    carried: Option<&str>,
+    network: Network,
+) -> Result<String, Refusal> {
+    if let Some(id) = carried.map(str::trim).filter(|id| !id.is_empty()) {
+        return Ok(id.to_owned());
+    }
+    registry
+        .only_of_kind(network.as_str())
+        .map(|connection| connection.id.clone())
+        .ok_or_else(|| {
+            Refusal::SuggestionUnreadable(format!(
+                "it names no connection, and the registry has {} of the kind {:?} to stand in",
+                registry
+                    .connections()
+                    .iter()
+                    .filter(|c| c.kind == network.as_str())
+                    .count(),
+                network.as_str()
+            ))
+        })
 }
 
 /// The room id out of an inbound event's `source`
@@ -428,6 +463,8 @@ struct SuggestionDocument {
     source: String,
     subject: String,
     network: String,
+    #[serde(default)]
+    connection: Option<String>,
     consent: String,
     #[serde(default)]
     traceparent: Option<String>,
@@ -472,6 +509,9 @@ struct TriggerDocument {
 /// the Gateway is not told them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerEnvelope {
+    /// The connection the message arrived on (ADR 0033, #269); a trigger older
+    /// than #269 is read as its network's single connection.
+    pub connection: String,
     pub event_id: String,
     pub event_type: String,
     /// The sender's Matrix user ID: the contact whose consent is checked
@@ -490,6 +530,8 @@ pub struct TriggerEnvelope {
 /// other holds somebody's words.
 #[derive(Debug, Deserialize)]
 struct TriggerEnvelopeDocument {
+    #[serde(default)]
+    connection: Option<String>,
     id: String,
     #[serde(rename = "type")]
     event_type: String,
@@ -555,6 +597,7 @@ impl Approval {
             "datacontenttype": "application/json",
             "dataschema": REPLY_APPROVED_DATASCHEMA,
             "network": self.suggestion.network.as_str(),
+            "connection": self.suggestion.connection,
             "consent": self.suggestion.consent_label.as_str(),
             "data": {
                 "persona_id": self.suggestion.persona_id,
@@ -801,6 +844,9 @@ pub struct Approvals {
     /// of that journal's projection and not a call to anybody.
     store: Arc<Store>,
     metrics: Arc<Metrics>,
+    /// The registry of connections (#269): what an event on the bus that
+    /// names none is resolved against, by kind.
+    connections: Arc<crate::connections::Registry>,
     /// This deployment's owner: who an approval is by (ADR 0011).
     owner: String,
     nats_url: String,
@@ -813,6 +859,7 @@ impl Approvals {
     pub fn new(
         store: Arc<Store>,
         metrics: Arc<Metrics>,
+        connections: Arc<crate::connections::Registry>,
         owner: String,
         nats_url: String,
         lookup_window: u64,
@@ -821,6 +868,7 @@ impl Approvals {
         Self {
             store,
             metrics,
+            connections,
             owner,
             nats_url,
             lookup_window,
@@ -903,6 +951,7 @@ impl Approvals {
             ))
         })?;
         Ok(TriggerEnvelope {
+            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
             event_id: document.id,
             event_type: document.event_type,
             contact: document.subject,
@@ -1222,7 +1271,7 @@ impl Approvals {
     }
 
     /// Publishes the approved reply, with the contract's id as `Nats-Msg-Id`
-    /// and the three extensions duplicated as headers — the same shape the
+    /// and the extensions duplicated as headers — the same shape the
     /// Sensor and the SDK publish with, so a consumer filtering on headers
     /// sees this event like any other.
     async fn publish(
@@ -1233,6 +1282,7 @@ impl Approvals {
     ) -> Result<u64> {
         let mut extensions = vec![
             ("network", approval.suggestion.network.as_str()),
+            ("connection", approval.suggestion.connection.as_str()),
             ("consent", approval.suggestion.consent_label.as_str()),
         ];
         if let Some(traceparent) = &approval.suggestion.traceparent {
@@ -1299,6 +1349,7 @@ impl Approvals {
             source: document.source,
             persona_id: document.data.persona_id,
             trigger_event_id: document.subject,
+            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
             network,
             consent_label,
             suggestion: Content {
@@ -1584,6 +1635,7 @@ mod tests {
             persona_id: "assistant".to_owned(),
             trigger_event_id: "b".repeat(64),
             network: Network::Whatsapp,
+            connection: "whatsapp".to_owned(),
             consent_label: State::Granted,
             suggestion: Content {
                 body: "Pas de problème, à 20h !".to_owned(),
@@ -1738,6 +1790,42 @@ mod tests {
             );
         }
         assert!(is_event_id(&"0123456789abcdef".repeat(4)));
+    }
+
+    #[test]
+    fn an_event_that_names_no_connection_is_resolved_in_the_registry_or_refused() {
+        // A producer older than #269 on a deployment with one connection per
+        // kind: the registry's single one of that kind stands in — read
+        // there, not spelled from the network's name. Two of the kind, or
+        // none, and the Gateway will not guess which perimeter it was.
+        let registry = crate::connections::Registry::from_config(
+            Some("wa-home=whatsapp,wa-work=whatsapp,signal=signal"),
+            &[],
+            "example.com",
+        )
+        .expect("a registry");
+        assert_eq!(
+            connection_of(&registry, Some(" wa-work "), Network::Whatsapp).unwrap(),
+            "wa-work",
+            "what the event carries is what it belongs to"
+        );
+        assert_eq!(
+            connection_of(&registry, None, Network::Signal).unwrap(),
+            "signal"
+        );
+        assert_eq!(
+            connection_of(&registry, None, Network::Matrix).unwrap(),
+            "matrix",
+            "the native connection every registry has"
+        );
+        for (network, count) in [(Network::Whatsapp, "2"), (Network::Telegram, "0")] {
+            match connection_of(&registry, Some(""), network) {
+                Err(Refusal::SuggestionUnreadable(reason)) => {
+                    assert!(reason.contains(count), "{reason}");
+                }
+                other => panic!("{network:?}: expected a refusal, got {other:?}"),
+            }
+        }
     }
 
     #[test]

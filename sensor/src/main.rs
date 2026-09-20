@@ -42,7 +42,7 @@ use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
 use twalk_sensor::metrics::{DropReason, Metrics, OwnerDeviceInvite};
 use twalk_sensor::owner_device::Reach;
-use twalk_sensor::{consent, network, normalize, outbound, owner_device};
+use twalk_sensor::{connection, consent, network, normalize, outbound, owner_device};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -295,6 +295,14 @@ async fn main() -> Result<()> {
     // stray event in a replaced room is a line, the rest are the same fact.
     let replaced_rooms: Arc<Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>> =
         Arc::new(Mutex::new(HashSet::new()));
+    // The registry of connections every event is stamped with (ADR 0033,
+    // #269): the Gateway's, read off the consent snapshot below, or the
+    // implicit one until then. Rooms whose connection could not be resolved
+    // are said once each.
+    let registry: Arc<std::sync::RwLock<connection::Registry>> =
+        Arc::new(std::sync::RwLock::new(connection::Registry::implicit()));
+    let unresolved_rooms: Arc<Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>> =
+        Arc::new(Mutex::new(HashSet::new()));
     if bridge_bots.is_empty() {
         info!(
             "no bridge bots configured (SENSOR_BRIDGE_BOTS): a bridge's own bot is published as \
@@ -353,6 +361,7 @@ async fn main() -> Result<()> {
         jetstream.clone(),
         consent_cache.clone(),
         snapshot_source,
+        registry.clone(),
         metrics.clone(),
     )
     .await;
@@ -453,6 +462,8 @@ async fn main() -> Result<()> {
         let owner = owner.clone();
         let bridge_bots = bridge_bots.clone();
         let replaced_rooms = replaced_rooms.clone();
+        let registry = registry.clone();
+        let unresolved_rooms = unresolved_rooms.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -462,6 +473,8 @@ async fn main() -> Result<()> {
             let owner = owner.clone();
             let bridge_bots = bridge_bots.clone();
             let replaced_rooms = replaced_rooms.clone();
+            let registry = registry.clone();
+            let unresolved_rooms = unresolved_rooms.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -506,6 +519,11 @@ async fn main() -> Result<()> {
                     warn!(room = %room.room_id(), %sender, "cannot determine the network, skipping event");
                     return;
                 };
+                let Some(connection) =
+                    connection_of(&room, network, &registry, &unresolved_rooms, &metrics).await
+                else {
+                    return;
+                };
 
                 // The user's own message. Its own event type, the operator's
                 // Matrix ID as the subject, and no consent extension at all:
@@ -542,6 +560,7 @@ async fn main() -> Result<()> {
                         owner_matrix_id: owner.matrix_id().to_owned(),
                         body,
                         network,
+                        connection: connection.clone(),
                         reply_to,
                         thread_root: thread_root.map(|event_id| event_id.to_string()),
                         attachments,
@@ -603,6 +622,7 @@ async fn main() -> Result<()> {
                     sender: sender.to_string(),
                     body,
                     network,
+                    connection: connection.clone(),
                     consent,
                     display_name,
                     network_identifier,
@@ -669,6 +689,8 @@ async fn main() -> Result<()> {
         let owner = owner.clone();
         let bridge_bots = bridge_bots.clone();
         let replaced_rooms = replaced_rooms.clone();
+        let registry = registry.clone();
+        let unresolved_rooms = unresolved_rooms.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -678,6 +700,8 @@ async fn main() -> Result<()> {
             let owner = owner.clone();
             let bridge_bots = bridge_bots.clone();
             let replaced_rooms = replaced_rooms.clone();
+            let registry = registry.clone();
+            let unresolved_rooms = unresolved_rooms.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -698,6 +722,11 @@ async fn main() -> Result<()> {
                 let reactor: OwnedUserId = event.sender.clone();
                 let Some(network) = resolve_network(&room, &reactor).await else {
                     warn!(room = %room.room_id(), %reactor, "cannot determine the network, skipping event");
+                    return;
+                };
+                let Some(connection) =
+                    connection_of(&room, network, &registry, &unresolved_rooms, &metrics).await
+                else {
                     return;
                 };
 
@@ -737,6 +766,7 @@ async fn main() -> Result<()> {
                         target_event_id: target_event_id.to_string(),
                         target_excerpt: excerpt,
                         network,
+                        connection: connection.clone(),
                         produced_at: rfc3339(std::time::SystemTime::now()),
                         // Bridges report network timestamps in bridge-specific
                         // fields; mapping them arrives with the enrichment work.
@@ -786,6 +816,7 @@ async fn main() -> Result<()> {
                     target_event_id: target_event_id.to_string(),
                     target_excerpt: excerpt,
                     network,
+                    connection: connection.clone(),
                     consent,
                     display_name,
                     network_identifier,
@@ -836,6 +867,8 @@ async fn main() -> Result<()> {
         let own_user = own_user.clone();
         let owner = owner.clone();
         let bridge_bots = bridge_bots.clone();
+        let registry = registry.clone();
+        let unresolved_rooms = unresolved_rooms.clone();
         let consent_cache = consent_cache.clone();
         let publish_tracker = publish_tracker.clone();
         let metrics = metrics.clone();
@@ -844,6 +877,8 @@ async fn main() -> Result<()> {
             let own_user = own_user.clone();
             let owner = owner.clone();
             let bridge_bots = bridge_bots.clone();
+            let registry = registry.clone();
+            let unresolved_rooms = unresolved_rooms.clone();
             let consent_cache = consent_cache.clone();
             let publish_tracker = publish_tracker.clone();
             let metrics = metrics.clone();
@@ -1022,6 +1057,14 @@ async fn main() -> Result<()> {
                          worse than naming the room"
                     );
                 }
+                // The connection is the source room's (ADR 0033): presence is
+                // not room-scoped, and the room chosen above is the one whose
+                // perimeter this event is attributed to.
+                let Some(connection) =
+                    connection_of(&room, network, &registry, &unresolved_rooms, &metrics).await
+                else {
+                    return;
+                };
                 let display_name = room
                     .get_member(&sender)
                     .await
@@ -1042,6 +1085,7 @@ async fn main() -> Result<()> {
                     server_name: own_user.server_name().as_str().to_owned(),
                     matrix_room_id: room.room_id().to_string(),
                     network,
+                    connection,
                     consent,
                     display_name,
                     network_identifier,
@@ -1915,6 +1959,52 @@ async fn dropped_as_a_replaced_room(
     true
 }
 
+/// The connection a room's traffic belongs to (ADR 0033, #269), looked up in
+/// the registry by the bridge bot the room's own `m.bridge` marker names —
+/// never derived. `None` is a room no connection covers: nothing from it is
+/// published, the drop is counted under its own reason, and the room is
+/// said once, because a perimeter guessed wrong is a perimeter whose
+/// decisions govern somebody else's messages.
+async fn connection_of(
+    room: &Room,
+    network: network::Network,
+    registry: &std::sync::RwLock<connection::Registry>,
+    unresolved: &Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>,
+    metrics: &Metrics,
+) -> Option<String> {
+    let markers = room_bridge_contents(room).await;
+    let bridge_bot = markers
+        .iter()
+        .find_map(|content| content.get("bridgebot").and_then(serde_json::Value::as_str))
+        .map(str::to_owned);
+    let resolution = registry
+        .read()
+        .expect("the registry lock is never poisoned")
+        .resolve(bridge_bot.as_deref(), network);
+    match resolution {
+        connection::Resolution::Connection(id) => Some(id),
+        connection::Resolution::Unknown { reason } => {
+            let dropped = metrics.record_dropped(DropReason::UnknownConnection);
+            let first_time = unresolved
+                .lock()
+                .expect("the unresolved-rooms set is never poisoned")
+                .insert(room.room_id().to_owned());
+            if first_time {
+                warn!(
+                    room = %room.room_id(),
+                    network = network.as_str(),
+                    bridge_bot = bridge_bot.as_deref().unwrap_or("none"),
+                    dropped,
+                    "no connection covers this room ({reason}): nothing from it is published \
+                     until the Gateway's registry names it (GATEWAY_CONNECTIONS), because an \
+                     event stamped with a guessed perimeter is one the wrong decisions govern"
+                );
+            }
+            None
+        }
+    }
+}
+
 /// The room an `m.room.tombstone` names as this room's replacement, when the
 /// room carries one. An empty or absent `replacement_room` is not a
 /// replacement, whatever else the tombstone says.
@@ -2227,6 +2317,15 @@ async fn publish_envelope(
     let mut headers = async_nats::header::HeaderMap::new();
     headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
     headers.insert("network", network.as_str());
+    // The connection travels as a header too (ADR 0033, #269): the headers
+    // duplicate the envelope's extensions so a consumer can select on them
+    // without deserializing the event.
+    if let Some(connection) = envelope
+        .get("connection")
+        .and_then(serde_json::Value::as_str)
+    {
+        headers.insert("connection", connection);
+    }
     // `outbound.message.sent` carries no consent extension at all (ADR
     // 0018), and the headers duplicate the envelope's extensions for
     // server-side filtering — so a header the envelope does not have is one
@@ -2464,6 +2563,7 @@ async fn bring_up_consent<S>(
     jetstream: async_nats::jetstream::Context,
     consent_cache: ConsentCache,
     source: Option<S>,
+    registry: Arc<std::sync::RwLock<connection::Registry>>,
     metrics: Arc<Metrics>,
 ) where
     S: ConsentSnapshotSource + 'static,
@@ -2471,14 +2571,16 @@ async fn bring_up_consent<S>(
     let Some(source) = source else {
         info!(
             "no Companion Gateway configured (SENSOR_GATEWAY_URL): the consent cache starts \
-             cold and senders label pending until a decision arrives on the bus"
+             cold and senders label pending until a decision arrives on the bus; the registry \
+             of connections is the implicit one — one connection per network, named after it \
+             — which is correct while such a deployment has one bridge per network (ADR 0033)"
         );
         tokio::spawn(consume_consent_changes(jetstream, consent_cache, None));
         return;
     };
     match source.fetch_snapshot().await {
         Ok(snapshot) => {
-            let start = apply_consent_snapshot(&consent_cache, &snapshot, &metrics);
+            let start = apply_consent_snapshot(&consent_cache, &snapshot, &registry, &metrics);
             tokio::spawn(consume_consent_changes(
                 jetstream,
                 consent_cache,
@@ -2496,7 +2598,7 @@ async fn bring_up_consent<S>(
             );
             tokio::spawn(async move {
                 let snapshot = retry_consent_snapshot(&source, &metrics).await;
-                let start = apply_consent_snapshot(&consent_cache, &snapshot, &metrics);
+                let start = apply_consent_snapshot(&consent_cache, &snapshot, &registry, &metrics);
                 consume_consent_changes(jetstream, consent_cache, Some(start)).await;
             });
         }
@@ -2507,9 +2609,20 @@ async fn bring_up_consent<S>(
 fn apply_consent_snapshot(
     consent_cache: &ConsentCache,
     snapshot: &consent::ConsentSnapshot,
+    registry: &std::sync::RwLock<connection::Registry>,
     metrics: &Metrics,
 ) -> u64 {
     consent_cache.apply_snapshot(snapshot);
+    if let Some(handed) = &snapshot.connections {
+        *registry
+            .write()
+            .expect("the registry lock is never poisoned") = handed.clone();
+        info!(
+            connections = handed.len(),
+            handed_over = handed.handed_over(),
+            "the registry of connections is the Gateway's: every event is stamped from it"
+        );
+    }
     metrics.record_consent_snapshot(snapshot.entries.len());
     info!(
         entries = snapshot.entries.len(),

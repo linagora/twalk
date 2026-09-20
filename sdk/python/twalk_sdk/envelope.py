@@ -160,6 +160,11 @@ def _base_event(
             f"consent extensions (network={trigger.network!r}, "
             f"consent={trigger.consent!r})"
         )
+    if not trigger.connection:
+        raise EnvelopeError(
+            "a message-flow event must carry the trigger's connection (ADR 0033): "
+            "the trigger names none, and a persona never derives one"
+        )
     event: Dict[str, Any] = {
         "specversion": SPEC_VERSION,
         "id": event_id,
@@ -173,6 +178,9 @@ def _base_event(
     if trigger.traceparent:
         event["traceparent"] = trigger.traceparent
     event["network"] = trigger.network
+    # Copied, never derived (ADR 0033): the perimeter the trigger arrived on
+    # is the perimeter the persona's answer belongs to.
+    event["connection"] = trigger.connection
     event["consent"] = trigger.consent
     return event
 
@@ -267,6 +275,7 @@ def nats_headers(event: Dict[str, Any]) -> Dict[str, str]:
     headers = {
         "Nats-Msg-Id": event["id"],
         "network": event["network"],
+        "connection": event["connection"],
         "consent": event["consent"],
     }
     traceparent = event.get("traceparent")

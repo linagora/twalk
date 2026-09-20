@@ -142,6 +142,7 @@ fn inbound_event(sender: &str, room_id: &str, consent: &str) -> Value {
         "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
         "traceparent": TRACEPARENT,
         "network": "whatsapp",
+        "connection": "whatsapp",
         "consent": consent,
         "data": data
     });
@@ -166,6 +167,7 @@ fn suggest_event(trigger: &Value, body: &str, expires_at: &str) -> Value {
         "dataschema": "https://schemas.twalk.dev/cloudevents/v1/persona.suggest.produced.schema.json",
         "traceparent": TRACEPARENT,
         "network": trigger["network"],
+        "connection": trigger["connection"],
         // The label the Sensor observed, copied from the trigger. It stays
         // `granted` after a revocation: that is exactly why a label check is
         // not a consent check.
@@ -467,6 +469,9 @@ async fn a_valid_approval_publishes_a_schema_valid_reply_and_names_its_position(
         "the deterministic id is the dedup key, which is what makes a republish safe"
     );
     assert_eq!(stored.header("network"), Some("whatsapp"));
+    // #269: the connection travels as a header too, the way the Sensor and
+    // the SDK publish it, so a consumer filtering on it sees every producer.
+    assert_eq!(stored.header("connection"), Some("whatsapp"));
     assert_eq!(stored.header("consent"), Some("granted"));
     assert_eq!(stored.header("traceparent"), Some(TRACEPARENT));
 

@@ -184,6 +184,10 @@ tags:
       The same tag carries the one endpoint a bridge calls rather than the
       Companion: the status webhook, which is mautrix's only push channel
       and the producer behind `bridge.status.changed.v1` on the bus.
+  - name: connections
+    description: |
+      The registry of connections — the accounts this deployment observes
+      or acts through, and the perimeters consent is scoped to (ADR 0033).
   - name: runtime
     description: |
       Whether a persona runtime is present on this deployment (ticket #189).
@@ -2720,6 +2724,47 @@ paths:
   # The one route on this origin whose caller is not a browser and not the
   # Sensor, but a bridge (ticket #56). Outside `/api/` for that reason, under
   # the Gateway's reserved `/_twalk/` prefix.
+  /api/connections:
+    get:
+      operationId: listConnections
+      tags: [connections]
+      summary: The registry of connections, the perimeters consent is scoped to.
+      description: |
+        Every configured account this deployment observes or acts through
+        (ADR 0033, #269): a bridge, a mailbox, a calendar. Each has an opaque
+        stable id, a kind — one of the contract's
+        `definitions/kind.schema.json` — and a label; the ones a bridge
+        carries name the bridge and, when the operator named one, its bot.
+
+        Configuration, read-only: `GATEWAY_CONNECTIONS` (`id=kind[=label]`;
+        the bridge a connection rides is the `GATEWAY_BRIDGES` entry of the
+        same id, else the only bridge of its kind), or, unset, one connection
+        per bridge **whose id is the network's name** — the id every existing
+        consent decision was migrated onto (#270). A second bridge of one
+        network is declared, never derived. The native `matrix` connection —
+        the user's own account on the homeserver — is in every registry.
+
+        The Companion draws a card per connection and decides per connection
+        (#272); `network` on a card is its kind.
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The registry, in the order declared.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connections]
+                additionalProperties: false
+                properties:
+                  connections:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Connection"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
   /api/portals:
     get:
       operationId: listPortals
@@ -4906,6 +4951,42 @@ components:
             tombstone that points into the dark is a fact, not a reason to
             fold the conversation into nothing.
 
+    Connection:
+      type: object
+      description: One connection of the registry (ADR 0033, #269).
+      required: [id, kind, label]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]{0,63}$"
+          description: |
+            Opaque and stable. On a deployment with one connection per
+            network it is the network's name; nothing parses an id.
+        kind:
+          $ref: "#/components/schemas/Kind"
+        label:
+          type: string
+          description: For a person to read; a bridge's instance id by default.
+        bridge_id:
+          type: string
+          description: The bridge instance carrying it (`GATEWAY_BRIDGES`), for a connection a bridge carries.
+        bridge_bot:
+          type: string
+          description: |
+            The bridge's bot (`GATEWAY_BRIDGE_<ID>_BOT_USER_ID`), the account
+            the Sensor recognises a portal of this connection by. Absent when
+            the operator named none; the Sensor then resolves the connection
+            by kind when the kind has exactly one.
+
+    Kind:
+      type: string
+      description: |
+        The kind of a connection: the contract's own definition
+        (`contracts/cloudevents/v1/definitions/kind.schema.json`, the one
+        authority): every network, plus `calendar` (ADR 0033).
+      enum: [whatsapp, telegram, signal, discord, sms, matrix, email, calendar]
+
     PortalMove:
       type: object
       description: One conversation's move, as the register decided it (#255).
@@ -5509,6 +5590,7 @@ components:
           next_stream_sequence,
           decision_sequence,
           owner_identities,
+          connections,
           entries,
         ]
       additionalProperties: false
@@ -5578,6 +5660,20 @@ components:
               "@you:matrix.example.com",
               "@whatsapp_lid-115332874281144:matrix.example.com",
             ]
+        connections:
+          type: array
+          description: |
+            The registry of connections (ADR 0033, #269): every configured
+            account this deployment observes or acts through, with the bridge
+            and the bot for the ones a bridge carries. Here on the same
+            argument as `owner_identities`: the registry has one owner and
+            the Sensor reads it rather than deriving it, stamping every event
+            with the connection of the bridge that built the room. A bot no
+            connection names is a bridge no connection covers, and the Sensor
+            publishes nothing from its portals rather than guessing. Empty
+            on a deployment with no bridge and no declaration; never absent.
+          items:
+            $ref: "#/components/schemas/Connection"
         entries:
           type: array
           description: |

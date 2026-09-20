@@ -651,6 +651,7 @@ fn inbound_event(subject: &str) -> Value {
         "subject": subject,
         "datacontenttype": "application/json",
         "network": "whatsapp",
+        "connection": "whatsapp",
         "consent": "pending",
         "data": {
             "body": "un message que la Gateway ne garde pas",
@@ -682,6 +683,7 @@ fn approval_trigger_event(sender: &str, room_id: &str) -> Value {
         "subject": sender,
         "datacontenttype": "application/json",
         "network": "whatsapp",
+        "connection": "whatsapp",
         "consent": "granted",
         "data": {
             "body": "On décale à 20h ?",
@@ -717,6 +719,7 @@ fn approval_suggestion_event(trigger: &Value, expires_in_seconds: i64) -> Value 
         "subject": trigger_id,
         "datacontenttype": "application/json",
         "network": "whatsapp",
+        "connection": "whatsapp",
         "consent": "granted",
         "data": {
             "persona_id": "assistant",
@@ -754,6 +757,7 @@ fn unreadable_suggestion_event() -> Value {
         "subject": trigger_id,
         "datacontenttype": "application/json",
         "network": "carrierpigeon",
+        "connection": "carrierpigeon",
         "consent": "granted",
         "data": {
             "persona_id": "assistant",
@@ -1022,13 +1026,38 @@ fn the_networks_the_description_names_are_the_contracts() -> Result<()> {
         copy, authority,
         "openapi.yaml's Network schema disagrees with the contract"
     );
-    // And no other inline copy of the list anywhere in the description: one
-    // schema, `$ref`'d — a second list is a second authority.
+    // The kinds too (#269): the networks plus what is not a network.
+    let kinds = twalk_test_harness::contract_definition_values("kind")?;
+    let kinds_copy: Vec<String> = description.doc["components"]["schemas"]["Kind"]["enum"]
+        .as_array()
+        .context("components.schemas.Kind.enum")?
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        kinds_copy, kinds,
+        "openapi.yaml's Kind schema disagrees with the contract"
+    );
+    // And no other inline copy of either list anywhere in the description:
+    // two schemas, `$ref`'d — a third list is a third authority.
     let text = std::fs::read_to_string(Description::path())?;
     assert_eq!(
         text.matches("enum: [whatsapp").count(),
-        1,
-        "openapi.yaml repeats the network list instead of referencing Network"
+        2,
+        "openapi.yaml repeats the network or kind list instead of referencing Network or Kind"
+    );
+    // The shape of a connection's id, the same way (#269): the contract's
+    // `definitions/connection.schema.json` is the authority, the
+    // description's `Connection.id` a copy held to it.
+    let id_pattern = twalk_test_harness::contract_definition("connection")?["pattern"]
+        .as_str()
+        .context("the connection definition has a pattern")?
+        .to_owned();
+    assert_eq!(
+        description.doc["components"]["schemas"]["Connection"]["properties"]["id"]["pattern"]
+            .as_str(),
+        Some(id_pattern.as_str()),
+        "openapi.yaml's Connection.id pattern disagrees with the contract"
     );
     Ok(())
 }
@@ -1460,6 +1489,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         ),
         (Method::GET, "/api/portals", "/api/portals"),
         (Method::GET, "/api/portals/moves", "/api/portals/moves"),
+        (Method::GET, "/api/connections", "/api/connections"),
         (
             Method::POST,
             "/api/portals/observation",
@@ -3813,6 +3843,49 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         register.body["summary"]["total"], 0,
         "and no total pretends to cover it: {}",
         register.body
+    );
+    // The registry of connections (#269): nothing declared, so one per bridge,
+    // named after its network — the id every decision is migrated onto.
+    let connections = call
+        .check(
+            Method::GET,
+            &bridged_base,
+            "/api/connections",
+            "/api/connections",
+            &bridge_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    let ids: Vec<&str> = connections.body["connections"]
+        .as_array()
+        .context("a list of connections")?
+        .iter()
+        .filter_map(|connection| connection["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        ["whatsapp", "signal", "matrix"],
+        "one per bridge in GATEWAY_BRIDGES order, named after its network, and the native \
+         Matrix connection every deployment has: {}",
+        connections.body
+    );
+    for connection in connections.body["connections"].as_array().unwrap() {
+        assert_eq!(
+            connection["id"], connection["kind"],
+            "derived from a bridge, a connection is named after its network: {connection}"
+        );
+    }
+    assert_eq!(
+        connections.body["connections"][0]["bridge_id"], STUB_BRIDGE_ID,
+        "a connection a bridge carries names it: {}",
+        connections.body
+    );
+    assert!(
+        connections.body["connections"][2]["bridge_id"].is_null(),
+        "the native connection rides no bridge: {}",
+        connections.body
     );
     // The journal of moves (#255): this Gateway has a store, so the answer is
     // a list — empty, since nothing it can read has moved. A move against real

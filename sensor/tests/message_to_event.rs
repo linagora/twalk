@@ -60,6 +60,9 @@ async fn text_message_becomes_a_schema_valid_cloud_event() -> Result<()> {
     );
     assert_eq!(event["subject"].as_str(), Some("@bot_alpha:test.twalk"));
     assert_eq!(event["network"].as_str(), Some("whatsapp"));
+    // #269: with no Gateway the registry is the implicit one — one connection
+    // per network, named after it — and every event says which.
+    assert_eq!(event["connection"].as_str(), Some("whatsapp"));
     assert_eq!(
         event["consent"].as_str(),
         Some("pending"),

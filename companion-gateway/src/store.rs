@@ -73,7 +73,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 6] = [
+pub const MIGRATIONS: [&str; 7] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -421,6 +421,23 @@ pub const MIGRATIONS: [&str; 6] = [
     ) WITHOUT ROWID;
 
     CREATE INDEX portal_move_decided_at ON portal_move (decided_at);
+    "#,
+    // v7 — the registry of connections (ADR 0033, issue #269).
+    //
+    // What the Gateway is configured with, written at every start so the
+    // store always holds the registry the running Gateway serves: the next
+    // migration (#270) keys consent on it, and a decision must be able to
+    // reference a connection the store knows. `kind` is not CHECKed: the
+    // contract's definition is the authority and the Gateway refuses an
+    // unknown kind at startup, before anything reaches this table.
+    r#"
+    CREATE TABLE connection (
+        id         TEXT NOT NULL PRIMARY KEY,
+        kind       TEXT NOT NULL,
+        label      TEXT NOT NULL,
+        bridge_id  TEXT,
+        created_at TEXT NOT NULL
+    ) WITHOUT ROWID;
     "#,
 ];
 
@@ -1248,15 +1265,27 @@ impl Store {
         }
     }
 
-    /// Records one bridge transition and its rendered envelope, in one
-    /// statement: the row is durable before anything is published, as a
-    /// consent decision is.
-    ///
-    /// The identical transition arriving twice — the same bridge, the same
-    /// state, the same instant — records nothing and returns the first row's
-    /// id, exactly as a replayed decision does. That is the second line of
-    /// defence behind the state comparison: mautrix retries a push with
-    /// backoff, so the same body genuinely does arrive twice.
+    /// Records the registry of connections as configured (#269): inserted
+    /// when new, kind and label refreshed when known. Never deleted here — a
+    /// connection that left the configuration may still be what a recorded
+    /// decision is scoped to, and forgetting it would orphan the decision.
+    pub fn record_connections(&self, connections: &[crate::connections::Connection]) -> Result<()> {
+        let now = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+        let connection = self.connection();
+        for entry in connections {
+            connection
+                .execute(
+                    "INSERT INTO connection (id, kind, label, bridge_id, created_at) \
+                     VALUES (?, ?, ?, ?, ?) \
+                     ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, \
+                     label = excluded.label, bridge_id = excluded.bridge_id",
+                    rusqlite::params![entry.id, entry.kind, entry.label, entry.bridge_id, now],
+                )
+                .context("failed to record a connection")?;
+        }
+        Ok(())
+    }
+
     /// Journals one move, once: a second record about the same successor is
     /// a replay of the same decision and changes nothing. Returns whether
     /// this call was the one that recorded it.
@@ -1317,6 +1346,15 @@ impl Store {
             .context("failed to read a portal move row")
     }
 
+    /// Records one bridge transition and its rendered envelope, in one
+    /// statement: the row is durable before anything is published, as a
+    /// consent decision is.
+    ///
+    /// The identical transition arriving twice — the same bridge, the same
+    /// state, the same instant — records nothing and returns the first row's
+    /// id, exactly as a replayed decision does. That is the second line of
+    /// defence behind the state comparison: mautrix retries a push with
+    /// backoff, so the same body genuinely does arrive twice.
     pub fn record_bridge_status(
         &self,
         transition: &crate::bridge_status::Transition,
@@ -2979,6 +3017,82 @@ mod bridge_status_tests {
             .expect("marked");
         assert_eq!(store.unpublished_bridge_status_count().unwrap(), 0);
         assert!(store.unpublished_bridge_status(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_registry_is_recorded_once_refreshed_when_known_and_never_forgotten() {
+        // #269: the table a consent decision will be scoped to (#270). A
+        // connection that left the configuration stays — a decision may
+        // still name it — and one that is back is the same row, with its
+        // first `created_at`, not a new one.
+        let store = store("connections-recorded");
+        let connection = |id: &str, kind: &str, label: &str, bridge: Option<&str>| {
+            crate::connections::Connection {
+                id: id.to_owned(),
+                kind: kind.to_owned(),
+                label: label.to_owned(),
+                bridge_id: bridge.map(str::to_owned),
+                bridge_bot: None,
+            }
+        };
+        store
+            .record_connections(&[
+                connection(
+                    "whatsapp",
+                    "whatsapp",
+                    "mautrix-whatsapp",
+                    Some("mautrix-whatsapp"),
+                ),
+                connection("matrix", "matrix", "example.com", None),
+            ])
+            .expect("recorded");
+        let rows = |store: &Store| -> Vec<(String, String, String, Option<String>, String)> {
+            let connection = store.connection();
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, kind, label, bridge_id, created_at FROM connection ORDER BY id",
+                )
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        let first = rows(&store);
+        assert_eq!(first.len(), 2);
+        assert_eq!(
+            (
+                first[1].0.as_str(),
+                first[1].2.as_str(),
+                first[1].3.as_deref()
+            ),
+            ("whatsapp", "mautrix-whatsapp", Some("mautrix-whatsapp"))
+        );
+
+        // The next start: WhatsApp relabelled, Matrix gone from the
+        // configuration, Signal new.
+        store
+            .record_connections(&[
+                connection("whatsapp", "whatsapp", "Home", Some("mautrix-whatsapp")),
+                connection("signal", "signal", "mautrix-signal", Some("mautrix-signal")),
+            ])
+            .expect("recorded again");
+        let second = rows(&store);
+        let ids: Vec<&str> = second.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(ids, ["matrix", "signal", "whatsapp"], "never deleted here");
+        assert_eq!(second[2].2, "Home", "the label follows the configuration");
+        assert_eq!(
+            second[2].4, first[1].4,
+            "a connection recorded again keeps the instant it was first recorded"
+        );
     }
 
     #[test]

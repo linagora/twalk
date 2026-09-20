@@ -97,6 +97,7 @@ fn inbound_event(subject: &str, network: &str, at: &str, body: &str, display_nam
         "datacontenttype": "application/json",
         "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
         "network": network,
+        "connection": network,
         "consent": "pending",
         "data": {
             "body": body,

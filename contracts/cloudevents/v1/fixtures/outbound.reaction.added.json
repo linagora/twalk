@@ -9,6 +9,7 @@
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/outbound.reaction.added.schema.json",
   "traceparent": "00-908d41e1f05691842779447bf1902f8c-c91637532d00714e-01",
   "network": "whatsapp",
+  "connection": "whatsapp",
   "data": {
     "reaction": "👍",
     "target": {

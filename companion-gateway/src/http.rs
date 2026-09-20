@@ -36,6 +36,7 @@ use crate::bridge::Bridges;
 use crate::bridge_http;
 use crate::bridge_status::Statuses;
 use crate::bridge_status_http;
+use crate::connections_http;
 use crate::consent_http;
 use crate::consent_snapshot::{self, Snapshots};
 use crate::contacts::Contacts;
@@ -141,6 +142,10 @@ pub struct Gateway {
     /// built no conversations" and "this Gateway cannot see them" are very
     /// different claims and only one of them is about the user's messages.
     portals: Option<Arc<Portals>>,
+    /// The registry of connections ([`crate::connections`], ADR 0033, #269).
+    /// Always present: with no bridge and no declaration it is empty, which
+    /// is a fact and not a refusal.
+    connections: Arc<crate::connections::Registry>,
     /// Hermes's answers ([`crate::hermes_answer`], ticket #206). `None` when
     /// no seam is configured, which is every deployment that has not opted
     /// into ADR 0032's integration — and then the route says which variable
@@ -171,6 +176,7 @@ impl Gateway {
             runtime_presence: None,
             settings: None,
             portals: None,
+            connections: Arc::new(crate::connections::Registry::default()),
             answers: None,
             now_unix_seconds,
         }
@@ -328,6 +334,15 @@ impl Gateway {
         self
     }
 
+    pub fn with_connections(mut self, connections: Arc<crate::connections::Registry>) -> Self {
+        self.connections = connections;
+        self
+    }
+
+    pub fn connections(&self) -> &crate::connections::Registry {
+        &self.connections
+    }
+
     pub fn portals(&self) -> Option<Arc<Portals>> {
         self.portals.clone()
     }
@@ -415,6 +430,7 @@ pub fn router(gateway: Gateway) -> Router {
         // conversations the Sensor is inside — read live from the
         // homeserver, stored nowhere.
         .merge(portals_http::routes())
+        .merge(connections_http::routes())
         // Hermes's answer (ticket #206, ADR 0032): the second route on this
         // origin whose caller is not a browser and not the Sensor, and the
         // first whose caller is outside the deployment altogether. Merged like

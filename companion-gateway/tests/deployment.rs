@@ -1526,6 +1526,7 @@ fn suggestion_event(trigger_id: &str) -> serde_json::Value {
         "subject": trigger_id,
         "datacontenttype": "application/json",
         "network": "matrix",
+        "connection": "matrix",
         "consent": "granted",
         "data": {
             "persona_id": "assistant",
