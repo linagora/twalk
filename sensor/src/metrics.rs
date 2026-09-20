@@ -67,6 +67,14 @@ pub struct Metrics {
     dropped_unattributable_subject: AtomicU64,
     dropped_tombstoned_room: AtomicU64,
     dropped_unknown_connection: AtomicU64,
+    /// Consent entries and changes the Sensor refused, by why (#271):
+    /// `no_connection` is a Gateway older than #270 serving a state this
+    /// Sensor will not guess the perimeter of; `malformed` a document
+    /// missing what the contract requires. Named like the dropped events:
+    /// a thing the Sensor deliberately did not do, counted so that its
+    /// absence is not mistaken for silence.
+    consent_refused_no_connection: AtomicU64,
+    consent_refused_malformed: AtomicU64,
     /// The owner's own device (ADR 0025, issue #123): whether the deployment
     /// has one at all, how many portal rooms it is joined to, and what became
     /// of the invitations it was sent.
@@ -108,8 +116,8 @@ pub enum DropReason {
     /// owner nor a contact (issue #152).
     BridgeBot,
     /// The Sensor cannot attribute the subject to one network, so publishing
-    /// would name one on a guess — and consent is looked up by
-    /// `(subject, network)` (issue #150).
+    /// would name one on a guess — and the connection, which consent is
+    /// looked up by, is resolved from it (issue #150, #271).
     UnattributableSubject,
     /// The room carries an `m.room.tombstone`: it was replaced, and what
     /// still arrives in it is stray (issue #254, ADR 0029). Publishing it
@@ -194,6 +202,8 @@ impl Metrics {
             dropped_unattributable_subject: AtomicU64::new(0),
             dropped_tombstoned_room: AtomicU64::new(0),
             dropped_unknown_connection: AtomicU64::new(0),
+            consent_refused_no_connection: AtomicU64::new(0),
+            consent_refused_malformed: AtomicU64::new(0),
             owner_device_present: AtomicBool::new(false),
             owner_device_rooms: AtomicU64::new(0),
             owner_device_invites_joined: AtomicU64::new(0),
@@ -216,6 +226,19 @@ impl Metrics {
             DropReason::UnknownConnection => &self.dropped_unknown_connection,
         };
         counter.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Counts a consent entry or change the Sensor refused, or `None` for
+    /// one that is not a defect — a `persona` decision is well-formed
+    /// traffic that never labels a sender. Returns the running total, for
+    /// the log line.
+    pub fn record_consent_refused(&self, why: crate::consent::Unusable) -> Option<u64> {
+        let counter = match why {
+            crate::consent::Unusable::NotAboutASender => return None,
+            crate::consent::Unusable::NoConnection => &self.consent_refused_no_connection,
+            crate::consent::Unusable::Malformed => &self.consent_refused_malformed,
+        };
+        Some(counter.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     pub fn record_published(&self, event_type: &str) {
@@ -411,6 +434,17 @@ impl Metrics {
                 count.load(Ordering::Relaxed)
             ));
         }
+        out.push_str("# HELP twalk_sensor_consent_refused_total Consent entries and changes the Sensor refused, by why: no_connection is a Gateway older than #270, whose state this Sensor will not guess the perimeter of; malformed is a document missing what the contract requires.\n");
+        out.push_str("# TYPE twalk_sensor_consent_refused_total counter\n");
+        for (reason, count) in [
+            ("no_connection", &self.consent_refused_no_connection),
+            ("malformed", &self.consent_refused_malformed),
+        ] {
+            out.push_str(&format!(
+                "twalk_sensor_consent_refused_total{{reason=\"{reason}\"}} {}\n",
+                count.load(Ordering::Relaxed)
+            ));
+        }
         out.push_str("# HELP twalk_sensor_owner_device_invites_total Invitations the owner's own device received, by what it did with them.\n");
         out.push_str("# TYPE twalk_sensor_owner_device_invites_total counter\n");
         for (outcome, count) in [
@@ -591,6 +625,39 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn a_consent_entry_the_sensor_refused_is_counted_by_why_and_a_persona_is_not() {
+        // A Gateway older than #270 serves entries with a network and no
+        // connection: refused rather than read as the network's connection
+        // (#271), and this is the number an operator reads it from. A
+        // persona decision is well-formed and counted by nobody.
+        let metrics = Metrics::new();
+        let body = metrics.render(1_000);
+        for reason in ["no_connection", "malformed"] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_sensor_consent_refused_total{{reason=\"{reason}\"}} 0\n"
+                )),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            metrics.record_consent_refused(crate::consent::Unusable::NoConnection),
+            Some(1)
+        );
+        assert_eq!(
+            metrics.record_consent_refused(crate::consent::Unusable::NoConnection),
+            Some(2)
+        );
+        assert_eq!(
+            metrics.record_consent_refused(crate::consent::Unusable::NotAboutASender),
+            None
+        );
+        let body = metrics.render(1_000);
+        assert!(body.contains("twalk_sensor_consent_refused_total{reason=\"no_connection\"} 2\n"));
+        assert!(!body.contains("persona"), "{body}");
     }
 
     #[test]
