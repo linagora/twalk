@@ -26,12 +26,21 @@
 /// The clerk binary at its process boundary: [`ClerkProc`].
 mod clerk;
 
+/// The events a test publishes, built from the contract's fixtures.
+mod events;
+
 /// The real Buzz relay and the signed client that seeds and reads it:
 /// [`RelayStack`], [`Channels`], [`relay_env`], [`fresh_clerk_key`].
 mod relay;
 
+/// One run of the clerk under test, claimed and given back as a whole:
+/// [`Run`].
+mod run;
+
 pub use clerk::*;
+pub use events::*;
 pub use relay::*;
+pub use run::*;
 pub use twalk_test_harness::*;
 
 use std::time::{SystemTime, UNIX_EPOCH};

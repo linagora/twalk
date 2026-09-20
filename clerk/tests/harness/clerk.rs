@@ -153,18 +153,29 @@ impl ClerkProc {
     }
 }
 
-impl Drop for ClerkProc {
-    /// A test that panicked never reached `stop`; the process must still
-    /// go. `kill_on_drop` would SIGKILL it, but a SIGTERM first is what
-    /// lets it say goodbye in the log a failure is read from.
-    fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
+impl ClerkProc {
+    /// Ends the process without waiting on it, from a context that cannot
+    /// await — a `Drop`: a SIGTERM first, which is what lets it say
+    /// goodbye in the log a failure is read from, then the `kill_on_drop`
+    /// SIGKILL as the child handle goes. A clerk already stopped is left
+    /// alone.
+    pub fn terminate(&mut self) {
+        if let Some(child) = self.child.take() {
             if let Some(pid) = child.id() {
                 let _ = std::process::Command::new("kill")
                     .args(["-TERM", &pid.to_string()])
                     .status();
             }
+            // `child` goes out of scope here: `kill_on_drop` finishes it.
         }
+    }
+}
+
+impl Drop for ClerkProc {
+    /// A test that panicked never reached `stop`; the process must still
+    /// go.
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 

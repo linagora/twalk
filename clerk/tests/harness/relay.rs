@@ -314,17 +314,29 @@ fn tag<const N: usize>(values: [&str; N]) -> Result<Tag> {
 /// hex line, to `<dir>/clerk.key` with mode 0600 — the shape
 /// `deploy/docker-compose/provision-nostr-key.sh` writes and
 /// `CLERK_NOSTR_KEY_FILE` names. Returns the path and the public key.
+///
+/// The file is created with its final mode (`create_new` and `mode(0600)`
+/// in one `open`), never written at the umask's default and tightened
+/// afterwards: a secret that was world-readable for a moment was
+/// world-readable. And `create_new` means a leftover from another run is
+/// a failure rather than a key silently overwritten.
 pub async fn fresh_clerk_key(dir: &Path) -> Result<(PathBuf, String)> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use tokio::io::AsyncWriteExt;
 
     let keys = Keys::generate();
     let path = dir.join("clerk.key");
-    tokio::fs::write(&path, format!("{}\n", keys.secret_key().to_secret_hex()))
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .await
+        .with_context(|| format!("creating {} with mode 0600", path.display()))?;
+    file.write_all(format!("{}\n", keys.secret_key().to_secret_hex()).as_bytes())
         .await
         .with_context(|| format!("writing {}", path.display()))?;
-    tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        .await
-        .with_context(|| format!("chmod 0600 {}", path.display()))?;
+    file.flush().await?;
     Ok((path, keys.public_key().to_hex()))
 }
 

@@ -19,30 +19,7 @@
 mod harness;
 
 use anyhow::Result;
-use harness::{
-    ensure_stack, fresh_clerk_key, relay_env, run_id, Bus, Channels, ClerkProc, RelayStack,
-    TEST_OWNER_PUBKEY_HEX,
-};
-
-/// A fresh clerk key on the relay and the three channels it will write to,
-/// named after the run so a leftover on the persistent stack says where it
-/// came from.
-async fn seed(stack: &RelayStack, run: &str, dir: &std::path::Path) -> Result<(String, Channels)> {
-    let (key_file, clerk_pubkey) = fresh_clerk_key(dir).await?;
-    stack.add_member(&clerk_pubkey).await?;
-    let channels = Channels {
-        approvals: stack
-            .create_channel(&format!("approbations-{run}"), "forum", &clerk_pubkey)
-            .await?,
-        activity: stack
-            .create_channel(&format!("activite-{run}"), "stream", &clerk_pubkey)
-            .await?,
-        journal: stack
-            .create_channel(&format!("journal-{run}"), "stream", &clerk_pubkey)
-            .await?,
-    };
-    Ok((key_file.to_string_lossy().into_owned(), channels))
-}
+use harness::{run_id, seed, RelayStack, Run, TEST_OWNER_PUBKEY_HEX};
 
 #[tokio::test]
 async fn the_relay_is_real_and_accepts_the_owners_seed() -> Result<()> {
@@ -66,7 +43,7 @@ async fn the_relay_is_real_and_accepts_the_owners_seed() -> Result<()> {
     let run = run_id("smoke-relay");
     let dir = std::env::temp_dir().join(&run);
     tokio::fs::create_dir_all(&dir).await?;
-    let (_, channels) = seed(&stack, &run, &dir).await?;
+    let (_, _, channels) = seed(&stack, &run, &dir).await?;
 
     // A fresh channel is empty, and the owner can read it: what every later
     // absence search depends on.
@@ -88,32 +65,19 @@ async fn the_relay_is_real_and_accepts_the_owners_seed() -> Result<()> {
 
 #[tokio::test]
 async fn the_clerk_comes_up_against_it() -> Result<()> {
-    ensure_stack().await?;
-    let stack = RelayStack::ensure().await?;
-    let run = run_id("smoke-clerk");
-    let bus = Bus::connect().await?;
-    bus.ensure_stream(&run, &[&format!("{run}.>")]).await?;
-    let dir = std::env::temp_dir().join(&run);
-    tokio::fs::create_dir_all(&dir).await?;
-    let (key_file, channels) = seed(&stack, &run, &dir).await?;
+    // `Run::start` is the whole setup every other suite begins with, and
+    // it returns only once the clerk has said `clerk running`.
+    let run = Run::start("smoke-clerk").await?;
 
-    let env = relay_env(&stack, std::path::Path::new(&key_file), &channels, &run);
-    let mut clerk = ClerkProc::start(env).await?;
-    clerk.wait_for_log("clerk running").await?;
-
-    assert_eq!(clerk.health().await?, reqwest::StatusCode::OK);
-    let metrics = clerk.metrics().await?;
+    assert_eq!(run.clerk.health().await?, reqwest::StatusCode::OK);
+    let metrics = run.clerk.metrics().await?;
     assert!(
         metrics.contains("twalk_clerk_posts_total{channel=\"approbations\"} 0\n"),
         "a clerk that has posted nothing says so:\n{metrics}"
     );
 
-    let status = clerk.stop().await?;
-    assert!(
-        status.success(),
-        "the clerk exits cleanly on SIGTERM: {status}"
-    );
-    bus.delete_stream(&run).await?;
-    tokio::fs::remove_dir_all(&dir).await?;
+    // `shutdown` is where the clerk's exit on SIGTERM is asserted: a
+    // status that is not success fails it.
+    run.shutdown().await?;
     Ok(())
 }
