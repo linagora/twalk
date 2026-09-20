@@ -11,6 +11,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { defaultSelection, scopeFor, scopeOptions, type BridgeRow } from './scope';
+import type { Connection } from '$lib/connections/registry';
 import type { BridgeConnection } from '$lib/networks/connection';
 
 function connection(state: BridgeConnection['state'], linked = true): BridgeConnection {
@@ -55,34 +56,63 @@ function bridge(
 	} as BridgeRow;
 }
 
+/**
+ * The registry a Gateway derives from those bridges (#269): one connection
+ * per bridge named after its network, and the native Matrix one.
+ */
+function registryFor(bridges: readonly BridgeRow[]): Connection[] {
+	return [
+		...bridges.map((row) => ({
+			id: row.network,
+			kind: row.network as Connection['kind'],
+			label: row.bridge_id,
+			bridge_id: row.bridge_id
+		})),
+		{ id: 'matrix', kind: 'matrix' as const, label: 'example.com' }
+	];
+}
+
+/** `scopeOptions` on a deployment whose registry is derived from its bridges. */
+function optionsFor(bridges: readonly BridgeRow[]) {
+	return scopeOptions(registryFor(bridges), bridges);
+}
+
+const MATRIX_OPTION = {
+	connection: 'matrix',
+	network: 'matrix',
+	label: null,
+	proven: false,
+	preselected: false
+};
+
 describe('scopeOptions', () => {
-	it('offers the connected networks ticked, and Matrix unticked', () => {
-		const options = scopeOptions([
+	it('offers the connected connections ticked, and Matrix unticked', () => {
+		const options = optionsFor([
 			bridge('whatsapp', 'connected'),
 			bridge('signal', 'disconnected'),
 			bridge('sms', 'disconnected')
 		]);
 		expect(options).toEqual([
-			{ network: 'whatsapp', proven: true, preselected: true },
+			{ connection: 'whatsapp', network: 'whatsapp', label: null, proven: true, preselected: true },
 			// Nothing the Gateway records says the Sensor was invited into any
 			// room, so Matrix is offered and never assumed.
-			{ network: 'matrix', proven: false, preselected: false }
+			MATRIX_OPTION
 		]);
 	});
 
-	it('offers a connected network that has no login process at all', () => {
+	it('offers a connected connection that has no login process at all', () => {
 		// The case found live (#142): two bridges holding live sessions, no
 		// login in flight, and the screen offered nothing — so no persona
 		// could be activated on any network. A login process is not a link.
-		const options = scopeOptions([bridge('whatsapp', 'connected'), bridge('signal', 'connected')]);
+		const options = optionsFor([bridge('whatsapp', 'connected'), bridge('signal', 'connected')]);
 		expect(defaultSelection(options)).toEqual(['whatsapp', 'signal']);
 	});
 
-	it('does not offer a network whose only evidence is a login in flight', () => {
+	it('does not offer a connection whose only evidence is a login in flight', () => {
 		// The mirror image, and the reason this is not "read both": a QR code
 		// somebody is in the middle of scanning is not a network to scope a
 		// consent decision onto.
-		const options = scopeOptions([
+		const options = optionsFor([
 			bridge('whatsapp', 'disconnected', {
 				state: 'complete'
 			} as BridgeRow['login'])
@@ -94,17 +124,34 @@ describe('scopeOptions', () => {
 		// `starting` and `degraded` are honest states of a bridge on its way
 		// somewhere, and `isConnected` rounds neither up — the same judgement
 		// the picker's badge makes, from the same function.
-		const options = scopeOptions([bridge('whatsapp', 'starting'), bridge('signal', 'degraded')]);
-		expect(options).toEqual([{ network: 'matrix', proven: false, preselected: false }]);
+		const options = optionsFor([bridge('whatsapp', 'starting'), bridge('signal', 'degraded')]);
+		expect(options).toEqual([MATRIX_OPTION]);
 	});
 
 	it('offers Matrix even on a deployment with no bridge at all', () => {
-		expect(scopeOptions([])).toEqual([{ network: 'matrix', proven: false, preselected: false }]);
+		expect(optionsFor([])).toEqual([MATRIX_OPTION]);
 	});
 
-	it('does not list one network twice when two bridges serve it', () => {
-		const options = scopeOptions([bridge('sms', 'connected'), bridge('sms', 'connected')]);
-		expect(options.filter((option) => option.network === 'sms')).toHaveLength(1);
+	it('offers two connections of one kind as two rows, each named', () => {
+		// The shape ADR 0033 exists for (#272): a persona activated on the
+		// work WhatsApp is not activated on the home one, so the perimeter is
+		// offered per connection and the label says which.
+		const bridges = [
+			bridge('whatsapp', 'connected'),
+			{ ...bridge('whatsapp', 'connected'), bridge_id: 'mautrix-whatsapp-work' }
+		];
+		const registry: Connection[] = [
+			{ id: 'wa-home', kind: 'whatsapp', label: 'Home', bridge_id: 'mautrix-whatsapp' },
+			{ id: 'wa-work', kind: 'whatsapp', label: 'Work', bridge_id: 'mautrix-whatsapp-work' },
+			{ id: 'matrix', kind: 'matrix', label: 'example.com' }
+		];
+		const options = scopeOptions(registry, bridges);
+		expect(options.map((option) => [option.connection, option.label, option.preselected])).toEqual([
+			['wa-home', 'Home', true],
+			['wa-work', 'Work', true],
+			['matrix', null, false]
+		]);
+		expect(defaultSelection(options)).toEqual(['wa-home', 'wa-work']);
 	});
 });
 

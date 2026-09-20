@@ -65,6 +65,7 @@
 		expiredBridges,
 		messageCount,
 		overallHealth,
+		pendingByConnection,
 		pendingDecisions,
 		personaRows,
 		type BridgeRow,
@@ -108,7 +109,9 @@
 		refreshing = false;
 	}
 
-	const bridges = $derived<BridgeRow[]>(bridgeRows(snapshot.bridges ?? []));
+	const bridges = $derived<BridgeRow[]>(
+		bridgeRows(snapshot.connections ?? [], snapshot.bridges ?? [])
+	);
 	const personas = $derived<PersonaRow[]>(
 		personaRows(
 			snapshot.consent ?? [],
@@ -117,6 +120,10 @@
 	);
 	const expired = $derived(expiredBridges(bridges));
 	const pending = $derived(pendingDecisions(snapshot.pending));
+	/** The same number per connection (#272): shown when it says more than the total does. */
+	const pendingRows = $derived(
+		pendingByConnection(snapshot.pending?.connections ?? [], snapshot.connections ?? [])
+	);
 	const messages = $derived(messageCount());
 	const feed = $derived(
 		activityFeed({
@@ -169,7 +176,7 @@
 		const result = await decideOnPersona({
 			persona: row.persona,
 			state: row.active ? 'revoked' : 'granted',
-			networks: row.active ? row.networks : row.decidedNetworks
+			connections: row.active ? row.connections : row.decidedConnections
 		});
 		busyPersona = null;
 		if (!result.ok) {
@@ -218,8 +225,8 @@
 		</p>
 	{/if}
 
-	{#each expired as row (row.bridgeId)}
-		<div class="card card--warning" role="alert" data-testid={`expired-${row.network}`}>
+	{#each expired as row (row.connectionId)}
+		<div class="card card--warning" role="alert" data-testid={`expired-${row.connectionId}`}>
 			<p class="card__title">
 				<Icon name="warning" size="dense" />
 				{$t('dashboard.banner.expired.title', { network: networkLabel(row.network) })}
@@ -273,6 +280,16 @@
 			     written lives on the consent screen, opened deliberately, for
 			     the same reason the approval queue does. -->
 			<p class="small muted" data-testid="pending-inbox">{$t('dashboard.chip.inbox')}</p>
+			{#if pendingRows.some((row) => row.label !== null)}
+				<!-- Two accounts of one kind: which inbox is waiting (#272). -->
+				<ul class="small muted" data-testid="pending-by-connection">
+					{#each pendingRows as row (row.connection)}
+						<li data-connection={row.connection} data-count={row.count}>
+							{networkLabel(row.network)}{row.label === null ? '' : ` · ${row.label}`}: {row.count}
+						</li>
+					{/each}
+				</ul>
+			{/if}
 			<p>
 				<a class="button button--primary" href="/consent" data-testid="to-consent">
 					<Icon name="consent" size="dense" />
@@ -308,12 +325,23 @@
 			<p class="small muted">{$t('dashboard.bridges.none')}</p>
 		{:else}
 			<ul class="rows">
-				{#each bridges as row (row.bridgeId)}
-					<li class="row" data-testid={`bridge-${row.network}`} data-state={row.state}>
+				{#each bridges as row (row.connectionId)}
+					<li
+						class="row"
+						data-testid={`bridge-${row.connectionId}`}
+						data-network={row.network}
+						data-state={row.state}
+					>
 						<span class="dot" data-tone={row.tone}></span>
 						<span class="row__text">
-							<span class="row__name">{networkLabel(row.network)}</span>
-							<span class="small muted" data-testid={`bridge-state-${row.network}`}>
+							<span class="row__name">
+								{networkLabel(row.network)}
+								{#if row.label !== null}
+									<!-- Which account, when the kind has two (#272). -->
+									<span class="muted">— {row.label}</span>
+								{/if}
+							</span>
+							<span class="small muted" data-testid={`bridge-state-${row.connectionId}`}>
 								{$t(`dashboard.bridge.state.${row.state}` as 'dashboard.bridge.state.connected')}
 							</span>
 							<span class="small muted">{$t('dashboard.bridge.lastMessage.unknown')}</span>

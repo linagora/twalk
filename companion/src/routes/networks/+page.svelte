@@ -1,13 +1,18 @@
 <!--
 	Screen 3 of `docs/wireframes/companion-v0.1.md`: the network picker.
 
-	The grid is the catalogue (`$lib/networks/catalogue.ts`) joined with what
-	`GET /api/bridges` says this deployment configured. Two separate facts, and
-	the screen keeps them separate:
+	The grid is the catalogue (`$lib/networks/catalogue.ts`) joined with the
+	deployment's registry of connections (`GET /api/connections`, ADR 0033)
+	and with what `GET /api/bridges` says about each connection's transport.
+	**A card is a connection** (#272): a deployment with a personal WhatsApp
+	and a work one has two WhatsApp cards, each named, each with its own
+	login and its own decisions; with one connection per kind — the reference
+	shape — the grid reads exactly as it always did. Separate facts, and the
+	screen keeps them separate:
 
-	  - a card the wireframes list but this deployment has no bridge for is
-	    shown, greyed, and says so — hiding it would leave the user wondering
-	    where WhatsApp went;
+	  - a kind the wireframes list but this deployment has no connection for
+	    is shown, greyed, and says so — hiding it would leave the user
+	    wondering where WhatsApp went;
 	  - a Gateway that could not answer at all does *not* grey everything. It
 	    says the list is unknown and leaves the cards tappable, because the
 	    screen behind them handles a missing bridge on its own.
@@ -54,6 +59,7 @@
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
+	import { loadRegistry, NOT_READ_YET, type Registry } from '$lib/connections/registry';
 	import { rereadWhileUnsettled, type Rereader } from '$lib/networks/reread';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
@@ -66,6 +72,8 @@
 	} from '$lib/networks/catalogue';
 	import { connectionOf } from '$lib/networks/connection';
 
+	let registry = $state<Registry>(NOT_READ_YET);
+	let registryRead = $state(false);
 	let bridges = $state<BridgeRow[]>([]);
 	let bridgesKnown = $state(false);
 	/** Why the list is unknown, when it is. */
@@ -89,8 +97,17 @@
 		rereader?.stop();
 	});
 
+	/**
+	 * The two reads together (#272): the registry says which connections
+	 * there are, the bridge list what each one's transport reports.
+	 */
 	async function readBridges() {
-		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		const [connections, listed] = await Promise.all([
+			loadRegistry(),
+			gateway.GET('/api/bridges').catch(() => null)
+		]);
+		registry = connections;
+		registryRead = connections.trouble === null;
 		bridgesKnown = listed !== null && listed.error === undefined;
 		bridgesTrouble = bridgesKnown ? null : troubleOf(listed);
 		bridges = listed?.data?.bridges ?? [];
@@ -109,7 +126,15 @@
 			(bridgesKnown && bridges.some((bridge) => connectionOf(bridge).state === 'unknown'))
 	);
 
-	const grid = $derived<CardState[]>(gridFor({ bridges, bridgesKnown, ios }));
+	const grid = $derived<CardState[]>(
+		gridFor({
+			connections: registry.connections,
+			connectionsKnown: registryRead,
+			bridges,
+			bridgesKnown,
+			ios
+		})
+	);
 
 	/**
 	 * Which journey this is, from the deployment's own state.
@@ -152,7 +177,7 @@
 	 * reports — so it is the one that looks like a warning.
 	 */
 	function badgeFor(state: CardState): { key: MessageKey; tone: string; icon: 'check' | 'warning' | 'reload' } | null {
-		switch (state.connection.state) {
+		switch (state.link.state) {
 			case 'connected':
 				return { key: 'networks.connected', tone: 'badge--ok', icon: 'check' };
 			case 'session_expired':
@@ -223,42 +248,54 @@
 	{/if}
 
 	<ul class="grid" data-testid="network-grid" aria-busy={!loaded}>
-		{#each grid as state (state.card.network)}
+		{#each grid as state (state.key)}
 			{@const blocked = blockedCopy(state)}
 			{@const badge = badgeFor(state)}
-			{@const manage = state.linked ? manageRouteFor(state.card) : null}
+			{@const manage = state.linked ? manageRouteFor(state) : null}
 			<li>
 				<!-- svelte-ignore a11y_no_redundant_roles -->
 				<div
 					class="tile"
 					class:tile--muted={state.blockedBy !== null}
-					data-testid={`card-${state.card.network}`}
+					data-testid={`card-${state.key}`}
+					data-network={state.card.network}
+					data-connection-id={state.connection?.id ?? ''}
 					data-blocked={state.blockedBy ?? ''}
 					data-connected={state.connected ? 'yes' : 'no'}
-					data-connection={state.connection.state}
+					data-connection={state.link.state}
 					data-linked={state.linked ? 'yes' : 'no'}
 					title={blocked ?? undefined}
 				>
 					<p class="tile__head">
 						<Icon name={state.card.icon} />
-						<span class="tile__name">{$t(state.card.titleKey)}</span>
+						<span class="tile__name">
+							{$t(state.card.titleKey)}
+							{#if state.label !== null}
+								<!-- Which account, when the kind has more than one
+								     (#272): the label the operator gave the
+								     connection, never a guess between two. -->
+								<span class="tile__account" data-testid={`label-${state.key}`}
+									>— {state.label}</span
+								>
+							{/if}
+						</span>
 						{#if state.card.preview}
 							<span class="badge">{$t('networks.preview')}</span>
 						{/if}
 						{#if badge !== null}
-							<span class={`badge ${badge.tone}`} data-testid={`state-${state.card.network}`}>
+							<span class={`badge ${badge.tone}`} data-testid={`state-${state.key}`}>
 								<Icon name={badge.icon} size="dense" />
 								{$t(badge.key)}
 							</span>
 						{/if}
 					</p>
 					<p class="small muted">{$t(state.card.subtitleKey)}</p>
-					{#if state.linked && state.connection.account?.name}
+					{#if state.linked && state.link.account?.name}
 						<!-- Which account, on the card itself: the user's own question
 						     is "is *my* number linked", and the answer is a fact the
 						     bridge already gave us. -->
-						<p class="small muted account" data-testid={`account-${state.card.network}`}>
-							{state.connection.account.name}
+						<p class="small muted account" data-testid={`account-${state.key}`}>
+							{state.link.account.name}
 						</p>
 					{/if}
 
@@ -272,8 +309,10 @@
 						<p class="tile__action">
 							<a
 								class="button button--secondary"
-								href={`/networks/conversations?network=${state.card.network}`}
-								data-testid={`conversations-${state.card.network}`}
+								href={state.connection === null
+									? `/networks/conversations?network=${state.card.network}`
+									: `/networks/conversations?connection=${encodeURIComponent(state.connection.id)}`}
+								data-testid={`conversations-${state.key}`}
 							>
 								<Icon name="observing" size="dense" />
 								{$t('networks.conversations')}
@@ -288,14 +327,14 @@
 						     409 — the Gateway being right and the Companion asking the
 						     wrong question (#108). -->
 						<p class="tile__action">
-							<a class="button button--secondary" href={manage} data-testid={`manage-${state.card.network}`}>
+							<a class="button button--secondary" href={manage} data-testid={`manage-${state.key}`}>
 								<Icon name="manage" size="dense" />
 								{$t('networks.manage')}
 							</a>
 						</p>
-					{:else if state.card.route !== null && state.blockedBy === null}
+					{:else if state.href !== null && state.blockedBy === null}
 						<p class="tile__action">
-							<a class="button button--secondary" href={state.card.route}>
+							<a class="button button--secondary" href={state.href}>
 								{$t('networks.continue')}
 								<Icon name="continue" size="dense" />
 							</a>

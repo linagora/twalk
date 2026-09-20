@@ -69,6 +69,7 @@
 		type ReadFailure
 	} from '$lib/portals/register';
 	import { consequence, observedNow } from '$lib/portals/selection';
+	import { loadRegistry } from '$lib/connections/registry';
 
 	/** Every conversation the register offered, of every network. */
 	let all = $state<ConversationRow[]>([]);
@@ -99,29 +100,62 @@
 	 * address the page was opened at — nothing here navigates.
 	 */
 	let network = $state<string | null>(null);
+	/**
+	 * Which connection this screen is about, from `?connection=` (#272): the
+	 * card that led here is one connection, and its conversations are the
+	 * ones its bridge built. Resolved to the bridge that carries it once the
+	 * registry has been read; `?network=` alone scopes to every connection of
+	 * that kind, as it did before.
+	 */
+	let connectionId = $state<string | null>(null);
+	let bridgeOfConnection = $state<string | null>(null);
+	/**
+	 * The URL named a connection the registry does not know, or the registry
+	 * could not be read: the screen says so and shows nothing, rather than
+	 * quietly widening to every conversation of every network (#272).
+	 */
+	let unknownConnection = $state(false);
 
 	onMount(async () => {
 		if (typeof window !== 'undefined') {
-			const asked = new URLSearchParams(window.location.search).get('network');
+			const search = new URLSearchParams(window.location.search);
+			const asked = search.get('network');
 			network = asked !== null && asked !== '' ? asked : null;
+			const named = search.get('connection');
+			connectionId = named !== null && named !== '' ? named : null;
 		}
 		await read();
 	});
 
+	/** Whether a row or a bridge is within what this screen is about. */
+	function inScope(candidate: { network: string; bridgeId: string }): boolean {
+		if (bridgeOfConnection !== null) {
+			return candidate.bridgeId === bridgeOfConnection;
+		}
+		return network === null || candidate.network === network;
+	}
+
 	async function read(): Promise<void> {
 		loaded = false;
-		const answer = await readRegister();
+		const [answer, registry] = await Promise.all([
+			readRegister(),
+			connectionId === null ? Promise.resolve(null) : loadRegistry()
+		]);
 		if (!answer.ok) {
 			failure = answer.failure;
 			loaded = true;
 			return;
 		}
 		failure = null;
+		if (registry !== null) {
+			const connection = registry.connections.find((entry) => entry.id === connectionId) ?? null;
+			unknownConnection = connection === null;
+			bridgeOfConnection = connection?.bridge_id ?? null;
+			network = connection?.kind ?? network;
+		}
 		bridges = [...answer.register.bridges];
 		crowdThreshold = answer.register.crowdThreshold;
-		all = answer.register.rows.filter(
-			(row) => network === null || row.network === network
-		);
+		all = unknownConnection ? [] : answer.register.rows.filter((row) => inScope(row));
 		// The selection starts from what is already true, so opening this
 		// screen and pressing the button changes nothing.
 		selected = observedNow(all);
@@ -232,7 +266,7 @@
 	 * would be the silence this whole answer exists against.
 	 */
 	const answerable = $derived(
-		bridges.filter((bridge) => network === null || bridge.network === network)
+		bridges.filter((bridge) => inScope({ network: bridge.network, bridgeId: bridge.bridge_id }))
 	);
 	const unreadableBridges = $derived(unreadable(answerable));
 	const silentBridges = $derived(askedNothing(answerable));
@@ -242,6 +276,7 @@
 	class="screen"
 	data-testid="screen-conversations"
 	data-network={network ?? 'all'}
+	data-connection={connectionId ?? 'all'}
 	data-loaded={loaded ? 'yes' : 'no'}
 	data-crowd-threshold={crowdThreshold ?? undefined}
 >
@@ -268,6 +303,17 @@
 			<span class="spinner" aria-hidden="true"></span>
 			{$t('conversations.loading')}
 		</p>
+	{:else if unknownConnection}
+		<!-- The link named an account this server does not list, or the
+		     registry could not be read: nothing is shown rather than every
+		     conversation of every network (#272). -->
+		<div class="card card--warning" role="alert" data-testid="conversations-unknown-connection">
+			<p class="card__title">
+				<Icon name="warning" size="dense" />
+				{$t('conversations.unknownConnection.title')}
+			</p>
+			<p>{$t('conversations.unknownConnection.body')}</p>
+		</div>
 	{:else if failure !== null}
 		{#if failure.kind === 'not-configured'}
 			<!-- Not a failure of the network or the session: the operator has

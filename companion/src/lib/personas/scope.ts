@@ -1,10 +1,12 @@
-// What a persona is activated *on*: the networks the user actually connected.
+// What a persona is activated *on*: the connections the user actually
+// connected (ADR 0033, #272) — the perimeters, never their kinds: a persona
+// active on the work WhatsApp is not active on the home one.
 //
 // ADR 0013 is categorical — "activation does not spread: connecting a new
 // network leaves every persona inactive on it until the user says otherwise" —
 // so the scope of an activation is decided once, from what is connected at the
 // moment the user presses the button, and is never widened afterwards. A
-// network connected next week is simply not in any decision the user took.
+// connection made next week is simply not in any decision the user took.
 //
 // # Where "connected" comes from, and the one network it cannot come from
 //
@@ -36,6 +38,7 @@
 // scope a consent decision to a network on the user's behalf, which is the
 // precise behaviour this project exists to prevent.
 
+import { bridgeOf, labelFor, ofKind, type Connection } from '$lib/connections/registry';
 import { connectionOf, isConnected, type ConfiguredBridge } from '$lib/networks/connection';
 
 /**
@@ -49,9 +52,14 @@ import { connectionOf, isConnected, type ConfiguredBridge } from '$lib/networks/
  */
 export type BridgeRow = ConfiguredBridge;
 
-/** A network offered as part of an activation's perimeter. */
+/** A connection offered as part of an activation's perimeter. */
 export interface ScopeOption {
+	/** The connection's id: what the decision's scope names. */
+	readonly connection: string;
+	/** Its kind, for the icon and the name. */
 	readonly network: string;
+	/** Which account, when the kind has more than one; `null` when it is the only one. */
+	readonly label: string | null;
 	/**
 	 * Whether the Gateway can see that this network is connected. `false` for
 	 * `matrix`, which nothing records — see the module note.
@@ -65,32 +73,51 @@ export interface ScopeOption {
 export const MATRIX_NETWORK = 'matrix';
 
 /**
- * The perimeter screen 4 offers: every network a bridge says is connected,
- * ticked, then Matrix, unticked.
+ * The perimeter screen 4 offers: every connection whose bridge says it is
+ * connected, ticked, then Matrix, unticked. One row per connection, and the
+ * bridge is the one the connection names — never the first bridge of the
+ * kind.
  *
- * Bridge order is the Gateway's — configuration order — so two deployments
- * with the same bridges draw the same screen.
+ * Registry order is the Gateway's — configuration order — so two deployments
+ * with the same registry draw the same screen.
  */
-export function scopeOptions(bridges: readonly ConfiguredBridge[]): ScopeOption[] {
+export function scopeOptions(
+	registry: readonly Connection[],
+	bridges: readonly ConfiguredBridge[]
+): ScopeOption[] {
 	const options: ScopeOption[] = [];
-	for (const bridge of bridges) {
-		if (!isConnected(connectionOf(bridge))) {
+	for (const entry of registry) {
+		if (entry.kind === MATRIX_NETWORK) {
 			continue;
 		}
-		if (options.some((option) => option.network === bridge.network)) {
+		const bridge = bridgeOf(entry, bridges);
+		if (bridge === null || !isConnected(connectionOf(bridge))) {
 			continue;
 		}
-		options.push({ network: bridge.network, proven: true, preselected: true });
+		options.push({
+			connection: entry.id,
+			network: entry.kind,
+			label: labelFor(entry, ofKind(registry, entry.kind)),
+			proven: true,
+			preselected: true
+		});
 	}
-	if (!options.some((option) => option.network === MATRIX_NETWORK)) {
-		options.push({ network: MATRIX_NETWORK, proven: false, preselected: false });
-	}
+	// The native connection is in every registry (#269); it is offered
+	// unticked, with the reason written on the screen.
+	const matrix = registry.find((entry) => entry.kind === MATRIX_NETWORK);
+	options.push({
+		connection: matrix?.id ?? MATRIX_NETWORK,
+		network: MATRIX_NETWORK,
+		label: null,
+		proven: false,
+		preselected: false
+	});
 	return options;
 }
 
-/** The networks a freshly drawn screen 4 would submit. */
+/** The connections a freshly drawn screen 4 would submit. */
 export function defaultSelection(options: readonly ScopeOption[]): string[] {
-	return options.filter((option) => option.preselected).map((option) => option.network);
+	return options.filter((option) => option.preselected).map((option) => option.connection);
 }
 
 /**

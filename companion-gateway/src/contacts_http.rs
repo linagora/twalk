@@ -90,10 +90,25 @@ async fn pending_contacts(
     let Some(contacts) = gateway.contacts() else {
         return not_configured();
     };
-    let filter = match query.get("network").filter(|value| !value.is_empty()) {
-        None => None,
-        Some(network) => match Network::parse(network) {
-            Some(network) => Some(network),
+    // The filter (#272): a connection, or a network — the latter narrows to
+    // every connection of that kind, which is what a screen that has not
+    // yet learned connections asked for before.
+    let filter = match (
+        query.get("connection").filter(|value| !value.is_empty()),
+        query.get("network").filter(|value| !value.is_empty()),
+    ) {
+        (Some(connection), _) => match gateway.connections().get(connection) {
+            Some(_) => Some(Filter::Connection(connection.clone())),
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "unknown_value",
+                    &format!("connection has the unknown value {connection:?}"),
+                )
+            }
+        },
+        (None, Some(network)) => match Network::parse(network) {
+            Some(network) => Some(Filter::Network(network)),
             None => {
                 return api_error(
                     StatusCode::BAD_REQUEST,
@@ -102,9 +117,10 @@ async fn pending_contacts(
                 )
             }
         },
+        (None, None) => None,
     };
     match contacts.pending() {
-        Ok(pending) => Json(pending_document(&pending, filter)).into_response(),
+        Ok(pending) => Json(pending_document(&pending, filter.as_ref())).into_response(),
         Err(error) => {
             error!(%error, "failed to read the pending contacts");
             api_error(
@@ -267,35 +283,64 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The pending list with its counts. The counts are of the whole list and
-/// `contacts` is what the filter left, so a badge and the list beside it can
-/// disagree without either being wrong.
-fn pending_document(pending: &[SeenContact], filter: Option<Network>) -> Value {
-    let mut counts: Vec<(Network, u64)> = Vec::new();
-    for seen in pending {
-        match counts
-            .iter_mut()
-            .find(|(network, _)| *network == seen.network)
-        {
-            Some((_, count)) => *count += 1,
-            None => counts.push((seen.network, 1)),
+/// What `?connection=` or `?network=` narrows the list to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Filter {
+    Connection(String),
+    Network(Network),
+}
+
+impl Filter {
+    fn admits(&self, seen: &SeenContact) -> bool {
+        match self {
+            Filter::Connection(id) => &seen.connection == id,
+            Filter::Network(network) => *network == seen.network,
         }
     }
+}
+
+/// The pending list with its counts. The counts are of the whole list and
+/// `contacts` is what the filter left, so a badge and the list beside it can
+/// disagree without either being wrong. Two breakdowns: per connection —
+/// the one a screen that decides per connection reads (#272) — and per
+/// network, kept for a screen that has not learned connections yet.
+fn pending_document(pending: &[SeenContact], filter: Option<&Filter>) -> Value {
     // A stable order whatever order the rows arrived in: the contract's own
-    // ordering of network values.
-    counts.sort_by_key(|(network, _)| network.as_str());
+    // ordering of network values, then the connection's id.
+    let by_connection = tally(pending, |seen| {
+        (seen.network.as_str(), seen.connection.as_str())
+    });
+    let by_network = tally(pending, |seen| (seen.network.as_str(), ""));
     json!({
         "total": pending.len(),
-        "networks": counts
+        "connections": by_connection
             .iter()
-            .map(|(network, count)| json!({ "network": network.as_str(), "count": count }))
+            .map(|((network, connection), count)| {
+                json!({ "connection": connection, "network": network, "count": count })
+            })
+            .collect::<Vec<_>>(),
+        "networks": by_network
+            .iter()
+            .map(|((network, _), count)| json!({ "network": network, "count": count }))
             .collect::<Vec<_>>(),
         "contacts": pending
             .iter()
-            .filter(|seen| filter.is_none() || filter == Some(seen.network))
+            .filter(|seen| filter.is_none_or(|filter| filter.admits(seen)))
             .map(pending_json)
             .collect::<Vec<_>>(),
     })
+}
+
+/// How many rows share each key, in key order.
+fn tally<'a, K: Ord>(
+    pending: &'a [SeenContact],
+    key: impl Fn(&'a SeenContact) -> K,
+) -> std::collections::BTreeMap<K, u64> {
+    let mut counts = std::collections::BTreeMap::new();
+    for seen in pending {
+        *counts.entry(key(seen)).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// This deployment projects no inbound stream: a `503` that names the
@@ -322,9 +367,13 @@ mod tests {
     use super::*;
 
     fn seen(contact: &str, network: Network, at: &str) -> SeenContact {
+        seen_on(contact, network.as_str(), network, at)
+    }
+
+    fn seen_on(contact: &str, connection: &str, network: Network, at: &str) -> SeenContact {
         SeenContact {
             contact: contact.to_owned(),
-            connection: network.as_str().to_owned(),
+            connection: connection.to_owned(),
             network,
             first_seen: at.to_owned(),
             last_seen: at.to_owned(),
@@ -360,9 +409,17 @@ mod tests {
             ]),
             "the counts are in the contract's own order of network values"
         );
+        assert_eq!(
+            whole["connections"],
+            json!([
+                { "connection": "signal", "network": "signal", "count": 1 },
+                { "connection": "whatsapp", "network": "whatsapp", "count": 2 }
+            ]),
+            "and per connection, the same numbers on the reference shape"
+        );
         assert_eq!(whole["contacts"].as_array().map(Vec::len), Some(3));
 
-        let filtered = pending_document(&pending, Some(Network::Signal));
+        let filtered = pending_document(&pending, Some(&Filter::Network(Network::Signal)));
         assert_eq!(
             filtered["total"],
             json!(3),
@@ -374,10 +431,55 @@ mod tests {
     }
 
     #[test]
+    fn two_connections_of_one_network_are_counted_and_filtered_apart() {
+        // The shape the perimeter exists for (#272): a contact waiting on
+        // the work account is not waiting on the home one, and the
+        // dashboard's per-connection numbers say so while the per-network
+        // number still adds them up.
+        let pending = vec![
+            seen_on(
+                "@a:example.com",
+                "wa-home",
+                Network::Whatsapp,
+                "2026-09-17T10:00:00.000Z",
+            ),
+            seen_on(
+                "@a:example.com",
+                "wa-work",
+                Network::Whatsapp,
+                "2026-09-17T10:01:00.000Z",
+            ),
+            seen_on(
+                "@b:example.com",
+                "wa-work",
+                Network::Whatsapp,
+                "2026-09-17T10:02:00.000Z",
+            ),
+        ];
+        let whole = pending_document(&pending, None);
+        assert_eq!(
+            whole["connections"],
+            json!([
+                { "connection": "wa-home", "network": "whatsapp", "count": 1 },
+                { "connection": "wa-work", "network": "whatsapp", "count": 2 }
+            ])
+        );
+        assert_eq!(
+            whole["networks"],
+            json!([{ "network": "whatsapp", "count": 3 }])
+        );
+        let work = pending_document(&pending, Some(&Filter::Connection("wa-work".to_owned())));
+        assert_eq!(work["contacts"].as_array().map(Vec::len), Some(2));
+        assert_eq!(work["total"], json!(3), "the total is the whole list");
+        let whatsapp = pending_document(&pending, Some(&Filter::Network(Network::Whatsapp)));
+        assert_eq!(whatsapp["contacts"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[test]
     fn an_empty_list_is_a_document_and_not_an_absence() {
         assert_eq!(
             pending_document(&[], None),
-            json!({ "total": 0, "networks": [], "contacts": [] })
+            json!({ "total": 0, "connections": [], "networks": [], "contacts": [] })
         );
     }
 
@@ -395,7 +497,13 @@ mod tests {
         let members: Vec<&String> = entry.as_object().expect("an object").keys().collect();
         assert_eq!(
             members,
-            vec!["connection", "contact", "first_seen", "last_seen", "network"],
+            vec![
+                "connection",
+                "contact",
+                "first_seen",
+                "last_seen",
+                "network"
+            ],
             "a body, a display name or a network identifier must never be one of these"
         );
     }
