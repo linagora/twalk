@@ -242,10 +242,27 @@ test('a running runtime is said as such, and the empty approval queue says why i
 		/not deployed|n’est pas encore déployé/
 	);
 
-	// The approval queue is empty on this stack, and the previous journeys
-	// left the assistant *paused*: with a runtime here, that is "nothing
-	// activated" — one of three sentences, and not the one that says no
-	// runtime exists.
+	// The approval queue is empty — arranged rather than assumed: the
+	// listing is a projection of the shared bus, and a suggestion another run
+	// published stays listed for as long as the stream keeps it, so a test
+	// that waited for the real list to be empty was green on a fresh stack and
+	// red on every stack after it (#148, the same shape as #211). What is
+	// under test is the sentence, and the sentence needs an empty list.
+	await page.route('**/api/suggestions', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				suggestions: [],
+				window: { from_sequence: 1, to_sequence: 1, sequences: 1, reached_start_of_stream: true },
+				truncated: false,
+				unreadable: 0
+			})
+		})
+	);
+	// The previous journeys left the assistant *paused*: with a runtime here,
+	// that is "nothing activated" — one of three sentences, and not the one
+	// that says no runtime exists.
 	await page.goto('/approvals');
 	const empty = page.getByTestId('approvals-empty');
 	await expect(empty).toBeVisible();
@@ -256,7 +273,20 @@ test('a running runtime is said as such, and the empty approval queue says why i
 test('without a runtime, the empty approval queue says that and not "nothing activated"', async ({
 	page
 }) => {
-	// The real read, on a stack that runs no runtime.
+	// The real runtime read, on a stack that runs no runtime; the list arranged
+	// empty for the reason given above.
+	await page.route('**/api/suggestions', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				suggestions: [],
+				window: { from_sequence: 1, to_sequence: 1, sequences: 1, reached_start_of_stream: true },
+				truncated: false,
+				unreadable: 0
+			})
+		})
+	);
 	await page.goto('/approvals');
 	const empty = page.getByTestId('approvals-empty');
 	await expect(empty).toBeVisible();
