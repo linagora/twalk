@@ -1552,6 +1552,17 @@ export interface components {
             /** @description The persona that proposed the reply. */
             persona_id: string;
             /**
+             * @description The Sensor's own report of what the reply reached once it posted
+             *     it, or `null` while there is none (issue #216). Present on
+             *     `GET /api/approvals/{id}` and on a suggestion's `approval`; never
+             *     on the `POST` answer, because at that moment the reply has been
+             *     published and not yet posted — which is the whole distinction:
+             *     `publication` says the reply reached the bus, `posted` says what
+             *     it reached from there. A client must never render one as the
+             *     other.
+             */
+            posted?: null | components["schemas"]["PostedReport"];
+            /**
              * @description Whether the reply reached the bus. Both values are terminal and
              *     neither is "in flight": an approval is published inside its own
              *     request or it is refused, so `unpublished` means a crash between
@@ -2164,6 +2175,41 @@ export interface components {
             user_id: string;
         };
         /**
+         * @description Whether an approved reply could reach the contact, as far as this
+         *     Gateway can tell **before** it is sent (issue #216). Read from the
+         *     room the trigger arrived in — its *envelope*, never its body — and
+         *     from where the owner's own account stands in that room, asked of the
+         *     homeserver as the bridge's bot.
+         *
+         *     Three answers, and the third is honest rather than optimistic.
+         *     `cannot_reach` is a certainty: the room is a portal of a configured
+         *     bridge and the owner's account is not joined to it, so nothing posted
+         *     there is relayed, whatever else is true — the mechanism that changes
+         *     it is #123 (a device of the owner's account, joined on the bridge
+         *     bot's invitation). `can_reach` is the register's best reading: the
+         *     owner is joined, which is what a bridge relays from. `unknown` is a
+         *     room no bridge bot of this deployment can read — native Matrix
+         *     (ADR 0009), which reaches its reader with no bridge in the way, or a
+         *     portal of a bridge with no token — and the Sensor's own report
+         *     (`posted`) is the answer there, after the fact.
+         */
+        Delivery: {
+            /**
+             * @description The one word behind the answer. `owner_invited` is the common
+             *     `cannot_reach`: the bridge invited the owner into the
+             *     conversation and no device of theirs has accepted — every portal,
+             *     on a deployment with no owner device configured; that room, on one
+             *     whose device could not join it (#237). `trigger_out_of_reach` is
+             *     the message this suggestion answers lying beyond the read window,
+             *     so its room could not be read; `lookup_failed` is the bus not
+             *     answering that second read.
+             * @enum {string}
+             */
+            detail: "owner_joined" | "owner_invited" | "owner_absent" | "not_a_known_portal" | "portal_unreadable" | "no_portal_register" | "no_owner_configured" | "trigger_out_of_reach" | "lookup_failed";
+            /** @enum {string} */
+            reach: "can_reach" | "cannot_reach" | "unknown";
+        };
+        /**
          * @description One device in the list. Dates are seconds since the epoch: the
          *     Gateway carries no date library, and a client renders local time
          *     from a number as readily as from a string.
@@ -2687,6 +2733,20 @@ export interface components {
              */
             observation: "observing" | "invited" | "absent" | "moved";
             /**
+             * @description Where the **owner's own account** stands in this room — the fact
+             *     that decides whether an approved reply into this conversation can
+             *     be delivered at all (issue #216, ADR 0025). A bridge relays only
+             *     what the logged-in user's own account sends, so `join` is what a
+             *     reply needs; `invite` is the bridge having asked and no device of
+             *     the owner's having accepted — every portal on a deployment with
+             *     no owner device (#123), or a room that device could not join
+             *     (#237); `absent` is not in the room and not asked. `null` when
+             *     this register was built with no owner to ask about, or for a
+             *     successor it could not read.
+             * @enum {string|null}
+             */
+            owner_membership: "join" | "invite" | "absent" | null;
+            /**
              * @description The portal room on this deployment's homeserver — the room that
              *     is **alive**. A room replaced by another (`m.room.tombstone`) is
              *     never a row: its conversation appears once, at the successor,
@@ -2859,6 +2919,32 @@ export interface components {
              *     `bridges`.
              */
             total: number;
+        };
+        /**
+         * @description What the Sensor said one approved reply reached, once it posted it
+         *     (issue #216, ADR 0025). The Sensor republishes the approval unchanged
+         *     on `twalk.persona.reply.approved.v1.posted` with two headers, and this
+         *     is those headers. Published on the good case as well as the bad one:
+         *     a report that existed only when something failed would make success a
+         *     silence.
+         */
+        PostedReport: {
+            /** @description The Matrix ID the reply was posted by. */
+            posted_as: string;
+            /**
+             * @description `contact` — the reply was posted by a device of the owner's own
+             *     account into a room the owner is a joined member of, which is what
+             *     a bridge relays; or the room is native Matrix (ADR 0009) with no
+             *     bridge in the way.
+             *     `nobody` — the reply was posted as `@sensor:` into a portal room.
+             *     Synapse accepted it and the bridge ignored it, because a bridge
+             *     relays only the logged-in user's own account (#123): the message
+             *     exists in a room the contact cannot see.
+             * @enum {string}
+             */
+            reach: "contact" | "nobody";
+            /** @description Where on the bus the report landed. */
+            stream_sequence: number;
         };
         /** @description A decision as the journal holds it. */
         RecordedConsentDecision: {
@@ -3072,6 +3158,7 @@ export interface components {
              * @enum {string}
              */
             consent: "granted" | "pending" | "revoked";
+            delivery: components["schemas"]["Delivery"];
             /**
              * @description The CloudEvents id of the `persona.suggest.produced.v1`. This is
              *     what `POST /api/approvals` takes as `suggestion_event_id`.
@@ -3091,6 +3178,14 @@ export interface components {
             network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
             /** @description The persona that proposed it. */
             persona_id: string;
+            /**
+             * @description The Sensor's report of what the approved reply reached, once it
+             *     posted it, or `null` while there is none — before the approval,
+             *     while the Sensor has not posted it yet, or when the report lies
+             *     beyond the read window. Never the same fact as
+             *     `approval.publication` (#216).
+             */
+            posted: null | components["schemas"]["PostedReport"];
             /**
              * Format: date-time
              * @description When the persona produced the suggestion.

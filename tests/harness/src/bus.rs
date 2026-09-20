@@ -100,6 +100,38 @@ impl Bus {
         Ok(())
     }
 
+    /// Publishes a CloudEvent with headers of the caller's own — the shape of
+    /// the Sensor's report of a posted reply (`reach`, `posted-as` on
+    /// `…reply.approved.v1.posted`), for a suite that runs no Sensor and plays
+    /// its part. `Nats-Msg-Id` is `<id>:<suffix>`, as the Sensor sets it
+    /// (`outbound::posted_msg_id`): the report carries the approval's own
+    /// `id`, and under that id alone the bus would deduplicate it against the
+    /// approval and drop it.
+    pub async fn publish_event_with_headers(
+        &self,
+        subject: &str,
+        msg_id_suffix: &str,
+        mut headers: async_nats::HeaderMap,
+        event: &Value,
+    ) -> Result<()> {
+        let id = event["id"].as_str().context("the event has no string id")?;
+        headers.insert(
+            async_nats::header::NATS_MESSAGE_ID,
+            format!("{id}:{msg_id_suffix}").as_str(),
+        );
+        let ack = self
+            .jetstream
+            .publish_with_headers(
+                subject.to_owned(),
+                headers,
+                serde_json::to_vec(event)?.into(),
+            )
+            .await
+            .context("publish failed")?;
+        ack.await.context("publish ack failed")?;
+        Ok(())
+    }
+
     /// Fetches the most recent message stored on a subject, if any.
     pub async fn last_message(&self, stream: &str, subject: &str) -> Result<Option<Value>> {
         use async_nats::jetstream::stream::LastRawMessageErrorKind;

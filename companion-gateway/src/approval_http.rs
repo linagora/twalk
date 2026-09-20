@@ -125,7 +125,11 @@ async fn approve(
 /// `GET /api/approvals/{suggestion_event_id}` — what became of one approval.
 ///
 /// `200` with the record, `404 approval_not_found` when this suggestion was
-/// never approved. The record's `publication` is `published` or
+/// never approved. The record carries `posted` as well: the Sensor's report
+/// of what the reply reached once posted (`contact` or `nobody`, and by which
+/// account), or `null` while there is none — published on the bus and
+/// delivered to the contact are two facts (#216). The record's
+/// `publication` is `published` or
 /// `unpublished`, and never anything a screen should render as a spinner:
 /// an approval is published inside its own request or it is refused, so
 /// `unpublished` means a crash happened between the Gateway's write and the
@@ -147,7 +151,19 @@ async fn approval_of_suggestion(
         );
     }
     match approvals.recorded(&suggestion_event_id) {
-        Ok(Some(recorded)) => Json(recorded_json(&recorded)).into_response(),
+        Ok(Some(recorded)) => {
+            // "Did my reply go out?" has two answers and this is the one
+            // place a client asks it after the fact: published on the bus,
+            // which the record says, and delivered to the contact, which
+            // only the Sensor's own report can say (#216).
+            let posted = approvals.posted(&recorded).await;
+            let mut rendered = recorded_json(&recorded);
+            rendered["posted"] = posted
+                .as_ref()
+                .map(crate::suggestions_http::posted_json)
+                .unwrap_or(Value::Null);
+            Json(rendered).into_response()
+        }
         Ok(None) => api_error(
             StatusCode::NOT_FOUND,
             "approval_not_found",
