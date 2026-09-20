@@ -553,6 +553,7 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
         &report.posted_as,
         &report.approval_id,
         &report.time,
+        false,
     );
     let published = clerk
         .relay

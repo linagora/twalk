@@ -64,6 +64,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 serde_json = "1"
+# Reading `companion-gateway/openapi.yaml` in the test that holds the
+# clerk's refusal table to the Gateway's own description (#284) — the same
+# walk the Companion's `refusal.test.ts` makes. Test-only, and the same
+# maintained fork of serde_yaml the Gateway's own conformance test uses.
+serde_yaml_ng = "0.10"
 tokio = { version = "1", features = ["full"] }
 # The test harness signs its own NIP-98 requests against the real Buzz relay
 # it brings up, the same way the clerk does.
