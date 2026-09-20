@@ -38,6 +38,26 @@
 //!   `build_reaction` and `build_forum_comment` ([`reaction`],
 //!   [`thread_reply`]) — and the same signed event a second time is a
 //!   duplicate, not a second event ([`RelayStack::submit_again_as`]).
+//!
+//! **The stack persists across runs**, like the shared Synapse and NATS, so
+//! that a run pays for `up -d --wait` once — and so that a wound it takes
+//! outlives the run that inflicted it. That is how #300's review found the
+//! suite's one "flake": after eight hours of runs, Postgres's data on tmpfs
+//! (charged to its own cgroup) had grown to its 256 MB limit, the kernel
+//! killed a backend mid-request, and the relay answered the seed's
+//! `POST /events` of the test that happened to be starting with
+//! `400 invalid: database error` — a refusal, which the client below
+//! rightly does not retry, so the test failed at `seed()` as though the
+//! code were wrong. The data is on disk now (`compose.relay.yaml`), and
+//! [`RelayStack::ensure`] refuses to adopt a Postgres or relay container
+//! that reports `OOMKilled` or is restarting — or a relay older than its
+//! database, which is what `docker compose up` leaves behind when the
+//! Postgres service's configuration changes and only that container is
+//! recreated: the community the relay seeded at boot is gone with the old
+//! volume, and every write is `404 no community is configured for this
+//! host`. It recreates the whole stack once, saying why, and fails naming
+//! the container if that did not help. A wounded stack is never discovered
+//! as an assertion.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -163,25 +183,38 @@ async fn ensure_relay() -> Result<()> {
 }
 
 async fn do_ensure_relay() -> Result<()> {
-    let status = Command::new("docker")
-        .args([
-            "compose",
-            "-p",
-            &stack_id(),
-            "-f",
-            &compose_file(),
-            "up",
-            "-d",
-            "--wait",
-        ])
-        .env("TWALK_CLERK_TEST_STACK", stack_id())
-        .env("TWALK_CLERK_TEST_RELAY_PORT", relay_port().to_string())
-        .stdout(Stdio::null())
-        .status()
+    compose(&["up", "-d", "--wait"])
         .await
-        .context("failed to run docker compose up for the relay")?;
-    if !status.success() {
-        bail!("docker compose up for the relay failed with {status}");
+        .context("docker compose up for the relay")?;
+    // The stack persists across runs, so a wound it took in an earlier run
+    // — a Postgres backend the kernel killed at the memory ceiling, a
+    // container in a restart loop — would be inherited here and surface
+    // as an assertion in whichever test happens to be seeding when the
+    // backend goes into recovery (the relay answers that second with
+    // `400 invalid: database error`, which nothing rightly retries). So a
+    // wounded container is recreated once, saying why, and if it is still
+    // wounded afterwards this fails naming it — never a test.
+    if let Some(wound) = wounded_container().await? {
+        eprintln!(
+            "the relay stack {} is wounded ({wound}); recreating it before any test runs",
+            stack_id()
+        );
+        compose(&["down", "-v"])
+            .await
+            .context("docker compose down for the wounded relay stack")?;
+        compose(&["up", "-d", "--wait"])
+            .await
+            .context("docker compose up for the recreated relay stack")?;
+        if let Some(wound) = wounded_container().await? {
+            bail!(
+                "the relay stack {} came up wounded again after being recreated ({wound}). \
+                 This is the harness's stack and not the code under test: a test run now \
+                 would fail on a relay whose database is in recovery. Look at \
+                 `docker logs` of that container and at clerk/tests/compose.relay.yaml's \
+                 memory limits.",
+                stack_id()
+            );
+        }
     }
     // Healthy is the health listener answering; the public listener is
     // what the tests speak to, so wait for its NIP-11 document.
@@ -202,6 +235,138 @@ async fn do_ensure_relay() -> Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// One `docker compose` command on the relay stack, with its project,
+/// file and the variables the file reads.
+async fn compose(args: &[&str]) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["compose", "-p", &stack_id(), "-f", &compose_file()])
+        .args(args)
+        .env("TWALK_CLERK_TEST_STACK", stack_id())
+        .env("TWALK_CLERK_TEST_RELAY_PORT", relay_port().to_string())
+        .stdout(Stdio::null())
+        .status()
+        .await
+        .with_context(|| format!("failed to run docker compose {}", args.join(" ")))?;
+    if !status.success() {
+        bail!("docker compose {} failed with {status}", args.join(" "));
+    }
+    Ok(())
+}
+
+/// The services whose health a run depends on and whose wounds persist:
+/// Redis holds nothing across a request, so it is not asked.
+const GUARDED_SERVICES: [&str; 2] = ["postgres", "relay"];
+
+/// One guarded container as `docker inspect` describes it.
+struct Inspected {
+    name: String,
+    /// `Created`, RFC 3339 with nanoseconds: lexically ordered.
+    created: String,
+    status: String,
+    oom_killed: bool,
+    restarting: bool,
+}
+
+async fn inspect(service: &str) -> Result<Option<Inspected>> {
+    let id = Command::new("docker")
+        .args([
+            "compose",
+            "-p",
+            &stack_id(),
+            "-f",
+            &compose_file(),
+            "ps",
+            "-q",
+            service,
+        ])
+        .env("TWALK_CLERK_TEST_STACK", stack_id())
+        .env("TWALK_CLERK_TEST_RELAY_PORT", relay_port().to_string())
+        .output()
+        .await
+        .with_context(|| format!("docker compose ps -q {service}"))?;
+    let id = String::from_utf8_lossy(&id.stdout).trim().to_owned();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    let inspected = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{.Name}} {{.Created}} {{.State.Status}} {{.State.OOMKilled}} {{.State.Restarting}}",
+            &id,
+        ])
+        .output()
+        .await
+        .with_context(|| format!("docker inspect {id}"))?;
+    let line = String::from_utf8_lossy(&inspected.stdout).trim().to_owned();
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let [name, created, status, oom, restarting] = fields.as_slice() else {
+        bail!("docker inspect {id} answered {line:?}, not five fields");
+    };
+    Ok(Some(Inspected {
+        name: name.trim_start_matches('/').to_owned(),
+        created: (*created).to_owned(),
+        status: (*status).to_owned(),
+        oom_killed: *oom == "true",
+        restarting: *restarting == "true",
+    }))
+}
+
+/// The first reason the running stack must not be adopted, as
+/// "`<container>`: `<why>`", or `None` when it is sound. A guarded
+/// container is wounded when its `State.OOMKilled` is set (on cgroup v2 a
+/// killed child leaves the container up, so `--wait` is satisfied by a
+/// database in recovery), when it is restarting, or when it is not
+/// running. And the relay is wounded when it is **older than its
+/// database**: `docker compose up` recreates a container whose
+/// configuration changed and leaves an unchanged dependent running, so a
+/// change to the Postgres service hands the old relay an empty database —
+/// the community it seeded at boot is gone, and every write is answered
+/// `404 no community is configured for this host`.
+async fn wounded_container() -> Result<Option<String>> {
+    let mut seen = Vec::new();
+    for service in GUARDED_SERVICES {
+        let Some(container) = inspect(service).await? else {
+            return Ok(Some(format!("{service}: no container")));
+        };
+        let why = if container.oom_killed {
+            Some("the kernel killed a process in it at its memory limit (OOMKilled)")
+        } else if container.restarting {
+            Some("it is restarting")
+        } else if container.status != "running" {
+            Some("it is not running")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return Ok(Some(format!(
+                "{}: {why} (status {}, created {})",
+                container.name, container.status, container.created
+            )));
+        }
+        seen.push((service, container));
+    }
+    let created = |service: &str| {
+        seen.iter()
+            .find(|(s, _)| *s == service)
+            .map(|(_, c)| c.created.as_str())
+            .unwrap_or("")
+    };
+    if created("relay") < created("postgres") {
+        return Ok(Some(format!(
+            "{}: it predates its database (relay created {}, postgres created {}), so the \
+             community it seeded at boot is gone",
+            seen.iter()
+                .find(|(s, _)| *s == "relay")
+                .map(|(_, c)| c.name.as_str())
+                .unwrap_or("relay"),
+            created("relay"),
+            created("postgres")
+        )));
+    }
+    Ok(None)
 }
 
 /// The real Buzz relay, spoken to as its owner.

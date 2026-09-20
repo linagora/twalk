@@ -1,5 +1,5 @@
 //! An approved reply to a mail, sent from the owner's own mailbox (issue
-//! #278, ADR 0037): the pure half — which approvals on the bus are this
+//! #278, ADR 0038): the pure half — which approvals on the bus are this
 //! collector's, the reply as a JMAP `Email/set` creation and its
 //! `EmailSubmission/set`, the subjects and ids of the retry policy the
 //! Sensor already has (`sensor/src/outbound.rs`, copied: the two binaries
@@ -98,6 +98,10 @@ pub struct ApprovedReply {
     pub connection: String,
     /// The Message-ID of the mail answered, angle brackets kept.
     pub in_reply_to: String,
+    /// The one address the reply goes to — the trigger's sender, whose
+    /// consent the approval checked — as the contract carries it
+    /// (`mailto:…`). The original found by Message-ID must be from it.
+    pub recipient: String,
     pub body: String,
     pub format: String,
     pub traceparent: Option<String>,
@@ -109,6 +113,7 @@ impl std::fmt::Debug for ApprovedReply {
             .field("event_id", &self.event_id)
             .field("connection", &self.connection)
             .field("in_reply_to", &self.in_reply_to)
+            .field("recipient", &self.recipient)
             .field("body", &"<redacted>")
             .finish()
     }
@@ -151,6 +156,12 @@ impl ApprovedReply {
                 .and_then(Value::as_str)
                 .context("the approval's mail target names no in_reply_to")?
                 .to_owned(),
+            recipient: target
+                .get("recipient")
+                .and_then(Value::as_str)
+                .filter(|recipient| recipient.starts_with("mailto:"))
+                .context("the approval's mail target names no mailto: recipient")?
+                .to_owned(),
             body: data
                 .pointer("/final/body")
                 .and_then(Value::as_str)
@@ -185,7 +196,9 @@ pub struct Sender {
 /// mail in Drafts under the creation id `#reply`, and `EmailSubmission/set`
 /// submitting it from the owner's identity, moving it to Sent and clearing
 /// `$draft` on success (RFC 8621 §7.5). `original` is the mail answered,
-/// as the collector read it back by Message-ID.
+/// as the collector read it back by Message-ID — for the thread and the
+/// subject only: the address is the approval's `recipient`, and the caller
+/// has already refused an original that is not from it.
 pub fn reply_calls(
     reply: &ApprovedReply,
     original: &Mail,
@@ -224,7 +237,7 @@ pub fn reply_calls(
         "mailboxIds": { drafts_id: true },
         "keywords": { "$draft": true, "$seen": true },
         "from": [{ "name": null, "email": owner_email }],
-        "to": [{ "name": original.from.name, "email": original.from.email }],
+        "to": [{ "name": original.from.name, "email": recipient_address(&reply.recipient) }],
         "subject": subject,
         "inReplyTo": [bare(&reply.in_reply_to)],
         "references": references.iter().map(|id| bare(id)).collect::<Vec<_>>(),
@@ -247,7 +260,7 @@ pub fn reply_calls(
                         "identityId": identity_id,
                         "envelope": {
                             "mailFrom": { "email": owner_email },
-                            "rcptTo": [{ "email": original.from.email }]
+                            "rcptTo": [{ "email": recipient_address(&reply.recipient) }]
                         }
                     }
                 },
@@ -265,6 +278,33 @@ pub fn reply_calls(
 
 /// `Email/query` for the reply already sent for an approval: the mail in
 /// the mailbox carrying its id in `X-Twalk-Approval`, if any.
+/// The address inside a `mailto:` recipient, lower-cased as the producer
+/// lower-cases a sender's.
+pub fn recipient_address(recipient: &str) -> String {
+    recipient
+        .strip_prefix("mailto:")
+        .unwrap_or(recipient)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Whether the mail found by Message-ID is from the approval's recipient —
+/// the check that makes the Message-ID a thread key and not an address.
+/// `Err` is the sentence a dead letter carries, naming neither body.
+pub fn original_is_from_recipient(reply: &ApprovedReply, original: &Mail) -> Result<(), String> {
+    let expected = recipient_address(&reply.recipient);
+    if original.from.email.trim().eq_ignore_ascii_case(&expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the mail found under {} is from {}, not from {expected}, the sender the approval \
+             is about: not sent, because a Message-ID is the sender's to choose and the \
+             owner's words must not go to whoever reused one",
+            reply.in_reply_to, original.from.email
+        ))
+    }
+}
+
 pub fn reply_already_sent(account_id: &str, event_id: &str) -> (&'static str, Value) {
     (
         "Email/query",
@@ -316,6 +356,37 @@ impl std::error::Error for SendError {}
 mod tests {
     use super::*;
     use crate::jmap::{Attachment, Person};
+
+    #[test]
+    fn the_original_must_be_from_the_recipient_the_approval_names() {
+        let reply = match ApprovedReply::parse(&approval(), &["mail-linagora".to_owned()]).unwrap()
+        {
+            Parsed::Ours(reply) => reply,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(reply.recipient, "mailto:alice@example.org");
+        assert!(original_is_from_recipient(&reply, &original()).is_ok());
+        let mut stranger = original();
+        stranger.from = Person {
+            name: Some("Mallory".to_owned()),
+            email: "mallory@example.net".to_owned(),
+        };
+        let refused = original_is_from_recipient(&reply, &stranger).unwrap_err();
+        assert!(refused.contains("mallory@example.net"), "{refused}");
+        assert!(refused.contains("alice@example.org"), "{refused}");
+        // Case is not identity's: an address the producer lower-cased still
+        // matches one the server spells with capitals.
+        let mut capitals = original();
+        capitals.from.email = "Alice@Example.org".to_owned();
+        assert!(original_is_from_recipient(&reply, &capitals).is_ok());
+        // And an approval with no recipient is not one this collector sends.
+        let mut unaddressed = approval();
+        unaddressed["data"]["target"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recipient");
+        assert!(ApprovedReply::parse(&unaddressed, &["mail-linagora".to_owned()]).is_err());
+    }
 
     fn approval() -> Value {
         serde_json::from_str(include_str!(

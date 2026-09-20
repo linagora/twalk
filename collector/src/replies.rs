@@ -290,7 +290,7 @@ async fn dead_letter(
 /// The reach report (#216): the approval republished unchanged on
 /// `<subject>.posted`, `reach=contact` and `posted-as` the owner's own
 /// address — a mail from the owner's mailbox reaches the recipient by
-/// construction, which is the whole point of ADR 0037.
+/// construction, which is the whole point of ADR 0038.
 async fn report_posted(
     jetstream: &async_nats::jetstream::Context,
     message: &async_nats::jetstream::Message,

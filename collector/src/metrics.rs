@@ -10,7 +10,7 @@ use std::sync::Mutex;
 pub struct Metrics {
     /// Events published to the bus (publish acked), by contract event type.
     events_published: Mutex<BTreeMap<String, u64>>,
-    /// Renewals of the grant, by outcome: `renewed`, `reconnect_required`,
+    /// Renewals of the grant, by outcome: `renewed`, `reconnect_required`, `pending_operator`,
     /// `unreachable`. A flat zero on a running collector means the access
     /// token has never had to be renewed yet, not that renewal works.
     renewals: Mutex<BTreeMap<&'static str, u64>>,
@@ -132,7 +132,12 @@ impl Metrics {
             .renewals
             .lock()
             .expect("the metrics mutex is never poisoned");
-        for outcome in ["renewed", "reconnect_required", "unreachable"] {
+        for outcome in [
+            "renewed",
+            "reconnect_required",
+            "pending_operator",
+            "unreachable",
+        ] {
             out.push_str(&format!(
                 "twalk_collector_grant_renewals_total{{outcome=\"{outcome}\"}} {}\n",
                 renewals.get(outcome).copied().unwrap_or(0)
@@ -197,7 +202,12 @@ mod tests {
     fn every_renewal_outcome_exists_at_zero_and_a_connection_is_in_exactly_one_state() {
         let metrics = Metrics::new();
         let body = metrics.render(1_000);
-        for outcome in ["renewed", "reconnect_required", "unreachable"] {
+        for outcome in [
+            "renewed",
+            "reconnect_required",
+            "pending_operator",
+            "unreachable",
+        ] {
             assert!(body.contains(&format!(
                 "twalk_collector_grant_renewals_total{{outcome=\"{outcome}\"}} 0\n"
             )));

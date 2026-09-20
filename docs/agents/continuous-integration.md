@@ -53,8 +53,8 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 | `gateway` | required | **163 s**, 125 tests | +3.0 GB target | 184 MB | warm stack |
 | `hermes` | required | **132 s** | +2.0 GB target | 87 MB | warm stack |
 | `clerk` | required | **not measured yet** (#265) | — | — | warm stack plus a Buzz relay, Postgres and Redis of its own; measure it before trusting the "full required run" figure below |
-| `collector` | required | 27 unit + 4 + 3 tests, 0.5 s warm after the build (measured 2026-09-20); the build shares nothing with the other crates' targets | +1.6 GB target | — | no Docker: the fake SSO, side service and JMAP server run in-process |
-| `collector-stack` | required | **72 s**, 14 tests — 13.0 s `calendar`, 10.6 s `mail`, 26.3 s `push`, 11.1 s `reply`, 10.1 s `status` (measured 2026-09-20; ~180 s before #280 taught the tests to read from the bus head noted at their start) | — | — | warm stack; the process boundary against the bus, every poll at 1 s — except `push` (#277), which polls at 12 s to prove a delivery arrives inside the interval and waits one interval out with the socket cut |
+| `collector` | required | 28 unit + 5 + 3 tests, 0.5 s warm after the build (measured 2026-09-20); the build shares nothing with the other crates' targets | +1.6 GB target | — | no Docker: the fake SSO, side service and JMAP server run in-process |
+| `collector-stack` | required | **69 s**, 15 tests — 12.8 s `calendar`, 10.3 s `mail`, 25.2 s `push`, 10.5 s `reply`, 9.8 s `status` (measured 2026-09-20; ~180 s before #280 taught the tests to read from the bus head noted at their start) | — | — | warm stack; the process boundary against the bus, every poll at 1 s — except `push` (#277), which polls at 12 s to prove a delivery arrives inside the interval and waits one interval out with the socket cut |
 | `sensor-deployment` | advisory | 61 s, 3 tests | small | 634 MB | **warm images** |
 | `gateway-deployment` | advisory | 56 s, 4 tests | small | 305 MB | **warm images** |
 | `hermes-full-loop` | advisory | 39 s | small | 153 MB | **warm images**; +10 containers |

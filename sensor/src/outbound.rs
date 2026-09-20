@@ -290,7 +290,11 @@ mod tests {
         // A mail target (#278) is not malformed: it is the collector's, and
         // the Sensor leaves it alone.
         let mut mail = sample_event();
-        mail["data"]["target"] = json!({ "connection": "mail-linagora", "in_reply_to": "<a@b>" });
+        mail["data"]["target"] = json!({
+            "connection": "mail-linagora",
+            "in_reply_to": "<a@b>",
+            "recipient": "mailto:a@b"
+        });
         assert_eq!(
             ApprovedReply::parse(&mail).unwrap(),
             Parsed::AnotherComponents {
