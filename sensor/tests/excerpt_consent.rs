@@ -97,7 +97,6 @@ fn consent_change(
     event["data"]["subject"] = json!({ "type": "contact", "id": subject_id });
     event["data"]["old_state"] = json!(old_state);
     event["data"]["new_state"] = json!(new_state);
-    event["data"]["scope"]["connections"] = json!([network]);
     event["data"]["scope"]["networks"] = json!([network]);
     event["data"]["occurred_at"] = json!(now);
     validate_against_contract(&event, "consent.state.changed")?;

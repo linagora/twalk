@@ -1061,7 +1061,21 @@ async fn main() -> Result<()> {
                 }
                 // The connection is the source room's (ADR 0033): presence is
                 // not room-scoped, and the room chosen above is the one whose
-                // perimeter this event is attributed to.
+                // perimeter this event is attributed to. With two
+                // connections of one network holding the same subject, that
+                // is the first shared room's connection, in room-id order —
+                // the tie ADR 0027 lets an ordering break — and the consent
+                // label is that perimeter's. A subject present through two
+                // accounts is one presence event under one of them, not
+                // two; a consumer that needs the other perimeter's answer
+                // reads it off the messages, which are room-scoped. With two
+                // connections of one network holding the same subject, that
+                // is the first shared room's connection, in room-id order —
+                // the tie ADR 0027 lets an ordering break — and the consent
+                // label is that perimeter's. A subject present through two
+                // accounts is one presence event under one of them, not
+                // two; a consumer that needs the other perimeter's answer
+                // reads it off the messages, which are room-scoped.
                 let Some(connection) =
                     connection_of(&room, network, &registry, &unresolved_rooms, &metrics).await
                 else {
@@ -2635,18 +2649,24 @@ fn apply_consent_snapshot(
         );
     }
     metrics.record_consent_snapshot(snapshot.entries.len());
-    let mut refused = 0;
+    // Each refusal counted, and each reason said once with its number: a
+    // persona entry is not a refusal and gets no line.
+    let mut refused: Vec<(consent::Unusable, usize)> = Vec::new();
     for why in &snapshot.unusable {
-        if metrics.record_consent_unusable(*why) > 0 {
-            refused += 1;
+        if metrics.record_consent_refused(*why).is_some() {
+            match refused.iter_mut().find(|(known, _)| known == why) {
+                Some((_, count)) => *count += 1,
+                None => refused.push((*why, 1)),
+            }
         }
     }
-    if refused > 0 {
+    for (why, count) in &refused {
         warn!(
-            refused,
-            "the consent snapshot holds entries this Sensor could not apply — an entry that \
-             names no connection is a Gateway older than #270, and its subjects stay pending \
-             here rather than labelled by a guessed perimeter (#271)"
+            reason = ?why,
+            count,
+            "the consent snapshot holds entries this Sensor refused: {}; their subjects stay \
+             pending here rather than labelled by a guessed perimeter (#271)",
+            why.explained()
         );
     }
     info!(
@@ -2811,19 +2831,19 @@ async fn run_consent_consumer(
                 // malformed, is counted and said (#271): the decision it
                 // carries is one this Sensor will not guess the perimeter
                 // of, and its sender stays labelled as before.
-                Err(consent::Unusable::NotAboutASender) => {}
                 Err(why) => {
-                    let total = metrics.record_consent_unusable(why);
-                    warn!(
-                        id = event
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("<none>"),
-                        reason = why.as_str(),
-                        total,
-                        "unusable consent.state.changed event, skipping: a decision scoped by \
-                         network alone is not read as its network's connection"
-                    );
+                    if let Some(total) = metrics.record_consent_refused(why) {
+                        warn!(
+                            id = event
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("<none>"),
+                            reason = ?why,
+                            total,
+                            "refused a consent.state.changed event: {}",
+                            why.explained()
+                        );
+                    }
                 }
             },
             Err(error) => {

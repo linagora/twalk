@@ -1,5 +1,5 @@
-//! Consent: the data-processing agreement state of a contact or of a whole
-//! network (CONTEXT.md). The Companion Gateway is the single writer of
+//! Consent: the data-processing agreement state of a contact, or of a whole
+//! connection (CONTEXT.md, ADR 0033). The Companion Gateway is the single writer of
 //! consent state (ADR 0006); the Sensor only labels events with the current
 //! state, held in an in-memory cache.
 //!
@@ -89,9 +89,33 @@ impl Consent {
 pub enum ConsentSubject {
     /// One contact, by Matrix user ID.
     Contact(String),
-    /// The network's own default, which applies to every contact on it that
-    /// has no decision of its own.
+    /// A connection's own default — the contract's `network` subject type,
+    /// scoped to a connection since #270 — which applies to every contact on
+    /// that connection that has no decision of its own.
     NetworkDefault,
+}
+
+impl ConsentSubject {
+    /// The subject of a snapshot entry or of a decision's `data`: the one
+    /// ladder both parsers climb, so a `persona` is told apart from a
+    /// malformed subject in one place.
+    fn parse(subject: &Value) -> Result<Self, Unusable> {
+        match subject
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(Unusable::Malformed)?
+        {
+            "contact" => Ok(Self::Contact(
+                subject
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or(Unusable::Malformed)?
+                    .to_owned(),
+            )),
+            "network" => Ok(Self::NetworkDefault),
+            _ => Err(Unusable::NotAboutASender),
+        }
+    }
 }
 
 /// One (subject, connection) of the consent state — the shape the Gateway's
@@ -106,13 +130,14 @@ pub struct ConsentEntry {
     pub state: Consent,
 }
 
-/// Why an entry or a change was not applied — counted, because a decision
-/// the cache silently did not take is a sender labelled by the wrong state.
+/// Why an entry or a change was not applied. The two that are defects are
+/// counted (`twalk_sensor_consent_refused_total`), because a decision the
+/// cache silently did not take is a sender labelled by the wrong state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unusable {
     /// A `persona` subject: activating a persona is a consent decision (ADR
-    /// 0013), but it is not state a sender is labelled by. Well-formed and
-    /// not counted as a defect.
+    /// 0013), but it is not state a sender is labelled by. Well-formed, not
+    /// a defect, not counted.
     NotAboutASender,
     /// The entry or the scope names no connection (#271) — a Gateway older
     /// than #270, or a producer that still scopes by network. Never read as
@@ -124,12 +149,15 @@ pub enum Unusable {
 }
 
 impl Unusable {
-    /// The metric's label value.
-    pub fn as_str(&self) -> &'static str {
+    /// What the operator is told, beside the count.
+    pub fn explained(&self) -> &'static str {
         match self {
-            Unusable::NotAboutASender => "not_about_a_sender",
-            Unusable::NoConnection => "no_connection",
-            Unusable::Malformed => "malformed",
+            Unusable::NotAboutASender => "a persona decision never labels a sender",
+            Unusable::NoConnection => {
+                "a decision scoped by network alone — a Gateway older than #270 — is not read \
+                 as its network's connection"
+            }
+            Unusable::Malformed => "the document is missing a member the contract requires",
         }
     }
 }
@@ -140,6 +168,10 @@ impl ConsentEntry {
     /// entry this Sensor cannot label a sender by: a `persona` subject, an
     /// entry that names its network but no connection.
     pub fn parse(entry: &Value) -> Result<Self, Unusable> {
+        // The subject first, in both parsers: a persona entry is not about a
+        // sender whatever else it carries, and must not be counted as one
+        // that names no connection.
+        let subject = ConsentSubject::parse(entry.get("subject").ok_or(Unusable::Malformed)?)?;
         let connection = entry
             .get("connection")
             .and_then(Value::as_str)
@@ -152,22 +184,6 @@ impl ConsentEntry {
                 .and_then(Value::as_str)
                 .ok_or(Unusable::Malformed)?,
         );
-        let subject = entry.get("subject").ok_or(Unusable::Malformed)?;
-        let subject = match subject
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(Unusable::Malformed)?
-        {
-            "contact" => ConsentSubject::Contact(
-                subject
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or(Unusable::Malformed)?
-                    .to_owned(),
-            ),
-            "network" => ConsentSubject::NetworkDefault,
-            _ => return Err(Unusable::NotAboutASender),
-        };
         Ok(Self {
             subject,
             connection,
@@ -195,22 +211,7 @@ impl ConsentChange {
     /// is one whose perimeter this Sensor would have to guess.
     pub fn parse(event: &Value) -> Result<Self, Unusable> {
         let data = event.get("data").ok_or(Unusable::Malformed)?;
-        let subject = data.get("subject").ok_or(Unusable::Malformed)?;
-        let subject = match subject
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(Unusable::Malformed)?
-        {
-            "contact" => ConsentSubject::Contact(
-                subject
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or(Unusable::Malformed)?
-                    .to_owned(),
-            ),
-            "network" => ConsentSubject::NetworkDefault,
-            _ => return Err(Unusable::NotAboutASender),
-        };
+        let subject = ConsentSubject::parse(data.get("subject").ok_or(Unusable::Malformed)?)?;
         let new_state = Consent::from_label(
             data.get("new_state")
                 .and_then(Value::as_str)
@@ -250,7 +251,7 @@ impl ConsentChange {
     pub fn subject_label(&self) -> &str {
         match &self.subject {
             ConsentSubject::Contact(id) => id,
-            ConsentSubject::NetworkDefault => "<network default>",
+            ConsentSubject::NetworkDefault => "<connection default>",
         }
     }
 }
@@ -628,7 +629,7 @@ mod tests {
         }
     }
 
-    fn network_change(new_state: Consent, connections: &[&str]) -> ConsentChange {
+    fn default_change(new_state: Consent, connections: &[&str]) -> ConsentChange {
         ConsentChange {
             subject: ConsentSubject::NetworkDefault,
             new_state,
@@ -680,6 +681,18 @@ mod tests {
             cache.state("@michel:example.com", "whatsapp"),
             Consent::Pending,
             "nor about the operator's own Matrix ID, which is always one of their identities"
+        );
+        // Whatever the connection (#271): the refusal is about who the
+        // subject is, and an id that is not the network's name changes
+        // nothing about that.
+        cache.apply(&contact_change(
+            "@whatsapp_33660469852:example.com",
+            Consent::Granted,
+            &["wa-work"],
+        ));
+        assert_eq!(
+            cache.state("@whatsapp_33660469852:example.com", "wa-work"),
+            Consent::Pending
         );
     }
 
@@ -818,7 +831,7 @@ mod tests {
         // row. Refusing the owner's own rows is not enough on its own, which
         // is why the producers no longer consult this cache for them at all.
         let cache = cache_with_an_owner();
-        cache.apply(&network_change(Consent::Granted, &["whatsapp"]));
+        cache.apply(&default_change(Consent::Granted, &["whatsapp"]));
         assert_eq!(
             cache.state("@whatsapp_33612345678:example.com", "whatsapp"),
             Consent::Granted
@@ -855,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_is_scoped_to_its_networks() {
+    fn a_decision_is_scoped_to_its_connections() {
         let cache = ConsentCache::default();
         cache.apply(&contact_change(
             "@a:example.com",
@@ -906,9 +919,9 @@ mod tests {
     }
 
     #[test]
-    fn a_contacts_own_decision_wins_over_the_networks_default() {
+    fn a_contacts_own_decision_wins_over_the_connections_default() {
         let cache = ConsentCache::default();
-        cache.apply(&network_change(Consent::Granted, &["whatsapp"]));
+        cache.apply(&default_change(Consent::Granted, &["whatsapp"]));
         assert_eq!(
             cache.state("@unknown:example.com", "whatsapp"),
             Consent::Granted,
@@ -917,7 +930,7 @@ mod tests {
         assert_eq!(
             cache.state("@unknown:example.com", "signal"),
             Consent::Pending,
-            "the default is scoped to its own network"
+            "the default is scoped to its own connection"
         );
 
         cache.apply(&contact_change(
@@ -937,7 +950,7 @@ mod tests {
         );
 
         // The default itself is revised like any other decision.
-        cache.apply(&network_change(Consent::Revoked, &["whatsapp"]));
+        cache.apply(&default_change(Consent::Revoked, &["whatsapp"]));
         assert_eq!(cache.state("@b:example.com", "whatsapp"), Consent::Revoked);
         assert_eq!(cache.state("@a:example.com", "whatsapp"), Consent::Revoked);
     }
@@ -1201,7 +1214,7 @@ mod tests {
             Consent::Granted,
             &["wa-work"],
         ));
-        cache.apply(&network_change(Consent::Revoked, &["wa-home"]));
+        cache.apply(&default_change(Consent::Revoked, &["wa-home"]));
         assert_eq!(cache.state("@a:example.com", "wa-work"), Consent::Granted);
         assert_eq!(cache.state("@a:example.com", "wa-home"), Consent::Revoked);
         assert_eq!(cache.state("@b:example.com", "wa-work"), Consent::Pending);
