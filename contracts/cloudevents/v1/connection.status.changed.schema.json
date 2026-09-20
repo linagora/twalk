@@ -108,7 +108,7 @@
             "reconnect_required",
             "pending_operator"
           ],
-          "description": "The state after the transition. `connected`: the grant renews and every service answers with it. `unreachable`: a service or the SSO did not answer; nothing is wrong with the grant, and the collector retries on its own. `reconnect_required`: the SSO refused to renew the grant (400/401 on refresh) — revoked, expired, or rotated away — and only the operator can give a new one (`twalk-collector consent --renew`). `pending_operator`: a fresh token was refused by a service (401/403) — the grant stands but lacks what that service expects, an audience or a scope — and the operator has to change the client, not the grant. Two refusals, never one: the operator does different things about them."
+          "description": "The state after the transition. `connected`: the grant renews and every service answers with it. `unreachable`: a service or the SSO did not answer; nothing is wrong with the grant, and the collector retries on its own. `reconnect_required`: the SSO refused to renew the grant (400/401 on refresh) — revoked, expired, or rotated away — and only the operator can give a new one (`twalk-collector authorize --renew`). `pending_operator`: a fresh token was refused by a service (401/403) — the grant stands but lacks what that service expects, an audience or a scope — and the operator has to change the client, not the grant. Two refusals, never one: the operator does different things about them."
         },
         "occurred_at": {
           "type": "string",

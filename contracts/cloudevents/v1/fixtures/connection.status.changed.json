@@ -15,6 +15,6 @@
     "to_state": "reconnect_required",
     "occurred_at": "2026-09-20T09:00:00Z",
     "service": "sso",
-    "hint": "The SSO refused to renew the grant for mail-linagora. Run `twalk-collector consent --renew` on the host and sign in again; nothing is published from this connection until then."
+    "hint": "The SSO refused to renew the grant for mail-linagora. Run `twalk-collector authorize --renew` on the host and sign in again; nothing is published from this connection until then."
   }
 }
