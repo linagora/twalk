@@ -40,7 +40,9 @@ use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use async_nats::jetstream::context::GetStreamErrorKind;
+use async_nats::jetstream::context::{
+    CreateStreamErrorKind, GetStreamErrorKind, UpdateStreamError,
+};
 use async_nats::jetstream::stream::{
     Compression, Config, DiscardPolicy, RetentionPolicy, StorageType,
 };
@@ -79,12 +81,21 @@ impl StreamPolicy {
     /// A day: longer than any re-sync a restart produces.
     pub const DEFAULT_DUPLICATE_WINDOW_SECONDS: u64 = 86_400;
 
+    /// The longest age this policy accepts, a hundred years: past about 292
+    /// years the nanoseconds the bus is sent no longer fit the signed integer
+    /// it reads them as and wrap to a negative value, which NATS treats as
+    /// **no expiry** — the state the zero check refuses, reached from the
+    /// other end. A ceiling well short of that, refused by name, is the
+    /// plainer answer.
+    pub const MAX_AGE_DAYS_CEILING: u64 = 36_500;
+
     /// Builds the policy from the operator's three values, refusing the ones
     /// NATS would read as "no limit": a zero age keeps every event for ever,
     /// a zero or negative size means no ceiling, and a zero window remembers
-    /// no id at all. Each refusal names the variable to fix. A window longer
-    /// than the age is refused too, because the bus refuses it — later, with
-    /// a less useful message.
+    /// no id at all — and an age past [`Self::MAX_AGE_DAYS_CEILING`], which
+    /// would wrap to the same "for ever". Each refusal names the variable to
+    /// fix. A window longer than the age is refused too, because the bus
+    /// refuses it — later, with a less useful message.
     pub fn new(max_age_days: u64, max_bytes: i64, duplicate_window_seconds: u64) -> Result<Self> {
         if max_age_days == 0 {
             anyhow::bail!(
@@ -92,6 +103,18 @@ impl StreamPolicy {
                  the undecided policy issue #174 replaced. Set it to at least 1"
             );
         }
+        let max_age_secs = max_age_days
+            .checked_mul(86_400)
+            .filter(|_| max_age_days <= Self::MAX_AGE_DAYS_CEILING)
+            .with_context(|| {
+                format!(
+                    "SENSOR_BUS_MAX_AGE_DAYS is {max_age_days}: past {} days (a hundred years) \
+                     the age the bus is sent wraps to a value it reads as \"no expiry\", which is \
+                     the undecided policy issue #174 replaced. Set it to {} at most",
+                    Self::MAX_AGE_DAYS_CEILING,
+                    Self::MAX_AGE_DAYS_CEILING
+                )
+            })?;
         if max_bytes < 1 {
             anyhow::bail!(
                 "SENSOR_BUS_MAX_BYTES is {max_bytes}: the bus would grow without a ceiling until \
@@ -104,7 +127,7 @@ impl StreamPolicy {
                  and every republished event would land twice. Set it to at least 1"
             );
         }
-        let max_age = Duration::from_secs(max_age_days * 86_400);
+        let max_age = Duration::from_secs(max_age_secs);
         let duplicate_window = Duration::from_secs(duplicate_window_seconds);
         if duplicate_window > max_age {
             anyhow::bail!(
@@ -317,21 +340,31 @@ pub enum Outcome {
 /// recreates a stream: a refused update is an `error` naming the field and
 /// the operator's options, and is not a failure of this call — the Sensor
 /// still has a stream to publish on. What fails the call is a bus that
-/// cannot be asked at all.
+/// cannot be asked at all, on the read and on the update alike.
+///
+/// The update sends the **whole** configuration [`StreamPolicy::stream_config`]
+/// names, and [`diff`] compares the thirteen policy fields: so when a policy
+/// field differs, a field the policy does not name that an operator edited
+/// out of band (`description`, `allow_direct`, `metadata`, a `republish`…)
+/// is reset to the policy's value without a line of its own — and when none
+/// differs, that edit survives. That is the accepted cost of the Sensor
+/// owning the configuration rather than the thirteen fields alone: the
+/// stream has one author, and an edit made behind its back is not one it
+/// preserves.
 pub async fn ensure_stream(
     jetstream: &async_nats::jetstream::Context,
     policy: &StreamPolicy,
 ) -> Result<Outcome> {
     let wanted = policy.stream_config();
     let outcome = match jetstream.get_stream(STREAM_NAME).await {
-        Ok(stream) => reconcile(jetstream, &stream.cached_info().config, &wanted).await,
+        Ok(stream) => reconcile(jetstream, &stream.cached_info().config, &wanted).await?,
         Err(error) if is_not_found(&error) => match jetstream.create_stream(wanted.clone()).await {
             Ok(_) => Outcome::Created,
             // Another component created a bare stream between the read and
             // the create: reconcile that one rather than fail over a race
             // the deployment's start order makes ordinary.
             Err(create_error) => match jetstream.get_stream(STREAM_NAME).await {
-                Ok(stream) => reconcile(jetstream, &stream.cached_info().config, &wanted).await,
+                Ok(stream) => reconcile(jetstream, &stream.cached_info().config, &wanted).await?,
                 Err(_) => {
                     return Err(create_error)
                         .with_context(|| format!("failed to create the {STREAM_NAME} stream"))
@@ -377,10 +410,11 @@ pub async fn ensure_stream(
             %error,
             "the bus refused to update the stream's retention policy in place, so the Sensor \
              runs on the stream's existing policy ({}). A field JetStream cannot change on a \
-             live stream (storage, retention, the name) needs the operator's act, and Twalk \
-             never takes it: either keep the stream as it is, or — knowing that every event on \
-             it is then gone for good — remove it (`nats stream rm {STREAM_NAME}`) and restart \
-             the Sensor, which creates it anew with the policy (ADR 0037)",
+             live stream (its storage, its retention) needs the operator's act, and Twalk never \
+             takes it: either keep the stream as it is, or — knowing that every event on it is \
+             then gone for good — remove it (`nats stream rm {STREAM_NAME}` with the nats CLI \
+             on the host, or by removing the bus's data volume) and restart the Sensor, which \
+             creates it anew with the policy (ADR 0037)",
             changes
                 .iter()
                 .map(|c| format!("{}={}", c.field, c.old))
@@ -395,17 +429,37 @@ async fn reconcile(
     jetstream: &async_nats::jetstream::Context,
     existing: &Config,
     wanted: &Config,
-) -> Outcome {
+) -> Result<Outcome> {
     let changes = diff(existing, wanted);
     if changes.is_empty() {
-        return Outcome::Unchanged;
+        return Ok(Outcome::Unchanged);
     }
     match jetstream.update_stream(wanted).await {
-        Ok(_) => Outcome::Updated(changes),
-        Err(error) => Outcome::Refused {
+        Ok(_) => Ok(Outcome::Updated(changes)),
+        Err(error) => refused_or_not_answered(changes, error),
+    }
+}
+
+/// What a failed `update_stream` means. Only an answer **from the server** —
+/// a JetStream API error, which carries the bus's own reason ("stream
+/// configuration update can not change storage type") — is a refusal the
+/// Sensor can run on: the stream is there, with a policy, and the operator is
+/// told which. A timeout, an unavailable JetStream or a transport failure is
+/// a bus that could not be asked, and is an error the way the read path's is:
+/// the process does not run on a guess about a policy it could not even ask
+/// about, and it must not be told to remove a stream over a timeout.
+fn refused_or_not_answered(changes: Vec<FieldChange>, error: UpdateStreamError) -> Result<Outcome> {
+    match error.kind() {
+        CreateStreamErrorKind::JetStream(_) => Ok(Outcome::Refused {
             changes,
             error: error.to_string(),
-        },
+        }),
+        _ => Err(error).with_context(|| {
+            format!(
+                "failed to update the {STREAM_NAME} stream's retention policy: the bus did not \
+                 answer"
+            )
+        }),
     }
 }
 
@@ -560,6 +614,75 @@ mod tests {
             assert!(
                 error.to_string().contains(variable),
                 "({days}, {bytes}, {window}) names {variable}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_age_that_would_wrap_to_for_ever_is_refused_by_name() {
+        for days in [
+            StreamPolicy::MAX_AGE_DAYS_CEILING + 1,
+            // 292 years: the nanoseconds no longer fit the bus's signed integer.
+            106_752,
+            u64::MAX / 86_400 + 1,
+            u64::MAX,
+        ] {
+            let error = StreamPolicy::new(days, 1, 1).unwrap_err();
+            assert!(
+                error.to_string().contains("SENSOR_BUS_MAX_AGE_DAYS"),
+                "{days}: {error}"
+            );
+        }
+        assert!(
+            StreamPolicy::new(StreamPolicy::MAX_AGE_DAYS_CEILING, 1, 1).is_ok(),
+            "the ceiling itself is allowed"
+        );
+    }
+
+    #[test]
+    fn only_an_answer_from_the_bus_is_a_refusal() {
+        use async_nats::jetstream::context::CreateStreamError;
+
+        let changes = || {
+            vec![FieldChange {
+                field: "storage",
+                old: "memory".to_owned(),
+                new: "file".to_owned(),
+            }]
+        };
+        // The server's own answer, as it comes off the wire: the bus is
+        // there, it has a policy, and it will not change this field.
+        let api_error: async_nats::jetstream::Error = serde_json::from_value(serde_json::json!({
+            "code": 500,
+            "err_code": 10052,
+            "description": "stream configuration update can not change storage type"
+        }))
+        .expect("a JetStream API error deserialises");
+        let refused = refused_or_not_answered(changes(), CreateStreamError::from(api_error))
+            .expect("a refusal is an outcome, not a failure");
+        match refused {
+            Outcome::Refused { changes, error } => {
+                assert_eq!(changes[0].field, "storage");
+                assert!(error.contains("can not change storage type"), "{error}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+
+        // No answer at all: the Sensor does not run on a guess about a policy
+        // it could not ask about, and is never told to remove a stream over
+        // a timeout.
+        for kind in [
+            CreateStreamErrorKind::TimedOut,
+            CreateStreamErrorKind::JetStreamUnavailable,
+            CreateStreamErrorKind::Response,
+            CreateStreamErrorKind::ResponseParse,
+            CreateStreamErrorKind::NotFound,
+        ] {
+            let error = refused_or_not_answered(changes(), CreateStreamError::new(kind.clone()))
+                .expect_err("a bus that did not answer is an error");
+            assert!(
+                error.to_string().contains("did not answer"),
+                "{kind:?}: {error:#}"
             );
         }
     }
