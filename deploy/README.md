@@ -77,21 +77,19 @@ Both variables, and not just the token, because the token alone acts as the **wr
 
 Telegram is the one where that register does not start empty. It syncs the chat list at login, so roughly fifteen portal rooms appear at once rather than accumulating as conversations become active — a list of decisions waiting, since nothing is observed until the user chooses it. `../bridges/README.md` states the three configuration keys that decide how big that jump is, and what happens if a Telegram group is promoted to a supergroup.
 
-Three things follow, and each is worth knowing before you go looking for a missing message.
+Four things follow, and each is worth knowing before you go looking for a missing message.
 
 - **Nothing is observed by default, and that is deliberate.** Those eighteen rooms held roughly 1,300 memberships, several hundred people who do not know Twalk exists. Observation is chosen per conversation, and until it is chosen the Sensor is in none of them.
 - **The deployment can say how many conversations it is outside.** `GET /api/portals` lists every conversation with its name, its size and whether the Sensor is inside; `/metrics` carries the same counts as `twalk_companion_gateway_portal_rooms{observation="observing|invited|absent"}`. The Sensor's own `twalk_sensor_observed_rooms` says how many rooms it is actually reading.
 - **A conversation stuck at `invited` is a configuration error with a name.** The Gateway invited the Sensor and the Sensor refused the inviter: that bridge's bot is missing from `SENSOR_ALLOWED_INVITERS`. The Sensor counts those refusals as `twalk_sensor_invites_total{outcome="ignored"}` and logs one warning each.
 
-<<<<<<< HEAD
+- **A readable bridge with no conversations says which account it asked as.** Each entry of `bridges` in `GET /api/portals` carries `asked_as` and `joined_rooms`, because `absent: 0` used to mean two different things and a deployment could not tell them apart: a network that has genuinely built no conversation yet, and a register asking an account that is in no rooms. `joined_rooms: 0` next to a `sender_localpart`-shaped account is the second ([#171](https://github.com/linagora/twalk/issues/171)); the Gateway also logs one warning per read, naming the account and the variable.
+
 ### The bridge bots are also the accounts that are not people
 
 Those same bot ids belong in `SENSOR_BRIDGE_BOTS` too, and for the opposite reason ([#152](https://github.com/linagora/twalk/issues/152), ADR 0026). `SENSOR_ALLOWED_INVITERS` says whose invitation the Sensor accepts; `SENSOR_BRIDGE_BOTS` says which accounts are the appservices' own service identities, about which nothing is published at all — not presence, not what they write into a portal room, and no consent decision. Leave it empty and the bots are published as contacts: on the reference deployment `@whatsappbot` and `@signalbot` produced 1,150 of 1,216 presence events, two a minute each for as long as the stack ran, and each one travelled through the consent machinery, so the consent state can acquire a row about a robot.
 
 Two lists rather than one, because the second question is not the first and `SENSOR_ALLOWED_INVITERS` also names *you*: deriving the bots from it would delete your own presence — or that of a second account you trust to invite the Sensor — from the bus as a side effect of an unrelated setting. An account you do not name stays a contact, which is the safe failure in this one direction: mistaking a contact for a bot makes a real person disappear from the stream in silence. `twalk_sensor_events_dropped_total{reason="bridge_bot"}` is how you check it worked, and a flat zero on a stack with bridges connected means an id is misspelled rather than that there was nothing to drop.
-=======
-- **A readable bridge with no conversations says which account it asked as.** Each entry of `bridges` in `GET /api/portals` carries `asked_as` and `joined_rooms`, because `absent: 0` used to mean two different things and a deployment could not tell them apart: a network that has genuinely built no conversation yet, and a register asking an account that is in no rooms. `joined_rooms: 0` next to a `sender_localpart`-shaped account is the second ([#171](https://github.com/linagora/twalk/issues/171)); the Gateway also logs one warning per read, naming the account and the variable.
->>>>>>> origin/main
 
 A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversations read at all, and says so in `GET /api/portals` rather than quietly contributing nothing to the totals. `GATEWAY_PORTAL_REFRESH_SECONDS` decides only how fresh the `/metrics` counts are (300 by default, `0` turns the background read off); the API always reads the homeserver there and then. `GATEWAY_CROWD_THRESHOLD` (20 by default) is where a member count becomes a crowd: the chooser asks the user to acknowledge the size of any conversation at or above it before the Sensor is put in, and a conversation whose room is replaced is followed automatically only below it (ADR 0029). The Companion reads the served value and holds no number of its own.
 
@@ -105,6 +103,7 @@ A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversat
 | `docker-compose/provision-bridges.sh` | Step 1 above: registrations, Synapse's configuration, the restart |
 | `docker-compose/provision-owner-device.sh` | The operator route of ADR 0034: the `Twalk` device on the owner's own account, its credential written where the Sensor reads it |
 | `docker-compose/provision-hermes-nostr-key.sh` | The Nostr key Hermes — the agent runtime of ADR 0032, not this stack's persona runtime — signs Buzz events with; written into Hermes's own env file (`BUZZ_PRIVATE_KEY`), never into this stack's, because Twalk holds no Buzz key. Prints the public half, which the relay must be told to accept |
+| `docker-compose/provision-buzz-channels.sh` | The operator route of #218: the owner's four Buzz channels, created **as the owner** from a key file only they write, Hermes added as a bot member, the UUIDs written where Hermes reads them — no UUID typed by hand |
 | `docker-compose/synapse/homeserver.yaml` | Synapse's configuration template (Jinja2, rendered by the image) |
 | `docker-compose/*.Dockerfile` | One image per Twalk component |
 | `docker-compose/hermes-entrypoint.sh` | Hermes's entrypoint: start the runtime, or say why it is hosting nothing |
