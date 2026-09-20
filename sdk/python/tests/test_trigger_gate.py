@@ -108,6 +108,32 @@ class TriggerGateTest(unittest.TestCase):
         self.assertFalse(triggers_a_persona(event))
         self.assertFalse(is_granted(event))
 
+    def test_the_owners_own_calendar_wakes_no_persona_and_passes_the_consent_gate_by_neither_door(
+        self,
+    ) -> None:
+        # The three `calendar.*` types (#280) are the owner's own agenda on
+        # the calendar connection: the subject is the owner, there is no
+        # consent extension to read — the people inside are governed by the
+        # participant rule of the contract, not by the envelope — and no
+        # suggestion-persona is woken by them, as none is by `outbound.*`.
+        # Both gates say no, and neither by accident: the type gate by the
+        # allowlist, the consent gate because there is nothing to read. A
+        # consumer that reacts to a moved meeting (the agent runtime of ADR
+        # 0032) reads the bus directly and is not this loop.
+        for name in ("created", "changed", "removed"):
+            with self.subTest(type=name):
+                event = fixture(f"calendar.event.{name}")
+                self.assertEqual(event["type"], f"fr.linagora.twalk.calendar.event.{name}.v1")
+                self.assertTrue(event["subject"].startswith("mailto:"))
+                self.assertNotIn("consent", event)
+                self.assertNotIn("network", event, "a calendar is a kind, not a network")
+                self.assertIn("connection", event)
+                self.assertFalse(triggers_a_persona(event))
+                self.assertFalse(is_granted(event))
+        withheld = variant_fixture("calendar.event.created", "withheld-participant")
+        self.assertEqual(withheld["data"]["participants_withheld"], 1)
+        self.assertFalse(triggers_a_persona(withheld))
+
     def test_a_type_the_contract_adds_later_does_not_trigger_a_persona(self) -> None:
         # The forward-compatible default is "no". A tenth type must not start
         # waking personas because nobody thought to exclude it.

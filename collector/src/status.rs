@@ -138,7 +138,8 @@ impl Tracker {
     }
 }
 
-fn sha256_hex(input: &str) -> String {
+/// The contract's id digest: lowercase hex sha256 of the natural key.
+pub fn sha256_hex(input: &str) -> String {
     Sha256::digest(input.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

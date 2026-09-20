@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/calendar.event.removed.schema.json",
+  "title": "fr.linagora.twalk.calendar.event.removed.v1",
+  "description": "An event disappeared from one of the owner's calendars (ADR 0033, #280): the resource the collector held an etag for is no longer in the listing — deleted by the owner, or an invitation declined and dropped by their client. Distinct from a `cancelled` STATUS, which is a `changed` event on a resource that is still there. Carries the UID and the last title the collector published for it, so a consumer can say what was removed without keeping every event it ever saw, and nothing else: the people who were in it are not republished on its way out. This type carries NO consent extension: the event is the owner's own — their calendar, their time — and the consent model is about contacts (ADR 0018, ADR 0021). The people inside it are governed instead by the participant rule of definitions/calendar-event.schema.json, read on the mail connection of the same account. A persona is not woken by this type (the Python SDK's trigger allowlist admits `inbound.message.received` alone); the agent runtime of ADR 0032 reads it off the bus like any other type, which is what 'a meeting moved is on the bus within a minute, so an agent can react to it' means.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "connection",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0",
+      "description": "CloudEvents specification version. Fixed to 1.0 for all Twalk v1 events."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256('caldav:' + href + ':removed:' + ctag), where href is the resource's path as the collector last listed it and ctag the calendar's CTag at the listing in which the resource was gone. A removal has no ETag of its own — the resource is gone — and the CTag is what changed; a cursor lost and rebuilt after the removal never lists the resource at all and publishes nothing, which is the honest answer (no backfill, #251)."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^caldav://[^/]+/dav/calendars/[^/]+/[^/]+/$",
+      "description": "URI of the calendar collection the event lives in, on the side service the collector reads it through: caldav://<side service host>/dav/calendars/<owner's id>/<calendar id>/. The owner has several calendars, and this is what says which one; the trailing slash is the collection's, as CalDAV writes it.",
+      "examples": [
+        "caldav://calendar.example.com/dav/calendars/64f1c0a2e9b1d3f4a5b6c7d8/64f1c0a2e9b1d3f4a5b6c7d8/"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.calendar.event.removed.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp of when the collector observed the change — the poll at which the calendar's CTag differed and the resource was read — not when the organizer made it, which CalDAV does not tell a client."
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^mailto:[^@\\s]+@[^@\\s]+$",
+      "maxLength": 512,
+      "description": "The owner, as a `mailto:` URI (COLLECTOR_OWNER_EMAIL, lower-cased): the calendar is theirs and the event is about their time. Never a participant, never the organizer — a consumer that filtered on the subject would otherwise find a third party there. The same string the mail collector uses for the owner's own outgoing mail, so one subject is one person across the two connections of one account (ADR 0033).",
+      "examples": [
+        "mailto:michel@example.com"
+      ]
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json",
+      "description": "Fixed to application/json for all Twalk v1 events."
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/calendar.event.removed.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header."
+    },
+    "connection": {
+      "$ref": "definitions/connection.schema.json",
+      "description": "Twalk extension (ADR 0033). The calendar connection this event belongs to, by the id the Companion Gateway's registry gave it (kind `calendar`) — handed to the collector as COLLECTOR_CALENDAR_CONNECTION, never derived. Required, as on every type that has a connection; there is no `network` extension, because a calendar is a kind of connection and not a network (kind.schema.json), and there is no `consent` extension, because the event is the owner's own (ADR 0018's rule for outbound.*): a persona is not woken by it and the SDK's trigger allowlist says so."
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "uid",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The iCalendar UID of the removed event, as the collector last published it: the key a consumer joins on `created` and `changed`."
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "The title as the collector last published it, so the removal reads as 'Weekly sync was removed' rather than as a UID. The owner's own words about their own time, like `title` on the event itself."
+        }
+      }
+    }
+  }
+}

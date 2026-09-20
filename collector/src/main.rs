@@ -5,7 +5,7 @@
 //!
 //! What this binary does **not** do yet is collect anything: #276 (mail) and
 //! #280 (calendar) plug into the loop below with the access token it keeps
-//! fresh. What it does do is refuse to start on a connection the Gateway's
+//! fresh. What it does do is refuse to start on a connection the Companion Gateway's
 //! registry does not know, and refuse to publish anything when the grant
 //! turns out to be for another account — both said in words, once.
 
@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+use twalk_collector::calendars::SideError;
 use twalk_collector::config::Config;
 use twalk_collector::metrics::Metrics;
 use twalk_collector::oidc::{Client, Grant, Identities, Renewal, ServiceRefusal};
@@ -176,15 +177,22 @@ async fn run(config: Config) -> Result<()> {
         tokio::spawn(serve_metrics(listener, metrics.clone()));
     }
 
-    // The registry: a connection this process holds must be one the Gateway
+    // The registry: a connection this process holds must be one the Companion Gateway
     // names, or every event it published would be about a perimeter no
     // decision governs (ADR 0033). Refused at start, in words.
-    if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
-        let known = registry_ids(url, token).await?;
-        config.refuse_unknown_connections(&known)?;
-    } else {
-        warn!("COLLECTOR_GATEWAY_URL is not set: the connections are not checked against the registry");
-    }
+    // The same document carries the consent state the participants of a
+    // meeting are labelled by (#280), so it is read once.
+    let snapshot = match (&config.gateway_url, &config.gateway_service_token) {
+        (Some(url), Some(token)) => {
+            let document = consent_snapshot(url, token).await?;
+            config.refuse_unknown_connections(&registry_ids(&document))?;
+            Some(document)
+        }
+        _ => {
+            warn!("COLLECTOR_GATEWAY_URL is not set: the connections are not checked against the registry, and no consent decision is known");
+            None
+        }
+    };
 
     let nats = async_nats::connect(&config.nats_url)
         .await
@@ -199,6 +207,29 @@ async fn run(config: Config) -> Result<()> {
         .await
         .context("failed to ensure the twalk stream")?;
 
+    let consent = twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref()).await?;
+    // The calendar connection, when this process holds one: polled on every
+    // round the grant and the side service allow (#280).
+    let calendars = config
+        .connections
+        .iter()
+        .find(|held| held.kind == "calendar")
+        .map(|held| {
+            Ok::<_, anyhow::Error>(twalk_collector::calendars::Calendars {
+                connection: held.id.clone(),
+                owner_email: config.owner_email.clone(),
+                mail_connection: config
+                    .connections
+                    .iter()
+                    .find(|held| held.kind == "email")
+                    .map(|held| held.id.clone()),
+                side: twalk_collector::calendars::Side::new(&config.services.caldav_url)?,
+                state_dir: config.state_dir.clone(),
+                consent,
+            })
+        })
+        .transpose()?;
+
     let client = Client::discover(config.oidc.clone()).await?;
     let mut trackers: Vec<Tracker> = config
         .connections
@@ -206,6 +237,9 @@ async fn run(config: Config) -> Result<()> {
         .map(|held| Tracker::new(&held.id, held.kind, &config.host))
         .collect();
     let mut grant = Grant::read(&config.oidc.grant_file)?;
+    // The calendars are polled on their own interval (#251: every 60 s),
+    // not on every health round.
+    let mut last_calendar_poll: Option<std::time::Instant> = None;
     let mut access: Option<twalk_collector::oidc::AccessToken> = None;
     // Why the SSO last refused to renew, when it did: the grant's fault
     // (`reconnect_required`) or the client's (`pending_operator`) are two
@@ -215,6 +249,7 @@ async fn run(config: Config) -> Result<()> {
     loop {
         let now = SystemTime::now();
         let mut renewed_this_round = false;
+        let mut caldav_owner_id: Option<String> = None;
         let observation = match &grant {
             None => Observation {
                 state: State::ReconnectRequired,
@@ -312,7 +347,10 @@ async fn run(config: Config) -> Result<()> {
                             (None, _) => sso_refusal
                                 .clone()
                                 .unwrap_or_else(|| reconnect_required(&config)),
-                            (Some(_), Ok(identities)) => observe_services(&config, &identities),
+                            (Some(_), Ok(identities)) => {
+                                caldav_owner_id = identities.caldav_owner_id.clone();
+                                observe_services(&config, &identities)
+                            }
                             (Some(_), Err(error)) => Observation {
                                 state: State::Unreachable,
                                 service: None,
@@ -326,12 +364,75 @@ async fn run(config: Config) -> Result<()> {
         // One observation of the grant, published per connection it holds:
         // a calendar connection whose service refused gets its own words.
         let occurred_at = twalk_collector::oidc::now_rfc3339();
+        let mut calendar_is_connected = false;
         for tracker in &mut trackers {
             let per_connection = per_connection(&observation, tracker.kind());
+            if tracker.kind() == "calendar" && per_connection.state == State::Connected {
+                calendar_is_connected = true;
+            }
             metrics.set_connection_state(tracker.connection(), per_connection.state);
             if let Some(envelope) = tracker.observe(&per_connection, &occurred_at) {
                 publish(&jetstream, &envelope, &metrics).await;
             }
+        }
+        // The calendars, on a round where the grant stands and the side
+        // service answered as the owner, once the poll interval is up: what
+        // changed since the cursor is published, then the cursor moves. A
+        // read the side service refuses is the calendar connection's state
+        // — the same words the whoami would have found — and a poll that
+        // fails otherwise is said and retried next time.
+        let poll_is_due =
+            last_calendar_poll.is_none_or(|last| last.elapsed() >= config.calendar_poll_interval);
+        if let (Some(calendars), Some(token), Some(owner_id), true, true) = (
+            &calendars,
+            &access,
+            &caldav_owner_id,
+            calendar_is_connected,
+            poll_is_due,
+        ) {
+            last_calendar_poll = Some(std::time::Instant::now());
+            match calendars.poll(owner_id, &token.token, &occurred_at).await {
+                Ok(found) => {
+                    debug!(
+                        envelopes = found.envelopes.len(),
+                        cursors = found.cursors.len(),
+                        "calendars polled"
+                    );
+                    for envelope in &found.envelopes {
+                        publish(&jetstream, envelope, &metrics).await;
+                    }
+                    if let Err(error) = calendars.commit(&found.cursors) {
+                        error!(error = %format!("{error:#}"), "the calendar cursor could not be written; the next poll republishes");
+                    }
+                }
+                Err(SideError::Refused { status }) => {
+                    let refused = Observation {
+                        state: State::PendingOperator,
+                        service: Some("caldav"),
+                        hint: Some(format!(
+                            "caldav refused a fresh token with {status} on a calendar read: the grant \
+                             stands, but the client lacks what caldav expects — an audience or a \
+                             scope the operator has to add to the client at the SSO"
+                        )),
+                    };
+                    for tracker in trackers.iter_mut().filter(|t| t.kind() == "calendar") {
+                        metrics.set_connection_state(tracker.connection(), refused.state);
+                        if let Some(envelope) = tracker.observe(&refused, &occurred_at) {
+                            publish(&jetstream, &envelope, &metrics).await;
+                        }
+                    }
+                }
+                Err(error) => warn!(%error, "the calendars could not be polled this round"),
+            }
+        } else {
+            debug!(
+                calendars = calendars.is_some(),
+                token = access.is_some(),
+                owner_id = ?caldav_owner_id,
+                calendar_is_connected,
+                poll_is_due,
+                "calendars not polled this round"
+            );
         }
         tokio::time::sleep(config.health_interval).await;
     }
@@ -414,12 +515,16 @@ fn per_connection(observation: &Observation, kind: &str) -> Observation {
     }
 }
 
+/// Publishes one envelope on the subject its `type` names (`twalk.<type
+/// minus the prefix>`), with `Nats-Msg-Id` for the bus to deduplicate on
+/// and the `connection` header every message-flow type carries.
 async fn publish(
     jetstream: &async_nats::jetstream::Context,
     envelope: &serde_json::Value,
     metrics: &Metrics,
 ) {
     let id = envelope["id"].as_str().unwrap_or_default().to_owned();
+    let event_type = envelope["type"].as_str().unwrap_or_default().to_owned();
     let mut headers = async_nats::header::HeaderMap::new();
     headers.insert(async_nats::header::NATS_MESSAGE_ID, id.as_str());
     if let Some(connection) = envelope.get("connection").and_then(|v| v.as_str()) {
@@ -427,22 +532,17 @@ async fn publish(
     }
     let payload = serde_json::to_vec(envelope).expect("the envelope is serializable");
     match jetstream
-        .publish_with_headers(
-            status::bus_subject(status::STATUS_CHANGED_TYPE),
-            headers,
-            payload.into(),
-        )
+        .publish_with_headers(status::bus_subject(&event_type), headers, payload.into())
         .await
     {
         Ok(ack) => match ack.await {
             Ok(_) => {
-                metrics.record_published(status::STATUS_CHANGED_TYPE);
+                metrics.record_published(&event_type);
                 info!(
                     %id,
-                    connection = %envelope["subject"],
-                    state = %envelope["data"]["to_state"],
-                    "published {}",
-                    status::STATUS_CHANGED_TYPE
+                    connection = %envelope["connection"],
+                    subject = %envelope["subject"],
+                    "published {event_type}"
                 );
             }
             Err(error) => warn!(%id, %error, "publish ack failed"),
@@ -451,13 +551,13 @@ async fn publish(
     }
 }
 
-/// The Gateway's registry as `(id, kind)`, off the consent snapshot the
-/// Sensor reads too (`GET /api/consent/snapshot`, `connections[]`, as
-/// `companion-gateway/openapi.yaml` describes it), with the same service
-/// token.
-async fn registry_ids(gateway_url: &str, service_token: &str) -> Result<Vec<(String, String)>> {
+/// The Companion Gateway's consent snapshot, the document the Sensor reads too
+/// (`GET /api/consent/snapshot`, as `companion-gateway/openapi.yaml`
+/// describes it), with the same service token: the registry is its
+/// `connections[]`, the decisions its `entries[]`.
+async fn consent_snapshot(gateway_url: &str, service_token: &str) -> Result<serde_json::Value> {
     let url = format!("{}/api/consent/snapshot", gateway_url.trim_end_matches('/'));
-    let document: serde_json::Value = reqwest::Client::new()
+    reqwest::Client::new()
         .get(&url)
         .bearer_auth(service_token)
         .send()
@@ -467,8 +567,12 @@ async fn registry_ids(gateway_url: &str, service_token: &str) -> Result<Vec<(Str
         .with_context(|| format!("the Companion Gateway refused the registry read at {url}"))?
         .json()
         .await
-        .context("the Companion Gateway's snapshot is not JSON")?;
-    Ok(document["connections"]
+        .context("the Companion Gateway's snapshot is not JSON")
+}
+
+/// The Companion Gateway's registry as `(id, kind)`, off the snapshot's `connections[]`.
+fn registry_ids(document: &serde_json::Value) -> Vec<(String, String)> {
+    document["connections"]
         .as_array()
         .map(|entries| {
             entries
@@ -481,7 +585,7 @@ async fn registry_ids(gateway_url: &str, service_token: &str) -> Result<Vec<(Str
                 })
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default()
 }
 
 async fn serve_metrics(listener: tokio::net::TcpListener, metrics: Arc<Metrics>) {

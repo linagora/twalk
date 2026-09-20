@@ -105,7 +105,7 @@ twalk/
 ├── companion/           Twalk Companion PWA (SvelteKit static export): user-facing configuration surface
 ├── companion-gateway/   Companion backend (Rust): bridge provisioning facade, consent broker, persona orchestrator; openapi.yaml describes its HTTP surface
 ├── clerk/               The clerk (Rust): writes what the bus says onto the owner's Buzz relay, signed with a Nostr key of its own, holding no state
-├── collector/           The collector (Rust): holds one OIDC grant for the owner's own mailbox and calendars, says what state each connection is in
+├── collector/           The collector (Rust): holds one OIDC grant for the owner's own mailbox and calendars, publishes what changes in the calendars, says what state each connection is in
 ├── bridges/             Mautrix bridge configurations and registrations
 ├── deploy/              Docker Compose, Kubernetes and Ansible deployment manifests
 ├── ui/                  Optional Buzz control room and admin console
