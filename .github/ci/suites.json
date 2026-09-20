@@ -58,7 +58,8 @@
 			"run": "cargo test",
 			"needs": ["rust"],
 			"tier": "required",
-			"triggers": ["consent-cache/"]
+			"triggers": ["consent-cache/", "companion-gateway/openapi.yaml"],
+			"triggers_note": "The crate parses the Gateway's `ConsentSnapshot` and `ConsentStateEntry` documents, so a change to the description is a change to what it reads."
 		},
 
 		"sdk-python": {
