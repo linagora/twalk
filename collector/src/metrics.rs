@@ -21,6 +21,10 @@ pub struct Metrics {
     /// When the grant was last renewed, in seconds since the epoch; zero
     /// until it was.
     last_renewal_unix_seconds: AtomicU64,
+    /// Mails the frontier dropped, by reason (#276): `non_human_sender`,
+    /// `calendar_invitation`, `owner`. A silence counted, since a silence
+    /// is the one failure this product has shipped without noticing.
+    mails_dropped: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl Default for Metrics {
@@ -36,7 +40,17 @@ impl Metrics {
             renewals: Mutex::new(BTreeMap::new()),
             connection_state: Mutex::new(BTreeMap::new()),
             last_renewal_unix_seconds: AtomicU64::new(0),
+            mails_dropped: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    pub fn record_mail_dropped(&self, reason: &'static str) {
+        *self
+            .mails_dropped
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(reason)
+            .or_insert(0) += 1;
     }
 
     pub fn record_published(&self, event_type: &str) {
@@ -123,6 +137,19 @@ impl Metrics {
                 now_unix_seconds.saturating_sub(last)
             ));
         }
+        out.push_str("# HELP twalk_collector_events_dropped_total Events the collector did not publish, by reason — the Sensor's `twalk_sensor_events_dropped_total`, on this side: a mail the frontier dropped (`non_human_sender`, `calendar_invitation`, `owner`).\n");
+        out.push_str("# TYPE twalk_collector_events_dropped_total counter\n");
+        let dropped = self
+            .mails_dropped
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        for reason in crate::jmap::Dropped::ALL.map(crate::jmap::Dropped::as_str) {
+            out.push_str(&format!(
+                "twalk_collector_events_dropped_total{{reason=\"{reason}\"}} {}\n",
+                dropped.get(reason).copied().unwrap_or(0)
+            ));
+        }
+        drop(dropped);
         out.push_str("# HELP twalk_collector_connection_state Each connection's state: 1 on the state it is in, 0 on the three it is not.\n");
         out.push_str("# TYPE twalk_collector_connection_state gauge\n");
         for ((connection, state), value) in self
@@ -171,5 +198,10 @@ mod tests {
             "twalk_collector_connection_state{connection=\"mail-linagora\",state=\"connected\"} 0\n"
         ));
         assert!(body.contains("twalk_collector_grant_age_seconds 100\n"));
+        assert!(body.contains("twalk_collector_events_dropped_total{reason=\"owner\"} 0\n"));
+        metrics.record_mail_dropped("non_human_sender");
+        assert!(metrics
+            .render(1_000)
+            .contains("twalk_collector_events_dropped_total{reason=\"non_human_sender\"} 1\n"));
     }
 }

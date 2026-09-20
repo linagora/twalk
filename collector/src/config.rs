@@ -57,6 +57,10 @@ pub struct Config {
     /// every 60 s"; a test sets 1). Its own variable, because a health
     /// check and a read of the owner's agenda are two things to tune.
     pub calendar_poll_interval: std::time::Duration,
+    /// How often the mailbox is polled for a delivery
+    /// (`COLLECTOR_MAIL_POLL_SECONDS`, 60 by default; #277 makes the push
+    /// the rule and this the fallback).
+    pub mail_poll_interval: std::time::Duration,
 }
 
 impl Config {
@@ -149,6 +153,14 @@ impl Config {
                     None => 60,
                 },
             ),
+            mail_poll_interval: std::time::Duration::from_secs(
+                match optional_string("COLLECTOR_MAIL_POLL_SECONDS") {
+                    Some(value) => value.parse().with_context(|| {
+                        format!("COLLECTOR_MAIL_POLL_SECONDS is not a number: {value:?}")
+                    })?,
+                    None => 60,
+                },
+            ),
         })
     }
 
@@ -234,6 +246,7 @@ mod tests {
             log_level: "info".to_owned(),
             health_interval: std::time::Duration::from_secs(60),
             calendar_poll_interval: std::time::Duration::from_secs(60),
+            mail_poll_interval: std::time::Duration::from_secs(60),
         }
     }
 

@@ -173,3 +173,19 @@ class InboundMessage(Trigger):
     @property
     def is_reply(self) -> bool:
         return isinstance(self.data.get("reply_to"), Mapping)
+
+    @property
+    def title(self) -> Optional[str]:
+        """A mail's Subject line (#276), or ``None``: a bridged message has
+        none, and a revoked sender's mail carries none either — the title
+        is the sender's words and goes with the body."""
+        value = self.data.get("title")
+        return value if isinstance(value, str) else None
+
+    @property
+    def audience(self) -> Optional[str]:
+        """``direct`` when the owner was the only recipient, ``group`` when
+        one of several (#276), ``None`` when the source does not say — a
+        bridged message says it through its room, not here."""
+        value = self.data.get("audience")
+        return value if value in ("direct", "group") else None

@@ -10,6 +10,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde_json::{json, Value};
 use tokio::process::Command;
 use twalk_collector::oidc::{Client, Settings};
 use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
@@ -17,6 +18,7 @@ use twalk_test_harness::{nats_url, poll_until, Bus, FakeSso};
 
 pub const OWNER: &str = "michel@example.com";
 pub const STREAM: &str = "twalk";
+pub const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 
 pub struct Run {
     pub sso: FakeSso,
@@ -75,7 +77,7 @@ impl Run {
     }
 
     /// The environment the binary runs with: both connections held, the
-    /// health and calendar polls every second.
+    /// health, calendar and mail polls every second.
     pub fn env(&self) -> Vec<(String, String)> {
         [
             (
@@ -105,6 +107,7 @@ impl Run {
             ("COLLECTOR_HOST", "collector.test".to_owned()),
             ("COLLECTOR_HEALTH_INTERVAL_SECONDS", "1".to_owned()),
             ("COLLECTOR_CALENDAR_POLL_SECONDS", "1".to_owned()),
+            ("COLLECTOR_MAIL_POLL_SECONDS", "1".to_owned()),
             (
                 "COLLECTOR_LOG_LEVEL",
                 "info,twalk_collector=debug".to_owned(),
@@ -129,6 +132,73 @@ impl Run {
 
     pub fn start(&self) -> Result<CollectorProc> {
         CollectorProc::start(&self.env())
+    }
+
+    /// The Companion Gateway's snapshot, as the fake stands in for it: both
+    /// connections in the registry, the decisions given, the stream to be
+    /// followed from just past its current head.
+    pub async fn serve_snapshot(&self, bus: &Bus, entries: Vec<Value>) -> Result<()> {
+        let head = bus.last_sequence(STREAM, CONSENT_SUBJECT).await?;
+        self.sso.serve_gateway_snapshot(json!({
+            "stream": STREAM,
+            "subject": CONSENT_SUBJECT,
+            "stream_sequence": head,
+            "next_stream_sequence": head + 1,
+            "decision_sequence": entries.len(),
+            "connections": [
+                { "id": self.mail, "kind": "email", "network": "email" },
+                { "id": self.calendar, "kind": "calendar" },
+            ],
+            "entries": entries,
+        }));
+        Ok(())
+    }
+
+    /// A snapshot entry: the owner's decision about a `mailto:` on the
+    /// mail connection.
+    pub fn decided_on_mail(&self, identity: &str, state: &str) -> Value {
+        json!({
+            "subject": { "type": "contact", "id": identity },
+            "connection": self.mail,
+            "network": "email",
+            "state": state,
+            "decided_at": "2026-09-20T10:00:00.000Z",
+            "decision_sequence": 1
+        })
+    }
+
+    /// The events this run published on one subject, since its start, about
+    /// one of its connections.
+    pub async fn events_of(
+        &self,
+        bus: &Bus,
+        subject: &str,
+        connection: &str,
+    ) -> Result<Vec<Value>> {
+        Ok(bus
+            .fetch_since(STREAM, subject, self.since)
+            .await?
+            .into_iter()
+            .filter(|event| event["connection"].as_str() == Some(connection))
+            .collect())
+    }
+
+    /// Waits until at least `at_least` such events are on the bus.
+    pub async fn wait_for_events(
+        &self,
+        bus: &Bus,
+        subject: &str,
+        connection: &str,
+        at_least: usize,
+    ) -> Result<Vec<Value>> {
+        poll_until(
+            || async {
+                let events = self.events_of(bus, subject, connection).await.ok()?;
+                (events.len() >= at_least).then_some(events)
+            },
+            &format!("{at_least} events on {subject} about {connection}"),
+        )
+        .await
     }
 
     pub fn start_with_gateway(&self) -> Result<CollectorProc> {

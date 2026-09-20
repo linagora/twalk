@@ -11,10 +11,9 @@ mod support;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use support::{sha256_hex, Run, OWNER, STREAM};
-use twalk_test_harness::{ensure_stack, poll_until, validate_against_contract, Bus};
+use support::{sha256_hex, Run, CONSENT_SUBJECT, OWNER};
+use twalk_test_harness::{ensure_stack, validate_against_contract, Bus};
 
-const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 const DESCRIPTION: &str = "Notes nobody decided to share";
 
 const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-weekly\r\nSUMMARY:Weekly sync\r\nDESCRIPTION:Notes nobody decided to share\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:michel@example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=Alice Martin;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -23,59 +22,22 @@ const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBE
 /// ran: the past, which is not published.
 const STANDING: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:standing-1\r\nSUMMARY:Standing meeting\r\nDTSTART;TZID=Europe/Paris:20261001T140000\r\nDTEND;TZID=Europe/Paris:20261001T150000\r\nATTENDEE;CN=Carol:mailto:carol@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
-/// The Companion Gateway's snapshot, as the fake stands in for it: both connections
-/// in the registry, the decisions given, the stream to be followed from
-/// just past its current head.
-async fn serve_snapshot(run: &Run, bus: &Bus, entries: Vec<Value>) -> Result<()> {
-    let head = bus.last_sequence(STREAM, CONSENT_SUBJECT).await?;
-    run.sso.serve_gateway_snapshot(json!({
-        "stream": STREAM,
-        "subject": CONSENT_SUBJECT,
-        "stream_sequence": head,
-        "next_stream_sequence": head + 1,
-        "decision_sequence": entries.len(),
-        "connections": [
-            { "id": run.mail, "kind": "email", "network": "email" },
-            { "id": run.calendar, "kind": "calendar" },
-        ],
-        "entries": entries,
-    }));
-    Ok(())
-}
-
-fn revoked_on_mail(run: &Run, identity: &str) -> Value {
-    json!({
-        "subject": { "type": "contact", "id": identity },
-        "connection": run.mail,
-        "network": "email",
-        "state": "revoked",
-        "decided_at": "2026-09-20T10:00:00.000Z",
-        "decision_sequence": 1
-    })
-}
-
-/// The calendar events this run's connection published, of one type, in order.
+/// The calendar events this run's connection published, of one type.
 async fn events_of(bus: &Bus, run: &Run, kind: &str) -> Result<Vec<Value>> {
-    Ok(bus
-        .fetch_since(
-            STREAM,
-            &format!("twalk.calendar.event.{kind}.v1"),
-            run.since,
-        )
-        .await?
-        .into_iter()
-        .filter(|event| event["connection"].as_str() == Some(run.calendar.as_str()))
-        .collect())
+    run.events_of(
+        bus,
+        &format!("twalk.calendar.event.{kind}.v1"),
+        &run.calendar,
+    )
+    .await
 }
 
 async fn wait_for(bus: &Bus, run: &Run, kind: &str, at_least: usize) -> Result<Vec<Value>> {
-    let kind = kind.to_owned();
-    poll_until(
-        || async {
-            let events = events_of(bus, run, &kind).await.ok()?;
-            (events.len() >= at_least).then_some(events)
-        },
-        &format!("{at_least} calendar.event.{kind} about {}", run.calendar),
+    run.wait_for_events(
+        bus,
+        &format!("twalk.calendar.event.{kind}.v1"),
+        &run.calendar,
+        at_least,
     )
     .await
 }
@@ -87,7 +49,7 @@ async fn what_the_calendar_held_is_not_published_and_create_change_remove_are_th
     let bus = Bus::connect().await?;
     let run = Run::prepare("three").await?;
     run.authorize().await?;
-    serve_snapshot(&run, &bus, Vec::new()).await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
     // The calendar's id on the side service is this run's own, so two runs
     // on the shared bus never produce one href — and so one id.
     let collection = run.sso.create_calendar(&run.calendar, "Mine");
@@ -216,10 +178,9 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
     run.authorize().await?;
     // Bob was revoked on the mail connection before the collector started:
     // the snapshot says so. Alice was never decided about.
-    serve_snapshot(
-        &run,
+    run.serve_snapshot(
         &bus,
-        vec![revoked_on_mail(&run, "mailto:bob@example.org")],
+        vec![run.decided_on_mail("mailto:bob@example.org", "revoked")],
     )
     .await?;
     run.sso.create_calendar(&run.calendar, "Mine");

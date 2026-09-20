@@ -182,10 +182,23 @@ pub fn contract_types_about_a_person() -> Result<Vec<String>> {
     let mut types = Vec::new();
     for type_name in contract_schema_types()? {
         let schema = contract_schema(&type_name)?;
-        let names_a_matrix_user = schema
-            .pointer("/properties/subject/pattern")
-            .and_then(Value::as_str)
-            .is_some_and(|pattern| pattern.starts_with("^@"));
+        // The pattern is spelled directly, or as one branch of a `oneOf`
+        // when the type names a person in more than one way — a Matrix user
+        // ID or a `mailto:` on `inbound.message.received` since #276.
+        let subject = schema.pointer("/properties/subject");
+        let names_a_matrix_user = subject
+            .and_then(|subject| subject.get("pattern"))
+            .into_iter()
+            .chain(
+                subject
+                    .and_then(|subject| subject.get("oneOf"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|branch| branch.get("pattern")),
+            )
+            .filter_map(Value::as_str)
+            .any(|pattern| pattern.starts_with("^@"));
         if names_a_matrix_user {
             types.push(type_name);
         }

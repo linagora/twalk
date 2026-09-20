@@ -14,10 +14,10 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, warn};
-use twalk_collector::calendars::SideError;
 use twalk_collector::config::Config;
 use twalk_collector::metrics::Metrics;
 use twalk_collector::oidc::{Client, Grant, Identities, Renewal, ServiceRefusal};
+use twalk_collector::side::SideError;
 use twalk_collector::status::{self, Observation, State, Tracker};
 
 /// Renew when the access token has less than this left.
@@ -207,7 +207,9 @@ async fn run(config: Config) -> Result<()> {
         .await
         .context("failed to ensure the twalk stream")?;
 
-    let consent = twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref()).await?;
+    let consent =
+        twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref(), &config.owner_email)
+            .await?;
     // The calendar connection, when this process holds one: polled on every
     // round the grant and the side service allow (#280).
     let calendars = config
@@ -225,8 +227,25 @@ async fn run(config: Config) -> Result<()> {
                     .map(|held| held.id.clone()),
                 side: twalk_collector::calendars::Side::new(&config.services.caldav_url)?,
                 state_dir: config.state_dir.clone(),
-                consent,
+                consent: consent.clone(),
             })
+        })
+        .transpose()?;
+    // The mail connection, when this process holds one: the INBOX polled
+    // on its own interval (#276), each sender labelled by the decision
+    // about them on this connection.
+    let mailbox = config
+        .connections
+        .iter()
+        .find(|held| held.kind == "email")
+        .map(|held| {
+            twalk_collector::mails::Mailbox::new(
+                &held.id,
+                &config.owner_email,
+                &config.services.jmap_session_url,
+                &config.state_dir,
+                consent.clone(),
+            )
         })
         .transpose()?;
 
@@ -240,6 +259,7 @@ async fn run(config: Config) -> Result<()> {
     // The calendars are polled on their own interval (#251: every 60 s),
     // not on every health round.
     let mut last_calendar_poll: Option<std::time::Instant> = None;
+    let mut last_mail_poll: Option<std::time::Instant> = None;
     let mut access: Option<twalk_collector::oidc::AccessToken> = None;
     // Why the SSO last refused to renew, when it did: the grant's fault
     // (`reconnect_required`) or the client's (`pending_operator`) are two
@@ -365,10 +385,15 @@ async fn run(config: Config) -> Result<()> {
         // a calendar connection whose service refused gets its own words.
         let occurred_at = twalk_collector::oidc::now_rfc3339();
         let mut calendar_is_connected = false;
+        let mut mail_is_connected = false;
         for tracker in &mut trackers {
             let per_connection = per_connection(&observation, tracker.kind());
-            if tracker.kind() == "calendar" && per_connection.state == State::Connected {
-                calendar_is_connected = true;
+            if per_connection.state == State::Connected {
+                match tracker.kind() {
+                    "calendar" => calendar_is_connected = true,
+                    "email" => mail_is_connected = true,
+                    _ => {}
+                }
             }
             metrics.set_connection_state(tracker.connection(), per_connection.state);
             if let Some(envelope) = tracker.observe(&per_connection, &occurred_at) {
@@ -433,6 +458,54 @@ async fn run(config: Config) -> Result<()> {
                 poll_is_due,
                 "calendars not polled this round"
             );
+        }
+        // The mailbox, on the same terms: the grant stands, JMAP answered
+        // as the owner, the poll interval is up.
+        let mail_poll_is_due =
+            last_mail_poll.is_none_or(|last| last.elapsed() >= config.mail_poll_interval);
+        if let (Some(mailbox), Some(token), true, true) =
+            (&mailbox, &access, mail_is_connected, mail_poll_is_due)
+        {
+            last_mail_poll = Some(std::time::Instant::now());
+            match mailbox.poll(&token.token, &occurred_at).await {
+                Ok(found) => {
+                    debug!(
+                        envelopes = found.envelopes.len(),
+                        dropped = found.dropped.len(),
+                        "mailbox polled"
+                    );
+                    for why in &found.dropped {
+                        metrics.record_mail_dropped(why.as_str());
+                        info!(reason = why.as_str(), "a mail was not published");
+                    }
+                    for envelope in &found.envelopes {
+                        publish(&jetstream, envelope, &metrics).await;
+                    }
+                    if let Some(state) = &found.state {
+                        if let Err(error) = mailbox.commit(state) {
+                            error!(error = %format!("{error:#}"), "the mail state could not be written; the next poll republishes");
+                        }
+                    }
+                }
+                Err(SideError::Refused { status }) => {
+                    let refused = Observation {
+                        state: State::PendingOperator,
+                        service: Some("jmap"),
+                        hint: Some(format!(
+                            "jmap refused a fresh token with {status} on a mailbox read: the grant \
+                             stands, but the client lacks what jmap expects — an audience or a \
+                             scope the operator has to add to the client at the SSO"
+                        )),
+                    };
+                    for tracker in trackers.iter_mut().filter(|t| t.kind() == "email") {
+                        metrics.set_connection_state(tracker.connection(), refused.state);
+                        if let Some(envelope) = tracker.observe(&refused, &occurred_at) {
+                            publish(&jetstream, &envelope, &metrics).await;
+                        }
+                    }
+                }
+                Err(error) => warn!(%error, "the mailbox could not be polled this round"),
+            }
         }
         tokio::time::sleep(config.health_interval).await;
     }

@@ -21,8 +21,20 @@ use twalk_consent_cache::{ConsentCache, ConsentChange, Snapshot, CONSENT_CHANGED
 pub async fn follow(
     jetstream: async_nats::jetstream::Context,
     snapshot_document: Option<&Value>,
+    owner_email: &str,
 ) -> Result<ConsentCache> {
-    let cache = ConsentCache::default();
+    // The owner has no consent state (ADR 0021): a decision about their own
+    // address — from the snapshot or the stream — never enters the cache.
+    // Their identity here is the `mailto:` every mail and calendar event
+    // spells them by; the collector has no Matrix ID to name them by.
+    let owner = twalk_consent_cache::owner::Owner::new(
+        crate::caldav::owner_mailto(owner_email),
+        std::iter::empty(),
+    );
+    let cache = ConsentCache::for_people_only(
+        Some(owner),
+        twalk_consent_cache::bridge_bot::BridgeBots::default(),
+    );
     let Some(document) = snapshot_document else {
         info!("no Companion Gateway: no consent decisions, nobody withheld");
         return Ok(cache);
