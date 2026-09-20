@@ -228,6 +228,34 @@ impl Registry {
                 );
             }
         }
+        // And two connections of one kind are told apart by their bridges'
+        // **bots**, not by their bridge ids: the Sensor reads the bot a
+        // portal's own `m.bridge` marker names and looks it up here, so a
+        // bridge whose bot the operator did not name leaves its connection
+        // unrecognisable — every one of its portals would resolve to
+        // "several of this kind and none names this bot" and publish
+        // nothing. That is a configuration error with a name, refused here
+        // rather than discovered as a silence on the bus.
+        for connection in &connections {
+            let Some(bridge_id) = &connection.bridge_id else {
+                continue;
+            };
+            let of_kind = connections
+                .iter()
+                .filter(|other| other.kind == connection.kind)
+                .count();
+            if of_kind > 1 && connection.bridge_bot.is_none() {
+                bail!(
+                    "GATEWAY_CONNECTIONS names {of_kind} connections of the kind {:?}, and the \
+                     bridge {bridge_id:?} carrying {:?} names no bot: the Sensor tells two \
+                     connections of one kind apart by the bot that built each portal, so set \
+                     GATEWAY_BRIDGE_{}_BOT_USER_ID",
+                    connection.kind,
+                    connection.id,
+                    crate::config::variable_slug(bridge_id)
+                );
+            }
+        }
         Ok(Self { connections })
     }
 
@@ -604,6 +632,33 @@ mod tests {
                 .to_string();
         assert!(refused.contains("GATEWAY_CONNECTIONS"), "{refused}");
         assert!(refused.contains("mautrix-whatsapp-work"), "{refused}");
+    }
+
+    #[test]
+    fn two_connections_of_one_kind_need_both_bridges_bots_named() {
+        // Each connection rides its own bridge, so the bridge-id rule is
+        // satisfied — and the Sensor still could not tell the second one's
+        // portals from the first's, because it looks a portal up by the bot
+        // that built it and one bridge names none. Refused at startup, naming
+        // the variable, rather than found as a silence on the bus.
+        let bridges = [
+            bridge("mautrix-whatsapp", "whatsapp", Some("@whatsappbot:x")),
+            bridge("mautrix-whatsapp-work", "whatsapp", None),
+        ];
+        let refused = Registry::from_config(
+            Some("mautrix-whatsapp=whatsapp,mautrix-whatsapp-work=whatsapp"),
+            &bridges,
+            "x",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("GATEWAY_BRIDGE_MAUTRIX_WHATSAPP_WORK_BOT_USER_ID"),
+            "{refused}"
+        );
+        // One connection of a kind needs no bot at all: the kind is enough.
+        Registry::from_config(Some("mautrix-whatsapp-work=whatsapp"), &bridges[1..], "x")
+            .expect("a single connection of a kind resolves by its kind");
     }
 
     #[test]

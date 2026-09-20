@@ -134,12 +134,13 @@
 		},
 
 		"sensor": {
-			"what": "The Sensor at its process boundary, against the shared test stack: normalisation, consent, the owner, the owner's own device, bridge bots, presence, encryption, persistence, observability.",
+			"what": "The Sensor at its process boundary, against the shared test stack: normalisation, consent, the owner, the owner's own device, bridge bots, presence, encryption, persistence, observability, the bus's retention policy.",
 			"component": "sensor",
 			"workdir": "sensor",
-			"run": "cargo test --lib --test bridge_bots_are_not_contacts --test consent --test encryption --test excerpt_consent --test fidelity --test message_to_event --test observability --test outbound --test outbound_message_sent --test owner_device --test owner_is_never_a_contact --test persistence --test presence --test presence_network --test reactions --test sensor_lifecycle --test smoke",
+			"run": "cargo test --lib --test bridge_bots_are_not_contacts --test bus_policy --test consent --test encryption --test excerpt_consent --test fidelity --test message_to_event --test observability --test outbound --test outbound_message_sent --test owner_device --test owner_is_never_a_contact --test persistence --test presence --test presence_network --test reactions --test sensor_lifecycle --test smoke",
 			"targets": [
 				"bridge_bots_are_not_contacts",
+				"bus_policy",
 				"consent",
 				"encryption",
 				"excerpt_consent",

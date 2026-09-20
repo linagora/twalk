@@ -3,8 +3,16 @@
 #
 # Three containers and nothing else. The relay's only boot-time call to an
 # object store is the git conformance probe, and `BUZZ_GIT_CONFORMANCE_PROBE`
-# turns it off, so there is no MinIO here; Postgres keeps its data on tmpfs,
-# because nothing in this stack is worth keeping across a `down`.
+# turns it off, so there is no MinIO here. Postgres keeps its data on a
+# named volume that `down -v` removes — nothing in this stack is worth
+# keeping across a `down` — and **not** on tmpfs, which it did at first:
+# tmpfs pages are charged to the container's own memory cgroup, so the
+# data (WAL and partitions, 180 MB after eight hours of runs) shared the
+# 256 MB limit with Postgres's own buffers until the kernel killed a
+# backend mid-request, the relay answered the seed's `POST /events` with
+# `400 invalid: database error`, and whichever test was seeding in that
+# second failed as though it were flaky (#300's review). Disk pages are
+# reclaimable; tmpfs pages are not.
 #
 # The relay is multi-tenant by host: at boot it seeds one community for the
 # authority of `RELAY_URL` and makes `RELAY_OWNER_PUBKEY` its owner. Every
@@ -84,9 +92,14 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
-    mem_limit: 256m
-    tmpfs:
-      - /var/lib/postgresql/data
+    # 512m for Postgres's own memory alone: its data is on disk (below),
+    # where the page cache is reclaimable and does not count against the
+    # limit the way tmpfs did. `RelayStack::ensure` refuses to adopt this
+    # container once it reports `OOMKilled`, so a ceiling crossed again
+    # recreates the stack rather than failing a test.
+    mem_limit: 512m
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
@@ -96,3 +109,7 @@ services:
       timeout: 3s
       retries: 30
     mem_limit: 64m
+
+volumes:
+  # Removed by `down -v`, which is how this stack goes.
+  postgres-data:
