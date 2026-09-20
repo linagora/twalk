@@ -218,7 +218,7 @@ test.describe.serial('the bootstrap journey', () => {
 
 	/** The room id the handover alias points at, or `null`. */
 	async function handoverRoom(): Promise<string | null> {
-		const alias = encodeURIComponent(handoverAlias(stack!.serverName));
+		const alias = encodeURIComponent(handoverAlias(`@${stack!.owner}:${stack!.serverName}`) ?? '');
 		const answer = await fetch(
 			`${stack!.synapseUrl}/_matrix/client/v3/directory/room/${alias}`,
 			{ headers: { authorization: `Bearer ${await ownerToken()}` } }
@@ -226,10 +226,15 @@ test.describe.serial('the bootstrap journey', () => {
 		return answer.ok ? ((await answer.json()) as { room_id: string }).room_id : null;
 	}
 
-	/** One state event of a room, as the owner's own session can read it. */
+	/**
+	 * One state event of a room, as the owner's own session can read it.
+	 * `type` may carry a state key (`m.room.member/<user id>`); no trailing
+	 * slash, because Synapse matches `/state/{type}/{key}` to the end of the
+	 * path and a slash after the key is a route it does not have (#267).
+	 */
 	async function state(roomId: string, type: string): Promise<Record<string, unknown> | null> {
 		const answer = await fetch(
-			`${stack!.synapseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${type}/`,
+			`${stack!.synapseUrl}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${type}`,
 			{ headers: { authorization: `Bearer ${await ownerToken()}` } }
 		);
 		return answer.ok ? ((await answer.json()) as Record<string, unknown>) : null;
@@ -389,8 +394,12 @@ test.describe.serial('the bootstrap journey', () => {
 		await page.getByTestId('to-dashboard').click();
 		await expect(page.getByTestId('screen-dashboard')).toBeVisible();
 		await expect(page.getByTestId('persona-assistant')).toHaveAttribute('data-active', 'yes');
-		// Honest on arrival: the decision is recorded and nothing runs on it.
-		await expect(page.getByTestId('no-runtime')).toBeVisible();
+		// Honest on arrival: the decision is recorded and nothing runs on it —
+		// read from the deployment, which runs a bus and no runtime (#177).
+		await expect(page.getByTestId('runtime-state')).toHaveAttribute(
+			'data-presence',
+			/^(never|gone)$/
+		);
 	});
 
 	test('a reload stays signed in', async () => {

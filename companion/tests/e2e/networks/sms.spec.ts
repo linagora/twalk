@@ -14,7 +14,7 @@ test.skip(bridgeStack() === null, NO_STACK);
 test.describe.configure({ mode: 'serial' });
 
 /** A plausible jar: the seven Google session cookies, in header spelling. */
-const NAMES = ['SID', 'HSID', 'SSID', 'APISID', 'SAPISID', '__Secure-1PSID', '__Secure-1PSIDTS'];
+const NAMES = ['SID', 'HSID', 'OSID', 'SSID', 'APISID', 'SAPISID', '__Secure-1PSID', '__Secure-1PSIDTS'];
 const PASTE = NAMES.map((name) => `${name}=value-for-${name}`).join('; ');
 
 test.beforeEach(async ({ context, request }) => {
@@ -88,18 +88,26 @@ test('a whole cookie login: the cookies, the emoji, the connection', async ({ pa
 	// origin, so the five it did not ask for are not relayed anywhere (ADR 0011).
 	// The paste is still checked against the same list, so nothing is silently
 	// dropped: a name the bridge wants and the paste lacks is named on screen.
+	//
+	// On the wire the jar is **one string**, the JSON of the map: bridgev2
+	// declares a cookies answer as a string and parses it itself, and a map
+	// sent as a map is refused by its decoder before any connector runs (#224,
+	// #267). The stub refuses the same way, so this is the shape asserted.
 	const stats = await bridge.stats();
 	const relayed = stats.submits?.find((submit) => submit.step_type === 'cookies');
 	expect(relayed, JSON.stringify(stats.submits)).toBeDefined();
-	expect(relayed?.body?.cookies?.['SID']).toBe('value-for-SID');
-	expect(relayed?.body?.cookies).toEqual({
+	expect(typeof relayed?.body?.cookies).toBe('string');
+	const jar = JSON.parse(relayed?.body?.cookies ?? 'null') as Record<string, string>;
+	expect(jar['SID']).toBe('value-for-SID');
+	expect(jar).toEqual({
 		SID: 'value-for-SID',
-		SAPISID: 'value-for-SAPISID'
+		SAPISID: 'value-for-SAPISID',
+		OSID: 'value-for-OSID'
 	});
 	// By key, not by substring: `APISID` is inside `SAPISID`, and an absence
 	// test that can be satisfied by a coincidence is not an absence test.
-	const sent = Object.keys(relayed?.body?.cookies ?? {});
-	const unasked = NAMES.filter((name) => name !== 'SID' && name !== 'SAPISID');
+	const sent = Object.keys(jar);
+	const unasked = NAMES.filter((name) => !['SID', 'SAPISID', 'OSID'].includes(name));
 	for (const name of unasked) {
 		expect(sent, `${name} was not asked for`).not.toContain(name);
 	}
@@ -134,3 +142,43 @@ test('an iPhone is told plainly, and given a way out', async ({ browser, request
 
 	await context.close();
 });
+
+test('a paste without OSID is told which request it came from, not that it was copied badly', async ({
+	page,
+	request
+}) => {
+	// #220, from the owner's own attempts: "Copy as cURL" on any request of the
+	// Messages web app yields six of the seven cookies, every time, because the
+	// app talks to Google's API host and OSID is scoped to messages.google.com.
+	// The parser named the missing cookie correctly and the advice — "check you
+	// copied every row" — sent the owner to hunt for a truncated paste that did
+	// not exist. The cause is the request, and the remedy is a different view.
+	const bridge = new StubBridge(request, SMS_BRIDGE);
+	await page.goto('/networks/sms');
+	await page.getByTestId('accept-disclosure').click();
+
+	// Where the cookies are and are not, and which are not wanted: on the
+	// screen before the paste, not in a ticket.
+	const screen = page.getByTestId('screen-sms');
+	await expect(screen).toContainText(/messages\.google\.com/);
+	await expect(screen).toContainText(/Network tab|onglet Réseau/);
+	await expect(screen).toContainText(/__Secure-3P\*/);
+	await expect(screen).toContainText(/nowhere else|nulle part ailleurs/);
+
+	const sixOfSeven = NAMES.filter((name) => name !== 'OSID')
+		.map((name) => `${name}=value-for-${name}`)
+		.join('; ');
+	await page.getByTestId('cookie-paste').fill(sixOfSeven);
+	await page.getByTestId('submit-step').click();
+
+	const scoped = page.getByTestId('cookies-missing-scoped');
+	await expect(scoped).toBeVisible();
+	await expect(scoped).toContainText('OSID');
+	await expect(scoped).toContainText(/messages\.google\.com/);
+	// Not the sentence that blames the copy.
+	await expect(scoped).not.toContainText(/every row|toutes les lignes/);
+	// And nothing reached the bridge: a paste the screen can see is short is
+	// not sent to be refused.
+	expect((await bridge.stats()).submits.some((s) => s.step_type === 'cookies')).toBe(false);
+});
+

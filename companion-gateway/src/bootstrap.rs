@@ -96,6 +96,20 @@ pub struct Account {
     pub home_server: String,
 }
 
+/// The homeserver could not say whether an account exists: unreachable, or
+/// an answer that is neither "here it is" nor `M_NOT_FOUND`. Carries what the
+/// homeserver said, never a credential — the read it wraps needs none.
+#[derive(Debug)]
+pub struct AccountLookupFailure {
+    pub detail: String,
+}
+
+impl std::fmt::Display for AccountLookupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
 /// Why a registration was refused. No variant carries the password, the
 /// registration shared secret or an access token.
 #[derive(Debug)]
@@ -520,6 +534,73 @@ impl Bootstrap {
             .await
             .ok()
             .and_then(|member| member.membership))
+    }
+
+    /// Whether an account exists on the homeserver — asked of the homeserver,
+    /// whoever created the account (ticket #133).
+    ///
+    /// `GET /api/deployment`'s `bootstrapped` used to be the store's memory of
+    /// the registration relay succeeding. That is the right source for
+    /// refusing a second registration and the wrong one for "can this person
+    /// sign in": an account provisioned outside the relay, or a state
+    /// directory recreated or restored from before onboarding, is a working
+    /// deployment whose owner was told it had no account and shown no way in —
+    /// the failure #112 exists to prevent, reached by the screen written to
+    /// prevent it.
+    ///
+    /// The question is asked through the profile endpoint, because it is the
+    /// one read that answers for a local account without a token and while
+    /// `enable_registration: false` — `register/available`, the obvious one,
+    /// is refused outright by Synapse on a homeserver with registration
+    /// closed, which is every deployment of this product. A profile answers
+    /// `200` for any account that exists, empty or not, and `404` for one that
+    /// does not. Nothing of the profile is kept; only which of the two the
+    /// homeserver said.
+    ///
+    /// Every other answer is an error, never an absence: a homeserver that
+    /// cannot be reached, or one configured to require a token for profile
+    /// reads (`require_auth_for_profile_requests`), must not be reported as
+    /// "no account yet" — that would send a returning user to the account
+    /// form.
+    pub async fn account_exists(&self, user_id: &str) -> Result<bool, AccountLookupFailure> {
+        let url = self
+            .url(&["_matrix", "client", "v3", "profile", user_id])
+            .map_err(|detail| AccountLookupFailure { detail })?;
+        let response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| AccountLookupFailure {
+                detail: format!(
+                    "the homeserver could not be reached: {}",
+                    error.without_url()
+                ),
+            })?;
+        if response.status().is_success() {
+            return Ok(true);
+        }
+        let status = response.status();
+        let (errcode, detail) = matrix_error(response).await;
+        // Synapse says a missing local profile two ways depending on the
+        // path it took — `M_NOT_FOUND` "Profile was not found", or `M_UNKNOWN`
+        // "No row found (profiles)" — and both are the answer "no such
+        // account". `M_UNRECOGNIZED` is not: that is a server with no such
+        // endpoint, which is not a Matrix homeserver answering the question.
+        if status == reqwest::StatusCode::NOT_FOUND && errcode != "M_UNRECOGNIZED" {
+            return Ok(false);
+        }
+        Err(AccountLookupFailure {
+            detail: if status == reqwest::StatusCode::FORBIDDEN {
+                format!(
+                    "the homeserver refused the profile read ({errcode}: {detail}); it is \
+                     configured to require a token for profile requests \
+                     (require_auth_for_profile_requests), which this check cannot carry"
+                )
+            } else {
+                format!("the homeserver answered {status} ({errcode}: {detail})")
+            },
+        })
     }
 
     /// A homeserver URL with each path segment properly escaped. Room ids and

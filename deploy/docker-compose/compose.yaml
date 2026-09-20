@@ -23,8 +23,10 @@
 #
 # Hermes joins this stack as of issue #158, and with it the one service that
 # holds the host's Docker socket — read ADR 0023 and the `hermes` service
-# below before running this on a host you share. The other planes join as
-# they land (see the repository roadmap).
+# below before running this on a host you share. The clerk joins as of
+# issue #265 — the owner's Buzz channels, written from the bus — and hosts
+# nothing until a relay is named. The other planes join as they land (see the
+# repository roadmap).
 
 name: twalk
 
@@ -693,6 +695,102 @@ services:
       HERMES_SHUTDOWN_GRACE_MS: ${HERMES_SHUTDOWN_GRACE_MS:-}
     # The runtime exits on unreadable configuration and on a bus it cannot
     # reach at startup; compose brings it back, as it does the Sensor.
+    restart: unless-stopped
+
+  # --- The clerk: the owner's Buzz channels, fed from the bus ---------------
+  #
+  # The clerk (ticket #265, ADR 0035) writes onto the owner's Buzz relay what
+  # the bus says — one forum post per suggestion in `approbations`, one line
+  # per posted reply in `journal`, what calls for a look in `activite` — under
+  # a Nostr key of its own, and holds no state: the relay is its memory. It
+  # reads the bus with three durable consumers and never writes to it.
+  #
+  # It runs in the host's network namespace, like hermes, and for a reason of
+  # the same shape: the relay is reached by the URL it **announces** — NIP-98
+  # binds every signed request to exactly that URL, and the relay is
+  # multi-tenant by host — which on the reference deployment is
+  # https://buzz.maudet.cloud, terminated by a Caddy on this same host. A
+  # container on this stack's network would have to reach that name through
+  # the host's own loopback, which this host firewalls; in the host's
+  # namespace the URL simply resolves. The bus is reached through its
+  # published port, which is why NATS_PORT appears in CLERK_NATS_URL.
+  #
+  # Empty on CLERK_RELAY_URL, the key file or any of the three channels, the
+  # container starts, says which are missing and hosts nothing (see
+  # clerk-entrypoint.sh): a stack without Buzz still comes up.
+  clerk:
+    build:
+      # The repository root, for the same reason as the Sensor's and the
+      # Gateway's. See clerk.Dockerfile.
+      context: ../..
+      dockerfile: deploy/docker-compose/clerk.Dockerfile
+    image: ${TWALK_CLERK_IMAGE:-twalk/clerk:local}
+    depends_on:
+      nats:
+        condition: service_started
+    network_mode: host
+    init: true
+    volumes:
+      # The clerk's own Nostr key, as a file: a path on the host, mounted
+      # read-only at a fixed path in the container. Unset, /dev/null is
+      # mounted here and the entrypoint reports the key as missing rather
+      # than starting the clerk. Docker creates a *directory* for a path
+      # that does not exist, so a typo shows up as the entrypoint refusing
+      # to start and naming the variable, not as a clerk that signs nothing.
+      - ${CLERK_NOSTR_KEY_FILE:-/dev/null}:/run/secrets/clerk.key:ro
+    tmpfs:
+      # Where the entrypoint installs its copy of the key, owned by the
+      # unprivileged `clerk` account, for the binary to read (see
+      # clerk-entrypoint.sh): a tmpfs rather than the image's writable
+      # layer, so the copy the entrypoint makes never lands on disk — only
+      # in memory, and gone the moment the container stops.
+      - /run/clerk
+    environment:
+      # This stack's bus, through the port it publishes on loopback: the
+      # clerk is in the host's network namespace.
+      CLERK_NATS_URL: nats://127.0.0.1:${NATS_PORT:-4222}
+      # The URL the relay announces (its own RELAY_URL): scheme, host and
+      # port, nothing after. The clerk refuses a path or a trailing slash.
+      CLERK_RELAY_URL: ${CLERK_RELAY_URL:-}
+      # The container's side of the mount above; the host path is in .env.
+      CLERK_NOSTR_KEY_FILE: /run/secrets/clerk.key
+      # The three channels, by UUID, as ./provision-buzz-channels.sh printed
+      # them.
+      CLERK_CHANNEL_APPROVALS: ${CLERK_CHANNEL_APPROVALS:-}
+      CLERK_CHANNEL_ACTIVITY: ${CLERK_CHANNEL_ACTIVITY:-}
+      CLERK_CHANNEL_JOURNAL: ${CLERK_CHANNEL_JOURNAL:-}
+      # The language the clerk writes its own sentences in — never a
+      # contact's words, which it never quotes. Set it here explicitly: on
+      # the reference deployment the personas take their language from the
+      # Companion's own settings (#184), which the clerk cannot read — it
+      # holds no Gateway credential, by design — so HERMES_USER_LANGUAGE is
+      # typically empty and falling through to it would not reach what the
+      # user actually chose. Unset means English, and the clerk warns at
+      # startup that it is unset.
+      CLERK_USER_LANGUAGE: ${CLERK_USER_LANGUAGE:-${HERMES_USER_LANGUAGE:-}}
+      # /health and /metrics, on the host's loopback since this is the
+      # host's namespace: the port is the operator's to choose, the
+      # interface is not.
+      CLERK_LISTEN: 127.0.0.1:${CLERK_LISTEN_PORT:-8084}
+      # How often the clerk looks for a post whose suggestion has expired
+      # and deletes it.
+      CLERK_SWEEP_SECONDS: ${CLERK_SWEEP_SECONDS:-60}
+      CLERK_LOG_LEVEL: ${CLERK_LOG_LEVEL:-info}
+    healthcheck:
+      # The clerk's own health endpoint — or the marker the entrypoint leaves
+      # when it hosts nothing, because a container that is asleep on purpose
+      # is not an unhealthy one and `up -d --wait` must not fail on it.
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:${CLERK_LISTEN_PORT:-8084}/health || test -e /run/clerk/hosting-nothing
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    # The clerk exits on unreadable configuration — a variable it refuses, a
+    # key file it will not accept — and compose brings it back. A bus it
+    # cannot reach it waits for instead, retrying every few seconds and
+    # saying so at ERROR, with /health already answering meanwhile.
     restart: unless-stopped
 
   # --- Bridges: mautrix-whatsapp, -signal, -gmessages and -telegram --------

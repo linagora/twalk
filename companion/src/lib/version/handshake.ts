@@ -24,6 +24,13 @@ export type Handshake =
 	| { kind: 'match'; version: string }
 	/** The Gateway moved. The shell must be replaced. */
 	| { kind: 'mismatch'; expected: string; actual: string }
+	/**
+	 * The Gateway is the right version and ships a **different build of the
+	 * Companion** than the one running (#222): this browser holds a shell the
+	 * server no longer serves — a redeploy an open tab never picked up. The
+	 * shell must be replaced, the same way.
+	 */
+	| { kind: 'stale-shell'; running: string; shipped: string }
 	/** `/health` did not answer, or answered something else. Not a mismatch. */
 	| { kind: 'unreachable'; reason: string };
 
@@ -43,10 +50,30 @@ export function compareVersions(expected: string, reported: string | undefined |
 	return { kind: 'mismatch', expected, actual: reported };
 }
 
+/**
+ * The second comparison (#222): the build this page runs against the build
+ * the Gateway ships. A Gateway that names no build (an export without
+ * `_app/version.json`, or a Gateway older than this field) cannot be compared
+ * and is left at the first comparison's answer — never a stale shell on a
+ * guess, for the same reason a versionless `/health` is never a mismatch.
+ */
+export function compareBuilds(
+	running: string,
+	shipped: string | null | undefined,
+	otherwise: Handshake
+): Handshake {
+	if (typeof shipped !== 'string' || shipped.length === 0 || shipped === running) {
+		return otherwise;
+	}
+	return { kind: 'stale-shell', running, shipped };
+}
+
 /** What `/health` told us, for the diagnostics page. */
 export interface GatewayHealth {
 	version: string;
 	revision: string;
+	/** The build of the Companion the Gateway ships, or `null` when it names none. */
+	companionBuild: string | null;
 }
 
 export interface HandshakeResult {
@@ -59,7 +86,15 @@ export interface HandshakeResult {
  * the shape of the health document is the description's and not this file's
  * idea of it.
  */
-export async function shakeHands(expected = EXPECTED_GATEWAY_VERSION): Promise<HandshakeResult> {
+export async function shakeHands(
+	expected = EXPECTED_GATEWAY_VERSION,
+	/**
+	 * The build this page was made from: SvelteKit's `version` from
+	 * `$app/environment`, which the caller supplies because that module is the
+	 * app's and not the unit tests'. `null` skips the build comparison.
+	 */
+	running: string | null = null
+): Promise<HandshakeResult> {
 	try {
 		const result = await gateway.GET('/health');
 		const data = result.data;
@@ -72,9 +107,21 @@ export async function shakeHands(expected = EXPECTED_GATEWAY_VERSION): Promise<H
 				health: null
 			};
 		}
+		const versions = compareVersions(expected, data.version);
+		// The build comparison only once the versions agree: a moved Gateway
+		// is already a reload, and one reason at a time is one banner at a
+		// time.
+		const outcome =
+			versions.kind === 'match' && running !== null
+				? compareBuilds(running, data.companion_build, versions)
+				: versions;
 		return {
-			outcome: compareVersions(expected, data.version),
-			health: { version: data.version, revision: data.revision }
+			outcome,
+			health: {
+				version: data.version,
+				revision: data.revision,
+				companionBuild: data.companion_build ?? null
+			}
 		};
 	} catch (cause) {
 		return {
