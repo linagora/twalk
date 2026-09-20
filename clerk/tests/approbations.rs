@@ -33,6 +33,8 @@ mod harness;
 use anyhow::Result;
 use harness::{inbound_message, suggestion, Run, CONTACT_MATRIX_ID};
 use serde_json::json;
+use twalk_clerk::refusals::{delivery_unread_line, Unread};
+use twalk_clerk::text::Lang;
 
 #[tokio::test]
 async fn a_suggestion_becomes_one_post_and_stays_one() -> Result<()> {
@@ -59,6 +61,15 @@ async fn a_suggestion_becomes_one_post_and_stays_one() -> Result<()> {
         "the reference line is the post's last line:\n{}",
         post.content
     );
+    // No write half on this run, so no device to read the delivery with:
+    // the post says so, in the Companion's words (#300), rather than
+    // guessing whether the reply could reach the contact.
+    let no_device = delivery_unread_line(Lang::Fr, Unread::NoDevice);
+    assert!(
+        post.content.lines().any(|line| line == no_device),
+        "a read-half post carries the no-device delivery line:\n{}",
+        post.content
+    );
     assert_eq!(
         post.pubkey.to_hex(),
         run.clerk_pubkey,
@@ -68,9 +79,10 @@ async fn a_suggestion_becomes_one_post_and_stays_one() -> Result<()> {
         .await?;
 
     // The same event again — the bus deduplicates on `Nats-Msg-Id` for
-    // two minutes, so this is the same CloudEvent id under a new message
-    // id, which is what a redelivery is to the clerk. Then a second
-    // suggestion: its post proves the consumer went past the redelivery.
+    // the bus's duplicate window (24 h since #174), so this is the same
+    // CloudEvent id under a new message id, which is what a redelivery is
+    // to the clerk. Then a second suggestion: its post proves the consumer
+    // went past the redelivery.
     run.publish_again("persona.suggest.produced", &first)
         .await?;
     let second = suggestion(&run.id, 2, 3600)?;

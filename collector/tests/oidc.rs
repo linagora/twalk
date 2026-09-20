@@ -134,6 +134,50 @@ async fn a_revoked_grant_is_reconnect_required_and_a_refusing_service_is_pending
     Ok(())
 }
 
+/// The third refusal the two-refusals rule owes (review of #274): the SSO
+/// refusing the **client** — a wrong secret, here — is not the grant being
+/// gone. Read as `reconnect_required`, it would send the operator to sign in
+/// again for a problem signing in cannot fix; it is `pending_operator`,
+/// naming the client's configuration, and the grant on disk is left alone.
+#[tokio::test]
+async fn a_wrong_client_secret_is_pending_operator_and_not_a_reconnect() -> Result<()> {
+    let sso = FakeSso::start(OWNER).await?;
+    let dir = tempfile::tempdir()?;
+    let settings = settings(&sso, dir.path())?;
+    let client = Client::discover(settings.clone()).await?;
+    let grant = authorize(&client, &sso).await?;
+
+    // The operator rotated the secret file to a value the SSO does not know.
+    std::fs::write(
+        &settings.client_secret_file,
+        "not-the-secret-the-sso-knows\n",
+    )?;
+    let Renewal::PendingOperator { detail } = client.renew(&grant).await? else {
+        panic!("a refused client is the operator's problem, not a reconnect");
+    };
+    assert!(detail.contains("invalid_client"), "{detail}");
+    assert!(
+        detail.contains("COLLECTOR_OIDC_CLIENT_SECRET_FILE"),
+        "the remedy names the setting: {detail}"
+    );
+    assert!(
+        !detail.contains(&grant.refresh_token),
+        "the refusal's words never carry the token: {detail}"
+    );
+    // The grant was not touched: the SSO still knows it, and the right
+    // secret renews it.
+    assert_eq!(
+        Grant::read(&settings.grant_file)?.map(|g| g.refresh_token),
+        Some(grant.refresh_token.clone())
+    );
+    twalk_test_harness::sso::write_client_secret(dir.path())?;
+    assert!(matches!(
+        client.renew(&grant).await?,
+        Renewal::Renewed { .. }
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -> Result<()> {
     let sso = FakeSso::start(OWNER).await?;

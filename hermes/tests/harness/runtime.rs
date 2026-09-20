@@ -414,7 +414,12 @@ impl RuntimeRun {
                 "subject": { "type": "persona", "id": persona_id },
                 "old_state": "unset",
                 "new_state": new_state,
-                "scope": { "networks": networks },
+                // Since #270 (ADR 0033) a decision's perimeter is its
+                // connections, keyed by the ids the Gateway's registry gave
+                // them; on a deployment with one connection per network the
+                // id is the network's name, which is what this stack has.
+                // `networks` stays for the runtime, which still reads it.
+                "scope": { "connections": networks, "networks": networks },
                 "occurred_at": occurred_at,
                 "actor": "@michel:test.twalk",
             }
