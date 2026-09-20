@@ -3,10 +3,28 @@
 // and is unit-testable. The caller passes `navigator.languages` (or
 // `[navigator.language]`); see `./index.ts`.
 
-/** The locales v0.1 ships. French first: it is the owner's language. */
-export const LOCALES = ['fr', 'en'] as const;
+/**
+ * The locales v0.1 ships (ADR 0016, #102). French first: it is the owner's
+ * language. English and French are reviewed; Italian, Spanish and German were
+ * produced without a native reviewer, which each catalogue states in its
+ * `catalogue.review` entry and `CONTRIBUTING.md` says how to fix.
+ */
+export const LOCALES = ['fr', 'en', 'it', 'es', 'de'] as const;
 
 export type Locale = (typeof LOCALES)[number];
+
+/**
+ * Each language named in itself, for a picker: a German speaker looking for
+ * their language finds "Deutsch", not "German" in whatever language the
+ * screen happens to be in.
+ */
+export const LOCALE_NAMES: Record<Locale, string> = {
+	fr: 'Français',
+	en: 'English',
+	it: 'Italiano',
+	es: 'Español',
+	de: 'Deutsch'
+};
 
 /**
  * English is the fallback, not the default: `pickLocale` only reaches it when

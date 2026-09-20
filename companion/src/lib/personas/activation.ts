@@ -14,24 +14,14 @@
 
 import { gateway } from '$lib/api/client';
 import type { components } from '$lib/api/schema';
+import { isNetwork, type Network } from '$lib/networks/contract';
 import { scopeFor } from './scope';
 
-export type Network = components['schemas']['Network'];
+// The contract's networks live in `$lib/networks/contract` — one runtime list,
+// tested against the contract — so a string from a screen is checked against
+// what the Gateway will accept and not against a copy kept here (#268).
+export { isNetwork, NETWORKS, type Network } from '$lib/networks/contract';
 export type RecordedDecision = components['schemas']['RecordedConsentDecision'];
-
-/** The contract's networks, so a string from a screen can be checked. */
-export const NETWORKS: readonly Network[] = [
-	'whatsapp',
-	'telegram',
-	'signal',
-	'discord',
-	'sms',
-	'matrix'
-];
-
-export function isNetwork(value: string): value is Network {
-	return (NETWORKS as readonly string[]).includes(value);
-}
 
 /** Why an activation did not happen, in the codes a screen branches on. */
 export type ActivationFailure =

@@ -224,6 +224,26 @@ fn suggestion_json(listed: &Listed) -> Value {
         },
         "stream_sequence": listed.stream_sequence,
         "approval": listed.approval.as_ref().map(approval_json),
+        // Before the approval: whether a reply could reach the contact at
+        // all, from the owner's account's membership of the trigger's room
+        // (#216). After it: what the Sensor said the reply reached. Two
+        // members, because "published on your bus" and "delivered" are two
+        // facts and the screen must never render them as one.
+        "delivery": {
+            "reach": listed.delivery.reach(),
+            "detail": listed.delivery.detail(),
+        },
+        "posted": listed.posted.as_ref().map(posted_json),
+    })
+}
+
+/// The Sensor's report, as both the listing and `GET /api/approvals/{id}`
+/// render it.
+pub fn posted_json(posted: &crate::approval::Posted) -> Value {
+    json!({
+        "reach": posted.reach,
+        "posted_as": posted.posted_as,
+        "stream_sequence": posted.stream_sequence,
     })
 }
 
@@ -251,6 +271,7 @@ mod tests {
     use super::*;
     use crate::approval::{Content, Format};
     use crate::consent::{Network, State};
+    use crate::portals::Delivery;
     use crate::suggestions::{Standing, Window};
 
     fn listed(standing: Standing, approval: Option<RecordedApproval>) -> Listed {
@@ -272,6 +293,10 @@ mod tests {
             stream_sequence: 42,
             standing,
             approval,
+            delivery: Delivery::Unknown {
+                why: "trigger_out_of_reach",
+            },
+            posted: None,
         }
     }
 

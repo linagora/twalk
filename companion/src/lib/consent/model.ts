@@ -62,6 +62,7 @@
 // acceptance criterion.
 
 import type { components } from '$lib/api/schema';
+import { isNetwork } from '$lib/networks/contract';
 
 export type Network = components['schemas']['Network'];
 export type State = components['schemas']['ConsentState_State'];
@@ -252,12 +253,6 @@ function unkey(at: string): { contact: string; network: Network | null } {
 	const contact = at.slice(0, cut);
 	const network = at.slice(cut + 1);
 	return { contact, network: isNetwork(network) ? network : null };
-}
-
-const NETWORKS: readonly string[] = ['whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix'];
-
-function isNetwork(value: string): value is Network {
-	return NETWORKS.includes(value);
 }
 
 /**

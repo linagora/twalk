@@ -70,6 +70,15 @@ async fn the_health_endpoint_answers_as_soon_as_the_gateway_listens() -> Result<
         .as_str()
         .unwrap_or_else(|| panic!("the health document names the build's revision: {body}"));
     assert!(!revision.is_empty(), "the revision is non-empty: {body}");
+    // The build of the Companion this origin ships, read from the export's own
+    // `_app/version.json` (#222): the other half of a comparison the browser
+    // makes with the build it runs, so a redeploy an open tab never picked up
+    // is a named fact rather than five identical submissions.
+    assert_eq!(
+        health["companion_build"].as_str(),
+        Some(harness::COMPANION_BUILD_ID),
+        "the health document names the Companion build it serves: {body}"
+    );
 
     gateway.stop().await;
     Ok(())
@@ -416,6 +425,21 @@ async fn the_companion_states_its_cache_policy_and_revalidates_the_shell() -> Re
         .await?;
     assert_ne!(header(&plain, "etag"), header(&brotli, "etag"));
 
+    // Two more names that outlive a build and therefore take the shell's
+    // policy (#222): the worker's script — a browser that reused it from its
+    // HTTP cache would keep an old worker installed, which is how a redeploy
+    // stayed invisible through four reloads and one hard reload — and the
+    // build id the handshake compares.
+    for path in ["/service-worker.js", "/_app/version.json"] {
+        let answer = client.get(format!("{base}{path}")).send().await?;
+        assert_eq!(answer.status(), reqwest::StatusCode::OK, "{path}");
+        assert_eq!(
+            header(&answer, "cache-control").as_deref(),
+            Some("no-cache"),
+            "{path}: revalidated on every load, never reused blind"
+        );
+    }
+
     gateway.stop().await;
     Ok(())
 }
@@ -716,6 +740,95 @@ async fn an_absent_companion_build_does_not_take_the_service_down() -> Result<()
     )
     .await;
     assert!(warned.is_ok(), "startup warns about the absent build");
+
+    gateway.stop().await;
+    Ok(())
+}
+
+/// The server half of the upgrade path (#222): a Companion redeployed under a
+/// running Gateway is what the Gateway serves and names from the next request
+/// on. Nothing is read once and remembered — not the build id, not the shell's
+/// tag — so a browser that revalidates (the `no-cache` above) gets the new
+/// bytes and a browser comparing builds (the Companion's handshake) sees the
+/// new one.
+///
+/// The browser half — a page running build A, told the Gateway ships B, that
+/// purges its worker and reloads once, then says so — is the Companion's
+/// `tests/e2e/version.spec.ts`. Between them: client on A, server moved to B,
+/// client on B.
+#[tokio::test]
+async fn a_redeployed_companion_is_what_the_gateway_serves_and_names_from_the_next_request(
+) -> Result<()> {
+    let static_dir = companion_build("redeploy")?;
+    let gateway = GatewayProc::start(&gateway_env(&static_dir))?;
+    let base = gateway.base_url().await?;
+    poll_until(
+        || async {
+            reqwest::get(format!("{base}/health"))
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()
+        },
+        "the gateway health endpoint",
+    )
+    .await?;
+    let client = reqwest::Client::new();
+
+    // Build A: the health names it, the shell carries A's bytes and a tag.
+    let health = client.get(format!("{base}/health")).send().await?;
+    let health: serde_json::Value = health.json().await?;
+    assert_eq!(
+        health["companion_build"].as_str(),
+        Some(harness::COMPANION_BUILD_ID)
+    );
+    let shell = client.get(format!("{base}/")).send().await?;
+    let etag_a = shell
+        .headers()
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .expect("the shell carries a tag");
+    assert_eq!(shell.text().await?, INDEX_HTML);
+
+    // The redeploy: a new export lands in the directory the Gateway serves —
+    // a new shell naming new chunks, and a new build id. Nothing restarts.
+    const INDEX_B: &str = "<!doctype html>\n<title>Companion home, build B</title>\n";
+    std::fs::write(static_dir.join("index.html"), INDEX_B)?;
+    std::fs::write(
+        static_dir.join("_app/version.json"),
+        "{\"version\":\"build-b\"}",
+    )?;
+
+    // Build B, from the next request: the health names it, and a browser
+    // revalidating the shell with A's tag gets B's bytes and a 200 — never a
+    // 304 that would keep it on A.
+    let health = client.get(format!("{base}/health")).send().await?;
+    let health: serde_json::Value = health.json().await?;
+    assert_eq!(
+        health["companion_build"].as_str(),
+        Some("build-b"),
+        "the Gateway names the build it ships now, not the one it started with: {health}"
+    );
+    let revalidated = client
+        .get(format!("{base}/"))
+        .header("if-none-match", &etag_a)
+        .send()
+        .await?;
+    assert_eq!(
+        revalidated.status(),
+        reqwest::StatusCode::OK,
+        "a shell that changed is re-sent, not confirmed"
+    );
+    assert_ne!(
+        revalidated
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok()),
+        Some(etag_a.as_str()),
+        "the new shell has a tag of its own"
+    );
+    assert_eq!(revalidated.text().await?, INDEX_B);
 
     gateway.stop().await;
     Ok(())

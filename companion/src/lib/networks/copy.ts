@@ -138,16 +138,21 @@ export const TELEGRAM: LoginScreenCopy = {
  * The Google cookie step, in this project's words rather than the bridge's
  * eleven.
  *
- * The step ids: mautrix-gmessages names its steps `fi.mau.gmessages.login.*`,
- * which is the connector's own namespace, and the stub the suite drives answers
- * `fi.mau.stub.login.cookies`. Neither is captured from a live bridge — a
- * Google Messages login needs a real account — so this is the one place in this
- * file where an id could be wrong, and the failure mode is visible rather than
- * silent: an unmatched step id draws the bridge's own words and a card saying
- * the explanation is missing (`FieldsPanel.svelte`).
+ * The step ids: `fi.mau.gmessages.google_account` is what mautrix-gmessages
+ * v26.09 really advertises — read off the reference deployment on 2026-09-19,
+ * where the owner reached this step and got the fallback panel naming it,
+ * because this list had guessed `fi.mau.gmessages.login.cookies` from the
+ * connector's namespace (#220). The guess stays, in case a release renames it
+ * back, and the stub the suite drives answers `fi.mau.stub.login.cookies`. An
+ * unmatched id is still visible rather than silent: the bridge's own words and
+ * a card saying the explanation is missing (`FieldsPanel.svelte`).
  */
 const GOOGLE_COOKIES: StepOverride = {
-	stepIds: ['fi.mau.gmessages.login.cookies', 'fi.mau.stub.login.cookies'],
+	stepIds: [
+		'fi.mau.gmessages.google_account',
+		'fi.mau.gmessages.login.cookies',
+		'fi.mau.stub.login.cookies'
+	],
 	expects: { kind: 'cookies', fieldTypes: ['cookie'] },
 	// No headline of its own: the sections below *are* the instructions, and the
 	// bridge's eleven words are replaced rather than printed above them.
@@ -164,14 +169,31 @@ const GOOGLE_COOKIES: StepOverride = {
 			warn: true
 		}),
 		section({ steps: ['sms.step2.a', 'sms.step2.b', 'sms.step2.c'], link: true }),
+		// Where the cookies are, and where they are not (#220). The obvious
+		// route — "Copy as cURL" on a request in the Network tab — yields six
+		// of the seven every time, because the Messages web app talks to
+		// `instantmessaging-pa.clients6.google.com` and `OSID` is scoped to
+		// `messages.google.com`, so the browser never sends it there. The owner
+		// tried repeatedly and concluded they had copied wrong; they had not.
+		section({
+			title: 'sms.cookies.where.title',
+			bullets: ['sms.cookies.where.application', 'sms.cookies.where.notNetwork', 'sms.cookies.notThese'],
+			warn: true
+		}),
 		// What the seven cookies together let their holder do, read **before**
 		// the paste rather than after it: it is the sentence that lets someone
-		// decide not to (#57).
-		section({ body: 'sms.cookies.whatTheyAre' })
+		// decide not to (#57) — and, for the same reason, where they must not
+		// go: the owner pasted a complete cURL, live session cookies included,
+		// into a chat with an assistant while asking for help with a screen
+		// that explained nothing (#220).
+		section({ body: 'sms.cookies.whatTheyAre' }),
+		section({ body: 'sms.cookies.onlyHere', warn: true })
 	],
 	submit: 'sms.cookies.submit',
 	after: ['sms.cookies.neverStored'],
-	refused: 'sms.failed.google'
+	refused: 'sms.failed.google',
+	hostScoped: ['OSID'],
+	hostScopedMissing: 'sms.cookies.missingScoped'
 };
 
 export const SMS: LoginScreenCopy = {

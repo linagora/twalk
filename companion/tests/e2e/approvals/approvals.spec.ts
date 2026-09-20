@@ -74,15 +74,30 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		expect(page1).not.toContain(published.displayName);
 		expect(page1).not.toContain(published.networkIdentifier);
 
+		// #216, before the button: whether this reply can reach the contact at
+		// all is said *here*, from the Gateway's read of the homeserver, and
+		// not discovered after the fact. This stack's bridges are stubs the
+		// register cannot ask, so the honest answer is `unknown` — the point
+		// is that the sentence exists and names its reason, and that it is
+		// never `can_reach` on a guess.
+		const delivery = row.getByTestId('delivery');
+		await expect(delivery).toBeVisible();
+		await expect(delivery).toHaveAttribute('data-reach', 'unknown');
+		await expect(delivery).toHaveAttribute('data-detail', /.+/);
+
 		// The one deliberate act.
 		await row.getByTestId('approve').click();
 		await expect(row.getByTestId('sent')).toBeVisible();
-		// It says where the reply landed, and under whose name.
+		// It says where the reply landed, and under whose name — and calls it
+		// published, never sent: delivery is the next sentence, and the
+		// Sensor's to write.
 		await expect(row.getByTestId('sent')).toContainText(it.ownerId);
 		// Sent as written: the persona's words stay the text on screen, and
 		// nothing claims the user wrote something else (#217).
 		await expect(row.getByTestId('proposed')).toContainText('MARKER-REPLY-approve');
 		await expect(row.getByTestId('approved-text')).toHaveCount(0);
+		await expect(row.getByTestId('delivered')).toBeVisible();
+		await expect(row.getByTestId('delivered')).toHaveAttribute('data-reach', 'pending');
 
 		// And it actually left the deployment.
 		const event = await bus.waitFor(
@@ -111,6 +126,11 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 	await expect(
 		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('already-sent')
 	).toBeVisible();
+	// Published and delivered are two sentences after a re-read too, and no
+	// Sensor runs on this stack, so the second one is still "not yet".
+	await expect(
+		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('delivered')
+	).toHaveAttribute('data-reach', 'pending');
 	// An approved row offers nothing to press again.
 	await expect(
 		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('approve')

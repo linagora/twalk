@@ -735,3 +735,49 @@ async fn without_an_owner_the_origin_serves_the_companion_and_closes_its_api() -
     gateway.stop().await;
     Ok(())
 }
+
+/// `bootstrapped` is the homeserver's answer, not the store's memory
+/// (ticket #133).
+///
+/// This suite's Gateway is configured with an owner the registration relay
+/// never created — `bot_alpha`, provisioned by the test stack — and a state
+/// directory of its own, so its store holds no `owner_account` row. That is
+/// exactly the shape of a deployment whose account was provisioned outside
+/// the relay, or whose state directory was recreated, restored from a backup
+/// taken before onboarding, or moved between hosts: the deployment works, the
+/// account exists, and the only screen that could let the owner in used to
+/// tell them the deployment had no account yet.
+///
+/// The `false` half — an owner nobody has created — is `bootstrap.rs`'s
+/// `the_deployment_says_whether_it_has_its_account`, which asserts both sides
+/// around the one registration that flips it; that test still holds, because
+/// a homeserver that says `M_NOT_FOUND` is an absence and not an error.
+#[tokio::test]
+async fn the_deployment_has_its_account_whoever_created_it() -> Result<()> {
+    let (gateway, base, state_dir) = start("deployment-account-exists-on-the-homeserver").await?;
+    let client = client()?;
+
+    let sessions_db = state_dir.join("sessions.db");
+    assert!(
+        sessions_db.exists(),
+        "the store exists, so an empty store and no store are not being confused"
+    );
+
+    let answer = client.get(format!("{base}/api/deployment")).send().await?;
+    assert_eq!(answer.status(), reqwest::StatusCode::OK);
+    let document = json(answer).await?;
+    assert_eq!(
+        document["bootstrapped"].as_bool(),
+        Some(true),
+        "the owner's account exists on the homeserver, whoever created it, so the \
+         deployment says so — a store with no memory of creating it is not a deployment \
+         with no account: {document}"
+    );
+    assert!(
+        document.get("owner").is_none(),
+        "the check must not leak the owner's Matrix ID into the unauthenticated answer"
+    );
+
+    gateway.stop().await;
+    Ok(())
+}
