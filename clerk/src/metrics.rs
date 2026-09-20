@@ -83,14 +83,20 @@ pub enum Skipped {
     /// `pubkey` field is the relay's word and only the signature is the
     /// key holder's. A number here that is not zero is a relay to look at.
     Unverified,
+    /// The Companion Gateway already records the suggestion as approved
+    /// (`standing: approved` on `GET /api/suggestions/{id}`, #300): it was
+    /// decided from the approval screen before the clerk read it, so there
+    /// is no decision left to ask the owner for, and no post is made.
+    AlreadyApproved,
 }
 
 impl Skipped {
-    pub const ALL: [Skipped; 4] = [
+    pub const ALL: [Skipped; 5] = [
         Skipped::Expired,
         Skipped::Unreadable,
         Skipped::Duplicate,
         Skipped::Unverified,
+        Skipped::AlreadyApproved,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -99,6 +105,7 @@ impl Skipped {
             Self::Unreadable => "unreadable",
             Self::Duplicate => "duplicate",
             Self::Unverified => "unverified",
+            Self::AlreadyApproved => "already_approved",
         }
     }
 }
@@ -177,6 +184,7 @@ pub struct Metrics {
     skipped_unreadable: AtomicU64,
     skipped_duplicate: AtomicU64,
     skipped_unverified: AtomicU64,
+    skipped_already_approved: AtomicU64,
     /// Failed writes to the relay — a post, a delete, a query that did not
     /// come back with a `2xx`.
     relay_failures: AtomicU64,
@@ -212,6 +220,7 @@ impl Metrics {
             skipped_unreadable: AtomicU64::new(0),
             skipped_duplicate: AtomicU64::new(0),
             skipped_unverified: AtomicU64::new(0),
+            skipped_already_approved: AtomicU64::new(0),
             relay_failures: AtomicU64::new(0),
             sweeps: AtomicU64::new(0),
             approvals: Mutex::new(
@@ -238,6 +247,7 @@ impl Metrics {
             Skipped::Unreadable => &self.skipped_unreadable,
             Skipped::Duplicate => &self.skipped_duplicate,
             Skipped::Unverified => &self.skipped_unverified,
+            Skipped::AlreadyApproved => &self.skipped_already_approved,
         }
     }
 
@@ -401,7 +411,13 @@ mod tests {
                 "why {why} should exist at zero: {body}"
             );
         }
-        for why in ["expired", "unreadable", "duplicate", "unverified"] {
+        for why in [
+            "expired",
+            "unreadable",
+            "duplicate",
+            "unverified",
+            "already_approved",
+        ] {
             assert!(
                 body.contains(&format!("twalk_clerk_skipped_total{{why=\"{why}\"}} 0\n")),
                 "why {why} should exist at zero: {body}"

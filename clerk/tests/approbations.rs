@@ -33,6 +33,8 @@ mod harness;
 use anyhow::Result;
 use harness::{inbound_message, suggestion, Run, CONTACT_MATRIX_ID};
 use serde_json::json;
+use twalk_clerk::refusals::{delivery_unread_line, Unread};
+use twalk_clerk::text::Lang;
 
 #[tokio::test]
 async fn a_suggestion_becomes_one_post_and_stays_one() -> Result<()> {
@@ -57,6 +59,15 @@ async fn a_suggestion_becomes_one_post_and_stays_one() -> Result<()> {
         post.content.lines().last(),
         Some(reference.as_str()),
         "the reference line is the post's last line:\n{}",
+        post.content
+    );
+    // No write half on this run, so no device to read the delivery with:
+    // the post says so, in the Companion's words (#300), rather than
+    // guessing whether the reply could reach the contact.
+    let no_device = delivery_unread_line(Lang::Fr, Unread::NoDevice);
+    assert!(
+        post.content.lines().any(|line| line == no_device),
+        "a read-half post carries the no-device delivery line:\n{}",
         post.content
     );
     assert_eq!(

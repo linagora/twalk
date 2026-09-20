@@ -80,9 +80,21 @@
 //! the loop remembers between ticks ([`Session`]): it makes no Gateway
 //! call while it lasts, tells a ✅ so once without spending it, and carries
 //! it when a later refresh succeeds.
+//!
+//! The write half also gives the suggestions consumer one read (#300,
+//! [`read_before_post`]): `GET /api/suggestions/{id}` as the device, once
+//! per suggestion at posting time and never per tick, so that the post
+//! says whether an approved reply could reach the contact — the
+//! Companion's own sentence, so the two doors show one vocabulary — and
+//! a suggestion the Gateway already records as approved is not posted at
+//! all (`skipped{already_approved}`). The read never blocks the post: a
+//! Gateway that does not answer, refuses, or does not hold the suggestion
+//! yields the "not read" line naming why, in the same tick. The session
+//! cell is shared with the loop ([`Clerk::session`]) so that a `401` met
+//! on either side stops the calls on both.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
@@ -97,7 +109,7 @@ use crate::events::{
     self, BridgeStatus, ConsentChange, Suggestion, BRIDGE_STATUS, CONSENT_CHANGED, REPLY_APPROVED,
     SUGGEST_PRODUCED,
 };
-use crate::gateway::{Gateway, GatewayError, Outcome};
+use crate::gateway::{Gateway, GatewayError, Outcome, Read};
 use crate::metrics::{ApprovalOutcome, Channel, Deleted, Metrics, Skipped};
 use crate::reference::{self, Reference};
 use crate::refusals::{self, Remedy};
@@ -162,13 +174,41 @@ pub const SESSION_REFRESH_RETRY: Duration = Duration::from_secs(60 * 60);
 /// Everything a consumer needs, built once by the binary and shared by
 /// every task: the configuration, the relay, the counters, the language
 /// the clerk writes in, and — when the write half is configured — the
-/// Companion Gateway it approves through.
+/// Companion Gateway it approves through, and what is known of the
+/// session on it.
 pub struct Clerk {
     pub config: Config,
     pub relay: Relay,
     pub metrics: Arc<Metrics>,
     pub lang: Lang,
     pub gateway: Option<Gateway>,
+    /// The one thing remembered about the session on the Companion
+    /// Gateway ([`Session`]), shared by the two tasks that speak to it:
+    /// the decisions loop, which refreshes it and carries approvals as
+    /// it, and the suggestions consumer, which reads a suggestion's
+    /// delivery as it before posting (#300). One cell, because a dead
+    /// session found by either must stop the other's calls too — the hot
+    /// loop of refusals `gateway.rs` warns against would otherwise simply
+    /// move from the tick to the next suggestion.
+    pub session: Mutex<Session>,
+}
+
+impl Clerk {
+    /// What the last Gateway answer said about the session.
+    pub fn session(&self) -> Session {
+        *self
+            .session
+            .lock()
+            .expect("the session cell is never poisoned")
+    }
+
+    /// Records what the last Gateway answer said about the session.
+    pub fn set_session(&self, session: Session) {
+        *self
+            .session
+            .lock()
+            .expect("the session cell is never poisoned") = session;
+    }
 }
 
 /// Whether the relay already holds a post for the suggestion `id`: any of
@@ -502,8 +542,9 @@ async fn settle(
 }
 
 /// One `persona.suggest.produced` event: a forum post in `approbations`
-/// and a line in `activite`, unless it is unreadable, expired or already
-/// posted.
+/// and a line in `activite`, unless it is unreadable, expired, already
+/// posted — or, when the write half is configured, already approved
+/// ([`read_before_post`]).
 async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), RelayError> {
     let suggestion: Suggestion = match serde_json::from_slice(&message.payload) {
         Ok(suggestion) => suggestion,
@@ -538,6 +579,19 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         skip(clerk, Skipped::Duplicate, "suggestion", &format!("id={id}"));
         return Ok(());
     }
+    let delivery_line = match read_before_post(clerk, id).await {
+        BeforePost::Post(line) => line,
+        BeforePost::AlreadyApproved => {
+            let total = clerk.metrics.record_skipped(Skipped::AlreadyApproved);
+            info!(
+                id,
+                why = Skipped::AlreadyApproved.as_str(),
+                total,
+                "a suggestion the Companion Gateway already records as approved is not posted"
+            );
+            return Ok(());
+        }
+    };
     let reference = reference::line(&Reference {
         suggestion_id: suggestion.id.clone(),
         expires_at: suggestion.data.expires_at.clone(),
@@ -547,7 +601,7 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         &suggestion.data.suggestion.body,
         &suggestion.network,
         suggestion.data.expires_at.as_deref(),
-        &refusals::delivery_unread_line(clerk.lang, refusals::Unread::NoDevice),
+        &delivery_line,
         &reference,
     );
     let published = clerk.relay.forum_post(approvals, &post).await?;
@@ -566,6 +620,113 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
     let line = text::activity_suggested(clerk.lang, &suggestion.network);
     activity_line(clerk, &line, id).await;
     Ok(())
+}
+
+/// What the read of a suggestion before its post came to: the delivery
+/// line the post carries, or the one answer that means there is no post
+/// to make.
+enum BeforePost {
+    /// Post, with this as the third line.
+    Post(String),
+    /// The Companion Gateway records the suggestion as `approved`: it was
+    /// decided from the approval screen before the clerk got to it, and a
+    /// post would ask the owner for a decision already made.
+    AlreadyApproved,
+}
+
+/// One `GET /api/suggestions/{id}` as the owner's device before the post
+/// (#300), when the write half is configured — so that the post says
+/// whether the reply can reach the contact, in the Companion's own words
+/// ([`refusals::delivery_line`]), and a suggestion already approved is not
+/// posted at all. Without a device the line says so
+/// ([`refusals::Unread::NoDevice`]) and nothing is asked.
+///
+/// The read is **one per suggestion, at posting time, and never per
+/// tick**: a restart between this read and the next tick finds the post
+/// by its reference line and reads nothing again, so what the clerk knows
+/// of a suggestion is still only what the relay holds (ADR 0035). And it
+/// **never blocks the post**: bounded by the Gateway's request timeout,
+/// every way it can fail is a `warn` with the id and the status and code
+/// — never a body — and the matching "not read" line
+/// ([`refusals::delivery_unread_line`]), and the post goes up in the same
+/// tick. `404 suggestion_not_found` and `410 suggestion_out_of_reach` are
+/// the Gateway not holding the suggestion ([`refusals::Unread::NotFound`]);
+/// any other coded refusal, and a session the Gateway will not have, are
+/// [`refusals::Unread::GatewayRefused`]; nothing answered, or an answer
+/// that is not the route's, is [`refusals::Unread::GatewayUnreachable`].
+/// A `401` is the same breaker as the decisions loop's: the session is
+/// marked [`Session::Dead`] and no further call is made, for a suggestion
+/// or for a ✅, until a refresh of the loop's own brings it back.
+async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
+    use refusals::Unread;
+    let l = clerk.lang;
+    let Some(gateway) = clerk.gateway.as_ref() else {
+        return BeforePost::Post(refusals::delivery_unread_line(l, Unread::NoDevice));
+    };
+    if clerk.session() == Session::Dead {
+        warn!(
+            id,
+            gateway = %gateway.base(),
+            "the Companion Gateway will not have the clerk's session, so the suggestion's \
+             delivery is not read and it is posted as such; run provision-clerk-device.sh"
+        );
+        return BeforePost::Post(refusals::delivery_unread_line(l, Unread::GatewayRefused));
+    }
+    let unread = match gateway.suggestion(id).await {
+        Ok(Read::Found(read)) if read.standing == "approved" => {
+            return BeforePost::AlreadyApproved;
+        }
+        Ok(Read::Found(read)) => {
+            debug!(
+                id,
+                standing = %read.standing,
+                reach = %read.delivery.reach,
+                detail = %read.delivery.detail,
+                "read the suggestion's delivery from the Companion Gateway"
+            );
+            return BeforePost::Post(refusals::delivery_line(l, &read.delivery));
+        }
+        Ok(Read::Refused { status, code }) if matches!(status, 404 | 410) => {
+            warn!(
+                id,
+                status,
+                code,
+                "the Companion Gateway does not hold the suggestion; posted as not read"
+            );
+            Unread::NotFound
+        }
+        Ok(Read::Refused { status, code }) => {
+            warn!(
+                id,
+                status,
+                code,
+                "the Companion Gateway refused the suggestion read; posted as not read"
+            );
+            Unread::GatewayRefused
+        }
+        Err(GatewayError::Unauthenticated) => {
+            clerk.set_session(Session::Dead);
+            warn!(
+                id,
+                gateway = %gateway.base(),
+                "the Companion Gateway will not have the clerk's session: the Buzz device was \
+                 revoked or its refresh token died; the suggestion is posted as not read, and \
+                 no further call is made until a refresh succeeds; run provision-clerk-device.sh"
+            );
+            Unread::GatewayRefused
+        }
+        Err(error) => {
+            warn!(
+                %error,
+                id,
+                gateway = %gateway.base(),
+                "the Companion Gateway gave no usable answer to the suggestion read; posted as \
+                 not read"
+            );
+            Unread::GatewayUnreachable
+        }
+    };
+    BeforePost::Post(refusals::delivery_unread_line(l, unread))
 }
 
 /// One `.posted` report: a line in `journal`, unless the relay already
@@ -737,7 +898,7 @@ async fn activity_line(clerk: &Clerk, line: &str, bus_event_id: &str) {
 fn skip(clerk: &Clerk, why: Skipped, what: &str, detail: &str) {
     let total = clerk.metrics.record_skipped(why);
     match why {
-        Skipped::Expired => info!(
+        Skipped::Expired | Skipped::AlreadyApproved => info!(
             why = why.as_str(),
             detail,
             total,
@@ -925,17 +1086,20 @@ impl DecisionsTick {
     }
 }
 
-/// What the decisions loop knows about its session on the Companion
-/// Gateway between ticks. **Dead** is the one state a tick must remember:
-/// the Gateway answered `401` to a refresh, so the `Buzz` device was
+/// What the clerk knows about its session on the Companion Gateway
+/// between ticks ([`Clerk::session`]). **Dead** is the one state that must
+/// be remembered: the Gateway answered `401` to a refresh, or to a request
+/// made with a token a refresh had just issued, so the `Buzz` device was
 /// revoked or its refresh token died, and the way out is an operator
-/// signing it in again — asking again every five seconds would be the hot
-/// loop of refusals `gateway.rs` warns against, so a dead session makes no
-/// Gateway call at all until a refresh of the loop's own succeeds (the
-/// hourly retry, or the next start). An owner's ✅ seen meanwhile is told
-/// so in the thread, once, and **not spent** by it: the sentence names the
-/// script, and the ✅ is carried the moment the session is back, because
-/// the owner decided and the impediment was the clerk's.
+/// signing it in again — asking again every five seconds, or on every
+/// suggestion, would be the hot loop of refusals `gateway.rs` warns
+/// against, so a dead session makes no Gateway call at all until a refresh
+/// of the decisions loop's own succeeds (the hourly retry, or the next
+/// start). An owner's ✅ seen meanwhile is told so in the thread, once,
+/// and **not spent** by it: the sentence names the script, and the ✅ is
+/// carried the moment the session is back, because the owner decided and
+/// the impediment was the clerk's. A suggestion posted meanwhile carries
+/// the "not read" line ([`read_before_post`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Session {
     /// The last refresh succeeded, or none has failed with `401` yet.
@@ -957,13 +1121,12 @@ pub async fn decisions(clerk: Arc<Clerk>) {
     // At startup, so a session that died while the clerk was away is an
     // ERROR now, naming the script, and not a surprise in a thread on the
     // first ✅ a month later.
-    let mut session = Session::Alive;
-    let mut next_refresh = Instant::now() + refresh_session(gateway, &mut session).await;
+    let mut next_refresh = Instant::now() + refresh_session(&clerk, gateway).await;
     info!(
         every_seconds = write.decision.as_secs(),
         gateway = %gateway.base(),
         owner = %write.owner_pubkey,
-        session = ?session,
+        session = ?clerk.session(),
         "decisions loop running"
     );
     let mut ticker = tokio::time::interval(write.decision);
@@ -971,9 +1134,9 @@ pub async fn decisions(clerk: Arc<Clerk>) {
     loop {
         ticker.tick().await;
         if Instant::now() >= next_refresh {
-            next_refresh = Instant::now() + refresh_session(gateway, &mut session).await;
+            next_refresh = Instant::now() + refresh_session(&clerk, gateway).await;
         }
-        let tick = decisions_once(&clerk, &mut session).await;
+        let tick = decisions_once(&clerk).await;
         if tick.happened() {
             info!(
                 posts = tick.posts,
@@ -1003,20 +1166,20 @@ pub async fn decisions(clerk: Arc<Clerk>) {
 /// answer leaves the session as it was and is a warning, because the next
 /// approval refreshes again anyway ([`Gateway::approve`]) and the loop
 /// must start without it.
-async fn refresh_session(gateway: &Gateway, session: &mut Session) -> Duration {
+async fn refresh_session(clerk: &Clerk, gateway: &Gateway) -> Duration {
     match gateway.refresh().await {
         Ok(()) => {
-            if *session == Session::Dead {
+            if clerk.session() == Session::Dead {
                 info!(
                     gateway = %gateway.base(),
                     "the clerk's session is back: the Buzz device was signed in again"
                 );
             }
-            *session = Session::Alive;
+            clerk.set_session(Session::Alive);
             SESSION_REFRESH_PERIOD
         }
         Err(GatewayError::Unauthenticated) => {
-            *session = Session::Dead;
+            clerk.set_session(Session::Dead);
             error!(
                 gateway = %gateway.base(),
                 "the Companion Gateway will not have the clerk's session: the Buzz device was \
@@ -1054,7 +1217,7 @@ async fn refresh_session(gateway: &Gateway, session: &mut Session) -> Duration {
 /// unanswered gesture carried. Every relay call that fails is a warning
 /// and a counted failure, and the tick moves on; nothing stops the loop.
 /// Does nothing when the write half is not configured.
-pub async fn decisions_once(clerk: &Clerk, session: &mut Session) -> DecisionsTick {
+pub async fn decisions_once(clerk: &Clerk) -> DecisionsTick {
     let mut tick = DecisionsTick::default();
     let (Some(write), Some(gateway)) = (clerk.config.write_half(), clerk.gateway.as_ref()) else {
         return tick;
@@ -1136,7 +1299,7 @@ pub async fn decisions_once(clerk: &Clerk, session: &mut Session) -> DecisionsTi
         }
         if let Some(act) = triage.act {
             let told = told_revoked.contains(&act.gesture_id);
-            carry(clerk, gateway, write, session, &mut tick, post, act, told).await;
+            carry(clerk, gateway, write, &mut tick, post, act, told).await;
         }
     }
     // (4) The expired posts: a stranger is answered as anywhere, and an
@@ -1320,7 +1483,6 @@ async fn carry(
     clerk: &Clerk,
     gateway: &Gateway,
     write: &WriteHalf,
-    session: &mut Session,
     tick: &mut DecisionsTick,
     post: &nostr::Event,
     act: Decision,
@@ -1366,7 +1528,7 @@ async fn carry(
         return;
     }
 
-    if *session == Session::Dead {
+    if clerk.session() == Session::Dead {
         // No call: the answer is known, and asking would be the hot loop of
         // refusals. The gesture waits, told once, for the session to come
         // back.
@@ -1467,7 +1629,7 @@ async fn carry(
             .await;
         }
         Err(GatewayError::Unauthenticated) => {
-            *session = Session::Dead;
+            clerk.set_session(Session::Dead);
             if told {
                 // Told already, on an earlier death of the session; the
                 // count says the call was made and refused.

@@ -1,11 +1,12 @@
 //! A stub Companion Gateway for the clerk's write half (#284): the session
-//! of the owner's `Buzz` device and `POST /api/approvals`.
+//! of the owner's `Buzz` device, `POST /api/approvals` and — since #300 —
+//! `GET /api/suggestions/{id}`, the read the clerk makes before a post.
 //!
 //! The clerk's suite runs at its process boundary — the real binary, a real
 //! Buzz relay, the real bus — and the Companion Gateway is the one thing it
 //! cannot bring up cheaply: a real one needs a homeserver, a state
 //! directory, an owner and a signed-in device, and what the clerk needs
-//! from it is three routes. So this is a stub of exactly those three, on the
+//! from it is four routes. So this is a stub of exactly those four, on the
 //! same terms as `hermes/tests/harness/gateway.rs` is a stub of the runtime
 //! settings and `sensor/tests/harness/gateway.rs` of the consent snapshot.
 //!
@@ -36,10 +37,13 @@
 //!
 //! What it records is what a test asserts: every authenticated
 //! `POST /api/approvals` ([`ApprovalCall`]: the suggestion, the `final`
-//! body if one was sent, the device token that made the call, when), how
-//! many refreshes happened, and how many requests were turned away at the
-//! door. The answer to an approval is scripted per suggestion id
-//! ([`State::answers`], default [`Answer::Approve`]).
+//! body if one was sent, the device token that made the call, when), every
+//! authenticated `GET /api/suggestions/{id}` ([`State::reads`], the ids in
+//! order), how many refreshes happened, and how many requests were turned
+//! away at the door. The answer to an approval is scripted per suggestion
+//! id ([`State::answers`], default [`Answer::Approve`]); the answer to a
+//! read too ([`State::suggestions`], a [`SuggestionAnswer`]), and an id
+//! with none is `404 suggestion_not_found`.
 //!
 //! **Unreachable** is not an [`Answer`]: a Gateway that is not there is a
 //! port nothing listens on, [`UNREACHABLE_GATEWAY_URL`], reserved outside
@@ -115,12 +119,42 @@ pub const NETWORK: &str = "whatsapp";
 /// channel: distinctive, so a test can search every event of every channel
 /// for it.
 pub const CONTACT: &str = "@whatsapp_33600000000:example.test";
+/// The persona's words as the stub's `Suggestion` carries them (#300) —
+/// distinctive, and **not** the bus's, so a post that quoted the Gateway's
+/// body rather than the event's would show it.
+pub const GATEWAY_SUGGESTION_BODY: &str = "MARQUEUR-corps-servi-par-la-passerelle-9c1d";
 
 /// The `event_id` the stub's `Approval` carries for `suggestion_id`: the
 /// Gateway's own rule, `sha256(suggestion_event_id ":" approved_by)` as 64
 /// hex characters (`companion-gateway/src/approval.rs`).
 pub fn approval_event_id(suggestion_id: &str) -> String {
     sha256_hex(&format!("{suggestion_id}:{OWNER_MATRIX_ID}"))
+}
+
+/// What the stub answers one `GET /api/suggestions/{id}` with, by
+/// suggestion id (#300): the `Suggestion` shape's `standing` and its
+/// `delivery`'s `reach` and `detail`, kept as strings so a test can script
+/// a value the clerk has never met. An id with no answer scripted is
+/// `404 suggestion_not_found`, which is what the Gateway says of one the
+/// bus does not hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionAnswer {
+    /// `approvable`, `expired` or `approved`.
+    pub standing: String,
+    /// `can_reach`, `cannot_reach` or `unknown`.
+    pub reach: String,
+    /// The word behind the reach: `owner_joined`, `owner_invited`, …
+    pub detail: String,
+}
+
+impl SuggestionAnswer {
+    pub fn new(standing: &str, reach: &str, detail: &str) -> Self {
+        Self {
+            standing: standing.to_owned(),
+            reach: reach.to_owned(),
+            detail: detail.to_owned(),
+        }
+    }
 }
 
 /// What the stub answers one `POST /api/approvals` with, by suggestion id.
@@ -173,6 +207,15 @@ pub struct State {
     /// door is counted in `unauthenticated` instead, because the Gateway's
     /// approval handler never sees one either.
     pub approvals: Vec<ApprovalCall>,
+    /// The answer to `GET /api/suggestions/{id}`, by suggestion id; an id
+    /// not named is `404 suggestion_not_found` (#300).
+    pub suggestions: HashMap<String, SuggestionAnswer>,
+    /// Every `GET /api/suggestions/{id}` that reached the route, as the
+    /// ids read, in order — one per read, so "read once" is
+    /// `reads.iter().filter(|read| *read == id).count() == 1`. A read
+    /// turned away at the door is counted in `unauthenticated`, as an
+    /// approval is.
+    pub reads: Vec<String>,
     /// How many refreshes succeeded.
     pub refreshes: u32,
     /// How many requests, on any route, were answered `401`.
@@ -190,6 +233,8 @@ impl State {
             revoked: false,
             answers: HashMap::new(),
             approvals: Vec::new(),
+            suggestions: HashMap::new(),
+            reads: Vec::new(),
             refreshes: 0,
             unauthenticated: 0,
             reissued: 0,
@@ -213,6 +258,19 @@ impl State {
     /// Scripts the answer to `suggestion_id`.
     pub fn answer(&mut self, suggestion_id: &str, answer: Answer) {
         self.answers.insert(suggestion_id.to_owned(), answer);
+    }
+
+    /// Scripts what `GET /api/suggestions/{id}` says of `suggestion_id`.
+    pub fn suggestion(&mut self, suggestion_id: &str, answer: SuggestionAnswer) {
+        self.suggestions.insert(suggestion_id.to_owned(), answer);
+    }
+
+    /// How many times `suggestion_id` was read through the door.
+    pub fn reads_of(&self, suggestion_id: &str) -> usize {
+        self.reads
+            .iter()
+            .filter(|read| *read == suggestion_id)
+            .count()
     }
 }
 
@@ -267,6 +325,7 @@ impl StubGateway {
         let router = Router::new()
             .route("/api/session/refresh", post(refresh_route))
             .route("/api/approvals", post(approvals_route))
+            .route("/api/suggestions/{id}", get(suggestion_route))
             .route("/api/devices", get(devices_route))
             .fallback(fallback_route)
             .with_state(state.clone());
@@ -515,6 +574,72 @@ async fn approvals_route(
     }
 }
 
+/// The Gateway's `Suggestion` (`openapi.yaml`, `suggestions_http.rs`),
+/// every required member present, so that the clerk's read is exercised
+/// against the whole shape and not only the two members it keeps: the
+/// trigger by identity alone, the persona's own words for the body — a
+/// marker, so a test can check the clerk posts the bus's body and not the
+/// Gateway's — and, when `standing` is `approved`, the `Approval` record
+/// the real route carries, which names the contact and the owner.
+fn suggestion_json(suggestion_id: &str, answer: &SuggestionAnswer) -> Value {
+    let now = now_rfc3339();
+    let approval = (answer.standing == "approved").then(|| approval_json(suggestion_id, false));
+    json!({
+        "event_id": suggestion_id,
+        "source": format!("hermes://example.test/personas/{PERSONA_ID}"),
+        "persona_id": PERSONA_ID,
+        "network": NETWORK,
+        "consent": "granted",
+        "produced_at": now,
+        "expires_at": now,
+        "attempt": 1,
+        "standing": answer.standing,
+        "trigger": {
+            "event_id": sha256_hex(&format!("trigger of {suggestion_id}")),
+            "event_type": "fr.linagora.twalk.inbound.message.received.v1",
+        },
+        "suggestion": {
+            "body": GATEWAY_SUGGESTION_BODY,
+            "format": "text/plain",
+        },
+        "stream_sequence": 42,
+        "approval": approval,
+        "delivery": {
+            "reach": answer.reach,
+            "detail": answer.detail,
+        },
+        "posted": Value::Null,
+    })
+}
+
+/// `GET /api/suggestions/{id}`: the device's read of one suggestion (#300),
+/// recorded in [`State::reads`], then answered as scripted — or
+/// `404 suggestion_not_found` for an id no test scripted, the Gateway's
+/// own answer for a suggestion the bus does not hold.
+async fn suggestion_route(
+    Shared(state): Shared<Locked>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let mut state = state
+        .lock()
+        .expect("the stub Gateway mutex is never poisoned");
+    if as_device(&state, &headers).is_none() {
+        return unauthenticated(&mut state);
+    }
+    state.reads.push(id.clone());
+    match state.suggestions.get(&id) {
+        Some(answer) => respond(200, suggestion_json(&id, answer)),
+        None => respond(
+            404,
+            json!({
+                "error": "suggestion_not_found",
+                "detail": "no suggestion with this id is on the bus",
+            }),
+        ),
+    }
+}
+
 /// `GET /api/devices`: the one `Buzz` device, current.
 async fn devices_route(Shared(state): Shared<Locked>, headers: HeaderMap) -> Response<Body> {
     let mut state = state
@@ -532,8 +657,8 @@ async fn fallback_route(request: axum::extract::Request) -> Response<Body> {
         json!({
             "error": "not_found",
             "detail": format!(
-                "this stub Companion Gateway serves POST /api/session/refresh, POST /api/approvals \
-                 and GET /api/devices only, not {} {}",
+                "this stub Companion Gateway serves POST /api/session/refresh, POST /api/approvals, \
+                 GET /api/suggestions/{{id}} and GET /api/devices only, not {} {}",
                 request.method(),
                 request.uri().path()
             ),
@@ -701,6 +826,84 @@ mod tests {
             json!(approval_event_id(suggestion))
         );
         assert_eq!(stub.state().approvals.len(), 3, "every call that got in");
+
+        // A suggestion read, as the device: scripted, the whole shape with
+        // the scripted standing and delivery; unscripted, 404 with the
+        // Gateway's code; both recorded, in order. Without the device
+        // token it is 401 and not recorded.
+        stub.state().suggestion(
+            suggestion,
+            SuggestionAnswer::new("approvable", "cannot_reach", "owner_invited"),
+        );
+        let read = http
+            .get(format!("{}/api/suggestions/{suggestion}", stub.base_url))
+            .header("cookie", format!("{DEVICE_COOKIE}={device}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read.status(), 200);
+        let found: Value = read.json().await.unwrap();
+        assert_eq!(found["event_id"], json!(suggestion));
+        assert_eq!(found["standing"], json!("approvable"));
+        assert_eq!(found["delivery"]["reach"], json!("cannot_reach"));
+        assert_eq!(found["delivery"]["detail"], json!("owner_invited"));
+        assert_eq!(found["approval"], Value::Null);
+        assert_eq!(found["suggestion"]["body"], json!(GATEWAY_SUGGESTION_BODY));
+        for member in [
+            "source",
+            "persona_id",
+            "network",
+            "consent",
+            "produced_at",
+            "expires_at",
+            "attempt",
+            "trigger",
+            "stream_sequence",
+            "posted",
+        ] {
+            assert!(found.get(member).is_some(), "the Suggestion shape: {found}");
+        }
+        let unscripted = http
+            .get(format!("{}/api/suggestions/{refused_id}", stub.base_url))
+            .header("cookie", format!("{DEVICE_COOKIE}={device}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unscripted.status(), 404);
+        let body: Value = unscripted.json().await.unwrap();
+        assert_eq!(body["error"], json!("suggestion_not_found"));
+        let no_device = http
+            .get(format!("{}/api/suggestions/{suggestion}", stub.base_url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_device.status(), 401);
+        {
+            let state = stub.state();
+            assert_eq!(
+                state.reads,
+                vec![suggestion.to_owned(), refused_id.to_owned()]
+            );
+            assert_eq!(state.reads_of(suggestion), 1);
+        }
+        stub.state().suggestion(
+            suggestion,
+            SuggestionAnswer::new("approved", "can_reach", "owner_joined"),
+        );
+        let approved_read = http
+            .get(format!("{}/api/suggestions/{suggestion}", stub.base_url))
+            .header("cookie", format!("{DEVICE_COOKIE}={device}"))
+            .send()
+            .await
+            .unwrap();
+        let found: Value = approved_read.json().await.unwrap();
+        assert_eq!(found["standing"], json!("approved"));
+        assert_eq!(
+            found["approval"]["contact"],
+            json!(CONTACT),
+            "an approved suggestion carries the record, as the Gateway's does"
+        );
+        assert_eq!(stub.state().reads_of(suggestion), 2);
 
         // The device list, as the device.
         let devices = http
