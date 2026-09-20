@@ -28,12 +28,13 @@
 	has a confusable name, and reading it is the bug this ticket fixes.
 -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 
 	import { page } from '$app/state';
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
+	import { rereadWhileUnsettled, type Rereader } from '$lib/networks/reread';
 	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import {
 		bridgeOf,
@@ -87,7 +88,26 @@
 			: linkTo(card.route, picked, siblings, extra);
 	}
 
-	onMount(load);
+	let rereader: Rereader | null = null;
+
+	// Read now, and again while the answer is transient (#148): a bridge the
+	// Gateway could not ask at that instant read as *unknown* until the user
+	// reloaded, which is a transient failure shown as a permanent one. The
+	// retry button stays — a user should not have to wait for a timer — and
+	// the timer means they do not have to find the button.
+	onMount(() => {
+		rereader = rereadWhileUnsettled(
+			load,
+			() =>
+				loaded &&
+				((!listKnown && listTrouble === 'unreachable') ||
+					(listKnown && bridgeId !== null && connection.state === 'unknown'))
+		);
+	});
+
+	onDestroy(() => {
+		rereader?.stop();
+	});
 
 	/**
 	 * The connection this screen manages — the URL's, or the kind's only one

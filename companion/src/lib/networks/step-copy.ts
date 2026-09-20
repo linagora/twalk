@@ -88,6 +88,17 @@ export interface StepOverride {
 	readonly after: readonly MessageKey[];
 	/** Replaces the generic sentence when *this step's* answer is refused. */
 	readonly refused: MessageKey | null;
+	/**
+	 * Cookies the network's **API host never carries**, so a paste copied from
+	 * a request to it is complete and still lacks them (#220). When one of
+	 * these is what is missing, the failure names that cause — the request
+	 * went to the wrong host — and the remedy, instead of telling the user
+	 * their copy was incomplete: it was not, and "check every row" sends them
+	 * to hunt in the one place they have no reason to doubt.
+	 */
+	readonly hostScoped: readonly string[];
+	/** The sentence for a missing cookie in `hostScoped`; `null` when there are none. */
+	readonly hostScopedMissing: MessageKey | null;
 }
 
 /** The override for a step, or `null` when this project has nothing to add. */

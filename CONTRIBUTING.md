@@ -32,9 +32,9 @@ Two habits the project has learned the hard way. Assert the *absence* of things 
 
 ## Translations
 
-The Companion ships in English, French, Italian, Spanish and German. Catalogues are ICU MessageFormat JSON at `companion/src/lib/i18n/<locale>.json`, and each carries a header stating whether a native speaker has reviewed it. As of this writing, **English and French are reviewed; Italian, Spanish and German are not** — they were produced without a native reviewer, and improving them is one of the most useful contributions available.
+The Companion ships in English, French, Italian, Spanish and German. Catalogues are ICU MessageFormat JSON at `companion/src/lib/i18n/<locale>.json`, and each carries a header — its first entry, `catalogue.review` — stating whether a native speaker has reviewed it. As of this writing, **English and French are reviewed; Italian, Spanish and German are not** — they were produced without a native reviewer, and improving them is one of the most useful contributions available.
 
-How it behaves, so a partial contribution is safe: a key missing from a catalogue falls back to English at runtime, and a test fails when a catalogue's keys have drifted from English's — missing or extra. So you can contribute a language incrementally, and the suite will tell you exactly which keys remain rather than letting a catalogue quietly rot at sixty percent.
+How it behaves, so a partial contribution is safe: a key missing from a catalogue falls back to English at runtime, and a test fails when a catalogue's keys have drifted from English's — missing or extra — or when a string's placeholders no longer match the English string's. So you can contribute a language incrementally, and the suite will tell you exactly which keys remain rather than letting a catalogue quietly rot at sixty percent.
 
 To add a language: copy `en.json`, translate what you can, state your review status in the header, and open a pull request. Say in it whether you are a native speaker of the language — that is the information the project cannot get any other way.
 

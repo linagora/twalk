@@ -21,6 +21,7 @@ use twalk_companion_gateway::metrics::Metrics;
 use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
 use twalk_companion_gateway::owner::Owner;
 use twalk_companion_gateway::portals::{refresh_until_shutdown, PortalBridge, Portals};
+use twalk_companion_gateway::runtime_presence::RuntimePresence;
 use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::settings::Settings;
 use twalk_companion_gateway::static_files::Resolver;
@@ -437,6 +438,10 @@ async fn main() -> Result<()> {
         config.bootstrap.homeserver_url.as_deref(),
         config.bootstrap.sensor_user_id.as_deref(),
         config
+            .sign_in
+            .as_ref()
+            .map(|sign_in| sign_in.owner.as_str()),
+        config
             .bridges
             .iter()
             .map(|bridge| PortalBridge {
@@ -455,6 +460,15 @@ async fn main() -> Result<()> {
     .context("failed to build the portal register")?
     {
         Some(portals) => {
+            // The listing asks the register where the owner's account stands
+            // in a suggestion's room (#216). The register is built after the
+            // store the listing already holds, because it journals its own
+            // moves there (#255), so the two are linked here rather than at
+            // either one's construction.
+            let portals = Arc::new(portals);
+            if let Some(suggestions) = &suggestions {
+                suggestions.attach_portals(portals.clone());
+            }
             info!(
                 sensor = %portals.sensor_user_id(),
                 refresh_seconds = config.portal_refresh_seconds,
@@ -478,7 +492,7 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            Some(Arc::new(portals))
+            Some(portals)
         }
         None => {
             if !config.bridges.is_empty() {
@@ -516,6 +530,12 @@ async fn main() -> Result<()> {
             .with_contacts(contacts)
             .with_approvals(approvals)
             .with_suggestions(suggestions)
+            .with_runtime_presence(
+                config
+                    .consent
+                    .as_ref()
+                    .map(|consent| Arc::new(RuntimePresence::new(consent.nats_url.clone()))),
+            )
             .with_settings(settings)
             .with_portals(portals.clone())
             .with_connections(connections.clone())

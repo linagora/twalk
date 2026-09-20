@@ -18,7 +18,8 @@ import {
 	ensureHandoverRoom,
 	handoverAlias,
 	handoverRoomCreation,
-	HANDOVER_ALIAS_LOCALPART,
+	handoverAliasLocalpart,
+	localpartOf,
 	HANDOVER_ROOM_TYPE,
 	SEND_LEVEL_NOBODY_HAS,
 	serverNameOf,
@@ -131,7 +132,7 @@ function run(
 
 describe('the room Twalk creates', () => {
 	it('is typed as something other than a conversation, for the room’s whole life', () => {
-		const body = handoverRoomCreation({ sensorUserId: SENSOR, name: 'Twalk' });
+		const body = handoverRoomCreation({ sensorUserId: SENSOR, ownerLocalpart: 'you', name: 'Twalk' });
 		// `m.room.create` cannot be replaced or redacted in Matrix, so this is
 		// the marker that cannot be taken off later — and it is the same field
 		// a space uses, which is what `$lib/matrix/rooms.ts` reads.
@@ -140,7 +141,7 @@ describe('the room Twalk creates', () => {
 	});
 
 	it('is encrypted at creation, because that is the whole reason it exists', () => {
-		const body = handoverRoomCreation({ sensorUserId: SENSOR, name: 'Twalk' });
+		const body = handoverRoomCreation({ sensorUserId: SENSOR, ownerLocalpart: 'you', name: 'Twalk' });
 		expect(body['initial_state']).toEqual([
 			{
 				type: 'm.room.encryption',
@@ -154,7 +155,7 @@ describe('the room Twalk creates', () => {
 	});
 
 	it('cannot be posted in by anybody, its creator included', () => {
-		const levels = handoverRoomCreation({ sensorUserId: SENSOR, name: 'Twalk' })[
+		const levels = handoverRoomCreation({ sensorUserId: SENSOR, ownerLocalpart: 'you', name: 'Twalk' })[
 			'power_level_content_override'
 		] as Record<string, number>;
 		// 101 is above the 100 a room's creator gets, so the homeserver refuses
@@ -168,16 +169,23 @@ describe('the room Twalk creates', () => {
 	});
 
 	it('is not a direct message, so no client files it beside the user’s people', () => {
-		expect(handoverRoomCreation({ sensorUserId: SENSOR, name: 'Twalk' })['is_direct']).toBe(false);
-		expect(handoverRoomCreation({ sensorUserId: SENSOR, name: 'Twalk' })['room_alias_name']).toBe(
-			HANDOVER_ALIAS_LOCALPART
+		expect(handoverRoomCreation({ sensorUserId: SENSOR, ownerLocalpart: 'you', name: 'Twalk' })['is_direct']).toBe(false);
+		expect(handoverRoomCreation({ sensorUserId: SENSOR, ownerLocalpart: 'you', name: 'Twalk' })['room_alias_name']).toBe(
+			handoverAliasLocalpart('you')
 		);
 	});
 });
 
 describe('the alias that identifies it', () => {
-	it('is one per homeserver, read off the user’s own Matrix ID', () => {
-		expect(handoverAlias('example.com')).toBe('#twalk-handover:example.com');
+	it('is one per owner, read off the user’s own Matrix ID', () => {
+		// Per owner and not per homeserver: on a homeserver two owners share —
+		// the test stack, every run — a per-homeserver alias belonged to the
+		// first and sent every later one to a room they were not in (#267).
+		expect(handoverAlias(OWNER)).toBe('#twalk-handover-you:example.com');
+		expect(handoverAlias('@other:example.com')).not.toBe(handoverAlias(OWNER));
+		expect(handoverAlias('you:example.com')).toBeNull();
+		expect(localpartOf(OWNER)).toBe('you');
+		expect(localpartOf('@you')).toBeNull();
 		expect(serverNameOf(OWNER)).toBe('example.com');
 		expect(serverNameOf('@you:example.com:8448')).toBe('example.com:8448');
 		expect(serverNameOf('you:example.com')).toBeNull();

@@ -21,7 +21,8 @@
 	let { handshake, reloadRefused }: Props = $props();
 
 	const show = $derived(
-		(handshake.kind === 'mismatch' && reloadRefused) || handshake.kind === 'unreachable'
+		((handshake.kind === 'mismatch' || handshake.kind === 'stale-shell') && reloadRefused) ||
+			handshake.kind === 'unreachable'
 	);
 </script>
 
@@ -37,11 +38,19 @@
 						actual: handshake.actual
 					})}</span
 				>
+			{:else if handshake.kind === 'stale-shell'}
+				<span class="label">{$t('version.staleShell.title')}</span>
+				<span class="small" data-testid="stale-shell-builds" data-running={handshake.running} data-shipped={handshake.shipped}
+					>{$t('version.staleShell.body', {
+						running: handshake.running,
+						shipped: handshake.shipped
+					})}</span
+				>
 			{:else if handshake.kind === 'unreachable'}
 				<span class="small">{$t('version.unreachable')}</span>
 			{/if}
 		</div>
-		{#if handshake.kind === 'mismatch'}
+		{#if handshake.kind === 'mismatch' || handshake.kind === 'stale-shell'}
 			<button class="button button--secondary" onclick={() => window.location.reload()}>
 				<Icon name="reload" size="dense" />
 				{$t('version.reload')}

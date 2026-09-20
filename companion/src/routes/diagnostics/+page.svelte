@@ -16,7 +16,7 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import { boot, EXPECTED_GATEWAY_VERSION } from '$lib/boot';
 	import { buildDiagnostics, copyDiagnostics } from '$lib/diagnostics';
-	import { locale, setLocale, t, LOCALES, type Locale } from '$lib/i18n';
+	import { locale, setLocale, t, LOCALES, LOCALE_NAMES, type Locale } from '$lib/i18n';
 
 	const bootState = $derived($boot);
 
@@ -69,6 +69,13 @@
 			<dd class="mono" data-testid="gateway-revision">
 				{bootState.health?.revision ?? $t('diagnostics.unknown')}
 			</dd>
+			<!-- Beside the build this page runs (#222): the two agreeing is what
+			     "current" means, and the two differing is the fact that was
+			     invisible while an owner reloaded a fixed screen five times. -->
+			<dt>{$t('diagnostics.shippedBuild')}</dt>
+			<dd class="mono" data-testid="shipped-build">
+				{bootState.health?.companionBuild ?? $t('diagnostics.unknown')}
+			</dd>
 		</dl>
 		<p class="small muted" data-testid="handshake-kind" data-kind={bootState.handshake.kind}>
 			{bootState.handshake.kind}
@@ -104,7 +111,7 @@
 						checked={$locale === option}
 						onchange={() => setLocale(option as Locale)}
 					/>
-					{$t(`lang.${option}` as 'lang.fr' | 'lang.en')}
+					<span lang={option}>{LOCALE_NAMES[option as Locale]}</span>
 				</label>
 			{/each}
 		</fieldset>

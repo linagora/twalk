@@ -9,6 +9,7 @@
 //   GET /api/devices   every device, revoked ones dated
 //   GET /api/contacts/pending   how many contacts are waiting for a decision
 //   GET /api/suggestions   how many replies are waiting for approval
+//   GET /api/runtime   whether an agent runtime is hosting personas here
 //
 // **The last one is read for its numbers and for nothing else.** Its answer
 // carries a `contacts` array of Matrix user IDs — the list of who has written
@@ -49,6 +50,7 @@ import { gateway } from '$lib/api/client';
 import type { components } from '$lib/api/schema';
 import { dismissed } from '$lib/approvals/dismissed';
 import { summarise, type Waiting } from '$lib/approvals/summary';
+import { runtimeOf, type Runtime } from '$lib/runtime/presence';
 
 /**
  * How many contacts are waiting for a decision, and on which networks. The
@@ -82,6 +84,13 @@ export type Snapshot = {
 	 * different statement from "none are waiting" and is rendered as neither.
 	 */
 	waiting: Waiting | null;
+	/**
+	 * Whether an agent runtime is hosting personas here (#177, #189): read
+	 * from the bus's consumer list by the Gateway, never assumed from a copy
+	 * key. `unknown` when the read did not answer, which is rendered as that
+	 * and not as either side.
+	 */
+	runtime: Runtime;
 	/** False when nothing answered at all. */
 	reachable: boolean;
 };
@@ -95,21 +104,26 @@ export const EMPTY: Snapshot = {
 	moves: null,
 	pending: null,
 	waiting: null,
+	runtime: { state: 'unknown', hosting: 0 },
 	reachable: true
 };
 
 export async function loadDashboard(): Promise<Snapshot> {
-	const [session, connections, bridges, consent, devices, pending, suggestions, moves] =
+	const [session, connections, bridges, consent, devices, pending, suggestions, moves, runtime] =
 		await Promise.all([
-		ask(() => gateway.GET('/api/session')),
-		ask(() => gateway.GET('/api/connections')),
-		ask(() => gateway.GET('/api/bridges')),
-		ask(() => gateway.GET('/api/consent/state')),
-		ask(() => gateway.GET('/api/devices')),
-		ask(() => gateway.GET('/api/contacts/pending')),
-		ask(() => gateway.GET('/api/suggestions')),
-		ask(() => gateway.GET('/api/portals/moves'))
-	]);
+			ask(() => gateway.GET('/api/session')),
+			ask(() => gateway.GET('/api/connections')),
+			ask(() => gateway.GET('/api/bridges')),
+			ask(() => gateway.GET('/api/consent/state')),
+			ask(() => gateway.GET('/api/devices')),
+			ask(() => gateway.GET('/api/contacts/pending')),
+			ask(() => gateway.GET('/api/suggestions')),
+			ask(() => gateway.GET('/api/portals/moves')),
+			// Kept whole rather than through `ask`: its refusal codes are part
+			// of the answer (`runtime_not_configured` is a deployment no
+			// runtime can run against, not an unknown).
+			gateway.GET('/api/runtime').catch(() => null)
+		]);
 	return {
 		session: session,
 		connections: connections?.connections ?? null,
@@ -126,6 +140,7 @@ export async function loadDashboard(): Promise<Snapshot> {
 		// Same line, same reason: what a persona wrote does not travel past
 		// here. `summarise` returns two numbers and has nowhere to put a text.
 		waiting: suggestions === null ? null : summarise(suggestions, dismissed()),
+		runtime: runtimeOf(runtime),
 		reachable:
 			session !== null ||
 			connections !== null ||

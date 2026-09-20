@@ -85,7 +85,7 @@
 // smaller one than a second taxonomy that would drift from the first.
 #![allow(clippy::result_large_err)]
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,8 +93,12 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::approval::{has_passed, Content, Format, Refusal, SUGGEST_PRODUCED_TYPE};
+use crate::approval::{
+    has_passed, Content, Format, Posted, Refusal, POSTED_AS_HEADER, POSTED_REACH_HEADER,
+    REPLY_APPROVED_TYPE, SUGGEST_PRODUCED_TYPE,
+};
 use crate::consent::{bus_subject, Network, State, STREAM_NAME};
+use crate::portals::{Delivery, Portals};
 use crate::store::{RecordedApproval, Store};
 
 /// How many suggestions a listing answers with when the caller names no
@@ -181,6 +185,18 @@ pub struct Listed {
     /// The approval this Gateway recorded, when there is one. `publication`
     /// on it is `published` or `unpublished`, both terminal (#24).
     pub approval: Option<RecordedApproval>,
+    /// Whether a reply could reach the contact, as far as the portal
+    /// register can tell **before** the approval (issue #216): the owner's
+    /// own account in or out of the room the trigger arrived in. Read from
+    /// the trigger's *envelope* (`source`), never from its body.
+    pub delivery: Delivery,
+    /// The Sensor's own report of what the approved reply reached, once it
+    /// posted it — `twalk.persona.reply.approved.v1.posted`, with `reach` and
+    /// `posted-as` as headers. `None` until the Sensor has posted it, or
+    /// when the report is beyond the read window. This is the *after* fact,
+    /// and it is never the same member as `approval.publication`: published
+    /// on the bus and delivered to the contact are two things (#216).
+    pub posted: Option<Posted>,
 }
 
 /// The stretch of the stream a read covered, reported so the bound is
@@ -282,6 +298,12 @@ pub struct Suggestions {
     lookup_window: u64,
     now: fn() -> std::time::SystemTime,
     bus: tokio::sync::OnceCell<async_nats::jetstream::Context>,
+    /// The portal register, which answers where the owner's account stands
+    /// in a room (#216), attached once both exist — the register is built
+    /// after this module's store, which it journals into (#255). Unset on a
+    /// deployment with no register, where every suggestion's delivery is
+    /// `unknown` and says why.
+    portals: std::sync::OnceLock<Arc<Portals>>,
 }
 
 impl Suggestions {
@@ -297,7 +319,14 @@ impl Suggestions {
             lookup_window,
             now,
             bus: tokio::sync::OnceCell::new(),
+            portals: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Gives the listing the portal register, once. A second call is ignored:
+    /// there is one register per deployment.
+    pub fn attach_portals(&self, portals: Arc<Portals>) {
+        let _ = self.portals.set(portals);
     }
 
     pub fn lookup_window(&self) -> u64 {
@@ -351,6 +380,8 @@ impl Suggestions {
                 Err(refusal) => return Err(refusal),
             }
         }
+        self.say_what_a_reply_would_reach(jetstream, &mut suggestions)
+            .await;
         Ok(Listing {
             suggestions,
             window: read.window,
@@ -377,7 +408,11 @@ impl Suggestions {
                 Refusal::BusUnreachable(format!("{error:#}"))
             })?;
         match read.kept.into_iter().next() {
-            Some((document, sequence)) => self.settle(document, sequence),
+            Some((document, sequence)) => {
+                let mut one = vec![self.settle(document, sequence)?];
+                self.say_what_a_reply_would_reach(jetstream, &mut one).await;
+                Ok(one.remove(0))
+            }
             None if read.window.reached_start_of_stream => Err(Refusal::SuggestionNotFound),
             None => Err(Refusal::SuggestionOutOfReach {
                 window: self.lookup_window,
@@ -430,7 +465,225 @@ impl Suggestions {
             stream_sequence: sequence,
             standing,
             approval,
+            delivery: Delivery::Unknown {
+                why: "trigger_out_of_reach",
+            },
+            posted: None,
         })
+    }
+
+    /// Fills in the two facts about delivery that the suggestion event
+    /// itself cannot carry (issue #216): what a reply *would* reach, from the
+    /// room the trigger arrived in and the owner's membership of it, and —
+    /// for an approved suggestion — what the Sensor said the reply *did*
+    /// reach.
+    ///
+    /// Best effort by design: a listing that could be read is answered even
+    /// when the second read fails, with `unknown` and the reason, because a
+    /// screen that cannot draw is worse than one that says it cannot tell.
+    async fn say_what_a_reply_would_reach(
+        &self,
+        jetstream: &async_nats::jetstream::Context,
+        suggestions: &mut [Listed],
+    ) {
+        if suggestions.is_empty() {
+            return;
+        }
+        // The rooms, from the triggers' envelopes. Every trigger precedes its
+        // suggestion on the stream, so the newest suggestion bounds the read.
+        let wanted: HashSet<String> = suggestions
+            .iter()
+            .map(|listed| listed.trigger_event_id.clone())
+            .collect();
+        let ceiling = suggestions
+            .iter()
+            .map(|listed| listed.stream_sequence)
+            .max()
+            .unwrap_or_default();
+        let sources = match self
+            .collect(
+                jetstream,
+                &bus_subject(crate::contacts::INBOUND_MESSAGE_TYPE),
+                ceiling.saturating_sub(self.lookup_window),
+                ceiling,
+                &wanted,
+                |message| {
+                    let envelope: TriggerEnvelope =
+                        serde_json::from_slice(&message.payload).ok()?;
+                    Some((envelope.id, envelope.source))
+                },
+            )
+            .await
+        {
+            Ok(sources) => sources,
+            Err(error) => {
+                warn!(%error, "the triggers of a suggestion listing could not be read, so what a reply would reach is unknown");
+                for listed in suggestions.iter_mut() {
+                    listed.delivery = Delivery::Unknown {
+                        why: "lookup_failed",
+                    };
+                }
+                HashMap::new()
+            }
+        };
+        let mut by_room: HashMap<String, Delivery> = HashMap::new();
+        for listed in suggestions.iter_mut() {
+            let Some(room) = sources
+                .get(&listed.trigger_event_id)
+                .and_then(|source| crate::approval::room_from_source(source))
+            else {
+                continue;
+            };
+            let delivery = match by_room.get(&room) {
+                Some(known) => known.clone(),
+                None => {
+                    let delivery = match self.portals.get() {
+                        Some(portals) => portals.delivery_of(&room).await,
+                        None => Delivery::Unknown {
+                            why: "no_portal_register",
+                        },
+                    };
+                    by_room.insert(room.clone(), delivery.clone());
+                    delivery
+                }
+            };
+            listed.delivery = delivery;
+        }
+
+        // The Sensor's reports, for the approvals that were published: from
+        // the oldest publication forward, since a report follows its reply.
+        let mut wanted: HashSet<String> = HashSet::new();
+        let mut start = u64::MAX;
+        for listed in suggestions.iter() {
+            if let Some(approval) = &listed.approval {
+                if let Some(sequence) = approval.stream_sequence {
+                    wanted.insert(approval.event_id.clone());
+                    start = start.min(sequence);
+                }
+            }
+        }
+        if wanted.is_empty() {
+            return;
+        }
+        let reports = match self
+            .collect(
+                jetstream,
+                &format!("{}.posted", bus_subject(REPLY_APPROVED_TYPE)),
+                start,
+                u64::MAX,
+                &wanted,
+                |message| {
+                    let envelope: PostedEnvelope = serde_json::from_slice(&message.payload).ok()?;
+                    let headers = message.headers.as_ref()?;
+                    let header =
+                        |name: &str| headers.get(name).map(|value| value.as_str().to_owned());
+                    let sequence = message.info().map(|info| info.stream_sequence).ok()?;
+                    Some((
+                        envelope.id,
+                        Posted {
+                            reach: header(POSTED_REACH_HEADER)?,
+                            posted_as: header(POSTED_AS_HEADER)?,
+                            stream_sequence: sequence,
+                        },
+                    ))
+                },
+            )
+            .await
+        {
+            Ok(reports) => reports,
+            Err(error) => {
+                warn!(%error, "the Sensor's reports of posted replies could not be read");
+                return;
+            }
+        };
+        for listed in suggestions.iter_mut() {
+            if let Some(approval) = &listed.approval {
+                listed.posted = reports.get(&approval.event_id).cloned();
+            }
+        }
+    }
+
+    /// Reads one subject between two stream positions and keeps, for each of
+    /// the `wanted` ids, what `extract` makes of the message that carries it.
+    /// Stops as soon as every wanted id has been seen.
+    async fn collect<T>(
+        &self,
+        jetstream: &async_nats::jetstream::Context,
+        filter_subject: &str,
+        start: u64,
+        ceiling: u64,
+        wanted: &HashSet<String>,
+        mut extract: impl FnMut(&async_nats::jetstream::Message) -> Option<(String, T)>,
+    ) -> Result<HashMap<String, T>> {
+        let mut found = HashMap::new();
+        let mut stream = jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .context("failed to reach the bus stream")?;
+        let (first_sequence, last_sequence) = {
+            let info = stream
+                .info()
+                .await
+                .context("failed to read the bus stream's state")?;
+            (info.state.first_sequence, info.state.last_sequence)
+        };
+        let start = start.max(first_sequence.max(1));
+        let ceiling = ceiling.min(last_sequence);
+        if last_sequence == 0 || ceiling < start {
+            return Ok(found);
+        }
+        let name = format!(
+            "gateway-suggestion-facts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        );
+        let consumer = stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                name: Some(name.clone()),
+                filter_subject: filter_subject.to_owned(),
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                    start_sequence: start,
+                },
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::None,
+                inactive_threshold: LOOKUP_CONSUMER_IDLE,
+                ..Default::default()
+            })
+            .await
+            .context("failed to open a read of the bus")?;
+        let mut batch = consumer
+            .fetch()
+            .max_messages(usize::try_from(ceiling - start + 1).unwrap_or(usize::MAX))
+            .messages()
+            .await
+            .context("failed to read from the bus")?;
+        {
+            use futures::StreamExt;
+            while let Some(message) = batch.next().await {
+                let Ok(message) = message else { break };
+                let sequence = message
+                    .info()
+                    .map(|info| info.stream_sequence)
+                    .unwrap_or_default();
+                if sequence > ceiling {
+                    break;
+                }
+                if let Some((id, value)) = extract(&message) {
+                    if wanted.contains(&id) {
+                        found.insert(id, value);
+                        if found.len() == wanted.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(error) = stream.delete_consumer(&name).await {
+            debug!(%error, "failed to delete the suggestion facts' consumer");
+        }
+        Ok(found)
     }
 
     /// Reads the tail of the suggestion subject and keeps the last `limit`
@@ -555,6 +808,23 @@ impl Suggestions {
             unreadable,
         })
     }
+}
+
+/// The envelope of a trigger, as the delivery question needs it: its id and
+/// its `source`, which names the room. **No `data` member**, for the reason
+/// every other view of an inbound event in this Gateway has none.
+#[derive(Debug, Deserialize)]
+struct TriggerEnvelope {
+    id: String,
+    source: String,
+}
+
+/// The Sensor's report of a posted reply: the approval event republished
+/// unchanged, so its `id` is the approval's. What the report says is in its
+/// headers.
+#[derive(Debug, Deserialize)]
+struct PostedEnvelope {
+    id: String,
 }
 
 /// One bounded read of the suggestion subject.

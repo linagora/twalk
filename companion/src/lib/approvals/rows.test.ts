@@ -10,8 +10,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	actionsFor,
+	deliveryCopy,
+	deliveryDetailKey,
 	goneStale,
 	noticesFor,
+	postedCopy,
 	toRow,
 	toRows,
 	triggerKey,
@@ -40,6 +43,8 @@ function suggestion(over: Partial<Suggestion> = {}): Suggestion {
 		suggestion: { body: 'Pas de problème, à 20h !', format: 'text/plain' },
 		stream_sequence: 42,
 		approval: null,
+		delivery: { reach: 'unknown', detail: 'not_a_known_portal' },
+		posted: null,
 		...over
 	} as Suggestion;
 }
@@ -268,5 +273,68 @@ describe('what is waiting for the user', () => {
 
 	it('does not count what this browser refused', () => {
 		expect(waitingCount(listing(), new Set(['b'.repeat(64)]))).toBe(0);
+	});
+});
+
+describe('published is not delivered (#216)', () => {
+	it('says before the button whether the reply can reach the contact, and why', () => {
+		// The certainty is the one drawn as a warning: the owner's account is
+		// not in the portal, so a bridge relays nothing posted there.
+		const cannot = toRow(
+			suggestion({ delivery: { reach: 'cannot_reach', detail: 'owner_invited' } })
+		);
+		expect(deliveryCopy(cannot.delivery)).toEqual({
+			key: 'approvals.delivery.cannotReach',
+			warns: true
+		});
+		expect(deliveryDetailKey(cannot.delivery)).toBe('approvals.delivery.detail.owner_invited');
+		// And the button stays: the Gateway is the authority on refusing.
+		expect(cannot.actions).toContain('approve');
+
+		const can = toRow(suggestion({ delivery: { reach: 'can_reach', detail: 'owner_joined' } }));
+		expect(deliveryCopy(can.delivery)).toEqual({ key: 'approvals.delivery.canReach', warns: false });
+
+		const unknown = toRow(suggestion());
+		expect(deliveryCopy(unknown.delivery)).toEqual({
+			key: 'approvals.delivery.unknown',
+			warns: false
+		});
+	});
+
+	it('never turns the approval record into a delivery sentence', () => {
+		// Published, and the Sensor has said nothing yet: the honest "not
+		// yet", never "delivered" read off `publication`.
+		const published = toRow(suggestion({ standing: 'approved', approval: approval() }));
+		expect(published.posted).toBeNull();
+		expect(postedCopy(published)).toBe('approvals.posted.pending');
+
+		// Published, and the screen already knew it could not reach anyone:
+		// that certainty is what is said, not "not yet".
+		const doomed = toRow(
+			suggestion({
+				standing: 'approved',
+				approval: approval(),
+				delivery: { reach: 'cannot_reach', detail: 'owner_invited' }
+			})
+		);
+		expect(postedCopy(doomed)).toBe('approvals.delivery.cannotReach');
+
+		// The Sensor's report, when there is one, is the sentence — either way.
+		const delivered = toRow(
+			suggestion({
+				standing: 'approved',
+				approval: approval(),
+				posted: { reach: 'contact', posted_as: '@owner:test.twalk', stream_sequence: 44 }
+			})
+		);
+		expect(postedCopy(delivered)).toBe('approvals.posted.contact');
+		const nobody = toRow(
+			suggestion({
+				standing: 'approved',
+				approval: approval(),
+				posted: { reach: 'nobody', posted_as: '@sensor:test.twalk', stream_sequence: 44 }
+			})
+		);
+		expect(postedCopy(nobody)).toBe('approvals.posted.nobody');
 	});
 });

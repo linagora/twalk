@@ -136,11 +136,37 @@ def openapi_consumers() -> set[str]:
     return consumers
 
 
+def catalogue_consumers() -> set[str]:
+    """Components outside the Companion whose code names a catalogue file that
+    really exists under `companion/src/lib/i18n/`.
+
+    The clerk embeds the Companion's French and English catalogues with
+    `include_str!` (#284), so that a Gateway refusal answered on Buzz is the
+    sentence the approval screen would show — which means a sentence edited
+    in the Companion has to rebuild and re-run the clerk, or the two doors
+    onto one fact drift apart. The rule is `contract_consumers`'s, a
+    reference to a file and not to the directory: the Hermes runtime and the
+    SDK name the directory in a doc comment as where the five languages come
+    from, and that is not a dependency on what a sentence says.
+    """
+    consumers: set[str] = set()
+    pattern = re.compile(r"companion/src/lib/i18n/[A-Za-z0-9_.-]+")
+    for path in code_files():
+        if component_of(path) == "companion":
+            continue
+        for reference in pattern.findall(read(path)):
+            if (REPO / reference.rstrip(".,;:)\"'")).is_file():
+                consumers.add(component_of(path))
+                break
+    return consumers
+
+
 DERIVATIONS = {
     "tests/harness/": harness_consumers,
     "consent-cache/": consent_cache_consumers,
     "contracts/": contract_consumers,
     "companion-gateway/openapi.yaml": openapi_consumers,
+    "companion/src/lib/i18n/": catalogue_consumers,
 }
 
 
@@ -236,7 +262,7 @@ class TheRuleTheRedMainIncidentsTaught(unittest.TestCase):
     def test_the_two_incidents_by_name(self):
         """The two cases that actually turned `main` red, spelled out."""
         harness = self.components_selected_by("tests/harness/src/stack.rs")
-        for consumer in ("sensor", "hermes", "companion-gateway"):
+        for consumer in ("sensor", "hermes", "companion-gateway", "clerk"):
             self.assertIn(
                 consumer,
                 harness,
@@ -246,7 +272,7 @@ class TheRuleTheRedMainIncidentsTaught(unittest.TestCase):
         contract = self.components_selected_by(
             "contracts/cloudevents/v1/inbound.message.received.schema.json"
         )
-        for consumer in ("sensor", "hermes", "companion-gateway", "sdk", "tests"):
+        for consumer in ("sensor", "hermes", "companion-gateway", "clerk", "sdk", "tests"):
             self.assertIn(
                 consumer,
                 contract,
@@ -282,6 +308,22 @@ class TheRuleTheRedMainIncidentsTaught(unittest.TestCase):
             "there has to run `npm run api:check`",
         )
 
+    def test_a_catalogue_or_openapi_change_runs_the_clerk(self):
+        """The clerk speaks the Companion's sentences for the Gateway's codes (#284).
+
+        `clerk/src/refusals.rs` embeds `companion/src/lib/i18n/{fr,en}.json` and
+        checks the sentences it knows against `companion-gateway/openapi.yaml`
+        in both directions, so a change to either file is a change to what the
+        clerk says on Buzz — or to whether it still builds.
+        """
+        for shared in ("companion/src/lib/i18n/fr.json", "companion-gateway/openapi.yaml"):
+            with self.subTest(shared=shared):
+                self.assertIn(
+                    "clerk",
+                    self.components_selected_by(shared),
+                    f"a change to {shared} has to run the clerk's suite",
+                )
+
 
 class EveryTestIsClaimed(unittest.TestCase):
     """No Rust integration test may exist that no suite runs.
@@ -297,7 +339,7 @@ class EveryTestIsClaimed(unittest.TestCase):
         cls.table = selection.load()
 
     def test_every_rust_test_target_is_run_exactly_once(self):
-        for component in ("sensor", "hermes", "companion-gateway"):
+        for component in ("sensor", "hermes", "companion-gateway", "clerk"):
             on_disk = {
                 path.stem for path in sorted((REPO / component / "tests").glob("*.rs"))
             }
@@ -338,7 +380,7 @@ class EveryTestIsClaimed(unittest.TestCase):
         silently dropped every one of them. `--lib` puts them back, on exactly
         one suite per component so they are not run twice.
         """
-        for component in ("sensor", "hermes", "companion-gateway"):
+        for component in ("sensor", "hermes", "companion-gateway", "clerk"):
             carriers = [
                 name
                 for name, suite in self.table["suites"].items()

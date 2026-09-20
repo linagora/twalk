@@ -209,12 +209,14 @@ export class StubBridge {
 			step_id: string;
 			step_type: string;
 			/**
-			 * The whole relayed body: `{cookies: {…}}` for a jar, and one member
-			 * per field for an ordinary step. Loosely typed on purpose — the shape
-			 * is the bridge's own, and a spec asserting on it is asserting on what
-			 * a bridge really received.
+			 * The whole relayed body: `{cookies: "<json>"}` for a jar — one string,
+			 * the JSON of the map, because bridgev2 declares a cookies answer as a
+			 * string and parses it itself (#224) — and one member per field for an
+			 * ordinary step. Loosely typed on purpose — the shape is the bridge's
+			 * own, and a spec asserting on it is asserting on what a bridge really
+			 * received.
 			 */
-			body: (Record<string, unknown> & { cookies?: Record<string, string> }) | null;
+			body: (Record<string, unknown> & { cookies?: string }) | null;
 		}[];
 		cancelled: string[];
 		/** The login ids the bridge was told to log out — the disconnect journey's proof. */
