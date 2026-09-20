@@ -119,7 +119,13 @@ pub(crate) struct MailStore {
     mails: BTreeMap<String, (String, u64, FakeMail)>,
     /// The Email state: moves on every delivery.
     state: u64,
+    /// States older than this are forgotten: `Email/changes` from one
+    /// answers `cannotCalculateChanges` (#277), which the collector recovers
+    /// from by querying the look-back window.
+    forgotten_before: u64,
     next_id: u64,
+    /// Where deliveries are announced to the push endpoint (#277).
+    pub(crate) push: Option<tokio::sync::broadcast::Sender<String>>,
     /// Every Email id whose content (`bodyValues`) was read, in order —
     /// what "a mail in Sent or Archive is never read" is asserted on.
     read_ids: Vec<String>,
@@ -172,7 +178,9 @@ impl Default for MailStore {
         Self {
             mails: BTreeMap::new(),
             state: 0,
+            forgotten_before: 0,
             next_id: offset * 1000,
+            push: None,
             read_ids: Vec::new(),
             submissions: Vec::new(),
             refuse_submissions: false,
@@ -187,7 +195,14 @@ impl MailStore {
         let id = format!("M{}", self.next_id);
         self.mails
             .insert(id.clone(), (mailbox.to_owned(), self.state, mail));
+        if let Some(push) = &self.push {
+            let _ = push.send(self.state());
+        }
         id
+    }
+
+    pub(crate) fn forget_states_before(&mut self, state: u64) {
+        self.forgotten_before = state;
     }
 
     pub(crate) fn state(&self) -> String {
@@ -217,17 +232,26 @@ impl MailStore {
 
 /// The session document, as the collector reads it: the account, its mail
 /// capability, and where the API is.
-pub(crate) fn session(account: &str, issuer: &str, state: &str) -> Value {
-    json!({
-        "capabilities": {
-            "urn:ietf:params:jmap:core": {
-                "maxSizeUpload": 50000000, "maxConcurrentUpload": 4, "maxSizeRequest": 10000000,
-                "maxConcurrentRequests": 4, "maxCallsInRequest": 16, "maxObjectsInGet": 500,
-                "maxObjectsInSet": 500, "collationAlgorithms": ["i;unicode-casemap"]
-            },
-            "urn:ietf:params:jmap:mail": {},
-            "urn:ietf:params:jmap:submission": {}
+pub(crate) fn session(account: &str, issuer: &str, state: &str, push_url: Option<&str>) -> Value {
+    let mut capabilities = json!({
+        "urn:ietf:params:jmap:core": {
+            "maxSizeUpload": 50000000, "maxConcurrentUpload": 4, "maxSizeRequest": 10000000,
+            "maxConcurrentRequests": 4, "maxCallsInRequest": 16, "maxObjectsInGet": 500,
+            "maxObjectsInSet": 500, "collationAlgorithms": ["i;unicode-casemap"]
         },
+        "urn:ietf:params:jmap:mail": {},
+        "urn:ietf:params:jmap:submission": {}
+    });
+    // Push (#277): RFC 8887's capability names the socket; TMail's names
+    // the ticket endpoint a browser — and this collector — opens it with.
+    if let Some(url) = push_url {
+        capabilities["urn:ietf:params:jmap:websocket"] =
+            json!({ "url": url, "supportsPush": true });
+        capabilities["com:linagora:params:jmap:ws:ticket"] =
+            json!({ "generationEndpoint": format!("{issuer}/jmap/ws/ticket") });
+    }
+    json!({
+        "capabilities": capabilities,
         "accounts": {
             ACCOUNT_ID: {
                 "name": account,
@@ -342,6 +366,9 @@ fn email_changes(args: &Value, store: &MailStore) -> Result<Value, Value> {
         .and_then(Value::as_str)
         .and_then(|state| state.parse().ok())
         .ok_or_else(|| json!({ "type": "invalidArguments", "description": "sinceState is not a state this server issued" }))?;
+    if since < store.forgotten_before {
+        return Err(json!({ "type": "cannotCalculateChanges" }));
+    }
     let created: Vec<&String> = store
         .mails
         .iter()
@@ -605,11 +632,13 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
                 pair.get(1)?.as_str()?.trim().to_owned(),
             ))
         });
+    let after = filter.get("after").and_then(Value::as_str);
     let ids: Vec<&String> = store
         .mails
         .iter()
         .filter(|(_, (mailbox, _, mail))| {
             in_mailbox.is_none_or(|wanted| wanted == mailbox)
+                && after.is_none_or(|after| mail.received_at.as_str() >= after)
                 && header.as_ref().is_none_or(|(name, value)| {
                     if name == "message-id" {
                         mail.message_id.trim_matches(|c| c == '<' || c == '>')

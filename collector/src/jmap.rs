@@ -38,7 +38,23 @@ pub const MAIL_CAPABILITY: &str = "urn:ietf:params:jmap:mail";
 pub struct Session {
     pub api_url: String,
     pub account_id: String,
+    /// Push (#277), when the server offers it: RFC 8887's socket, and
+    /// TMail's ticket endpoint to open it with.
+    pub push: Option<PushEndpoint>,
 }
+
+/// Where a server pushes state changes (RFC 8887), and how the socket is
+/// opened: with a ticket from `com:linagora:params:jmap:ws:ticket` when the
+/// server offers one — the route a browser takes, and the one TMail
+/// documents — or with the bearer on the handshake otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushEndpoint {
+    pub websocket_url: String,
+    pub ticket_url: Option<String>,
+}
+
+pub const WEBSOCKET_CAPABILITY: &str = "urn:ietf:params:jmap:websocket";
+pub const TICKET_CAPABILITY: &str = "com:linagora:params:jmap:ws:ticket";
 
 impl Session {
     /// Reads the session resource (RFC 8620 §2): the primary mail account,
@@ -74,9 +90,28 @@ impl Session {
             .ok_or_else(|| {
                 anyhow::anyhow!("the session names no account with the mail capability")
             })?;
+        let push = document
+            .pointer(&format!(
+                "/capabilities/{}",
+                WEBSOCKET_CAPABILITY.replace('/', "~1")
+            ))
+            .and_then(|capability| capability.get("url"))
+            .and_then(Value::as_str)
+            .map(|url| PushEndpoint {
+                websocket_url: url.to_owned(),
+                ticket_url: document
+                    .pointer(&format!(
+                        "/capabilities/{}",
+                        TICKET_CAPABILITY.replace('/', "~1")
+                    ))
+                    .and_then(|capability| capability.get("generationEndpoint"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            });
         Ok(Self {
             api_url,
             account_id,
+            push,
         })
     }
 }
@@ -180,6 +215,25 @@ pub fn email_get(account_id: &str, ids: &[String]) -> (&'static str, Value) {
             "fetchTextBodyValues": true,
             "fetchHTMLBodyValues": true,
             "maxBodyValueBytes": 262144
+        }),
+    )
+}
+
+/// `Email/query` for what the INBOX received since an instant (#277): the
+/// recovery read when the server forgot the state — RFC 8621 §4.4.1's
+/// `after` is on `receivedAt`, oldest first so a ring of ids fills in order.
+pub fn email_received_after(
+    account_id: &str,
+    inbox_id: &str,
+    after: &str,
+) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "inMailbox": inbox_id, "after": after },
+            "sort": [{ "property": "receivedAt", "isAscending": true }],
+            "limit": 500
         }),
     )
 }
@@ -1011,7 +1065,24 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(session.account_id, "u1");
+        assert!(session.push.is_none(), "a server offering no push");
         assert!(Session::parse(&json!({ "apiUrl": "x", "accounts": {} })).is_err());
+        let with_push = Session::parse(&json!({
+            "apiUrl": "https://mail.example.com/jmap/api",
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": "u1" },
+            "capabilities": {
+                "urn:ietf:params:jmap:websocket": { "url": "wss://mail.example.com/jmap/ws", "supportsPush": true },
+                "com:linagora:params:jmap:ws:ticket": { "generationEndpoint": "https://mail.example.com/jmap/ws/ticket" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            with_push.push,
+            Some(PushEndpoint {
+                websocket_url: "wss://mail.example.com/jmap/ws".to_owned(),
+                ticket_url: Some("https://mail.example.com/jmap/ws/ticket".to_owned()),
+            })
+        );
 
         assert_eq!(
             inbox_id(&json!({ "list": [

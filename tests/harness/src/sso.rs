@@ -89,6 +89,11 @@ struct State {
     calendars: std::collections::BTreeMap<String, FakeCalendar>,
     /// The owner's mailbox on the fake JMAP server (#276).
     mails: crate::jmap_fake::MailStore,
+    /// The push endpoint's URL, named by the session (#277); `None` on a
+    /// server that offers no push.
+    push_url: Option<String>,
+    /// The push half's state, for the ticket endpoint to mint tickets into.
+    push_state: Option<Arc<Mutex<crate::jmap_push::PushState>>>,
     /// A Companion Gateway's consent snapshot to answer at
     /// `/api/consent/snapshot`, when a test stands this fake in for the
     /// Gateway too; `None` answers 404 there, an unreadable registry.
@@ -125,6 +130,8 @@ pub struct FakeSso {
     addr: SocketAddr,
     state: Arc<Mutex<State>>,
     accept_task: tokio::task::JoinHandle<()>,
+    /// The JMAP push endpoint (#277), on a listener of its own.
+    push: crate::jmap_push::Push,
 }
 
 impl FakeSso {
@@ -135,9 +142,15 @@ impl FakeSso {
             .await
             .context("failed to bind the fake SSO")?;
         let addr = listener.local_addr()?;
+        let push = crate::jmap_push::Push::start().await?;
+        let mut mails = crate::jmap_fake::MailStore::default();
+        mails.push = Some(push.changes.clone());
         let state = Arc::new(Mutex::new(State {
             account: account.to_owned(),
             port: addr.port(),
+            mails,
+            push_url: Some(push.url()),
+            push_state: Some(push.state.clone()),
             ..State::default()
         }));
         let accept_task = tokio::spawn(accept_loop(listener, state.clone()));
@@ -145,6 +158,7 @@ impl FakeSso {
             addr,
             state,
             accept_task,
+            push,
         })
     }
 
@@ -326,6 +340,47 @@ impl FakeSso {
     /// `SENT_ID`, `ARCHIVE_ID`).
     pub fn deliver_to(&self, mailbox: &str, mail: crate::jmap_fake::FakeMail) -> String {
         self.lock().mails.deliver(mailbox, mail)
+    }
+
+    /// Stops the push endpoint (#277): every open socket is closed, every
+    /// new connection refused, until [`Self::restore_push`]. Deliveries keep
+    /// moving the Email state; only the poll finds them.
+    pub fn cut_push(&self) {
+        self.push
+            .state
+            .lock()
+            .expect("the push state is not poisoned")
+            .up = false;
+        // A change that wakes the serving tasks so they close their sockets.
+        let _ = self.push.changes.send(self.lock().mails.state());
+    }
+
+    pub fn restore_push(&self) {
+        self.push
+            .state
+            .lock()
+            .expect("the push state is not poisoned")
+            .up = true;
+    }
+
+    /// How many `StateChange`s the push endpoint sent so far.
+    pub fn pushes(&self) -> u64 {
+        self.push
+            .state
+            .lock()
+            .expect("the push state is not poisoned")
+            .pushed
+    }
+
+    /// Forgets every Email state before `state`: `Email/changes` from an
+    /// older one answers `cannotCalculateChanges` (#277).
+    pub fn forget_mail_states_before(&self, state: u64) {
+        self.lock().mails.forget_states_before(state);
+    }
+
+    /// The current Email state, as a number.
+    pub fn mail_state(&self) -> u64 {
+        self.lock().mails.state().parse().unwrap_or(0)
     }
 
     /// Every reply the collector submitted through the fake (#278).
@@ -516,8 +571,24 @@ fn respond_json(
         ("GET", "/jmap/session") => {
             let issuer = format!("http://127.0.0.1:{}", guard.port);
             let state = guard.mails.state();
+            let push_url = guard.push_url.clone();
             service("jmap", request, guard, |account| {
-                crate::jmap_fake::session(account, &issuer, &state)
+                crate::jmap_fake::session(account, &issuer, &state, push_url.as_deref())
+            })
+        }
+        // TMail's ticket endpoint (#277): one ticket, good for one socket.
+        ("POST", "/jmap/ws/ticket") => {
+            let ticket = guard
+                .push_state
+                .as_ref()
+                .map(|push| crate::jmap_push::mint_ticket(push));
+            service("jmap", request, guard, |account| {
+                json!({
+                    "value": ticket,
+                    "generatedOn": "2026-09-21T08:00:00Z",
+                    "validUntil": "2026-09-21T08:01:00Z",
+                    "username": account
+                })
             })
         }
         ("POST", "/jmap/api") => match admit("jmap", request, guard) {

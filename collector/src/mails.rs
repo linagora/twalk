@@ -42,6 +42,60 @@ pub struct MailState {
     pub account_id: String,
     pub inbox_id: String,
     pub state: String,
+    /// When the mailbox was last read up to `state` (#277): where the
+    /// look-back window starts from when the state is lost. Absent on a
+    /// state an earlier build wrote: a recovery from such a state has no
+    /// window to look back over and takes the mailbox as it stands, as a
+    /// first start does, rather than list everything the INBOX holds.
+    #[serde(default)]
+    pub last_read_at: String,
+    /// The Email ids read most recently, newest last, capped at
+    /// [`PUBLISHED_RING`] (#277): what a recovery sets aside as already
+    /// published. Ids, never a word of a mail.
+    #[serde(default)]
+    pub published: Vec<String>,
+}
+
+/// How many read ids the state remembers: what a look-back window can hold
+/// at any plausible rate, and nothing a person could be identified by.
+pub const PUBLISHED_RING: usize = 500;
+
+/// How far before the last read a recovery looks (#251: five minutes).
+pub const LOOK_BACK: std::time::Duration = std::time::Duration::from_secs(300);
+
+impl MailState {
+    fn remember(&mut self, id: &str) {
+        if self.published.iter().any(|known| known == id) {
+            return;
+        }
+        self.published.push(id.to_owned());
+        if self.published.len() > PUBLISHED_RING {
+            let excess = self.published.len() - PUBLISHED_RING;
+            self.published.drain(..excess);
+        }
+    }
+}
+
+/// The `state` of an `Email/get` for no ids: the account's current one.
+fn email_state_of(result: &Value) -> String {
+    result
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The instant a recovery lists mail from: the last read, less the
+/// look-back; `None` when no read was ever recorded.
+fn look_back_from(last_read_at: &str) -> Option<String> {
+    let at =
+        time::OffsetDateTime::parse(last_read_at, &time::format_description::well_known::Rfc3339)
+            .ok()?
+            - LOOK_BACK;
+    at.replace_nanosecond(0)
+        .unwrap_or(at)
+        .format(&time::format_description::well_known::Rfc3339)
+        .ok()
 }
 
 /// What one poll found. No `Debug`: the envelopes hold the senders' words.
@@ -106,6 +160,8 @@ impl Mailbox {
 
     /// One poll: the session, then either the first state (published as
     /// nothing) or the changes since the persisted one, read and published.
+    /// A state the server no longer serves changes from is recovered by the
+    /// look-back window (#277).
     pub async fn poll(&self, token: &str, now: &str) -> Result<MailPoll, SideError> {
         let session =
             Session::parse(&self.get(&self.session_url, token).await?).map_err(|error| {
@@ -146,6 +202,8 @@ impl Mailbox {
                 account_id: account.to_owned(),
                 inbox_id,
                 state,
+                last_read_at: now.to_owned(),
+                published: Vec::new(),
             });
             return Ok(poll);
         };
@@ -156,38 +214,102 @@ impl Mailbox {
                 vec![jmap::email_changes(account, &previous.state)],
             )
             .await?;
-        let changes = match method(&response, 0) {
-            Ok(result) => Changes::parse(&result),
+        let (created, new_state, recovered) = match method(&response, 0) {
+            Ok(result) => {
+                let changes = Changes::parse(&result);
+                // Only a mail newly created is a message received; an
+                // update (a flag, a move) is not a second delivery.
+                (changes.created, changes.new_state, false)
+            }
             Err(SideError::Unreachable { detail })
                 if detail.contains("cannotCalculateChanges")
                     || detail.contains("invalidArguments") =>
             {
-                // The server forgot the state: #277 recovers it; until then
-                // said, and nothing guessed.
-                warn!(state = %previous.state, "the JMAP server no longer serves changes from the persisted state; recovery is #277's");
-                return Ok(poll);
+                // The server forgot the state (#277): everything delivered
+                // to the INBOX since a little before the last read is
+                // listed, what was already published is set aside by its
+                // id, and the current state becomes the cursor again. Said,
+                // because a resynchronisation is a fact the operator reads.
+                let since = match look_back_from(&previous.last_read_at) {
+                    Some(since) => since,
+                    None => {
+                        let response = self
+                            .call(&session.api_url, token, vec![jmap::email_state(account)])
+                            .await?;
+                        let state = email_state_of(&method(&response, 0)?);
+                        warn!(
+                            lost_state = %previous.state,
+                            "the JMAP server no longer serves changes from the persisted state and no last read is recorded: the mailbox is taken as it stands again"
+                        );
+                        return Ok(MailPoll {
+                            state: Some(MailState {
+                                state,
+                                last_read_at: now.to_owned(),
+                                ..previous.clone()
+                            }),
+                            ..poll
+                        });
+                    }
+                };
+                let response = self
+                    .call(
+                        &session.api_url,
+                        token,
+                        vec![
+                            jmap::email_received_after(account, &previous.inbox_id, &since),
+                            jmap::email_state(account),
+                        ],
+                    )
+                    .await?;
+                let ids: Vec<String> = method(&response, 0)?
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let state = email_state_of(&method(&response, 1)?);
+                let unseen: Vec<String> = ids
+                    .into_iter()
+                    .filter(|id| !previous.published.contains(id))
+                    .collect();
+                warn!(
+                    lost_state = %previous.state,
+                    since = %since,
+                    to_read = unseen.len(),
+                    "the JMAP server no longer serves changes from the persisted state: recovered from the look-back window"
+                );
+                (unseen, state, true)
             }
             Err(error) => return Err(error),
         };
-        if changes.created.is_empty() && changes.updated.is_empty() {
-            if changes.new_state != previous.state {
-                poll.state = Some(MailState {
-                    state: changes.new_state,
-                    ..previous
-                });
+        let mut next = MailState {
+            state: new_state,
+            last_read_at: now.to_owned(),
+            ..previous.clone()
+        };
+        if created.is_empty() {
+            if next.state != previous.state || recovered {
+                poll.state = Some(next);
             }
             return Ok(poll);
         }
-        // Only a mail newly created is a message received; an update (a
-        // flag, a move) is not a second delivery.
-        let response = self
-            .call(
-                &session.api_url,
-                token,
-                vec![jmap::email_mailboxes(account, &changes.created)],
-            )
-            .await?;
-        let in_inbox = jmap::in_mailbox(&method(&response, 0)?, &previous.inbox_id);
+        let in_inbox = if recovered {
+            // The query was already the INBOX's.
+            created
+        } else {
+            let response = self
+                .call(
+                    &session.api_url,
+                    token,
+                    vec![jmap::email_mailboxes(account, &created)],
+                )
+                .await?;
+            jmap::in_mailbox(&method(&response, 0)?, &previous.inbox_id)
+        };
         let envelopes = Envelopes::new(
             &self.connection,
             &self.host(),
@@ -217,6 +339,9 @@ impl Mailbox {
                         continue;
                     }
                 };
+                // Remembered whatever the frontier says, so a recovery
+                // never re-reads it either.
+                next.remember(&mail.id);
                 match jmap::frontier(&mail, &self.owner_email) {
                     Ok(()) => {
                         let consent = self.consent.state(&mail.from.mailto(), &self.connection);
@@ -227,10 +352,7 @@ impl Mailbox {
                 }
             }
         }
-        poll.state = Some(MailState {
-            state: changes.new_state,
-            ..previous
-        });
+        poll.state = Some(next);
         Ok(poll)
     }
 
@@ -493,4 +615,41 @@ fn first_id(query: &Value) -> Option<String> {
         .and_then(|ids| ids.first())
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{look_back_from, MailState, PUBLISHED_RING};
+
+    #[test]
+    fn the_look_back_starts_five_minutes_before_the_last_read_and_nowhere_without_one() {
+        assert_eq!(
+            look_back_from("2026-09-20T15:09:12.873Z").as_deref(),
+            Some("2026-09-20T15:04:12Z")
+        );
+        assert_eq!(look_back_from(""), None, "a state an earlier build wrote");
+        assert_eq!(look_back_from("yesterday"), None);
+    }
+
+    #[test]
+    fn the_ring_keeps_the_newest_ids_once_each() {
+        let mut state = MailState {
+            account_id: "u1".to_owned(),
+            inbox_id: "inbox-1".to_owned(),
+            state: "7".to_owned(),
+            last_read_at: String::new(),
+            published: Vec::new(),
+        };
+        for n in 0..(PUBLISHED_RING + 3) {
+            state.remember(&format!("M{n}"));
+        }
+        state.remember("M4");
+        assert_eq!(state.published.len(), PUBLISHED_RING);
+        assert_eq!(state.published.first().map(String::as_str), Some("M3"));
+        assert_eq!(
+            state.published.last().map(String::as_str),
+            Some(&*format!("M{}", PUBLISHED_RING + 2))
+        );
+        assert_eq!(state.published.iter().filter(|id| *id == "M4").count(), 1);
+    }
 }
