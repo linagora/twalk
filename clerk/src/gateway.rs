@@ -1,5 +1,7 @@
 //! The seam to the Companion Gateway (#284): the clerk's session as its
-//! `Buzz` device, and `POST /api/approvals` for the suggestion a ✅ decided.
+//! `Buzz` device, `POST /api/approvals` for the suggestion a ✅ decided,
+//! and — since the device also reads — `GET /api/suggestions/{id}` for
+//! where that suggestion stands before it is posted at all.
 //!
 //! The clerk is a **device of the owner** on the Companion Gateway, the way
 //! a phone or a browser tab is, and nothing more privileged: it holds no
@@ -19,7 +21,8 @@
 //! to write the file would run for fifteen minutes and then be signed out for
 //! good — the order makes the file the one place the session survives. A
 //! `401` is answered by **one refresh and one retry, never two**
-//! ([`Gateway::approve`], [`Gateway::devices`]): the first `401` is a device
+//! ([`Gateway::approve`], [`Gateway::suggestion`], [`Gateway::devices`]):
+//! the first `401` is a device
 //! token that expired in memory, which a refresh cures; a second one right
 //! after a refresh that succeeded is a session the Gateway will not have —
 //! the device was revoked from the dashboard, or the refresh token died
@@ -46,6 +49,19 @@
 //! clerk restarted between the approval and its record on Buzz, is one reply
 //! that went out once, and the Gateway hands back the record so the clerk can
 //! say where it went instead of telling the owner to try again.
+//!
+//! The read ([`Gateway::suggestion`]) is the write's shape turned around and
+//! keeps its rules: the same cookie, the same one refresh and one retry, a
+//! refusal as a code and nothing else ([`Read::Refused`]), and no body in
+//! any error — which matters more here than on the approval, because a
+//! `200` from this route **is** the suggestion, its text included, and a
+//! parse failure that quoted it would put a contact's conversation in a log
+//! line. Of that answer the clerk keeps two words ([`SuggestionRead`]):
+//! `standing`, so a suggestion the Gateway already records as approved is
+//! not posted a second time, and `delivery` (#216), so the post says whether
+//! a ✅ on it would reach anybody. Everything else the route says — the
+//! trigger, the consent label, the approval record — is read into nothing,
+//! by the shape of the struct rather than by a field left unused.
 
 use std::fmt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -336,6 +352,48 @@ pub enum Outcome {
     },
     /// Any other `4xx`/`5xx` with an `error` code. The sentence that code
     /// becomes is `refusals.rs`'s, not this module's.
+    Refused { status: u16, code: String },
+}
+
+/// Whether an approved reply could reach the contact, as the Companion
+/// Gateway reads it **before** the reply is sent (#216): where the owner's
+/// own account stands in the room the trigger arrived in. `reach` is one of
+/// `can_reach`, `cannot_reach` and `unknown`; `detail` the word behind it
+/// (`owner_joined`, `owner_invited`, `not_a_known_portal`, …). Both are kept
+/// as the Gateway spelled them rather than as enums, so a value this build
+/// has never met still reaches the post as a word instead of stopping the
+/// read — the sentence for each is `refusals.rs`'s, from the Companion's
+/// own catalogue, and an unknown one renders the word itself.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Delivery {
+    pub reach: String,
+    pub detail: String,
+}
+
+/// The two members of one `GET /api/suggestions/{id}` answer the clerk
+/// keeps. `standing` is `approvable`, `expired` or `approved`; `delivery` is
+/// [`Delivery`]. The route answers the whole `Suggestion` — the trigger's
+/// id, the consent label, the persona's text, the approval record — and
+/// none of that is a field here: serde reads an unnamed member into nothing,
+/// which is how "the clerk keeps only these two" is enforced by the shape
+/// of the type rather than by a caller's restraint. A `200` missing either
+/// is not this route's answer and is [`GatewayError::Malformed`], described
+/// without its body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SuggestionRead {
+    pub standing: String,
+    pub delivery: Delivery,
+}
+
+/// What one read of a suggestion came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Read {
+    /// `200`: the suggestion is on the bus, and this is where it stands.
+    Found(SuggestionRead),
+    /// A `4xx`/`5xx` with an `error` code — `404 suggestion_not_found`,
+    /// `410 suggestion_out_of_reach`, `409 suggestion_unreadable`, a `5xx`
+    /// naming the store or the bus. What each means for the post is the
+    /// caller's to decide; this module keeps the code and nothing else.
     Refused { status: u16, code: String },
 }
 
@@ -639,6 +697,53 @@ impl Gateway {
         })
     }
 
+    /// `GET /api/suggestions/{id}` as the device — where one suggestion
+    /// stands, read **once, at posting time** and never per tick, so that
+    /// what the clerk knows about a suggestion is still only what the relay
+    /// and the Gateway hold (ADR 0035). One `401` is answered by one refresh
+    /// and one retry; a second `401` is [`GatewayError::Unauthenticated`].
+    ///
+    /// A refusal with a code is [`Read::Refused`] and not an error, because
+    /// `404 suggestion_not_found` and `410 suggestion_out_of_reach` are
+    /// ordinary answers about a suggestion the bus has let go of, and the
+    /// caller — which is about to post, whatever this read says — is the
+    /// one that knows what each means for the line it writes. It is logged
+    /// at `debug` here for the same reason: the loop says, with the
+    /// suggestion's id, what it did about it. A refusal with no code is
+    /// [`GatewayError::Malformed`], a proxy page in front of a Gateway that
+    /// is not there, and transient.
+    pub async fn suggestion(&self, id: &str) -> Result<Read, GatewayError> {
+        let answer = self
+            .as_device(|token| {
+                self.http
+                    .get(format!("{}/api/suggestions/{id}", self.base))
+                    .header(COOKIE, format!("{DEVICE_COOKIE}={token}"))
+            })
+            .await?;
+        if (200..300).contains(&answer.status) {
+            let read: SuggestionRead = parse(&answer, "a suggestion read")?;
+            return Ok(Read::Found(read));
+        }
+        let Some(code) = error_code(&answer.body) else {
+            return Err(GatewayError::Malformed {
+                status: answer.status,
+                why: format!(
+                    "a suggestion read was refused with no error code ({} bytes of body)",
+                    answer.body.len()
+                ),
+            });
+        };
+        debug!(
+            status = answer.status,
+            code = %code,
+            "the Companion Gateway refused a suggestion read"
+        );
+        Ok(Read::Refused {
+            status: answer.status,
+            code,
+        })
+    }
+
     /// `GET /api/devices` — the owner's device list. Nothing in production
     /// calls it today: the decisions loop has no use for it, the operator's
     /// script is Python and the deployment suite reads the route with a
@@ -763,7 +868,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::extract::State;
-    use axum::http::{HeaderMap as AxumHeaders, Response};
+    use axum::http::{HeaderMap as AxumHeaders, Response, Uri};
     use axum::routing::{get, post};
     use axum::Router;
 
@@ -801,10 +906,12 @@ mod tests {
         }
     }
 
-    /// One request the stub saw: which route, the `Cookie` header, the body.
+    /// One request the stub saw: which route, the path it was made on, the
+    /// `Cookie` header, the body.
     #[derive(Debug, Clone)]
     struct Seen {
         route: &'static str,
+        path: String,
         cookie: Option<String>,
         body: String,
     }
@@ -848,6 +955,7 @@ mod tests {
         seen: StdMutex<Vec<Seen>>,
         refresh: StdMutex<VecDeque<Scripted>>,
         approve: StdMutex<VecDeque<Scripted>>,
+        suggestion: StdMutex<VecDeque<Scripted>>,
         devices: StdMutex<VecDeque<Scripted>>,
     }
 
@@ -866,6 +974,7 @@ mod tests {
             &self,
             route: &'static str,
             script: &StdMutex<VecDeque<Scripted>>,
+            uri: &Uri,
             headers: &AxumHeaders,
             body: String,
         ) -> Response<Body> {
@@ -875,6 +984,7 @@ mod tests {
                 .map(str::to_owned);
             self.seen.lock().unwrap().push(Seen {
                 route,
+                path: uri.path().to_owned(),
                 cookie,
                 body,
             });
@@ -896,35 +1006,48 @@ mod tests {
 
     async fn refresh_route(
         State(stub): State<Arc<Stub>>,
+        uri: Uri,
         headers: AxumHeaders,
         body: String,
     ) -> Response<Body> {
-        stub.answer("refresh", &stub.refresh, &headers, body)
+        stub.answer("refresh", &stub.refresh, &uri, &headers, body)
     }
 
     async fn approve_route(
         State(stub): State<Arc<Stub>>,
+        uri: Uri,
         headers: AxumHeaders,
         body: String,
     ) -> Response<Body> {
-        stub.answer("approve", &stub.approve, &headers, body)
+        stub.answer("approve", &stub.approve, &uri, &headers, body)
+    }
+
+    async fn suggestion_route(
+        State(stub): State<Arc<Stub>>,
+        uri: Uri,
+        headers: AxumHeaders,
+        body: String,
+    ) -> Response<Body> {
+        stub.answer("suggestion", &stub.suggestion, &uri, &headers, body)
     }
 
     async fn devices_route(
         State(stub): State<Arc<Stub>>,
+        uri: Uri,
         headers: AxumHeaders,
         body: String,
     ) -> Response<Body> {
-        stub.answer("devices", &stub.devices, &headers, body)
+        stub.answer("devices", &stub.devices, &uri, &headers, body)
     }
 
     /// A stub Companion Gateway on a loopback port of its own, answering the
-    /// three routes from their scripts, recording what it saw.
+    /// four routes from their scripts, recording what it saw.
     async fn stub_gateway() -> (Arc<Stub>, String) {
         let stub = Arc::new(Stub::default());
         let router = Router::new()
             .route("/api/session/refresh", post(refresh_route))
             .route("/api/approvals", post(approve_route))
+            .route("/api/suggestions/{id}", get(suggestion_route))
             .route("/api/devices", get(devices_route))
             .with_state(stub.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1269,6 +1392,189 @@ mod tests {
         );
     }
 
+    /// A `200` from `GET /api/suggestions/{id}` holding only the two
+    /// members the clerk reads. The real route answers the whole
+    /// `Suggestion` (the trigger, the consent label, the text, the approval
+    /// record); the stub leaves all of it out, which is the assertion that
+    /// the client requires none of it.
+    fn suggestion_body(standing: &str, reach: &str, detail: &str) -> String {
+        format!(
+            r#"{{"standing":"{standing}","delivery":{{"reach":"{reach}","detail":"{detail}"}}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn suggestion_read_sends_the_device_cookie_and_reads_standing_and_delivery() {
+        let dir = ScratchDir::new();
+        let (stub, base) = stub_gateway().await;
+        script(&stub.refresh, [issued("D1", "R2")]);
+        script(
+            &stub.suggestion,
+            [
+                json(
+                    200,
+                    &suggestion_body("approvable", "cannot_reach", "owner_invited"),
+                ),
+                // The whole shape, with the members the clerk does not keep
+                // — the route's real answer names the contact's message by
+                // id and carries the persona's text; none of it is read.
+                json(
+                    200,
+                    &format!(
+                        r#"{{"event_id":"{SUGGESTION}","source":"hermes://example.com/personas/assistant","persona_id":"assistant","network":"whatsapp","consent":"granted","produced_at":"2026-09-20T10:00:00Z","expires_at":"2026-09-20T11:00:00Z","attempt":1,"standing":"approved","trigger":{{"event_id":"{APPROVAL}","type":"inbound.message.received.v1"}},"suggestion":{{"body":"Pas de problème, à 20h !","language":"fr"}},"stream_sequence":7,"approval":{approved},"delivery":{{"reach":"can_reach","detail":"owner_joined"}},"posted":null}}"#,
+                        approved = approved_body(false)
+                    ),
+                ),
+            ],
+        );
+        let gateway = Gateway::new(&base, dir.session("R1"));
+
+        let read = gateway.suggestion(SUGGESTION).await.unwrap();
+
+        assert_eq!(
+            read,
+            Read::Found(SuggestionRead {
+                standing: "approvable".to_owned(),
+                delivery: Delivery {
+                    reach: "cannot_reach".to_owned(),
+                    detail: "owner_invited".to_owned(),
+                },
+            })
+        );
+        let seen = stub.seen("suggestion");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].path, format!("/api/suggestions/{SUGGESTION}"));
+        assert_eq!(seen[0].cookie.as_deref(), Some("twalk_device=D1"));
+        assert_eq!(seen[0].body, "", "a read sends no body");
+        assert_eq!(
+            stub.seen("refresh").len(),
+            1,
+            "the first call signs in once"
+        );
+
+        let read = gateway.suggestion(SUGGESTION).await.unwrap();
+        assert_eq!(
+            read,
+            Read::Found(SuggestionRead {
+                standing: "approved".to_owned(),
+                delivery: Delivery {
+                    reach: "can_reach".to_owned(),
+                    detail: "owner_joined".to_owned(),
+                },
+            })
+        );
+        assert_eq!(stub.seen("refresh").len(), 1, "a fresh token is reused");
+    }
+
+    #[tokio::test]
+    async fn a_404_or_410_is_refused_with_its_code() {
+        let dir = ScratchDir::new();
+        let (stub, base) = stub_gateway().await;
+        script(&stub.refresh, [issued("D1", "R2")]);
+        script(
+            &stub.suggestion,
+            [
+                json(404, r#"{"error":"suggestion_not_found"}"#),
+                json(
+                    410,
+                    r#"{"error":"suggestion_out_of_reach","detail":"widen GATEWAY_APPROVAL_LOOKUP_WINDOW"}"#,
+                ),
+                json(409, r#"{"error":"suggestion_unreadable"}"#),
+                json(503, r#"{"error":"suggestions_not_configured"}"#),
+                json(502, "upstream is gone"),
+                // A `200` that is not the route's shape: no `delivery`.
+                json(200, r#"{"standing":"approvable"}"#),
+            ],
+        );
+        let gateway = Gateway::new(&base, dir.session("R1"));
+
+        for (status, code) in [
+            (404, "suggestion_not_found"),
+            (410, "suggestion_out_of_reach"),
+            (409, "suggestion_unreadable"),
+            (503, "suggestions_not_configured"),
+        ] {
+            assert_eq!(
+                gateway.suggestion(SUGGESTION).await.unwrap(),
+                Read::Refused {
+                    status,
+                    code: code.to_owned()
+                }
+            );
+        }
+        // A refusal with no code is not an answer about the suggestion: a
+        // proxy in front of a Gateway that is not there, worth a later try.
+        let err = gateway.suggestion(SUGGESTION).await.unwrap_err();
+        assert!(
+            matches!(err, GatewayError::Malformed { status: 502, .. }),
+            "{err}"
+        );
+        assert!(err.is_transient());
+        assert!(!err.to_string().contains("upstream"), "{err}");
+        // And a `200` missing one of the two members is not this route's
+        // answer, and is not transient: it will be the same next time.
+        let err = gateway.suggestion(SUGGESTION).await.unwrap_err();
+        assert!(
+            matches!(err, GatewayError::Malformed { status: 200, .. }),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+    }
+
+    #[tokio::test]
+    async fn one_401_on_a_suggestion_read_refreshes_once() {
+        let dir = ScratchDir::new();
+        let session = dir.session("R1");
+        let path = session.path().to_owned();
+        let (stub, base) = stub_gateway().await;
+        script(&stub.refresh, [issued("D1", "R2"), issued("D2", "R3")]);
+        script(
+            &stub.suggestion,
+            [
+                json(401, r#"{"error":"unauthenticated"}"#),
+                json(
+                    200,
+                    &suggestion_body("approvable", "unknown", "not_a_known_portal"),
+                ),
+                json(401, r#"{"error":"unauthenticated"}"#),
+                json(401, r#"{"error":"unauthenticated"}"#),
+                json(
+                    200,
+                    &suggestion_body("approvable", "unknown", "not_a_known_portal"),
+                ),
+            ],
+        );
+        let gateway = Gateway::new(&base, session);
+        // Signed in, holding D1 — the 401 that follows is D1 dying under it.
+        gateway.refresh().await.unwrap();
+        assert_eq!(stub.seen("refresh").len(), 1);
+
+        let read = gateway.suggestion(SUGGESTION).await.unwrap();
+
+        assert!(matches!(read, Read::Found(_)), "{read:?}");
+        let reads = stub.seen("suggestion");
+        assert_eq!(reads.len(), 2, "one retry, exactly");
+        assert_eq!(reads[0].cookie.as_deref(), Some("twalk_device=D1"));
+        assert_eq!(reads[1].cookie.as_deref(), Some("twalk_device=D2"));
+        let refreshes = stub.seen("refresh");
+        assert_eq!(refreshes.len(), 2, "one refresh for the 401, exactly");
+        assert_eq!(refreshes[1].cookie.as_deref(), Some("twalk_refresh=R2"));
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains(&format!("{SESSION_KEY}=R3\n")));
+
+        // Two in a row are the session gone, and there is no third try.
+        script(&stub.refresh, [issued("D3", "R4")]);
+        let err = gateway.suggestion(SUGGESTION).await.unwrap_err();
+        assert_eq!(err, GatewayError::Unauthenticated);
+        assert_eq!(stub.seen("suggestion").len(), 4, "no third try");
+        assert_eq!(
+            stub.suggestion.lock().unwrap().len(),
+            1,
+            "the 200 the stub would have given a third try is still queued"
+        );
+    }
+
     #[tokio::test]
     async fn unreachable_is_transient() {
         let dir = ScratchDir::new();
@@ -1439,6 +1745,24 @@ mod tests {
                 tainted(401),
             ],
         );
+        // A `200` from the suggestion route is the suggestion, text and
+        // all — here every member but `standing` is marker, and `delivery`
+        // is missing, so the parse fails on a body that names the contact.
+        script(
+            &stub.suggestion,
+            [
+                json(
+                    200,
+                    &format!(
+                        r#"{{"standing":"approvable","suggestion":{{"body":"{MARKER}"}},"trigger":{{"event_id":"{MARKER}"}}}}"#
+                    ),
+                ),
+                json(
+                    404,
+                    &format!(r#"{{"error":"suggestion_not_found","detail":"{MARKER}"}}"#),
+                ),
+            ],
+        );
         let gateway = Gateway::new(&base, dir.session(&format!("{MARKER}-R1")));
         let mut errors: Vec<GatewayError> = Vec::new();
 
@@ -1458,12 +1782,24 @@ mod tests {
             }
         );
         errors.push(gateway.approve(SUGGESTION, None).await.unwrap_err()); // 401, 401
+                                                                           // The session is gone after those two 401s; signed in again, the
+                                                                           // suggestion route's 200 that is not the route's shape, then a
+                                                                           // refusal whose `detail` is marker and whose code is what is kept.
+        script(&stub.refresh, [issued("D9", "R9")]);
+        errors.push(gateway.suggestion(SUGGESTION).await.unwrap_err()); // 200, no `delivery`
+        assert_eq!(
+            gateway.suggestion(SUGGESTION).await.unwrap(),
+            Read::Refused {
+                status: 404,
+                code: "suggestion_not_found".to_owned()
+            }
+        );
         let loose = dir.0.join("loose.env");
         fs::write(&loose, format!("{SESSION_KEY}={MARKER}\n")).unwrap();
         fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
         errors.push(SessionFile::open(&loose).unwrap_err());
 
-        assert_eq!(errors.len(), 8);
+        assert_eq!(errors.len(), 9);
         for err in &errors {
             let text = format!("{err}");
             assert!(!text.contains(MARKER), "{err:?}");
@@ -1488,6 +1824,7 @@ mod tests {
                 "malformed",
                 "malformed",
                 "unauthenticated",
+                "malformed",
                 "session",
             ]
         );

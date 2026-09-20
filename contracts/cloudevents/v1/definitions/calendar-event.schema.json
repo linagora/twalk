@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/definitions/calendar-event.schema.json",
+  "title": "Calendar event",
+  "description": "What Twalk publishes about one event in the owner's own calendar (ADR 0033, #280): the meeting as the owner sees it in their agenda — when, what it is called, whether it stands, who is expected — and nothing of what was written inside it. Shared by `calendar.event.created.v1` and `calendar.event.changed.v1`, which carry the whole of it, and named by `calendar.event.removed.v1`, which carries the `uid` and the last published title. Two things are deliberately absent and stay absent: the description, because a meeting's body is where people paste what they did not decide to share, and attachments, for the same reason with a file's name added. The participants are the one piece of third-party data inside an event that is about the owner — ADR 0028's quoted-excerpt situation — and the reduction rule below is theirs.",
+  "type": "object",
+  "required": [
+    "uid",
+    "title",
+    "start",
+    "end",
+    "all_day",
+    "timezone",
+    "status",
+    "recurrence",
+    "organizer",
+    "participants",
+    "participants_withheld"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "uid": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "The iCalendar UID (RFC 5545 §3.8.4.7): the one identity an event keeps across every change, and the key a consumer joins created, changed and removed on. Stable across a move, a rename and a re-invitation; not stable across a copy."
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 1024,
+      "description": "The SUMMARY, as the owner wrote or accepted it. The owner's own words about their own time, published to their own infrastructure — except that the title of an invitation is the organizer's words: when the organizer is withheld (see `organizer`), the title is withheld with them and is empty here. Empty too when the event has none."
+    },
+    "start": {
+      "type": "string",
+      "anyOf": [
+        { "format": "date-time" },
+        { "format": "date" }
+      ],
+      "description": "When the event starts: an RFC 3339 date-time for a timed event (with its offset, in the event's own zone — `timezone` names it — so that a 09:00 meeting reads as 09:00), or a plain `YYYY-MM-DD` date when `all_day` is true, exactly as RFC 5545 distinguishes DATE-TIME from DATE."
+    },
+    "end": {
+      "type": "string",
+      "anyOf": [
+        { "format": "date-time" },
+        { "format": "date" }
+      ],
+      "description": "When the event ends, in the same form as `start`. Exclusive, as DTEND is: an all-day event on the 3rd has `start` 2026-10-03 and `end` 2026-10-04. Derived from DURATION when the source gives one instead of DTEND, and equal to `start` when it gives neither (RFC 5545 §3.6.1: a DATE-TIME start with no end occupies no time)."
+    },
+    "all_day": {
+      "type": "boolean",
+      "description": "Whether `start` and `end` are dates rather than instants. Said outright rather than inferred from the string, so a consumer never guesses from a shape."
+    },
+    "timezone": {
+      "type": ["string", "null"],
+      "maxLength": 128,
+      "description": "The IANA zone the event was scheduled in (the TZID of DTSTART), or null for an all-day event, a floating time, or a time given in UTC — the offset in `start` is authoritative either way; this is what lets a consumer say 'Paris time' rather than '+02:00'."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["confirmed", "tentative", "cancelled"],
+      "description": "The STATUS (RFC 5545 §3.8.1.11), lower-cased; `confirmed` when the source states none, which is what the RFC has a consumer assume. A `cancelled` event is a `changed` event with this field among `changed_fields`, not a `removed` one: the resource is still in the calendar, and that difference is the organizer's, not Twalk's."
+    },
+    "recurrence": {
+      "type": ["string", "null"],
+      "maxLength": 1024,
+      "description": "The RRULE (RFC 5545 §3.8.5.3) as written, e.g. `FREQ=WEEKLY;BYDAY=MO`, or null for an event that happens once. Carried verbatim rather than expanded: expansion is the consumer's question (which occurrences, in which window) and its answer is not content. One event of a recurring series is one resource with one UID, and this is its rule; an exception the organizer made to one occurrence (RECURRENCE-ID) is folded into the same resource by the server and is not published on its own in v1."
+    },
+    "organizer": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/person" }
+      ],
+      "description": "Who scheduled the event (ORGANIZER), or null when the source names none — a personal entry the owner made for themselves. A person, so the participant rule below applies to it: an organizer whose consent on the owner's mail connection is `revoked` is published as null and counted in `participants_withheld`, and the event's `title` — their words — goes with them."
+    },
+    "participants": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "required": ["identity", "name", "role", "partstat"],
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "$ref": "#/$defs/mailto"
+          },
+          "name": {
+            "type": ["string", "null"],
+            "maxLength": 512,
+            "description": "The CN parameter, or null when the source gives none. The person's name as the organizer's client had it — a display name, not a verified identity."
+          },
+          "role": {
+            "type": "string",
+            "enum": ["chair", "required", "optional", "non-participant"],
+            "description": "The ROLE parameter (RFC 5545 §3.2.16), in words: CHAIR, REQ-PARTICIPANT, OPT-PARTICIPANT, NON-PARTICIPANT. `required` when the source states none, as the RFC has it."
+          },
+          "partstat": {
+            "type": "string",
+            "enum": ["needs-action", "accepted", "declined", "tentative", "delegated"],
+            "description": "The PARTSTAT parameter (RFC 5545 §3.2.12), lower-cased: whether this person has answered the invitation. `needs-action` when the source states none."
+          }
+        }
+      },
+      "description": "The ATTENDEEs, the owner included when the organizer listed them — the owner is a participant in their own meeting, and their entry is never withheld (ADR 0021: the owner has no consent state). Every other entry is a third party's identity inside an event about the owner, and is governed by the decision the owner took about that person on the **mail connection of the same OIDC account**: the same `mailto:` string, on the connection that carries this person's mail. `granted` and `pending` publish the entry as it is — a pending person's attendance is labelled by nothing and reduced by nothing, as a pending sender's message is labelled and not reduced; `revoked` withholds the whole entry, identity included, since the identity is the datum (ADR 0012, ADR 0028). This type has no `consent` extension to branch on — the event is the owner's — so the rule cannot be a JSON Schema condition and is stated here in words instead, and demonstrated by the `withheld-participant` variant fixture; what a validator can check is `participants_withheld`."
+    },
+    "participants_withheld": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "How many people the source listed (ATTENDEEs and, when it is one of them, the ORGANIZER) that `participants` and `organizer` do not carry, because the owner's decision about them on the mail connection is `revoked`. The shape of the reduction without its content, the way a reduced attachment keeps `size_bytes`: a consumer counting heads is told the count is short and by how much, and is told nothing about who. Zero on an event where nobody was withheld, and on an event with nobody in it."
+    }
+  },
+  "$defs": {
+    "mailto": {
+      "type": "string",
+      "pattern": "^mailto:[^@\\s]+@[^@\\s]+$",
+      "maxLength": 512,
+      "description": "A person by their email address, as a `mailto:` URI (RFC 6068), lower-cased by the producer — the form CalDAV names them in and the form the mail collector's `subject` has, so one string is one person across the two connections of one account (ADR 0033: structural, not an inferred merge)."
+    },
+    "person": {
+      "type": "object",
+      "required": ["identity", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "identity": { "$ref": "#/$defs/mailto" },
+        "name": {
+          "type": ["string", "null"],
+          "maxLength": 512,
+          "description": "The CN parameter, or null when the source gives none."
+        }
+      }
+    }
+  }
+}

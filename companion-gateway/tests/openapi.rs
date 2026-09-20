@@ -3138,11 +3138,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     //
     // Each filler is a contact of this run's own, and that is not tidiness:
     // `approval_trigger_event` keys the CloudEvents id on the sender, the id
-    // is the `Nats-Msg-Id`, and JetStream absorbs a duplicate for two minutes
-    // — so fillers with a fixed name were *deduplicated* when this suite ran
-    // twice inside that window, the head did not move, the suggestion was
-    // still inside a one-position window, and this assertion failed with
-    // `409 consent_pending` on a Gateway whose consent store is empty. A
+    // is the `Nats-Msg-Id`, and JetStream absorbs a duplicate for the bus's
+    // duplicate window (24 h since #174) — so fillers with a fixed name were
+    // *deduplicated* when this suite ran twice inside that window, the head
+    // did not move, the suggestion was still inside a one-position window,
+    // and this assertion failed with `409 consent_pending` on a Gateway
+    // whose consent store is empty. A
     // suite that passes only when it has not run recently is worse than one
     // that fails (#206 found this while adding the endpoint below).
     for index in 0..4 {

@@ -43,7 +43,6 @@
 //! (`COLLECTOR_OIDC_CLIENT_SECRET_FILE`) — never argv, where `ps` shows it
 //! (the lesson of #239), never a bare variable a `docker inspect` prints.
 
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -123,35 +122,7 @@ impl Grant {
     /// mid-write leaves either the old grant or the new one and never half
     /// of one. The directory is created 0700 when missing.
     pub fn write(&self, path: &Path) -> Result<()> {
-        let directory = path
-            .parent()
-            .context("the grant file has no parent directory")?;
-        std::fs::create_dir_all(directory)
-            .with_context(|| format!("failed to create {}", directory.display()))?;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("failed to set the mode of {}", directory.display()))?;
-        let temporary = directory.join(format!(
-            ".{}.tmp",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("grant.json")
-        ));
-        {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .with_context(|| format!("failed to open {}", temporary.display()))?;
-            file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, path)
-            .with_context(|| format!("failed to move the grant into {}", path.display()))?;
-        Ok(())
+        crate::fs::write_json_private(path, self)
     }
 }
 
@@ -188,10 +159,19 @@ pub enum Renewal {
     /// A fresh access token, and the grant the SSO rotated to — already on
     /// disk when this is returned.
     Renewed { grant: Grant, access: AccessToken },
-    /// The SSO refused to renew: the grant is gone and only the operator can
-    /// give a new one. `detail` is the SSO's own error code and description,
-    /// never a token.
+    /// The SSO refused to renew because the **grant** is gone
+    /// (`invalid_grant`: revoked, expired, rotated away by another holder)
+    /// and only the owner signing in again can give a new one. `detail` is
+    /// the SSO's own error code and description, never a token.
     ReconnectRequired { detail: String },
+    /// The SSO refused to renew because of the **client**, not the grant
+    /// (`invalid_client`, `unauthorized_client`, `invalid_scope`: a wrong
+    /// secret, a client the SSO no longer allows this flow, a scope it does
+    /// not grant). The grant may well stand; authorizing again would not
+    /// help, and the operator changes the client's configuration. The third
+    /// refusal the two-refusals rule owes: sent to re-authorize for a wrong
+    /// secret, an operator re-authorizes for nothing.
+    PendingOperator { detail: String },
     /// The SSO did not answer, or answered something that is not a token
     /// response: nothing is wrong with the grant, and the next attempt may
     /// succeed.
@@ -387,11 +367,28 @@ impl Client {
         };
         if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED
         {
-            return Ok(Renewal::ReconnectRequired {
-                detail: format!(
-                    "the SSO refused to renew the grant ({status}): {}",
-                    refusal_words(&body)
-                ),
+            // RFC 6749 §5.2: the error code says whose fault it is. The
+            // grant's (`invalid_grant`) is the owner's to renew by signing
+            // in again; the client's is the operator's to fix at the SSO,
+            // and no sign-in changes it. An unknown code is read as the
+            // grant's: the remedy that costs the operator a minute rather
+            // than the one that costs a wrong diagnosis.
+            let words = refusal_words(&body);
+            let code = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            return Ok(match code {
+                "invalid_client" | "unauthorized_client" | "invalid_scope" => {
+                    Renewal::PendingOperator {
+                        detail: format!(
+                            "the SSO refused the client, not the grant ({status}): {words}. Check \
+                             COLLECTOR_OIDC_CLIENT_ID, the secret in \
+                             COLLECTOR_OIDC_CLIENT_SECRET_FILE and the client's configuration \
+                             at the SSO; signing in again would not change this"
+                        ),
+                    }
+                }
+                _ => Renewal::ReconnectRequired {
+                    detail: format!("the SSO refused to renew the grant ({status}): {words}"),
+                },
             });
         }
         if !status.is_success() {
@@ -534,6 +531,10 @@ impl ServiceRefusal {
 pub struct Identities {
     pub jmap: Result<String, ServiceRefusal>,
     pub caldav: Result<String, ServiceRefusal>,
+    /// The owner's id on the calendar side service (`/api/user`'s `_id`),
+    /// which their calendar collections are under. `None` when the side
+    /// service did not answer, or answered without one.
+    pub caldav_owner_id: Option<String>,
 }
 
 impl Identities {
@@ -583,24 +584,41 @@ impl Services {
                 .map(str::to_owned)
         })
         .await;
+        // The side service's `/api/user` is the OpenPaaS one: the owner's
+        // `_id`, which the calendar collections are under (#280), beside
+        // `preferredEmail`. Both are read here so the calendar half asks
+        // nothing more.
         let caldav_user = format!("{}/api/user", self.caldav_url.trim_end_matches('/'));
-        let caldav = ask(&http, "caldav", &caldav_user, access, |body| {
-            body.get("email")
+        let caldav_document = ask(&http, "caldav", &caldav_user, access, |body| {
+            body.get("preferredEmail")
                 .and_then(|v| v.as_str())
-                .map(str::to_owned)
+                .map(|email| {
+                    (
+                        email.to_owned(),
+                        body.get("_id").and_then(|v| v.as_str()).map(str::to_owned),
+                    )
+                })
         })
         .await;
-        Ok(Identities { jmap, caldav })
+        let (caldav, caldav_owner_id) = match caldav_document {
+            Ok((email, id)) => (Ok(email), id),
+            Err(refusal) => (Err(refusal), None),
+        };
+        Ok(Identities {
+            jmap,
+            caldav,
+            caldav_owner_id,
+        })
     }
 }
 
-async fn ask(
+async fn ask<T>(
     http: &reqwest::Client,
     service: &str,
     url: &str,
     access: &AccessToken,
-    account_of: impl Fn(&serde_json::Value) -> Option<String>,
-) -> Result<String, ServiceRefusal> {
+    account_of: impl Fn(&serde_json::Value) -> Option<T>,
+) -> Result<T, ServiceRefusal> {
     let response = http
         .get(url)
         .bearer_auth(&access.token)

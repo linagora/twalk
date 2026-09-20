@@ -83,14 +83,20 @@ pub enum Skipped {
     /// `pubkey` field is the relay's word and only the signature is the
     /// key holder's. A number here that is not zero is a relay to look at.
     Unverified,
+    /// The Companion Gateway already records the suggestion as approved
+    /// (`standing: approved` on `GET /api/suggestions/{id}`, #300): it was
+    /// decided from the approval screen before the clerk read it, so there
+    /// is no decision left to ask the owner for, and no post is made.
+    AlreadyApproved,
 }
 
 impl Skipped {
-    pub const ALL: [Skipped; 4] = [
+    pub const ALL: [Skipped; 5] = [
         Skipped::Expired,
         Skipped::Unreadable,
         Skipped::Duplicate,
         Skipped::Unverified,
+        Skipped::AlreadyApproved,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -99,6 +105,7 @@ impl Skipped {
             Self::Unreadable => "unreadable",
             Self::Duplicate => "duplicate",
             Self::Unverified => "unverified",
+            Self::AlreadyApproved => "already_approved",
         }
     }
 }
@@ -163,6 +170,55 @@ impl ApprovalOutcome {
     }
 }
 
+/// What one read of a suggestion before its post came to (#300,
+/// `consumers::read_before_post`): the label of
+/// `twalk_clerk_delivery_reads_total{outcome}`. One per suggestion the
+/// clerk went to post, **whatever the outcome** — a read that could not be
+/// made is counted under the reason it was not, so that a Gateway outage,
+/// a revoked device or a deployment that never configured one is a slope
+/// on `/metrics` rather than a sentence only the relay shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryRead {
+    /// The Companion Gateway answered with the suggestion's standing and
+    /// delivery, and the post carries the Companion's sentence.
+    Found,
+    /// The Companion Gateway records the suggestion as already approved: no
+    /// post (also `twalk_clerk_skipped_total{why="already_approved"}`).
+    AlreadyApproved,
+    /// `404 suggestion_not_found` or `410 suggestion_out_of_reach`: the
+    /// Gateway does not hold the suggestion the bus delivered.
+    NotFound,
+    /// Any other refusal, or a session the Gateway will not have (a `401`,
+    /// or a session already known dead, in which case no call was made).
+    Refused,
+    /// Nothing answered, or an answer that is not the route's shape.
+    Unreachable,
+    /// The write half is not configured: no device, so nothing was asked.
+    NoDevice,
+}
+
+impl DeliveryRead {
+    pub const ALL: [DeliveryRead; 6] = [
+        DeliveryRead::Found,
+        DeliveryRead::AlreadyApproved,
+        DeliveryRead::NotFound,
+        DeliveryRead::Refused,
+        DeliveryRead::Unreachable,
+        DeliveryRead::NoDevice,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Found => "found",
+            Self::AlreadyApproved => "already_approved",
+            Self::NotFound => "not_found",
+            Self::Refused => "refused",
+            Self::Unreachable => "unreachable",
+            Self::NoDevice => "no_device",
+        }
+    }
+}
+
 /// Process-wide health signals. Cheap to clone into every task: all state is
 /// shared behind atomics, except the per-code approval counters, which are
 /// a map behind a mutex because the set of codes is the Companion Gateway's and grows
@@ -177,6 +233,13 @@ pub struct Metrics {
     skipped_unreadable: AtomicU64,
     skipped_duplicate: AtomicU64,
     skipped_unverified: AtomicU64,
+    skipped_already_approved: AtomicU64,
+    delivery_reads_found: AtomicU64,
+    delivery_reads_already_approved: AtomicU64,
+    delivery_reads_not_found: AtomicU64,
+    delivery_reads_refused: AtomicU64,
+    delivery_reads_unreachable: AtomicU64,
+    delivery_reads_no_device: AtomicU64,
     /// Failed writes to the relay — a post, a delete, a query that did not
     /// come back with a `2xx`.
     relay_failures: AtomicU64,
@@ -212,6 +275,13 @@ impl Metrics {
             skipped_unreadable: AtomicU64::new(0),
             skipped_duplicate: AtomicU64::new(0),
             skipped_unverified: AtomicU64::new(0),
+            skipped_already_approved: AtomicU64::new(0),
+            delivery_reads_found: AtomicU64::new(0),
+            delivery_reads_already_approved: AtomicU64::new(0),
+            delivery_reads_not_found: AtomicU64::new(0),
+            delivery_reads_refused: AtomicU64::new(0),
+            delivery_reads_unreachable: AtomicU64::new(0),
+            delivery_reads_no_device: AtomicU64::new(0),
             relay_failures: AtomicU64::new(0),
             sweeps: AtomicU64::new(0),
             approvals: Mutex::new(
@@ -238,6 +308,7 @@ impl Metrics {
             Skipped::Unreadable => &self.skipped_unreadable,
             Skipped::Duplicate => &self.skipped_duplicate,
             Skipped::Unverified => &self.skipped_unverified,
+            Skipped::AlreadyApproved => &self.skipped_already_approved,
         }
     }
 
@@ -263,6 +334,25 @@ impl Metrics {
     /// Returns the running total, for the log line.
     pub fn record_skipped(&self, why: Skipped) -> u64 {
         self.skipped_counter(why).fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn delivery_read_counter(&self, outcome: DeliveryRead) -> &AtomicU64 {
+        match outcome {
+            DeliveryRead::Found => &self.delivery_reads_found,
+            DeliveryRead::AlreadyApproved => &self.delivery_reads_already_approved,
+            DeliveryRead::NotFound => &self.delivery_reads_not_found,
+            DeliveryRead::Refused => &self.delivery_reads_refused,
+            DeliveryRead::Unreachable => &self.delivery_reads_unreachable,
+            DeliveryRead::NoDevice => &self.delivery_reads_no_device,
+        }
+    }
+
+    /// One read of a suggestion before its post (#300), by outcome.
+    /// Returns the running total for that outcome.
+    pub fn record_delivery_read(&self, outcome: DeliveryRead) -> u64 {
+        self.delivery_read_counter(outcome)
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
     }
 
     /// One failed write to the relay. Returns the running total.
@@ -327,6 +417,18 @@ impl Metrics {
                 "twalk_clerk_skipped_total{{why=\"{}\"}} {}\n",
                 why.as_str(),
                 self.skipped_counter(why).load(Ordering::Relaxed)
+            ));
+        }
+
+        out.push_str(
+            "# HELP twalk_clerk_delivery_reads_total Reads of a suggestion from the Companion Gateway before its post (#300), by outcome: one per suggestion the clerk went to post, a read it could not make counted under why.\n",
+        );
+        out.push_str("# TYPE twalk_clerk_delivery_reads_total counter\n");
+        for outcome in DeliveryRead::ALL {
+            out.push_str(&format!(
+                "twalk_clerk_delivery_reads_total{{outcome=\"{}\"}} {}\n",
+                outcome.as_str(),
+                self.delivery_read_counter(outcome).load(Ordering::Relaxed)
             ));
         }
 
@@ -401,10 +503,31 @@ mod tests {
                 "why {why} should exist at zero: {body}"
             );
         }
-        for why in ["expired", "unreadable", "duplicate", "unverified"] {
+        for why in [
+            "expired",
+            "unreadable",
+            "duplicate",
+            "unverified",
+            "already_approved",
+        ] {
             assert!(
                 body.contains(&format!("twalk_clerk_skipped_total{{why=\"{why}\"}} 0\n")),
                 "why {why} should exist at zero: {body}"
+            );
+        }
+        for outcome in [
+            "found",
+            "already_approved",
+            "not_found",
+            "refused",
+            "unreachable",
+            "no_device",
+        ] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_clerk_delivery_reads_total{{outcome=\"{outcome}\"}} 0\n"
+                )),
+                "outcome {outcome} should exist at zero: {body}"
             );
         }
         assert!(
@@ -479,6 +602,43 @@ mod tests {
         // One HELP and one TYPE line for the family, however many rows.
         assert_eq!(
             body.matches("# TYPE twalk_clerk_approvals_total counter\n")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn delivery_reads_total_counts_each_outcome_apart() {
+        let metrics = Metrics::new();
+        assert_eq!(metrics.record_delivery_read(DeliveryRead::Found), 1);
+        assert_eq!(metrics.record_delivery_read(DeliveryRead::Found), 2);
+        assert_eq!(metrics.record_delivery_read(DeliveryRead::Unreachable), 1);
+        assert_eq!(metrics.record_delivery_read(DeliveryRead::NoDevice), 1);
+
+        let body = metrics.render(1_000);
+        assert!(
+            body.contains("twalk_clerk_delivery_reads_total{outcome=\"found\"} 2\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_clerk_delivery_reads_total{outcome=\"unreachable\"} 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_clerk_delivery_reads_total{outcome=\"no_device\"} 1\n"),
+            "{body}"
+        );
+        // The outcomes nothing recorded are still there, at zero.
+        for outcome in ["already_approved", "not_found", "refused"] {
+            assert!(
+                body.contains(&format!(
+                    "twalk_clerk_delivery_reads_total{{outcome=\"{outcome}\"}} 0\n"
+                )),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            body.matches("# TYPE twalk_clerk_delivery_reads_total counter\n")
                 .count(),
             1
         );

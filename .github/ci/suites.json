@@ -71,19 +71,19 @@
 			"targets": ["authorize", "oidc"],
 			"needs": ["rust"],
 			"tier": "required",
-			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"],
-			"triggers_note": "The Gateway's OpenAPI description is in here because the collector checks the connections it holds against the registry `GET /api/consent/snapshot` carries. `consent-cache/` is deliberately not: the collector labels no sender in #274, and the dependency arrives with the mail collector in lot 3 — `test_selection.py` derives it from `Cargo.toml`, so the line appears when the dependency does."
+			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"],
+			"triggers_note": "The Gateway's OpenAPI description is in here because the collector checks the connections it holds against the registry `GET /api/consent/snapshot` carries, and reads the consent snapshot off the same document. `consent-cache/` since #280: a participant in the owner's meeting is labelled by the decision taken about them on the mail connection, through the shared cache — `test_selection.py` derives the dependency from `Cargo.toml`."
 		},
 
 		"collector-stack": {
-			"what": "The collector at its process boundary (#274), against the fake SSO and the shared test stack's bus: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1.",
+			"what": "The collector at its process boundary, against the fake SSO, the fake side service and the shared test stack's bus. #274: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1. #280: an event created, moved and removed in the owner's calendar is the three calendar types with the contract's ids, an unchanged CTag publishes nothing, a participant revoked on the mail connection — in the snapshot or over the stream — is withheld and counted, one never decided about is carried. #276: a mail delivered to the INBOX after the start is inbound.message.received on the mail connection, field by field; a newsletter, an iTIP mail and the owner's own are dropped and counted; a mail in Sent or Archive is never read; a granted sender's mail is granted, a revoked sender's carries no words; what the INBOX held before the start is not published.",
 			"component": "collector",
 			"workdir": "collector",
-			"run": "cargo test --test status",
-			"targets": ["status"],
+			"run": "cargo test --test calendar --test mail --test status",
+			"targets": ["calendar", "mail", "status"],
 			"needs": ["rust", "docker"],
 			"tier": "required",
-			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"]
+			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"]
 		},
 
 		"clerk": {
@@ -134,12 +134,13 @@
 		},
 
 		"sensor": {
-			"what": "The Sensor at its process boundary, against the shared test stack: normalisation, consent, the owner, the owner's own device, bridge bots, presence, encryption, persistence, observability.",
+			"what": "The Sensor at its process boundary, against the shared test stack: normalisation, consent, the owner, the owner's own device, bridge bots, presence, encryption, persistence, observability, the bus's retention policy.",
 			"component": "sensor",
 			"workdir": "sensor",
-			"run": "cargo test --lib --test bridge_bots_are_not_contacts --test consent --test encryption --test excerpt_consent --test fidelity --test message_to_event --test observability --test outbound --test outbound_message_sent --test owner_device --test owner_is_never_a_contact --test persistence --test presence --test presence_network --test reactions --test sensor_lifecycle --test smoke",
+			"run": "cargo test --lib --test bridge_bots_are_not_contacts --test bus_policy --test consent --test encryption --test excerpt_consent --test fidelity --test message_to_event --test observability --test outbound --test outbound_message_sent --test owner_device --test owner_is_never_a_contact --test persistence --test presence --test presence_network --test reactions --test sensor_lifecycle --test smoke",
 			"targets": [
 				"bridge_bots_are_not_contacts",
+				"bus_policy",
 				"consent",
 				"encryption",
 				"excerpt_consent",

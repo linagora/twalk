@@ -42,11 +42,33 @@
 //! `diagnostics` remedy — the Companion's `UNKNOWN` row. That is the one
 //! sentence that embeds the code, and a test asserts no other one does: the
 //! codes are the Gateway's vocabulary, not the owner's.
+//!
+//! # The delivery line, from the same catalogues
+//!
+//! Since the clerk's device also reads (`GET /api/suggestions/{id}`), a
+//! post in `approbations` says whether a ✅ on it would reach anybody — the
+//! `delivery` the approval screen shows above its own button (#216:
+//! `can_reach`, `cannot_reach`, `unknown`, each with a `detail` word behind
+//! it). That sentence is the Companion's too ([`delivery_line`]):
+//! `approvals.delivery.canReach|cannotReach|unknown`, with the `{detail}`
+//! placeholder filled from `approvals.delivery.detail.<detail>`, exactly as
+//! `rows.ts`'s `deliveryCopy` and `deliveryDetailKey` compose it. The same
+//! test discipline holds it in place: every `detail` the Gateway's
+//! description enumerates has an entry in both catalogues and the
+//! catalogues name no `detail` the Gateway does not, and a `detail` this
+//! build has never met renders the word itself rather than stopping the
+//! post. And when the line could **not** be read ([`delivery_unread_line`])
+//! the post says so and says why, in one of four ways ([`Unread`]) — no
+//! device configured, a Gateway that did not answer, one that refused, a
+//! suggestion it could not find — because a post with no delivery line at
+//! all would be read as "fine", which is the one thing an unread delivery
+//! is not.
 
 use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use crate::gateway::Delivery;
 use crate::text::Lang;
 
 /// The Companion's catalogues, embedded: the clerk says exactly what the
@@ -65,6 +87,14 @@ const EN: &str = include_str!("../../companion/src/lib/i18n/en.json");
 /// The placeholder `approvals.refusal.unknown` leaves for the raw code. It is
 /// the Companion's ICU argument name, not this crate's choice.
 const CODE_PLACEHOLDER: &str = "{error}";
+
+/// The placeholder `approvals.delivery.cannotReach` and `.unknown` leave for
+/// the `detail` sentence — again the Companion's ICU argument name.
+const DETAIL_PLACEHOLDER: &str = "{detail}";
+
+/// The catalogue prefix of the `detail` sentences: one key per value of the
+/// Gateway's `Delivery.detail` enum.
+const DETAIL_PREFIX: &str = "approvals.delivery.detail.";
 
 /// What the user can do about a refusal — the Companion's five
 /// (`refusal.ts`'s `Remedy`), because there are five different actions and
@@ -200,6 +230,111 @@ fn unknown(l: Lang, code: &str) -> String {
     }
 }
 
+/// Why a post carries no delivery reading: the four ways the one read at
+/// posting time can come to nothing. Each is a different sentence, because
+/// "no device configured" is a deployment that chose not to, and "the
+/// Companion Gateway did not answer" is one that is in trouble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    /// The write half is not configured (`CLERK_GATEWAY_SESSION_FILE`), so
+    /// the clerk has no device to read as. The post is #265's.
+    NoDevice,
+    /// Nothing answered within the request timeout, or the answer was not
+    /// the route's shape: the Gateway is down, starting, or behind a proxy
+    /// page. The post goes up in the same tick regardless.
+    GatewayUnreachable,
+    /// The Gateway answered and refused: the clerk's session is gone, the
+    /// store or the bus behind it is unavailable, or the suggestion is on
+    /// the bus and this Gateway could not read it.
+    GatewayRefused,
+    /// `404 suggestion_not_found` or `410 suggestion_out_of_reach`: the bus
+    /// has let the suggestion go, or it lies further back than the Gateway
+    /// reads. The clerk holds the event that proposed it and posts it.
+    NotFound,
+}
+
+/// The delivery line of a post, in the Companion's own words:
+/// `Livraison : ` / `Delivery: ` and then the sentence the approval screen
+/// shows for this `reach` — `approvals.delivery.canReach`, `cannotReach` or
+/// `unknown`, the last for any `reach` this build has never met, as
+/// `rows.ts`'s `deliveryCopy` falls back — with `{detail}` replaced by the
+/// sentence for the `detail` word (`approvals.delivery.detail.<detail>`),
+/// or by the word itself when the catalogue has none for it. Total: no
+/// answer the Gateway gives leaves the post without a line.
+///
+/// The sentence is embedded **verbatim**, including what the Companion
+/// chose to put in it: a translator improves it in one place, and an owner
+/// reading it on Buzz and on the approval screen reads one sentence.
+pub fn delivery_line(l: Lang, delivery: &Delivery) -> String {
+    let key = match delivery.reach.as_str() {
+        "can_reach" => "approvals.delivery.canReach",
+        "cannot_reach" => "approvals.delivery.cannotReach",
+        _ => "approvals.delivery.unknown",
+    };
+    let detail = entry(l, &format!("{DETAIL_PREFIX}{}", delivery.detail))
+        .unwrap_or(delivery.detail.as_str());
+    let sentence = match entry(l, key) {
+        Some(template) => template.replace(DETAIL_PLACEHOLDER, detail),
+        // The catalogue could not be read at all: the two words the
+        // Gateway gave, which is still more than a blank.
+        None => format!("{} ({detail})", delivery.reach),
+    };
+    format!("{}{sentence}", delivery_prefix(l))
+}
+
+/// The delivery line of a post whose delivery the clerk could not read:
+/// says that it was not read, why, and where it *is* read — the Approvals
+/// screen — so an owner who wants the answer knows where to look, and
+/// never mistakes the absence for "can reach".
+pub fn delivery_unread_line(l: Lang, why: Unread) -> String {
+    let why = match (l, why) {
+        (Lang::Fr, Unread::NoDevice) => "aucun device configuré",
+        (Lang::Fr, Unread::GatewayUnreachable) => "le Companion Gateway n’a pas répondu",
+        (Lang::Fr, Unread::GatewayRefused) => "le Companion Gateway a refusé la lecture",
+        (Lang::Fr, Unread::NotFound) => "le Companion Gateway ne trouve pas cette suggestion",
+        (Lang::En, Unread::NoDevice) => "no device configured",
+        (Lang::En, Unread::GatewayUnreachable) => "the Companion Gateway did not answer",
+        (Lang::En, Unread::GatewayRefused) => "the Companion Gateway refused the read",
+        (Lang::En, Unread::NotFound) => "the Companion Gateway cannot find this suggestion",
+    };
+    match l {
+        Lang::Fr => format!(
+            "{}non lue par le greffier ({why}) — l’écran Approbations la connaît.",
+            delivery_prefix(l)
+        ),
+        Lang::En => format!(
+            "{}not read by the clerk ({why}) — the Approvals screen knows it.",
+            delivery_prefix(l)
+        ),
+    }
+}
+
+/// The label both delivery lines begin with, so that a reader of the post
+/// finds the line by one word whichever of the two it is.
+fn delivery_prefix(l: Lang) -> &'static str {
+    match l {
+        Lang::Fr => "Livraison : ",
+        Lang::En => "Delivery: ",
+    }
+}
+
+/// Every `detail` word the Companion's French catalogue has a sentence for
+/// (`approvals.delivery.detail.*`), for the test that holds it to the
+/// Gateway's description and to the English one — and for a suite that
+/// scripts each. The French catalogue is the reference the Companion's
+/// own tooling treats as complete.
+pub fn known_details() -> Vec<&'static str> {
+    catalogue(Lang::Fr)
+        .as_object()
+        .map(|entries| {
+            entries
+                .keys()
+                .filter_map(|key| key.strip_prefix(DETAIL_PREFIX))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One catalogue entry, or `None` when the key is not there or is not a
 /// string.
 fn entry(l: Lang, key: &str) -> Option<&'static str> {
@@ -311,6 +446,248 @@ mod tests {
             invented.is_empty(),
             "codes the clerk's table names and the Gateway no longer documents: {invented:?}"
         );
+    }
+
+    /// `components.schemas.Delivery.properties.<member>.enum` of the
+    /// Gateway's description: the closed vocabulary of one `Delivery`
+    /// member, as the Companion's `rows.test.ts` reads it.
+    fn delivery_enum(member: &str) -> BTreeSet<String> {
+        let document: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(OPENAPI).expect("openapi.yaml parses");
+        document
+            .get("components")
+            .and_then(|c| c.get("schemas"))
+            .and_then(|s| s.get("Delivery"))
+            .and_then(|d| d.get("properties"))
+            .and_then(|p| p.get(member))
+            .and_then(|m| m.get("enum"))
+            .and_then(|e| e.as_sequence())
+            .unwrap_or_else(|| panic!("openapi.yaml enumerates Delivery.{member}"))
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn every_delivery_detail_openapi_names_has_a_sentence_in_both_languages_and_no_extra() {
+        let documented = delivery_enum("detail");
+        // A sanity floor, for the same reason as the codes' walk.
+        assert!(documented.len() >= 5, "the walk found {documented:?}");
+        let known: BTreeSet<String> = known_details().into_iter().map(str::to_owned).collect();
+
+        let missing: Vec<_> = documented.difference(&known).collect();
+        assert!(
+            missing.is_empty(),
+            "details the Gateway documents for Delivery and the Companion has no words for: {missing:?}"
+        );
+        let invented: Vec<_> = known.difference(&documented).collect();
+        assert!(
+            invented.is_empty(),
+            "details the Companion's catalogue names and the Gateway no longer documents: {invented:?}"
+        );
+        // Both languages, and the English catalogue names the same set:
+        // `known_details` reads the French one, so an English entry missing
+        // or extra would otherwise go unnoticed here.
+        for detail in &documented {
+            for l in [Lang::Fr, Lang::En] {
+                let key = format!("{DETAIL_PREFIX}{detail}");
+                assert!(
+                    entry(l, &key).is_some_and(|s| !s.is_empty()),
+                    "{l:?}: {key}"
+                );
+            }
+        }
+        let english: BTreeSet<String> = catalogue(Lang::En)
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter_map(|key| key.strip_prefix(DETAIL_PREFIX))
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(english, documented);
+
+        // And every `reach` the Gateway documents is one `delivery_line`
+        // has a sentence for — a fourth value would fall into `unknown`'s
+        // sentence silently, which this pins.
+        let reaches = delivery_enum("reach");
+        let expected: BTreeSet<String> = ["can_reach", "cannot_reach", "unknown"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(reaches, expected);
+        for l in [Lang::Fr, Lang::En] {
+            for key in [
+                "approvals.delivery.canReach",
+                "approvals.delivery.cannotReach",
+                "approvals.delivery.unknown",
+            ] {
+                assert!(entry(l, key).is_some_and(|s| !s.is_empty()), "{l:?}: {key}");
+            }
+            // The two that take a detail leave the placeholder for it.
+            for key in [
+                "approvals.delivery.cannotReach",
+                "approvals.delivery.unknown",
+            ] {
+                assert!(
+                    entry(l, key).is_some_and(|s| s.contains(DETAIL_PLACEHOLDER)),
+                    "{l:?}: {key}"
+                );
+            }
+        }
+    }
+
+    fn delivery(reach: &str, detail: &str) -> Delivery {
+        Delivery {
+            reach: reach.to_owned(),
+            detail: detail.to_owned(),
+        }
+    }
+
+    #[test]
+    fn delivery_line_substitutes_the_detail() {
+        // The representative one, spelled out: what the owner reads on Buzz
+        // under a reply that would reach nobody is the Companion's warning,
+        // whole, with the reason in its parenthesis — including the
+        // Companion's own reference to the mechanism that changes it.
+        assert_eq!(
+            delivery_line(Lang::Fr, &delivery("cannot_reach", "owner_invited")),
+            "Livraison : Cette réponse ne peut pas atteindre le contact. Votre compte n’est pas \
+             dans cette conversation (votre compte y a été invité et aucun de vos appareils n’a \
+             accepté), et un bridge ne relaie que ce que votre propre compte envoie : l’approuver \
+             la publierait sur votre flux, et personne ne la recevrait. Ce qui change cela est le \
+             device qui agit en votre nom (#123) — il doit avoir rejoint la conversation. Ce \
+             n’est pas un défaut de votre installation."
+        );
+        assert_eq!(
+            delivery_line(Lang::En, &delivery("cannot_reach", "owner_invited")),
+            "Delivery: This reply cannot reach the contact. Your account is not in this \
+             conversation (your account was invited and none of your devices accepted), and a \
+             bridge relays only what your own account sends: approving would publish it on your \
+             stream, and nobody would receive it. What changes this is the device that acts in \
+             your name (#123) — it has to have joined the conversation. This is not a fault in \
+             your setup."
+        );
+        assert_eq!(
+            delivery_line(Lang::Fr, &delivery("can_reach", "owner_joined")),
+            "Livraison : Votre compte est dans cette conversation : une fois approuvée, la \
+             réponse est relayée au contact par le réseau, comme si vous l’aviez écrite."
+        );
+        assert_eq!(
+            delivery_line(Lang::En, &delivery("unknown", "not_a_known_portal")),
+            "Delivery: Twalk cannot tell in advance whether it will reach the contact (none of \
+             your bridges knows this conversation — a Matrix conversation, most likely). Your \
+             Sensor will say once the reply is posted."
+        );
+        // And, for every reach and every detail, the line is the prefix, the
+        // Companion's sentence for the reach, and the Companion's sentence
+        // for the detail in the placeholder's place — never the two words.
+        for l in [Lang::Fr, Lang::En] {
+            for (reach, key) in [
+                ("can_reach", "approvals.delivery.canReach"),
+                ("cannot_reach", "approvals.delivery.cannotReach"),
+                ("unknown", "approvals.delivery.unknown"),
+            ] {
+                for detail in known_details() {
+                    let line = delivery_line(l, &delivery(reach, detail));
+                    let sentence = entry(l, key).unwrap().replace(
+                        DETAIL_PLACEHOLDER,
+                        entry(l, &format!("{DETAIL_PREFIX}{detail}")).unwrap(),
+                    );
+                    assert_eq!(line, format!("{}{sentence}", delivery_prefix(l)));
+                    assert!(!line.contains(detail), "{l:?} {reach} {detail}: {line}");
+                    assert!(!line.contains(reach), "{l:?} {reach} {detail}: {line}");
+                    assert!(!line.contains(DETAIL_PLACEHOLDER), "{line}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_detail_renders_the_word() {
+        for l in [Lang::Fr, Lang::En] {
+            let line = delivery_line(l, &delivery("unknown", "a_detail_from_the_future"));
+            assert!(line.contains("(a_detail_from_the_future)"), "{l:?}: {line}");
+            assert!(!line.contains(DETAIL_PLACEHOLDER), "{l:?}: {line}");
+            assert!(line.starts_with(delivery_prefix(l)), "{l:?}: {line}");
+            // A `reach` this build has never met is the `unknown` sentence,
+            // as the Companion's `deliveryCopy` falls back — not a panic and
+            // not a blank.
+            let line = delivery_line(l, &delivery("a_reach_from_the_future", "owner_absent"));
+            assert_eq!(
+                line,
+                format!(
+                    "{}{}",
+                    delivery_prefix(l),
+                    entry(l, "approvals.delivery.unknown").unwrap().replace(
+                        DETAIL_PLACEHOLDER,
+                        entry(l, &format!("{DETAIL_PREFIX}owner_absent")).unwrap()
+                    )
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn unread_lines_in_both_languages() {
+        assert_eq!(
+            delivery_unread_line(Lang::Fr, Unread::NoDevice),
+            "Livraison : non lue par le greffier (aucun device configuré) — l’écran Approbations \
+             la connaît."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::Fr, Unread::GatewayUnreachable),
+            "Livraison : non lue par le greffier (le Companion Gateway n’a pas répondu) — l’écran \
+             Approbations la connaît."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::Fr, Unread::GatewayRefused),
+            "Livraison : non lue par le greffier (le Companion Gateway a refusé la lecture) — \
+             l’écran Approbations la connaît."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::Fr, Unread::NotFound),
+            "Livraison : non lue par le greffier (le Companion Gateway ne trouve pas cette \
+             suggestion) — l’écran Approbations la connaît."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::En, Unread::NoDevice),
+            "Delivery: not read by the clerk (no device configured) — the Approvals screen knows \
+             it."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::En, Unread::GatewayUnreachable),
+            "Delivery: not read by the clerk (the Companion Gateway did not answer) — the \
+             Approvals screen knows it."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::En, Unread::GatewayRefused),
+            "Delivery: not read by the clerk (the Companion Gateway refused the read) — the \
+             Approvals screen knows it."
+        );
+        assert_eq!(
+            delivery_unread_line(Lang::En, Unread::NotFound),
+            "Delivery: not read by the clerk (the Companion Gateway cannot find this suggestion) \
+             — the Approvals screen knows it."
+        );
+        // Four sentences, all different, none naming a ticket: an unread
+        // delivery is a fact about this deployment now, not a promise.
+        for l in [Lang::Fr, Lang::En] {
+            let lines: BTreeSet<String> = [
+                Unread::NoDevice,
+                Unread::GatewayUnreachable,
+                Unread::GatewayRefused,
+                Unread::NotFound,
+            ]
+            .into_iter()
+            .map(|why| delivery_unread_line(l, why))
+            .collect();
+            assert_eq!(lines.len(), 4);
+            for line in &lines {
+                assert!(line.starts_with(delivery_prefix(l)), "{line}");
+                assert!(!line.contains('#'), "{line}");
+            }
+        }
     }
 
     #[test]

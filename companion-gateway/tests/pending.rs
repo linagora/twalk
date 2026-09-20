@@ -548,6 +548,82 @@ async fn a_decision_recorded_through_the_write_api_stops_the_contact_waiting() -
     Ok(())
 }
 
+/// #270 review: an inbound event whose connection the registry cannot place
+/// is not a sighting — a row under a guessed perimeter would be a decision
+/// offered about the wrong account — and it is **not a silence either**. The
+/// Sensor counts and says the same fact on its side (`unknown_connection`);
+/// here it is `twalk_companion_gateway_contacts_unplaced_total` and one warn
+/// per cause, because a contact who wrote and is never listed as waiting is
+/// exactly the failure nothing else would ever show.
+#[tokio::test]
+async fn a_sighting_the_registry_cannot_place_is_counted_and_said_not_silently_skipped(
+) -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let gateway = Running::start("pending-unplaced").await?;
+
+    let placed = ghost("whatsapp", "placed");
+    let unplaced = ghost("whatsapp", "unplaced");
+    let mut foreign = inbound_event(
+        &unplaced,
+        "whatsapp",
+        "2026-09-17T10:00:00Z",
+        "a message on a connection this Gateway never registered",
+        SECRET_DISPLAY_NAME,
+    );
+    foreign["connection"] = json!("wa-somebody-elses");
+    publish(&bus, &foreign).await?;
+    // A second copy of the same cause, then a placeable sighting whose
+    // arrival proves the projection has read past both.
+    foreign["id"] = json!(harness::sha256_hex(&unique("pending-unplaced-second")));
+    foreign["time"] = json!("2026-09-17T10:00:01Z");
+    publish(&bus, &foreign).await?;
+    publish(
+        &bus,
+        &inbound_event(
+            &placed,
+            "whatsapp",
+            "2026-09-17T10:00:02Z",
+            "a message",
+            SECRET_DISPLAY_NAME,
+        ),
+    )
+    .await?;
+    gateway.wait_until_pending(&placed, "whatsapp").await?;
+
+    assert_eq!(
+        gateway.waiting_networks(&unplaced).await?,
+        Vec::<String>::new(),
+        "no row under a connection the registry does not know"
+    );
+    let unplaced_total = gateway
+        .metric("twalk_companion_gateway_contacts_unplaced_total")
+        .await?;
+    assert!(
+        unplaced_total >= 2,
+        "every unplaced event is counted: {unplaced_total}"
+    );
+    let logs = gateway.gateway.logs().await;
+    let said: Vec<&String> = logs
+        .iter()
+        .filter(|line| line.contains("cannot be placed in the registry"))
+        .filter(|line| line.contains("wa-somebody-elses"))
+        .collect();
+    assert_eq!(
+        said.len(),
+        1,
+        "the cause is said once, not once per event: {said:?}"
+    );
+    assert!(
+        said[0].contains("GATEWAY_CONNECTIONS"),
+        "and the line names the setting: {}",
+        said[0]
+    );
+
+    gateway.stop().await;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // 3. The store holds no body and no identifier
 // ---------------------------------------------------------------------------

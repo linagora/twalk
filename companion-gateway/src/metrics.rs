@@ -84,6 +84,10 @@ pub struct Metrics {
     /// projection is configured, so a Gateway that consumes nothing exposes
     /// no contact series at all.
     contacts_observed: Mutex<u64>,
+    /// Inbound events the projection could not place under a connection
+    /// (#270 review): counted, because a sighting silently not recorded is a
+    /// contact the dashboard never says is waiting.
+    contacts_unplaced: Mutex<u64>,
     pending_contacts: Mutex<Option<u64>>,
     /// Approved replies published on the bus (#24), and the approvals that
     /// were refused, by the code the caller was given
@@ -191,6 +195,7 @@ impl Metrics {
             approvals_published: Mutex::new(0),
             approval_refusals: Mutex::new(BTreeMap::new()),
             contacts_observed: Mutex::new(0),
+            contacts_unplaced: Mutex::new(0),
             pending_contacts: Mutex::new(None),
             portal_rooms: Mutex::new(None),
             portal_bridges_unreadable: Mutex::new(0),
@@ -369,6 +374,19 @@ impl Metrics {
             .contacts_observed
             .lock()
             .expect("the metrics mutex is never poisoned") += observed;
+    }
+
+    /// An inbound event whose connection the registry could not place — an
+    /// id it does not know, or none carried and several of the kind — so no
+    /// sighting was recorded (#270). Counted rather than only logged, for the
+    /// same reason the Sensor counts `unknown_connection`: the failure is a
+    /// contact who wrote and is not listed as waiting, which nothing else
+    /// would ever show.
+    pub fn record_contact_unplaced(&self) {
+        *self
+            .contacts_unplaced
+            .lock()
+            .expect("the metrics mutex is never poisoned") += 1;
     }
 
     /// How many contacts are waiting for a decision, as the store counts
@@ -556,6 +574,14 @@ impl Metrics {
             out.push_str(&format!(
                 "twalk_companion_gateway_contacts_observed_total {}\n",
                 self.contacts_observed
+                    .lock()
+                    .expect("the metrics mutex is never poisoned")
+            ));
+            out.push_str("# HELP twalk_companion_gateway_contacts_unplaced_total Inbound events no sighting was recorded for, because the registry could not place their connection.\n");
+            out.push_str("# TYPE twalk_companion_gateway_contacts_unplaced_total counter\n");
+            out.push_str(&format!(
+                "twalk_companion_gateway_contacts_unplaced_total {}\n",
+                self.contacts_unplaced
                     .lock()
                     .expect("the metrics mutex is never poisoned")
             ));

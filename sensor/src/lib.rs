@@ -5,6 +5,7 @@
 //! The pure, seam-independent logic lives in these modules; the binary in
 //! `main.rs` only wires them to matrix-sdk and NATS.
 
+pub mod bus;
 pub mod config;
 pub mod connection;
 pub mod consent;
