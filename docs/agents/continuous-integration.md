@@ -8,7 +8,7 @@ Open a pull request and it gets a verdict without anybody running anything by ha
 
 - **`routing`** — the routing table checked against the repository. Always runs, hosted, under a second.
 - **`verified`** — every selected suite that needs no Docker: the Python SDK, the shared harness's units, the Companion's Node-only suite. Always reports, including on a change that selects nothing.
-- **`verified-stack`** — every selected suite that needs a Docker host: the Sensor, the Gateway, Hermes. It **fails** when such suites were selected and `vars.TWALK_STACK_RUNNER` names no runner, because a green tick that meant "those never ran" would be the defect this project keeps shipping.
+- **`verified-stack`** — every selected suite that needs a Docker host: the Sensor, the Gateway, Hermes, the clerk. It **fails** when such suites were selected and `vars.TWALK_STACK_RUNNER` names no runner, because a green tick that meant "those never ran" would be the defect this project keeps shipping.
 
 Running the suites locally is still the fastest way to find out whether your change works, and `AGENTS.md` holds the commands. What changed is that it is no longer the *verification*: a local run says the suites passed in your worktree, and `verified` says they passed on the change as it will land.
 
@@ -24,7 +24,7 @@ The ticket that is still open there is **#148**, and what remains of it is not a
 
 ## What runs when
 
-The rule that matters is the one two red-`main` incidents taught: **a change to a shared path runs the consumers' suites, not only its own.** `tests/harness/` is a dev dependency of `sensor/`, `hermes/` and `companion-gateway/`, and the Companion's real-stack e2e brings up its compose file; `contracts/cloudevents/v1/` is read by the harness's validator, by the Sensor and by the Python SDK's tests; `companion-gateway/openapi.yaml` is what the Companion's API client is generated from.
+The rule that matters is the one two red-`main` incidents taught: **a change to a shared path runs the consumers' suites, not only its own.** `tests/harness/` is a dev dependency of `sensor/`, `hermes/`, `companion-gateway/` and `clerk/`, and the Companion's real-stack e2e brings up its compose file; `contracts/cloudevents/v1/` is read by the harness's validator, by the Sensor and by the Python SDK's tests; `companion-gateway/openapi.yaml` is what the Companion's API client is generated from.
 
 That rule is not a comment in a workflow. `.github/ci/test_selection.py` **derives** each shared path's consumers from the repository — Cargo path dependencies, code that names a contract file, code that brings up the harness's stack — and fails when `suites.json` does not route what the derivation found. Add a fourth consumer of the harness and the routing check goes red until the table says so. It also fails when a Rust test file exists that no suite runs, and when a tracked path is claimed by no suite and ignored by nothing.
 
@@ -52,6 +52,7 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 | `sensor` | required | **383 s**, 62 tests | +6.0 GB target | 425 MB | warm stack. **67 s and red on a stack just created** — see below |
 | `gateway` | required | **163 s**, 125 tests | +3.0 GB target | 184 MB | warm stack |
 | `hermes` | required | **132 s** | +2.0 GB target | 87 MB | warm stack |
+| `clerk` | required | **not measured yet** (#265) | — | — | warm stack plus a Buzz relay, Postgres and Redis of its own; measure it before trusting the "full required run" figure below |
 | `sensor-deployment` | advisory | 61 s, 3 tests | small | 634 MB | **warm images** |
 | `gateway-deployment` | advisory | 56 s, 4 tests | small | 305 MB | **warm images** |
 | `hermes-full-loop` | advisory | 39 s | small | 153 MB | **warm images**; +10 containers |
