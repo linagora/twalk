@@ -1,0 +1,66 @@
+[package]
+name = "twalk-clerk"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The clerk: writes onto the owner's Buzz relay what the bus says, under a Nostr key of its own, holding no state."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "twalk-clerk"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+# The bus, as every other component speaks it: three durable JetStream pull
+# consumers (approbations, journal, activite) over `inbound.>`/`persona.>`/
+# `outbound.>` (ticket #265).
+async-nats = "0.50"
+# The health/metrics origin (`/health`, `/metrics`), the same shape as the
+# Companion Gateway's own skeleton (`companion-gateway/src/http.rs`).
+axum = "0.8"
+# Draining a JetStream batch is a `Stream`.
+futures = "0.3"
+# The clerk's own Nostr identity and the events it signs: NIP-98 (`nip98`)
+# authenticates every write to the relay by binding it to the relay's own
+# announced URL, so a relay behind another host's proxy cannot be tricked
+# into accepting a signed request meant for this one.
+nostr = { version = "0.44", features = ["nip98"] }
+# The Buzz relay speaks HTTP (`POST /events`, `POST /query`), not the Nostr
+# relay websocket protocol, so this needs a plain HTTP client rather than a
+# `nostr` relay pool. rustls only, so the image needs no system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# NIP-98's request digest, and the reference line's own hash of what a post
+# answers.
+sha2 = "0.10"
+# RFC 3339 timestamps: a suggestion's `expires_at`, parsed to decide whether
+# a post has expired, and the clerk's own log timestamps, formatted the way
+# every other component formats them.
+time = { version = "0.3", features = ["parsing", "formatting"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# NIP-98's nonce.
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+# The test harness signs its own NIP-98 requests against the real Buzz relay
+# it brings up, the same way the clerk does.
+nostr = { version = "0.44", features = ["nip98"] }
+# The shared test harness: the test stack's lifecycle, the bus, contract
+# validation and `poll_until` (ticket #20).
+twalk-test-harness = { path = "../tests/harness" }
