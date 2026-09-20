@@ -14,6 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+# NIP-98 puts the signed auth event in an `Authorization` header as standard
+# base64; the crate is already in the graph through `nostr`, which re-exports
+# it only behind features the clerk has no use for.
+base64 = "0.22"
 # The bus, as every other component speaks it: three durable JetStream pull
 # consumers (approbations, journal, activite) over `inbound.>`/`persona.>`/
 # `outbound.>` (ticket #265).

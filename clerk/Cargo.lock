@@ -2921,6 +2921,7 @@ dependencies = [
  "anyhow",
  "async-nats",
  "axum",
+ "base64 0.22.1",
  "futures",
  "nostr",
  "reqwest 0.12.28",
