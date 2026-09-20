@@ -132,15 +132,15 @@ impl Metrics {
                 now_unix_seconds.saturating_sub(last)
             ));
         }
-        out.push_str("# HELP twalk_collector_mails_dropped_total Mails the frontier did not publish, by reason.\n");
-        out.push_str("# TYPE twalk_collector_mails_dropped_total counter\n");
+        out.push_str("# HELP twalk_collector_events_dropped_total Events the collector did not publish, by reason — the Sensor's `twalk_sensor_events_dropped_total`, on this side: a mail the frontier dropped (`non_human_sender`, `calendar_invitation`, `owner`).\n");
+        out.push_str("# TYPE twalk_collector_events_dropped_total counter\n");
         let dropped = self
             .mails_dropped
             .lock()
             .expect("the metrics mutex is never poisoned");
-        for reason in ["non_human_sender", "calendar_invitation", "owner"] {
+        for reason in crate::jmap::Dropped::ALL.map(crate::jmap::Dropped::as_str) {
             out.push_str(&format!(
-                "twalk_collector_mails_dropped_total{{reason=\"{reason}\"}} {}\n",
+                "twalk_collector_events_dropped_total{{reason=\"{reason}\"}} {}\n",
                 dropped.get(reason).copied().unwrap_or(0)
             ));
         }
@@ -188,10 +188,10 @@ mod tests {
             "twalk_collector_connection_state{connection=\"mail-linagora\",state=\"connected\"} 0\n"
         ));
         assert!(body.contains("twalk_collector_grant_age_seconds 100\n"));
-        assert!(body.contains("twalk_collector_mails_dropped_total{reason=\"owner\"} 0\n"));
+        assert!(body.contains("twalk_collector_events_dropped_total{reason=\"owner\"} 0\n"));
         metrics.record_mail_dropped("non_human_sender");
         assert!(metrics
             .render(1_000)
-            .contains("twalk_collector_mails_dropped_total{reason=\"non_human_sender\"} 1\n"));
+            .contains("twalk_collector_events_dropped_total{reason=\"non_human_sender\"} 1\n"));
     }
 }

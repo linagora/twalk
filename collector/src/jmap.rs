@@ -38,7 +38,6 @@ pub const MAIL_CAPABILITY: &str = "urn:ietf:params:jmap:mail";
 pub struct Session {
     pub api_url: String,
     pub account_id: String,
-    pub username: String,
 }
 
 impl Session {
@@ -75,15 +74,9 @@ impl Session {
             .ok_or_else(|| {
                 anyhow::anyhow!("the session names no account with the mail capability")
             })?;
-        let username = document
-            .get("username")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
         Ok(Self {
             api_url,
             account_id,
-            username,
         })
     }
 }
@@ -330,7 +323,9 @@ pub struct Attachment {
 }
 
 /// A mail, as the Email object says it and as far as the contract goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Its `Debug` names the id and the sender's address and nothing the sender
+/// wrote, so a `{:?}` in a log line is not a body in the log.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Mail {
     pub id: String,
     pub received_at: String,
@@ -350,6 +345,18 @@ pub struct Mail {
     pub precedence: Option<String>,
     /// Whether a part of the mail is `text/calendar`: an iTIP invitation.
     pub has_itip_part: bool,
+}
+
+impl std::fmt::Debug for Mail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mail")
+            .field("id", &self.id)
+            .field("from", &self.from.email)
+            .field("received_at", &self.received_at)
+            .field("attachments", &self.attachments.len())
+            .field("words", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Mail {
@@ -512,6 +519,13 @@ pub enum Dropped {
 }
 
 impl Dropped {
+    /// Every reason, for a counter that shows each at zero.
+    pub const ALL: [Dropped; 3] = [
+        Dropped::NonHumanSender,
+        Dropped::CalendarInvitation,
+        Dropped::Owner,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NonHumanSender => "non_human_sender",
@@ -647,6 +661,17 @@ pub fn html_to_text(html: &str) -> String {
     lines.join("\n").trim().to_owned()
 }
 
+/// The schema's caps on the text fields: `data.body`, `data.title`,
+/// `data.contact.display_name`.
+pub const BODY_MAX: usize = 65_536;
+pub const TITLE_MAX: usize = 1_024;
+pub const DISPLAY_NAME_MAX: usize = 256;
+
+/// The first `max` characters, on a character boundary.
+fn capped(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
 /// Where the events of one mailbox come from.
 #[derive(Debug, Clone)]
 pub struct Envelopes {
@@ -690,6 +715,16 @@ impl Envelopes {
                 })
             })
             .collect();
+        // The From name; the address itself when From carries none — the
+        // contract requires a display name, and the address is already the
+        // subject, so nothing more is said by saying it here. Every text
+        // field is held to the schema's cap, as the Sensor holds its own
+        // (`sensor/src/normalize.rs`): a long mail is a valid event.
+        let display_name = mail
+            .from
+            .name
+            .clone()
+            .unwrap_or_else(|| mail.from.email.clone());
         let mut data = json!({
             "format": "text/plain",
             "reply_to": mail
@@ -698,7 +733,7 @@ impl Envelopes {
                 .map(|id| json!({ "message_id": id }))
                 .unwrap_or(Value::Null),
             "attachments": attachments,
-            "contact": { "display_name": mail.from.name.clone().unwrap_or_else(|| mail.from.email.clone()) },
+            "contact": { "display_name": capped(&display_name, DISPLAY_NAME_MAX) },
             "audience": audience(mail, &self.owner_email),
         });
         if !mail.received_at.is_empty() {
@@ -708,9 +743,9 @@ impl Envelopes {
             data["thread_root"] = json!(root);
         }
         if !reduced {
-            data["body"] = json!(mail.body);
+            data["body"] = json!(capped(&mail.body, BODY_MAX));
             if !mail.subject.is_empty() {
-                data["title"] = json!(mail.subject);
+                data["title"] = json!(capped(&mail.subject, TITLE_MAX));
             }
         }
         json!({
@@ -788,6 +823,38 @@ mod tests {
         .unwrap();
         assert_eq!(reduced, fixture);
         assert!(reduced["data"].get("body").is_none() && reduced["data"].get("title").is_none());
+    }
+
+    #[test]
+    fn a_long_mail_is_held_to_the_schemas_caps_and_a_mail_never_debugs_its_words() {
+        let mut object = email_object();
+        object["subject"] = json!("é".repeat(2_000));
+        object["bodyValues"]["1"]["value"] = json!("x".repeat(100_000));
+        object["from"][0]["name"] = json!("n".repeat(500));
+        let mail = Mail::parse(&object).unwrap();
+        let envelopes = Envelopes::new("mail-linagora", "h", "u1", "i", "michel@example.com");
+        let event = envelopes.message_received(&mail, Consent::Pending, "2026-09-21T08:15:03Z");
+        assert_eq!(
+            event["data"]["body"].as_str().unwrap().chars().count(),
+            BODY_MAX
+        );
+        assert_eq!(
+            event["data"]["title"].as_str().unwrap().chars().count(),
+            TITLE_MAX
+        );
+        assert_eq!(
+            event["data"]["contact"]["display_name"]
+                .as_str()
+                .unwrap()
+                .len(),
+            DISPLAY_NAME_MAX
+        );
+        let debugged = format!("{mail:?}");
+        assert!(
+            !debugged.contains("xxxx") && !debugged.contains("éé"),
+            "{debugged}"
+        );
+        assert!(debugged.contains("alice@example.org"));
     }
 
     #[test]

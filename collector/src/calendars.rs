@@ -19,6 +19,8 @@ use serde_json::Value;
 use tracing::{info, warn};
 use twalk_consent_cache::{Consent, ConsentCache};
 
+pub use crate::side::SideError;
+
 use crate::caldav::{
     self, calendars_in, multiget_body, parse_listing, parse_multiget, Calendar, Changes, Cursor,
     Envelopes, Known, Listing, Resource, PROPFIND_BODY,
@@ -233,30 +235,6 @@ impl Calendars {
     }
 }
 
-/// Why a request to the side service did not answer with what was asked.
-#[derive(Debug)]
-pub enum SideError {
-    /// `401`/`403`: the token itself, or what the client lacks — the words
-    /// the status machinery already has (`ServiceRefusal`).
-    Refused { status: u16 },
-    /// No answer, another status, or an answer that is not what a CalDAV
-    /// server says.
-    Unreachable { detail: String },
-}
-
-impl std::fmt::Display for SideError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refused { status } => {
-                write!(f, "the side service refused the token with {status}")
-            }
-            Self::Unreachable { detail } => f.write_str(detail),
-        }
-    }
-}
-
-impl std::error::Error for SideError {}
-
 /// The side service, over HTTP: three requests and nothing else.
 #[derive(Debug, Clone)]
 pub struct Side {
@@ -268,23 +246,14 @@ pub struct Side {
 impl Side {
     pub fn new(caldav_url: &str) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?,
+            http: crate::side::client()?,
             base: caldav_url.trim_end_matches('/').to_owned(),
         })
     }
 
     /// The side service's host, for `source`.
     pub fn host(&self) -> String {
-        self.base
-            .split("://")
-            .nth(1)
-            .unwrap_or(&self.base)
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
+        crate::side::host_of(&self.base)
     }
 
     pub async fn calendars(&self, owner_id: &str, token: &str) -> Result<Vec<Calendar>, SideError> {
@@ -352,30 +321,12 @@ impl Side {
         request: reqwest::RequestBuilder,
         token: &str,
     ) -> Result<String, SideError> {
-        let response =
-            request
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|error| SideError::Unreachable {
-                    detail: format!("the side service did not answer: {error}"),
-                })?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SideError::Refused {
-                status: status.as_u16(),
-            });
-        }
-        if !status.is_success() {
-            return Err(SideError::Unreachable {
-                detail: format!("the side service answered {status}"),
-            });
-        }
-        response
+        crate::side::send(request, token, "caldav")
+            .await?
             .text()
             .await
             .map_err(|error| SideError::Unreachable {
-                detail: format!("the side service's answer could not be read: {error}"),
+                detail: format!("caldav's answer could not be read: {error}"),
             })
     }
 }

@@ -20,4 +20,5 @@ pub mod jmap;
 pub mod mails;
 pub mod metrics;
 pub mod oidc;
+pub mod side;
 pub mod status;

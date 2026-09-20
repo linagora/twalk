@@ -2,9 +2,10 @@
 //! RFC 8621): what the collector's `jmap` module and its mail poll are
 //! tested against, so that no test needs a TMail. One account, three
 //! mailboxes (INBOX, Sent, Archive), an Email state that moves on every
-//! delivery, and the four methods the collector calls — `Mailbox/get`,
-//! `Email/changes`, `Email/get`, and `Email/query` for the recovery #277
-//! adds. A test delivers mail with [`FakeMail`]; nothing else writes.
+//! delivery, and the three methods the collector calls — `Mailbox/get`,
+//! `Email/changes`, `Email/get` (#277 adds `Email/query` with the
+//! recovery it serves). A test delivers mail with [`FakeMail`]; nothing
+//! else writes.
 //!
 //! What it does not fake: blobs, keywords, threads beyond `threadId`, and
 //! push — the collector reads none of them in #276.
@@ -113,9 +114,6 @@ pub(crate) struct MailStore {
     mails: BTreeMap<String, (String, u64, FakeMail)>,
     /// The Email state: moves on every delivery.
     state: u64,
-    /// States older than this are forgotten: `Email/changes` answers
-    /// `cannotCalculateChanges` for them (#277).
-    forgotten_before: u64,
     next_id: u64,
     /// Every Email id whose content (`bodyValues`) was read, in order —
     /// what "a mail in Sent or Archive is never read" is asserted on.
@@ -131,7 +129,6 @@ impl Default for MailStore {
         Self {
             mails: BTreeMap::new(),
             state: 0,
-            forgotten_before: 0,
             next_id: offset * 1000,
             read_ids: Vec::new(),
         }
@@ -150,10 +147,6 @@ impl MailStore {
 
     pub(crate) fn state(&self) -> String {
         self.state.to_string()
-    }
-
-    pub(crate) fn forget_states_before(&mut self, state: u64) {
-        self.forgotten_before = state;
     }
 
     pub(crate) fn read_ids(&self) -> Vec<String> {
@@ -232,7 +225,6 @@ pub(crate) fn api(body: &str, store: &mut MailStore) -> (&'static str, Value) {
                 Err(error) => ("error", error),
             },
             "Email/get" => ("Email/get", email_get(args, store)),
-            "Email/query" => ("Email/query", email_query(args, store)),
             _ => ("error", json!({ "type": "unknownMethod" })),
         };
         responses.push(json!([name, result, call_id]));
@@ -273,9 +265,6 @@ fn email_changes(args: &Value, store: &MailStore) -> Result<Value, Value> {
         .and_then(Value::as_str)
         .and_then(|state| state.parse().ok())
         .ok_or_else(|| json!({ "type": "invalidArguments", "description": "sinceState is not a state this server issued" }))?;
-    if since < store.forgotten_before {
-        return Err(json!({ "type": "cannotCalculateChanges" }));
-    }
     let created: Vec<&String> = store
         .mails
         .iter()
@@ -311,11 +300,19 @@ fn email_get(args: &Value, store: &mut MailStore) -> Value {
                 .map(str::to_owned)
                 .collect()
         });
+    // A read of the content is one that asks for `bodyValues` — or for
+    // everything; a read of the mailboxes alone is not a read of the mail.
+    let reads_content = properties
+        .as_deref()
+        .is_none_or(|p| p.iter().any(|w| w == "bodyValues"));
     let mut list = Vec::new();
     let mut not_found = Vec::new();
     for id in ids {
         match store.mails.get(&id) {
             Some((mailbox, _, mail)) => {
+                if reads_content {
+                    store.read_ids.push(id.clone());
+                }
                 list.push(email_object(&id, mailbox, mail, properties.as_deref()))
             }
             None => not_found.push(id),
@@ -496,29 +493,4 @@ fn email_object(id: &str, mailbox: &str, mail: &FakeMail, properties: Option<&[S
         }
     }
     Value::Object(object)
-}
-
-/// `Email/query` with `inMailbox` and `after` (receivedAt) filters: the
-/// recovery read (#277).
-fn email_query(args: &Value, store: &MailStore) -> Value {
-    let filter = args.get("filter").cloned().unwrap_or(Value::Null);
-    let in_mailbox = filter.get("inMailbox").and_then(Value::as_str);
-    let after = filter.get("after").and_then(Value::as_str);
-    let ids: Vec<&String> = store
-        .mails
-        .iter()
-        .filter(|(_, (mailbox, _, mail))| {
-            in_mailbox.is_none_or(|wanted| wanted == mailbox)
-                && after.is_none_or(|after| mail.received_at.as_str() >= after)
-        })
-        .map(|(id, _)| id)
-        .collect();
-    json!({
-        "accountId": ACCOUNT_ID,
-        "queryState": store.state(),
-        "canCalculateChanges": false,
-        "position": 0,
-        "ids": ids,
-        "total": ids.len()
-    })
 }

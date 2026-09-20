@@ -14,10 +14,10 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, warn};
-use twalk_collector::calendars::SideError;
 use twalk_collector::config::Config;
 use twalk_collector::metrics::Metrics;
 use twalk_collector::oidc::{Client, Grant, Identities, Renewal, ServiceRefusal};
+use twalk_collector::side::SideError;
 use twalk_collector::status::{self, Observation, State, Tracker};
 
 /// Renew when the access token has less than this left.
@@ -202,7 +202,9 @@ async fn run(config: Config) -> Result<()> {
         .await
         .context("failed to ensure the twalk stream")?;
 
-    let consent = twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref()).await?;
+    let consent =
+        twalk_collector::consent::follow(jetstream.clone(), snapshot.as_ref(), &config.owner_email)
+            .await?;
     // The calendar connection, when this process holds one: polled on every
     // round the grant and the side service allow (#280).
     let calendars = config

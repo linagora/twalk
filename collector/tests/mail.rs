@@ -11,61 +11,22 @@ mod support;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use support::{sha256_hex, Run, OWNER, STREAM};
+use support::{sha256_hex, Run, OWNER};
 use twalk_test_harness::jmap_fake::{Address, FakeMail, ACCOUNT_ID, ARCHIVE_ID, INBOX_ID, SENT_ID};
-use twalk_test_harness::{ensure_stack, poll_until, validate_against_contract, Bus};
+use twalk_test_harness::{ensure_stack, validate_against_contract, Bus};
 
-const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
 const FILENAME: &str = "ordre-du-jour-confidentiel.pdf";
 
-/// The Companion Gateway's snapshot, as the fake stands in for it.
-async fn serve_snapshot(run: &Run, bus: &Bus, entries: Vec<Value>) -> Result<()> {
-    let head = bus.last_sequence(STREAM, CONSENT_SUBJECT).await?;
-    run.sso.serve_gateway_snapshot(json!({
-        "stream": STREAM,
-        "subject": CONSENT_SUBJECT,
-        "stream_sequence": head,
-        "next_stream_sequence": head + 1,
-        "decision_sequence": entries.len(),
-        "connections": [
-            { "id": run.mail, "kind": "email", "network": "email" },
-            { "id": run.calendar, "kind": "calendar" },
-        ],
-        "entries": entries,
-    }));
-    Ok(())
-}
-
-fn decided_on_mail(run: &Run, identity: &str, state: &str) -> Value {
-    json!({
-        "subject": { "type": "contact", "id": identity },
-        "connection": run.mail,
-        "network": "email",
-        "state": state,
-        "decided_at": "2026-09-20T10:00:00.000Z",
-        "decision_sequence": 1
-    })
-}
+const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 
 /// The messages this run's mail connection published, in order.
 async fn messages_of(bus: &Bus, run: &Run) -> Result<Vec<Value>> {
-    Ok(bus
-        .fetch_since(STREAM, "twalk.inbound.message.received.v1", run.since)
-        .await?
-        .into_iter()
-        .filter(|event| event["connection"].as_str() == Some(run.mail.as_str()))
-        .collect())
+    run.events_of(bus, MESSAGE_SUBJECT, &run.mail).await
 }
 
 async fn wait_for_messages(bus: &Bus, run: &Run, at_least: usize) -> Result<Vec<Value>> {
-    poll_until(
-        || async {
-            let events = messages_of(bus, run).await.ok()?;
-            (events.len() >= at_least).then_some(events)
-        },
-        &format!("{at_least} inbound.message.received about {}", run.mail),
-    )
-    .await
+    run.wait_for_events(bus, MESSAGE_SUBJECT, &run.mail, at_least)
+        .await
 }
 
 #[tokio::test]
@@ -75,7 +36,7 @@ async fn a_mail_delivered_after_the_start_is_the_message_and_what_was_there_befo
     let bus = Bus::connect().await?;
     let run = Run::prepare("mail").await?;
     run.authorize().await?;
-    serve_snapshot(&run, &bus, Vec::new()).await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
     // Already there when the collector starts: the past, not published.
     run.sso.deliver(FakeMail::from_person(
         "Old Friend",
@@ -210,13 +171,25 @@ async fn a_mail_delivered_after_the_start_is_the_message_and_what_was_there_befo
         "the newsletter, the invitation, the owner's note, Sent and Archive published nothing: {messages:?}"
     );
     let read = run.sso.mails_read();
+    assert!(read.contains(&id), "Alice's mail was read: {read:?}");
     assert!(
         !read.contains(&sent) && !read.contains(&archived),
         "a mail in Sent or Archive was read: {read:?}"
     );
 
-    collector.assert_never_logged(&[FILENAME]).await;
-    assert!(!run.stored_bytes()?.contains(FILENAME));
+    // Nobody's words — Alice's, the newsletter's, the note's — in the log
+    // or on disk; the filename neither.
+    collector
+        .assert_never_logged(&[
+            FILENAME,
+            "On se voit toujours lundi",
+            "Unsubscribe below",
+            "Buy milk",
+            "Point hebdo",
+        ])
+        .await;
+    let stored = run.stored_bytes()?;
+    assert!(!stored.contains(FILENAME) && !stored.contains("lundi") && !stored.contains("hebdo"));
     collector.stop().await;
     Ok(())
 }
@@ -227,12 +200,11 @@ async fn a_granted_senders_mail_is_granted_and_a_revoked_senders_carries_no_word
     let bus = Bus::connect().await?;
     let run = Run::prepare("decided").await?;
     run.authorize().await?;
-    serve_snapshot(
-        &run,
+    run.serve_snapshot(
         &bus,
         vec![
-            decided_on_mail(&run, "mailto:alice@example.org", "granted"),
-            decided_on_mail(&run, "mailto:bob@example.org", "revoked"),
+            run.decided_on_mail("mailto:alice@example.org", "granted"),
+            run.decided_on_mail("mailto:bob@example.org", "revoked"),
         ],
     )
     .await?;

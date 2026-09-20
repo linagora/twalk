@@ -18,10 +18,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{info, warn};
-use twalk_consent_cache::{Consent, ConsentCache};
+use twalk_consent_cache::ConsentCache;
 
-use crate::calendars::SideError;
 use crate::jmap::{self, Changes, Dropped, Envelopes, Mail, Session};
+use crate::side::{self, SideError};
 
 /// The mail connection this process holds, and what publishing about it
 /// needs.
@@ -43,8 +43,8 @@ pub struct MailState {
     pub state: String,
 }
 
-/// What one poll found.
-#[derive(Debug, Default)]
+/// What one poll found. No `Debug`: the envelopes hold the senders' words.
+#[derive(Default)]
 pub struct MailPoll {
     pub envelopes: Vec<Value>,
     /// The mails the frontier dropped, by reason — counted, never named.
@@ -68,9 +68,7 @@ impl Mailbox {
             session_url: session_url.to_owned(),
             state_dir: state_dir.to_owned(),
             consent,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?,
+            http: side::client()?,
         })
     }
 
@@ -102,14 +100,7 @@ impl Mailbox {
 
     /// The mail host, for `source`.
     fn host(&self) -> String {
-        self.session_url
-            .split("://")
-            .nth(1)
-            .unwrap_or(&self.session_url)
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
+        side::host_of(&self.session_url)
     }
 
     /// One poll: the session, then either the first state (published as
@@ -242,24 +233,16 @@ impl Mailbox {
         Ok(poll)
     }
 
-    /// Which consent a sender's next mail would be published under — for
-    /// the log, never for a decision.
-    pub fn consent_of(&self, mailto: &str) -> Consent {
-        self.consent.state(mailto, &self.connection)
-    }
-
     async fn get(&self, url: &str, token: &str) -> Result<Value, SideError> {
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(token)
-            .header("accept", "application/json")
-            .send()
-            .await
-            .map_err(|error| SideError::Unreachable {
-                detail: format!("the JMAP server did not answer at {url}: {error}"),
-            })?;
-        json_of(response).await
+        json_of(
+            side::send(
+                self.http.get(url).header("accept", "application/json"),
+                token,
+                "jmap",
+            )
+            .await?,
+        )
+        .await
     }
 
     async fn call(
@@ -268,17 +251,15 @@ impl Mailbox {
         token: &str,
         calls: Vec<(&str, Value)>,
     ) -> Result<Value, SideError> {
-        let response = self
-            .http
-            .post(api_url)
-            .bearer_auth(token)
-            .json(&jmap::request(calls))
-            .send()
-            .await
-            .map_err(|error| SideError::Unreachable {
-                detail: format!("the JMAP server did not answer at {api_url}: {error}"),
-            })?;
-        json_of(response).await
+        json_of(
+            side::send(
+                self.http.post(api_url).json(&jmap::request(calls)),
+                token,
+                "jmap",
+            )
+            .await?,
+        )
+        .await
     }
 }
 
@@ -289,17 +270,6 @@ fn method(response: &Value, index: usize) -> Result<Value, SideError> {
 }
 
 async fn json_of(response: reqwest::Response) -> Result<Value, SideError> {
-    let status = response.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(SideError::Refused {
-            status: status.as_u16(),
-        });
-    }
-    if !status.is_success() {
-        return Err(SideError::Unreachable {
-            detail: format!("the JMAP server answered {status}"),
-        });
-    }
     response
         .json()
         .await

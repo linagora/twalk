@@ -333,17 +333,6 @@ impl FakeSso {
         self.lock().mails.read_ids()
     }
 
-    /// The current Email state, as `Email/changes` reports it.
-    pub fn mail_state(&self) -> String {
-        self.lock().mails.state()
-    }
-
-    /// Forgets every Email state before `state`: `Email/changes` from an
-    /// older one answers `cannotCalculateChanges` (#277).
-    pub fn forget_mail_states_before(&self, state: u64) {
-        self.lock().mails.forget_states_before(state);
-    }
-
     /// Every refresh token the collector presented, in order.
     pub fn refresh_tokens_presented(&self) -> Vec<String> {
         self.lock().refresh_tokens_presented.clone()
