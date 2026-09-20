@@ -63,6 +63,17 @@
 			"triggers_note": "The crate parses the Gateway's `ConsentSnapshot` and `ConsentStateEntry` documents, so a change to the description is a change to what it reads."
 		},
 
+		"collector": {
+			"what": "The collector at its OIDC seam and its process boundary (#274), against a fake SSO the harness runs and the shared test stack's bus: the operator's consent with PKCE, the grant written at 0600 and renewed with the refresh token rotated, a revoked grant read as reconnect_required, a service refusing a fresh token as pending_operator on its own connection only, a grant for another account publishing nothing, and every transition a valid connection.status.changed.v1.",
+			"component": "collector",
+			"workdir": "collector",
+			"run": "cargo test",
+			"needs": ["rust", "docker"],
+			"tier": "required",
+			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"],
+			"triggers_note": "The Gateway's OpenAPI description is in here because the collector checks the connections it holds against the registry `GET /api/consent/snapshot` carries. `consent-cache/` is deliberately not: the collector labels no sender in #274, and the dependency arrives with the mail collector in lot 3 — `test_selection.py` derives it from `Cargo.toml`, so the line appears when the dependency does."
+		},
+
 		"clerk": {
 			"what": "The clerk at its process boundary, against the shared test stack for the bus and a real Buzz relay the suite brings up itself: one post per suggestion across a redelivery and a restart, nothing of a contact on the relay, the journal with its reach, the activity feed and what it leaves out, the sweep that deletes an expired suggestion's post, and the write half against a stub Companion Gateway — a ✅ by the owner is one approval, a stranger's is none, every refusal is the Companion's sentence.",
 			"component": "clerk",

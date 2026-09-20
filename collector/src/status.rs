@@ -1,0 +1,203 @@
+//! What a connection says about itself: `connection.status.changed.v1`
+//! (issue #274, ADR 0033), published at start and on every transition.
+//!
+//! The state machine is small and the words are the point. Four states —
+//! `connected`, `unreachable`, `reconnect_required`, `pending_operator` —
+//! and each one but the first carries a `hint`: the operator's next step,
+//! in a sentence, on the bus, so a dashboard can show it without reading the
+//! log. The two refusals stay two (see `oidc.rs`): a grant that is gone and a
+//! client that lacks what a service expects are different things to do.
+//!
+//! The first publication of a run has `from_state: unknown` — what came
+//! before is not this process's to remember, and a consumer reads the first
+//! event of a run as the state rather than as a change. After that, only a
+//! transition is published: the same state observed again is silence, and
+//! the id (`sha256(connection:to_state:occurred_at)`) makes a republished
+//! transition a duplicate the bus drops.
+
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+pub const STATUS_CHANGED_TYPE: &str = "fr.linagora.twalk.connection.status.changed.v1";
+pub const STATUS_CHANGED_DATASCHEMA: &str =
+    "https://schemas.twalk.dev/cloudevents/v1/connection.status.changed.schema.json";
+
+/// The bus subject of a contract type: `twalk.<type minus the prefix>`.
+pub fn bus_subject(event_type: &str) -> String {
+    let rest = event_type
+        .strip_prefix("fr.linagora.twalk.")
+        .expect("contract event types always carry the fr.linagora.twalk prefix");
+    format!("twalk.{rest}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Connected,
+    Unreachable,
+    ReconnectRequired,
+    PendingOperator,
+}
+
+impl State {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Connected => "connected",
+            State::Unreachable => "unreachable",
+            State::ReconnectRequired => "reconnect_required",
+            State::PendingOperator => "pending_operator",
+        }
+    }
+}
+
+/// One observation of a connection's state, with what the operator does
+/// about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    pub state: State,
+    /// Which service it is about, when one is: `sso`, `jmap`, `caldav`.
+    pub service: Option<&'static str>,
+    /// The operator's next step. Required for every state but `connected`.
+    pub hint: Option<String>,
+}
+
+impl Observation {
+    pub fn connected() -> Self {
+        Self {
+            state: State::Connected,
+            service: None,
+            hint: None,
+        }
+    }
+}
+
+/// A connection's last published state, so that only transitions publish.
+#[derive(Debug, Clone)]
+pub struct Tracker {
+    connection: String,
+    kind: &'static str,
+    host: String,
+    last: Option<State>,
+}
+
+impl Tracker {
+    pub fn new(connection: &str, kind: &'static str, host: &str) -> Self {
+        Self {
+            connection: connection.to_owned(),
+            kind,
+            host: host.to_owned(),
+            last: None,
+        }
+    }
+
+    pub fn connection(&self) -> &str {
+        &self.connection
+    }
+
+    /// The envelope to publish for this observation, or `None` when the
+    /// state did not change — the same answer twice is silence.
+    pub fn observe(&mut self, observation: &Observation, occurred_at: &str) -> Option<Value> {
+        if self.last == Some(observation.state) {
+            return None;
+        }
+        let from_state = self.last.map(State::as_str).unwrap_or("unknown");
+        self.last = Some(observation.state);
+        let id = sha256_hex(&format!(
+            "{}:{}:{occurred_at}",
+            self.connection,
+            observation.state.as_str()
+        ));
+        let mut data = json!({
+            "connection": self.connection,
+            "kind": self.kind,
+            "from_state": from_state,
+            "to_state": observation.state.as_str(),
+            "occurred_at": occurred_at,
+        });
+        if let Some(service) = observation.service {
+            data["service"] = json!(service);
+        }
+        if let Some(hint) = &observation.hint {
+            data["hint"] = json!(hint);
+        }
+        Some(json!({
+            "specversion": "1.0",
+            "id": id,
+            "source": format!("collector://{}/connections/{}", self.host, self.connection),
+            "type": STATUS_CHANGED_TYPE,
+            "time": occurred_at,
+            "subject": self.connection,
+            "datacontenttype": "application/json",
+            "dataschema": STATUS_CHANGED_DATASCHEMA,
+            "connection": self.connection,
+            "data": data,
+        }))
+    }
+}
+
+fn sha256_hex(input: &str) -> String {
+    Sha256::digest(input.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_observation_of_a_run_comes_from_unknown_and_the_same_state_twice_is_silence() {
+        let mut tracker = Tracker::new("mail-linagora", "email", "collector.example.com");
+        let first = tracker
+            .observe(&Observation::connected(), "2026-09-20T09:00:00Z")
+            .expect("the first observation publishes");
+        assert_eq!(first["data"]["from_state"], "unknown");
+        assert_eq!(first["data"]["to_state"], "connected");
+        assert_eq!(first["subject"], "mail-linagora");
+        assert_eq!(first["connection"], "mail-linagora");
+        assert_eq!(
+            first["source"],
+            "collector://collector.example.com/connections/mail-linagora"
+        );
+        assert!(first["data"].get("hint").is_none());
+        assert!(
+            tracker
+                .observe(&Observation::connected(), "2026-09-20T09:01:00Z")
+                .is_none(),
+            "connected again is not a change"
+        );
+        let refused = tracker
+            .observe(
+                &Observation {
+                    state: State::ReconnectRequired,
+                    service: Some("sso"),
+                    hint: Some("Run `twalk-collector consent --renew`.".to_owned()),
+                },
+                "2026-09-20T09:02:00Z",
+            )
+            .expect("a transition publishes");
+        assert_eq!(refused["data"]["from_state"], "connected");
+        assert_eq!(refused["data"]["service"], "sso");
+        assert_eq!(
+            refused["id"],
+            sha256_hex("mail-linagora:reconnect_required:2026-09-20T09:02:00Z")
+        );
+    }
+
+    #[test]
+    fn the_envelope_is_the_contracts() {
+        // The fixture's own id, recomputed by the recipe the schema states.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../contracts/cloudevents/v1/fixtures/connection.status.changed.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture["id"],
+            sha256_hex("mail-linagora:reconnect_required:2026-09-20T09:00:00Z")
+        );
+        assert_eq!(
+            bus_subject(STATUS_CHANGED_TYPE),
+            "twalk.connection.status.changed.v1"
+        );
+    }
+}
