@@ -1,11 +1,10 @@
 {
+	"catalogue.review": "reviewed",
 	"app.name": "Twalk Companion",
 	"app.tagline": "Le centre de commande de votre hub de messagerie souverain",
 	"app.skipToContent": "Aller au contenu",
 
 	"lang.switch": "Langue",
-	"lang.fr": "Français",
-	"lang.en": "English",
 
 	"screen1.description": "Twalk réunit toutes vos conversations — WhatsApp, Telegram, Signal, Discord, Google Messages — dans un espace qui vous appartient, surveillé par des agents que vous configurez. Ce Companion s'occupe de tout installer pour vous.",
 	"screen1.domain.label": "Votre domaine Twalk",

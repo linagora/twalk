@@ -171,7 +171,8 @@
 			language = answer.preference.language;
 			languageOutcome = 'saved';
 			// The first of the two effects, applied at once: this interface
-			// speaks the language just chosen, when it ships in it.
+			// speaks the language just chosen — the five it offers are the five
+			// it ships (#102).
 			if (next !== null && (LOCALES as readonly string[]).includes(next)) {
 				setLocale(next as Locale);
 			}

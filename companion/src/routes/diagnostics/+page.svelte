@@ -16,7 +16,7 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import { boot, EXPECTED_GATEWAY_VERSION } from '$lib/boot';
 	import { buildDiagnostics, copyDiagnostics } from '$lib/diagnostics';
-	import { locale, setLocale, t, LOCALES, type Locale } from '$lib/i18n';
+	import { locale, setLocale, t, LOCALES, LOCALE_NAMES, type Locale } from '$lib/i18n';
 
 	const bootState = $derived($boot);
 
@@ -111,7 +111,7 @@
 						checked={$locale === option}
 						onchange={() => setLocale(option as Locale)}
 					/>
-					{$t(`lang.${option}` as 'lang.fr' | 'lang.en')}
+					<span lang={option}>{LOCALE_NAMES[option as Locale]}</span>
 				</label>
 			{/each}
 		</fieldset>
