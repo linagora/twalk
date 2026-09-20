@@ -28,7 +28,16 @@
 //!   `["name", …]`, `["visibility", …]`, `["channel_type", …]`), and a
 //!   member is put into it by kind 9000 (`["h", uuid]`, `["p", hex]`,
 //!   `["role", …]`), NIP-29's put-user — exactly what `buzz-sdk`'s
-//!   `build_add_member` builds.
+//!   `build_add_member` builds;
+//! - an event is accepted only from the key that signed the request
+//!   (`event pubkey does not match authenticated identity` otherwise), so
+//!   the owner's gestures go up as the owner and a stranger's as the
+//!   stranger ([`RelayStack::submit_as`]); a reaction (kind 7) carries one
+//!   `["e", post]` tag and no `h`, a thread reply (kind 45003) carries
+//!   `["h", channel]` and `["e", post, "", "reply"]` — `buzz-sdk`'s
+//!   `build_reaction` and `build_forum_comment` ([`reaction`],
+//!   [`thread_reply`]) — and the same signed event a second time is a
+//!   duplicate, not a second event ([`RelayStack::submit_again_as`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -219,14 +228,19 @@ impl RelayStack {
     /// and the body, because "unauthorized" and "no such tenant" are the two
     /// mistakes this client can make and both are in the body.
     async fn signed_post(&self, path: &str, body: String) -> Result<Value> {
+        self.signed_post_as(&self.owner, path, body).await
+    }
+
+    /// [`signed_post`](Self::signed_post) as `keys` rather than the owner:
+    /// the relay refuses an event whose author is not the key that signed
+    /// the request (`event pubkey does not match authenticated identity`),
+    /// so a stranger's reaction must be posted as the stranger.
+    async fn signed_post_as(&self, keys: &Keys, path: &str, body: String) -> Result<Value> {
         let url = format!("{}{path}", self.url);
         let response = self
             .http
             .post(&url)
-            .header(
-                "Authorization",
-                authorization(&self.owner, &url, "POST", &body)?,
-            )
+            .header("Authorization", authorization(keys, &url, "POST", &body)?)
             .header("Content-Type", "application/json")
             .body(body)
             .send()
@@ -243,7 +257,16 @@ impl RelayStack {
     /// Submits one signed event and requires the relay to accept it: a
     /// refusal is a failure carrying the relay's own reason.
     pub async fn submit(&self, event: &Event) -> Result<()> {
-        let answer = self.signed_post("/events", event.as_json()).await?;
+        self.submit_as(&self.owner, event).await
+    }
+
+    /// [`submit`](Self::submit) with the request signed by `keys`, which
+    /// must be the event's own author (a relay member): how a stranger's
+    /// gesture reaches the relay.
+    pub async fn submit_as(&self, keys: &Keys, event: &Event) -> Result<()> {
+        let answer = self
+            .signed_post_as(keys, "/events", event.as_json())
+            .await?;
         if answer["accepted"].as_bool() != Some(true) {
             bail!(
                 "the relay refused a kind {} event: {answer}",
@@ -251,6 +274,29 @@ impl RelayStack {
             );
         }
         Ok(())
+    }
+
+    /// Submits an event the relay already holds, as `keys`, and requires the
+    /// relay to call it a **duplicate** — what a client that retried a
+    /// request looks like from the clerk's side: the same signed event, the
+    /// same id, once on the relay. A duplicate is `accepted: true,
+    /// message: "duplicate:"` for a comment and `accepted: false, message:
+    /// "duplicate: reaction already exists"` for a reaction (the relay's
+    /// `ingest.rs`), so both are read as the duplicate they are; an event the
+    /// relay did **not** already hold is a failure, because the test meant
+    /// to resubmit and did not. Returns the relay's message.
+    pub async fn submit_again_as(&self, keys: &Keys, event: &Event) -> Result<String> {
+        let answer = self
+            .signed_post_as(keys, "/events", event.as_json())
+            .await?;
+        let message = answer["message"].as_str().unwrap_or_default().to_owned();
+        if !message.starts_with("duplicate:") {
+            bail!(
+                "the relay did not call the resubmitted kind {} event a duplicate: {answer}",
+                event.kind.as_u16()
+            );
+        }
+        Ok(message)
     }
 
     /// Adds `pubkey_hex` as a member of the relay (kind 9030, NIP-43),
@@ -281,22 +327,47 @@ impl RelayStack {
             .sign_with_keys(&self.owner)
             .context("signing the create-channel event")?;
         self.submit(&create).await?;
+        self.add_to_channel(&channel, member).await?;
+        Ok(channel)
+    }
+
+    /// Puts `pubkey_hex` — already a relay member — into `channel` (kind
+    /// 9000, NIP-29's put-user, as `buzz-sdk`'s `build_add_member` builds
+    /// it), signed by the owner: what lets a key read the channel and
+    /// react in it.
+    pub async fn add_to_channel(&self, channel: &str, pubkey_hex: &str) -> Result<()> {
         let put_user = EventBuilder::new(Kind::Custom(9000), "")
             .tags([
-                tag(["h", &channel])?,
-                tag(["p", member])?,
+                tag(["h", channel])?,
+                tag(["p", pubkey_hex])?,
                 tag(["role", "member"])?,
             ])
             .sign_with_keys(&self.owner)
             .context("signing the put-user event")?;
-        self.submit(&put_user).await?;
-        Ok(channel)
+        self.submit(&put_user).await
+    }
+
+    /// A fresh key that is a member of the relay and of `channel`, and
+    /// nothing else — not the owner, not the clerk: a **stranger** whose
+    /// gesture on a post must decide nothing.
+    pub async fn stranger_in(&self, channel: &str) -> Result<Keys> {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        self.add_member(&pubkey).await?;
+        self.add_to_channel(channel, &pubkey).await?;
+        Ok(keys)
     }
 
     /// Every event of one of `kinds` in `channel`, newest first, as the
     /// owner reads them (the relay's cap of 1000, which no test approaches).
     pub async fn events_in(&self, channel: &str, kinds: &[u16]) -> Result<Vec<Event>> {
-        let filters = json!([{ "kinds": kinds, "#h": [channel], "limit": 1000 }]);
+        self.query(json!([{ "kinds": kinds, "#h": [channel], "limit": 1000 }]))
+            .await
+    }
+
+    /// One `POST /query` as the owner with `filters` — a JSON array of
+    /// NIP-01 filters — answered as events, newest first.
+    pub async fn query(&self, filters: Value) -> Result<Vec<Event>> {
         let answer = self.signed_post("/query", filters.to_string()).await?;
         serde_json::from_value(answer).context("the query answered something other than events")
     }
@@ -306,6 +377,30 @@ impl RelayStack {
     pub async fn all_events_in(&self, channel: &str) -> Result<Vec<Event>> {
         self.events_in(channel, &CLERK_KINDS).await
     }
+}
+
+/// A reaction (kind 7) on the post `post_id`, signed by `keys`: content
+/// the emoji, one `["e", post_id]` tag and nothing else — the shape
+/// `buzz-sdk`'s `build_reaction` writes and a Buzz client sends when the
+/// owner taps ✅ under a post. No `h` tag: the relay derives the channel
+/// from the target.
+pub fn reaction(keys: &Keys, post_id: &str, emoji: &str) -> Result<Event> {
+    EventBuilder::new(Kind::Custom(7), emoji)
+        .tags([tag(["e", post_id])?])
+        .sign_with_keys(keys)
+        .context("signing the reaction")
+}
+
+/// A **direct** reply (kind 45003) in the thread of the post `post_id` in
+/// `channel`, signed by `keys`: `["h", channel]` and the one
+/// `["e", post_id, "", "reply"]` tag `buzz-sdk`'s `build_forum_comment`
+/// writes when root and parent are the post itself — the owner answering
+/// the post with the text to send, or a stranger commenting on it.
+pub fn thread_reply(keys: &Keys, channel: &str, post_id: &str, text: &str) -> Result<Event> {
+    EventBuilder::new(Kind::Custom(45003), text)
+        .tags([tag(["h", channel])?, tag(["e", post_id, "", "reply"])?])
+        .sign_with_keys(keys)
+        .context("signing the thread reply")
 }
 
 /// The `Authorization` header of one NIP-98 request: a kind 27235 event
