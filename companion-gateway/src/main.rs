@@ -21,6 +21,7 @@ use twalk_companion_gateway::metrics::Metrics;
 use twalk_companion_gateway::outbox::{publish_until_shutdown, Outbox};
 use twalk_companion_gateway::owner::Owner;
 use twalk_companion_gateway::portals::{refresh_until_shutdown, PortalBridge, Portals};
+use twalk_companion_gateway::runtime_presence::RuntimePresence;
 use twalk_companion_gateway::session::Sessions;
 use twalk_companion_gateway::settings::Settings;
 use twalk_companion_gateway::static_files::Resolver;
@@ -501,6 +502,12 @@ async fn main() -> Result<()> {
             .with_contacts(contacts)
             .with_approvals(approvals)
             .with_suggestions(suggestions)
+            .with_runtime_presence(
+                config
+                    .consent
+                    .as_ref()
+                    .map(|consent| Arc::new(RuntimePresence::new(consent.nats_url.clone()))),
+            )
             .with_settings(settings)
             .with_portals(portals.clone())
             .with_answers(answers),

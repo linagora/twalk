@@ -162,6 +162,8 @@ pub mod outbox;
 pub mod owner;
 pub mod portals;
 pub mod portals_http;
+pub mod runtime_presence;
+pub mod runtime_presence_http;
 pub mod session;
 pub mod session_http;
 pub mod settings;
