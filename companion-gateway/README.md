@@ -371,8 +371,12 @@ less the newline and the longest sentence the contract allows, on the edited bod
 (`malformed_request`, naming the disclosure) and on the reply Hermes pushes (`hermes_answer_too_long`)
 alike — and a suggestion whose own body ignored that cap is refused as `409 suggestion_unreadable`
 rather than sent undisclosed, because a reply going out without the line is the outcome ADR 0031
-exists to prevent, and editing it shorter is the way out. A suggestion that carries no sentence
-goes out without one, with a `warn`: the Gateway does not invent it.
+exists to prevent, and editing it shorter is the way out. A suggestion whose `disclosure` is not one
+of the contract's five sentences — a third-party persona writing its own, or anything on the bus
+forging one — is refused the same way at the press, and listed as carrying none: the sentence a
+contact reads is the contract's or nothing, and here the way out is the persona, not the editor.
+A suggestion that carries no sentence goes out without one, with a `warn`: the Gateway does not
+invent it.
 
 **The switch is a journal, not a setting.** `disclosure_decision`, in the consent store beside the
 consent journal, with the same `occurred_at`/`actor`/`reason` shape and the same triggers refusing
