@@ -23,6 +23,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -88,12 +89,17 @@ async fn free_busy(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(str::trim);
-    if bearer != Some(endpoint.service_token.as_str()) {
+    // Compared as digests, in constant time — the Companion Gateway's own
+    // habit with this token (`consent_snapshot.rs`), kept on this side.
+    let presented = bearer.map(|token| Sha256::digest(token.as_bytes()));
+    let expected = Sha256::digest(endpoint.service_token.as_bytes());
+    if presented.is_none_or(|presented| presented != expected) {
         return refuse(
             &endpoint,
             StatusCode::UNAUTHORIZED,
             "unauthenticated",
             "this endpoint answers the Companion Gateway's service token and nothing else",
+            None,
         );
     }
     let connection = query.connection.unwrap_or_default();
@@ -107,6 +113,7 @@ async fn free_busy(
             StatusCode::NOT_FOUND,
             "connection_unknown",
             &format!("this collector holds no calendar connection named {connection:?}"),
+            None,
         );
     };
     let window = match Window::parse(
@@ -115,33 +122,38 @@ async fn free_busy(
     ) {
         Ok(window) => window,
         Err(error) => {
-            let code = error.code();
-            return refuse(&endpoint, StatusCode::BAD_REQUEST, code, &error.message());
+            return refuse(
+                &endpoint,
+                StatusCode::BAD_REQUEST,
+                error.code(),
+                &error.message(),
+                None,
+            );
         }
     };
+    // The connection's state as the run loop last observed it, and the two
+    // things a read needs that the loop holds — the owner's id on the side
+    // service and the access token. A state of `connected` with either
+    // missing is a round that has not completed yet: `unknown`, not
+    // `connected`, since "connected but unreadable" is not a state.
     let calendar = endpoint.calendar_access.read().await.clone();
     let token = endpoint.access.read().await.clone();
     let (owner_id, token) = match (calendar.state, calendar.owner_id, token) {
         (Some("connected"), Some(owner_id), Some(token)) => (owner_id, token),
         (state, _, _) => {
-            let state = state.unwrap_or("unknown");
-            endpoint
-                .metrics
-                .record_freebusy_read("connection_not_connected");
-            warn!(
-                connection,
-                state,
-                "a free/busy read on a calendar connection that is not connected was refused"
-            );
-            return (
+            let state = state
+                .filter(|state| *state != "connected")
+                .unwrap_or("unknown");
+            return refuse(
+                &endpoint,
                 StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "connection_not_connected",
-                    "state": state,
-                    "detail": format!("the calendar connection {connection:?} is {state}; the agenda cannot be read until it is connected"),
-                })),
-            )
-                .into_response();
+                "connection_not_connected",
+                &format!(
+                    "the calendar connection {connection:?} is {state}; the agenda cannot be \
+                     read until it is connected"
+                ),
+                Some(state),
+            );
         }
     };
     match calendars.free_busy(&owner_id, &token.token, &window).await {
@@ -170,20 +182,35 @@ async fn free_busy(
             StatusCode::BAD_GATEWAY,
             "caldav_refused",
             &format!("the calendar service refused the free-busy report with HTTP {status}"),
+            None,
         ),
         Err(SideError::Unreachable { detail }) => refuse(
             &endpoint,
             StatusCode::BAD_GATEWAY,
             "caldav_unreachable",
             &format!("the calendar service did not answer the free-busy report: {detail}"),
+            None,
         ),
     }
 }
 
-fn refuse(endpoint: &Endpoint, status: StatusCode, code: &'static str, detail: &str) -> Response {
+/// One refusal: counted under its code, said at `warn`, answered in the
+/// Companion Gateway's `Error` shape — with the connection's `state` beside
+/// it when that is what was refused.
+fn refuse(
+    endpoint: &Endpoint,
+    status: StatusCode,
+    code: &'static str,
+    detail: &str,
+    state: Option<&str>,
+) -> Response {
     endpoint.metrics.record_freebusy_read(code);
-    warn!(%code, status = status.as_u16(), detail, "a free/busy read was refused");
-    (status, Json(json!({ "error": code, "detail": detail }))).into_response()
+    warn!(%code, status = status.as_u16(), state, detail, "a free/busy read was refused");
+    let mut body = json!({ "error": code, "detail": detail });
+    if let Some(state) = state {
+        body["state"] = json!(state);
+    }
+    (status, Json(body)).into_response()
 }
 
 /// Serves the endpoint until the process ends.

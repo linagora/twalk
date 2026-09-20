@@ -1601,32 +1601,6 @@ impl Store {
         Ok(())
     }
 
-    /// The most recent free/busy reads, newest first.
-    pub fn hermes_reads(&self, limit: usize) -> Result<Vec<crate::hermes_freebusy::HermesRead>> {
-        let connection = self.connection();
-        let mut statement = connection
-            .prepare(
-                "SELECT connection, window_from, window_to, requested_at, delivery, outcome, intervals
-                 FROM hermes_read ORDER BY sequence DESC LIMIT ?",
-            )
-            .context("failed to prepare the free/busy reads read")?;
-        let rows = statement
-            .query_map([limit as i64], |row| {
-                Ok(crate::hermes_freebusy::HermesRead {
-                    connection: row.get(0)?,
-                    window_from: row.get(1)?,
-                    window_to: row.get(2)?,
-                    requested_at: row.get(3)?,
-                    delivery: row.get(4)?,
-                    outcome: row.get(5)?,
-                    intervals: row.get::<_, Option<i64>>(6)?.map(|count| count as u64),
-                })
-            })
-            .context("failed to read the free/busy reads")?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to read a free/busy read row")
-    }
-
     /// The most recent transitions, newest first, for the dashboard's feed.
     pub fn connection_status_changes(
         &self,

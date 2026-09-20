@@ -12,9 +12,7 @@
 //! [`crate::hermes_freebusy`] holds every decision. This file is the route
 //! and the mapping from a refusal to an answer.
 
-use std::collections::HashMap;
-
-use axum::extract::{OriginalUri, Query, State};
+use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -34,23 +32,30 @@ pub fn routes() -> Router<Gateway> {
 async fn read_free_busy(
     State(gateway): State<Gateway>,
     OriginalUri(uri): OriginalUri,
-    Query(members): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
     let Some(reads) = gateway.reads() else {
-        return refuse(
-            &gateway,
-            ReadRefusal::NotConfigured("hermes_answers_not_configured"),
-        );
+        return refuse(&gateway, ReadRefusal::SeamNotConfigured);
     };
+    // The members are read off the same string the signature covers, by
+    // hand: an extractor would refuse a malformed query in its own words,
+    // before the signature was checked and without a record — and every
+    // read is recorded, the malformed ones included.
     let query = uri.query().unwrap_or_default().to_owned();
     let mut request = ReadRequest {
-        query,
-        connection: members.get("connection").cloned(),
-        from: members.get("from").cloned(),
-        to: members.get("to").cloned(),
+        query: query.clone(),
         ..ReadRequest::default()
     };
+    for pair in query.split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let value = crate::contacts_http::percent_decode(value);
+        match name {
+            "connection" => request.connection = Some(value),
+            "from" => request.from = Some(value),
+            "to" => request.to = Some(value),
+            _ => {}
+        }
+    }
     let header = |name: &str| {
         headers
             .get(name)
@@ -79,7 +84,7 @@ async fn read_free_busy(
 /// `state` beside it when that is what was refused — the same shape an
 /// approval towards that connection gets (#275).
 fn refuse(gateway: &Gateway, refusal: ReadRefusal) -> Response {
-    if matches!(refusal, ReadRefusal::NotConfigured(_)) && gateway.reads().is_none() {
+    if refusal == ReadRefusal::SeamNotConfigured {
         // Counted here, since no `Reads` exists to count it.
         gateway.metrics().record_hermes_read(refusal.code());
     }

@@ -78,11 +78,11 @@ impl Calendars {
         Ok(())
     }
 
-    /// The decision about a `mailto:` on the mail connection, or `Pending`
-    /// — labelled by nothing, reduced by nothing — when there is none.
-    /// The owner's busy intervals in a window, across every calendar of
-    /// theirs (#281): the HAL list, then one `free-busy-query` per calendar,
-    /// merged. No cursor moves and nothing is published: a read.
+    /// The owner's busy intervals in a window (#281), across the calendars
+    /// the poll reads — the HAL list of their own and the shares they
+    /// accepted, the same set whose changes are published — one
+    /// `free-busy-query` each, merged. No cursor moves and nothing is
+    /// published: a read.
     pub async fn free_busy(
         &self,
         owner_id: &str,
@@ -97,6 +97,8 @@ impl Calendars {
         Ok(crate::freebusy::merge_answers(answers, window))
     }
 
+    /// The decision about a `mailto:` on the mail connection, or `Pending`
+    /// — labelled by nothing, reduced by nothing — when there is none.
     fn decide(&self, identity: &str) -> Consent {
         match &self.mail_connection {
             Some(mail) => self.consent.state(identity, mail),

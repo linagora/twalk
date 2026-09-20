@@ -4184,23 +4184,8 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // secret over the request line. Everything here is reached without bus
     // state: the credential, the window, the connection's name, and a
     // calendar connection no collector has spoken for.
-    let freebusy_query = |connection: &str, from: &str, to: &str| {
-        let encode = |value: &str| value.replace(':', "%3A");
-        format!(
-            "connection={}&from={}&to={}",
-            encode(connection),
-            encode(from),
-            encode(to)
-        )
-    };
-    let freebusy_signature = |query: &str, timestamp: &str| {
-        use hmac::{Hmac, Mac};
-        let mut mac =
-            Hmac::<sha2::Sha256>::new_from_slice(harness::HERMES_ANSWER_SECRET.as_bytes())
-                .expect("HMAC accepts a key of any length");
-        mac.update(format!("GET\n/_twalk/hermes/freebusy\n{query}\n{timestamp}").as_bytes());
-        format!("sha256={:x}", mac.finalize().into_bytes())
-    };
+    let freebusy_query = harness::freebusy_query;
+    let freebusy_signature = harness::freebusy_signature;
     let now = harness::rfc3339_now();
     let two_days = freebusy_query("calendar", "2026-09-24T08:00:00Z", "2026-09-26T08:00:00Z");
     // Unsigned: neither header.

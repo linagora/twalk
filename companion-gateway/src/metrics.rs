@@ -277,18 +277,20 @@ impl Metrics {
     /// (ticket #206): `published`, the reason an ignored push was ignored, or
     /// the refusal code. One counter for the whole seam, because the question
     /// is which way it is failing and not how many times it worked.
-    pub fn record_hermes_read(&self, outcome: &'static str) {
+    pub fn record_hermes_answer(&self, outcome: &'static str) {
         *self
-            .hermes_reads
+            .hermes_answers
             .lock()
             .expect("the metrics mutex is never poisoned")
             .entry(outcome)
             .or_insert(0) += 1;
     }
 
-    pub fn record_hermes_answer(&self, outcome: &'static str) {
+    /// Counts one free/busy read Hermes made (ticket #281): `served`, or
+    /// the code it was refused with — the same word the record holds.
+    pub fn record_hermes_read(&self, outcome: &'static str) {
         *self
-            .hermes_answers
+            .hermes_reads
             .lock()
             .expect("the metrics mutex is never poisoned")
             .entry(outcome)

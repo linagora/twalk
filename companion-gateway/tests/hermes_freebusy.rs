@@ -6,15 +6,17 @@
 //!
 //! 1. a read signed with the answers' secret, on a calendar connection the
 //!    collector said is `connected`, answers the intervals the collector
-//!    holds — **no title, no participant, no location** — and the relay
-//!    carried the Gateway's own service token and the window as asked;
+//!    answered and nothing else, and the relay carried the Gateway's own
+//!    service token and the window as asked (that no title, participant
+//!    or location ever leaves the collector is `collector/tests/freebusy.rs`'s
+//!    to prove, against a fixture that holds all three);
 //! 2. the read is a `hermes_read` row in the Gateway's store and a count
 //!    on `/metrics`, and so is every refusal;
 //! 3. wider than fourteen days is `400`, a bad signature `401`, a
 //!    connection that is not `connected` `409` with its state;
-//! 4. a collector that does not answer is `502`, not a `503` that would
-//!    say the deployment has no seam; a Gateway with a seam and no collector
-//!    is that `503`;
+//! 4. a collector that refuses with a code of its own, or does not answer,
+//!    is `502`, not a `503` that would say the deployment has no seam; a
+//!    Gateway with a seam and no collector is that `503`;
 //! 5. the skill Twalk ships (`skills/twalk-calendar/freebusy.sh`) makes a
 //!    request the route accepts — run as Hermes would run it.
 //!
@@ -28,9 +30,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use harness::{
-    companion_build, ensure_stack, gateway_env_with, gateway_state_dir, nats_url, poll_until,
-    validate_against_contract, Bus, GatewayProc, HERMES_ANSWER_SECRET, HERMES_DOMAIN,
-    SERVICE_TOKEN,
+    companion_build, ensure_stack, freebusy_query as query, freebusy_signature as signature,
+    gateway_env_with, gateway_state_dir, nats_url, poll_until, validate_against_contract, Bus,
+    GatewayProc, HERMES_ANSWER_SECRET, HERMES_DOMAIN, SERVICE_TOKEN,
 };
 use serde_json::{json, Value};
 
@@ -94,12 +96,21 @@ fn calendar_status_event(connection: &str, from: &str, to: &str) -> Value {
     event
 }
 
+/// One request the stub collector received: the request line, and the
+/// `authorization` header when there was one.
+type Relayed = (String, Option<String>);
+
+/// One `hermes_read` row as the test reads it back: connection, window
+/// from, window to, delivery, outcome, intervals.
+type Recorded = (String, String, String, Option<String>, String, Option<i64>);
+
 /// The collector's internal endpoint, stubbed: answers what a test tells
 /// it to, and keeps every request line and bearer it received, so the test
 /// asserts what the Gateway relayed and not only what came back.
 struct StubCollector {
     addr: std::net::SocketAddr,
-    requests: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    requests: Arc<Mutex<Vec<Relayed>>>,
+    answer: Arc<Mutex<(u16, Vec<u8>)>>,
     accept_task: tokio::task::JoinHandle<()>,
 }
 
@@ -109,13 +120,14 @@ impl StubCollector {
             .await
             .context("failed to bind the stub collector")?;
         let addr = listener.local_addr()?;
-        let requests: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::default();
+        let requests: Arc<Mutex<Vec<Relayed>>> = Arc::default();
         let seen = requests.clone();
-        let body = serde_json::to_vec(&body)?;
+        let answer = Arc::new(Mutex::new((status, serde_json::to_vec(&body)?)));
+        let canned = answer.clone();
         let accept_task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
                 let seen = seen.clone();
-                let body = body.clone();
+                let (status, body) = canned.lock().expect("not poisoned").clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buffer = vec![0_u8; 8192];
@@ -140,15 +152,22 @@ impl StubCollector {
         Ok(Self {
             addr,
             requests,
+            answer,
             accept_task,
         })
+    }
+
+    /// What the stub answers from now on: a refusal of its own, say.
+    fn answer(&self, status: u16, body: Value) {
+        *self.answer.lock().expect("not poisoned") =
+            (status, serde_json::to_vec(&body).expect("a JSON body"));
     }
 
     fn url(&self) -> String {
         format!("http://{}", self.addr)
     }
 
-    fn requests(&self) -> Vec<(String, Option<String>)> {
+    fn requests(&self) -> Vec<Relayed> {
         self.requests.lock().expect("not poisoned").clone()
     }
 
@@ -199,27 +218,6 @@ async fn gateway(
     Ok((gateway, base, gateway_state_dir(&static_dir)))
 }
 
-/// The signature over the canonical line, computed from the wire format in
-/// the skill's document rather than from the Gateway's code, so the test
-/// states the contract.
-fn signature(query: &str, timestamp: &str) -> String {
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(HERMES_ANSWER_SECRET.as_bytes())
-        .expect("HMAC accepts a key of any length");
-    mac.update(format!("GET\n{FREEBUSY_PATH}\n{query}\n{timestamp}").as_bytes());
-    format!("sha256={:x}", mac.finalize().into_bytes())
-}
-
-fn query(connection: &str, from: &str, to: &str) -> String {
-    let encode = |value: &str| value.replace(':', "%3A").replace('+', "%2B");
-    format!(
-        "connection={}&from={}&to={}",
-        encode(connection),
-        encode(from),
-        encode(to)
-    )
-}
-
 /// One read as Hermes makes it: the query string signed as sent.
 async fn read(
     base: &str,
@@ -262,9 +260,7 @@ async fn signed_read(
 
 /// The `hermes_read` rows, newest first, read straight from the Gateway's
 /// store: the record is the acceptance criterion, and nothing serves it yet.
-fn recorded_reads(
-    state_dir: &std::path::Path,
-) -> Result<Vec<(String, String, String, Option<String>, String, Option<i64>)>> {
+fn recorded_reads(state_dir: &std::path::Path) -> Result<Vec<Recorded>> {
     let connection = rusqlite::Connection::open_with_flags(
         state_dir.join("consent.sqlite3"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -482,13 +478,42 @@ async fn a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_rec
         .iter()
         .any(|read| read.4 == "connection_not_connected"));
 
-    // The collector down: a 502, not a 503 that would say the deployment
-    // has no seam.
+    // The collector refusing with a code of its own — its side service
+    // refused it — is a 502 that names the code; the collector down is a
+    // 502 too, and not a 503 that would say the deployment has no seam.
     bus.publish_event(
         CONNECTION_STATUS_SUBJECT,
         &calendar_status_event(&connection, "reconnect_required", "connected"),
     )
     .await?;
+    collector.answer(
+        502,
+        json!({ "error": "caldav_refused", "detail": "the calendar service refused the free-busy report with HTTP 403" }),
+    );
+    let body = poll_until(
+        || async {
+            let (status, body) = signed_read(
+                &base,
+                &connection,
+                "2026-09-24T08:00:00Z",
+                "2026-09-26T18:00:00Z",
+                None,
+            )
+            .await
+            .ok()?;
+            (status == 502).then_some(body)
+        },
+        "the read to reach the collector and be refused by it",
+    )
+    .await?;
+    assert_eq!(body["error"], "collector_refused");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("caldav_refused"),
+        "the collector's code travels: {body}"
+    );
     collector.stop();
     let body = poll_until(
         || async {
@@ -628,7 +653,7 @@ async fn the_skills_script_makes_a_request_the_route_accepts() -> Result<()> {
     );
     // The document's example is the script's own usage line.
     let document = std::fs::read_to_string(script.with_file_name("SKILL.md"))?;
-    assert!(document.contains("skills/twalk-calendar/freebusy.sh <connection> <from> <to>"));
+    assert!(document.contains("./freebusy.sh <connection> <from> <to>"));
     assert!(document.contains("X-Hermes-Signature-256") && document.contains("X-Hermes-Timestamp"));
     collector.stop();
     gateway.stop().await;

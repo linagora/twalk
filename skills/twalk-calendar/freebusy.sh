@@ -23,10 +23,14 @@ path=/_twalk/hermes/freebusy
 # twice: RFC 3339 instants carry ':' and '+', which are percent-encoded here
 # so the URL and the signed line agree byte for byte.
 encode() {
-  printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/ /%20/g'
+  printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/ /%20/g' \
+    -e 's/&/%26/g' -e 's/=/%3D/g' -e 's/#/%23/g'
 }
 query="connection=$(encode "$connection")&from=$(encode "$from")&to=$(encode "$to")"
 timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# The secret is an argument to openssl here, visible in the process list
+# for the milliseconds the call runs: Hermes's host is the owner's own
+# (ADR 0032's allowlist holds one key). On a shared host, sign otherwise.
 signature=$(printf 'GET\n%s\n%s\n%s' "$path" "$query" "$timestamp" \
   | openssl dgst -sha256 -hmac "$TWALK_ANSWER_SECRET" | sed 's/^.* //')
 delivery=${TWALK_DELIVERY_ID:-$(date -u +%s)-$$}

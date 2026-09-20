@@ -55,7 +55,7 @@
 //! the refusals — and the I/O in [`Reads`]: the store, the relay, the clock.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,7 @@ use sha2::Sha256;
 use tracing::{info, warn};
 
 use crate::approval::{connection_can_send, Refusal};
-use crate::hermes_answer::{CLOCK_SKEW_SECONDS, SIGNATURE_HEADER};
+use crate::hermes_answer::{is_fresh, signature_matches, CLOCK_SKEW_SECONDS, SIGNATURE_HEADER};
 use crate::metrics::Metrics;
 use crate::store::Store;
 
@@ -84,6 +84,11 @@ pub const MAX_WINDOW_SECONDS: i64 = 14 * 86_400;
 
 /// How long the relay waits for the collector.
 pub const COLLECTOR_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The most of any member of an unverified request the record keeps: the
+/// record holds what was asked, bad signature or not, and what was asked
+/// is whatever reached the port, so it is cut before it is stored.
+pub const RECORDED_MEMBER_LENGTH: usize = 256;
 
 /// The line the signature covers: method, path, query as sent, timestamp.
 /// The query is signed **as sent** and not re-encoded, since a canonical
@@ -136,6 +141,16 @@ impl Window {
                 "`from` and `to` are both required, as RFC 3339 instants".to_owned(),
             ));
         };
+        // A space is what a `+` becomes when a client leaves it unencoded
+        // in the query; read as an instant it would be silently shifted by
+        // its own offset, so it is refused instead.
+        if from.contains(' ') || to.contains(' ') {
+            return Err(ReadRefusal::InvalidWindow(
+                "`from` and `to` must be percent-encoded: a `+` in an offset reaches this \
+                 Gateway as a space"
+                    .to_owned(),
+            ));
+        }
         let start = crate::hermes_answer::parse_rfc3339_seconds(from).ok_or_else(|| {
             ReadRefusal::InvalidWindow(format!("`from` is not an RFC 3339 instant: {from:?}"))
         })?;
@@ -162,8 +177,10 @@ impl Window {
 /// counted under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadRefusal {
-    /// The Gateway has no seam to Hermes, or no collector to relay to.
-    NotConfigured(&'static str),
+    /// The Gateway has no seam to Hermes: no secret to verify a read with.
+    SeamNotConfigured,
+    /// The Gateway has no collector to relay to.
+    CollectorNotConfigured,
     /// No signature or no timestamp on the request.
     Unsigned,
     /// The signature does not match the canonical line.
@@ -186,7 +203,9 @@ pub enum ReadRefusal {
     },
     /// The store could not be read.
     StoreUnavailable(String),
-    /// The collector did not answer.
+    /// The collector did not answer, or answered something that is not a
+    /// free/busy answer — one code, since either way the relay found no
+    /// collector to speak with.
     CollectorUnreachable(String),
     /// The collector answered a refusal of its own.
     CollectorRefused { status: u16, code: String },
@@ -195,7 +214,8 @@ pub enum ReadRefusal {
 impl ReadRefusal {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::NotConfigured(which) => which,
+            Self::SeamNotConfigured => "hermes_answers_not_configured",
+            Self::CollectorNotConfigured => "collector_not_configured",
             Self::Unsigned => "unsigned",
             Self::BadSignature => "bad_signature",
             Self::Stale { .. } => "stale_timestamp",
@@ -212,7 +232,9 @@ impl ReadRefusal {
 
     pub fn status(&self) -> u16 {
         match self {
-            Self::NotConfigured(_) | Self::StoreUnavailable(_) => 503,
+            Self::SeamNotConfigured | Self::CollectorNotConfigured | Self::StoreUnavailable(_) => {
+                503
+            }
             Self::Unsigned | Self::BadSignature | Self::Stale { .. } => 401,
             Self::NoConnection | Self::InvalidWindow(_) | Self::WindowTooWide => 400,
             Self::ConnectionUnknown(_) => 404,
@@ -223,12 +245,12 @@ impl ReadRefusal {
 
     pub fn message(&self) -> String {
         match self {
-            Self::NotConfigured("hermes_answers_not_configured") => {
+            Self::SeamNotConfigured => {
                 "this Gateway has no seam to Hermes: set GATEWAY_HERMES_ANSWER_SECRET, which \
                  signs Hermes's answers and its free/busy reads alike"
                     .to_owned()
             }
-            Self::NotConfigured(_) => {
+            Self::CollectorNotConfigured => {
                 "this Gateway relays no free/busy read: set GATEWAY_COLLECTOR_URL to the \
                  collector's internal endpoint (COLLECTOR_HTTP_LISTEN on its side) and \
                  GATEWAY_SERVICE_TOKEN, which the collector accepts"
@@ -360,12 +382,20 @@ impl Reads {
             Ok(_) => "served",
             Err(refusal) => refusal.code(),
         });
+        let cut = |member: &Option<String>| {
+            member.as_deref().map(|value| {
+                value
+                    .chars()
+                    .take(RECORDED_MEMBER_LENGTH)
+                    .collect::<String>()
+            })
+        };
         let record = HermesRead {
-            connection: request.connection.clone().unwrap_or_default(),
-            window_from: request.from.clone().unwrap_or_default(),
-            window_to: request.to.clone().unwrap_or_default(),
+            connection: cut(&request.connection).unwrap_or_default(),
+            window_from: cut(&request.from).unwrap_or_default(),
+            window_to: cut(&request.to).unwrap_or_default(),
             requested_at: crate::hermes_answer::rfc3339_seconds((self.now)()),
-            delivery: request.delivery.clone(),
+            delivery: cut(&request.delivery),
             outcome: label,
             intervals,
         };
@@ -400,23 +430,11 @@ impl Reads {
         let (Some(timestamp), Some(signature)) = (&request.timestamp, &request.signature) else {
             return Err(ReadRefusal::Unsigned);
         };
-        let expected = sign(
-            &self.secret,
-            &canonical("GET", FREEBUSY_PATH, &request.query, timestamp),
-        );
-        if !constant_time_eq(expected.as_bytes(), signature.trim().as_bytes()) {
+        let line = canonical("GET", FREEBUSY_PATH, &request.query, timestamp);
+        if !signature_matches(&self.secret, Some(signature), line.as_bytes()) {
             return Err(ReadRefusal::BadSignature);
         }
-        let sent = crate::hermes_answer::parse_rfc3339_seconds(timestamp).ok_or_else(|| {
-            ReadRefusal::Stale {
-                timestamp: timestamp.clone(),
-            }
-        })?;
-        let now = (self.now)()
-            .duration_since(UNIX_EPOCH)
-            .map(|since| since.as_secs() as i64)
-            .unwrap_or_default();
-        if (now - sent).abs() > CLOCK_SKEW_SECONDS {
+        if !is_fresh(timestamp, (self.now)()) {
             return Err(ReadRefusal::Stale {
                 timestamp: timestamp.clone(),
             });
@@ -454,10 +472,12 @@ impl Reads {
             Err(Refusal::StoreUnavailable(detail)) => {
                 return Err(ReadRefusal::StoreUnavailable(detail))
             }
+            // `connection_can_send` produces the two refusals above and no
+            // other; a third would be a store this module cannot read.
             Err(other) => return Err(ReadRefusal::StoreUnavailable(other.message())),
         }
         let Some((collector_url, service_token)) = &self.collector else {
-            return Err(ReadRefusal::NotConfigured("collector_not_configured"));
+            return Err(ReadRefusal::CollectorNotConfigured);
         };
         let response = self
             .http
@@ -487,13 +507,6 @@ impl Reads {
             ))
         })
     }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]

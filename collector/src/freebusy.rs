@@ -135,10 +135,12 @@ pub fn parse_free_busy(ics: &str, window: &Window) -> Result<Vec<Busy>> {
         if free {
             continue;
         }
+        // Never the period's text in an error: an error is a log line and a
+        // 502's detail, and a period is a piece of the owner's agenda.
         for period in value.split(',') {
             let (start, end) = period
                 .split_once('/')
-                .with_context(|| format!("a FREEBUSY period is start/end: {period:?}"))?;
+                .context("a FREEBUSY period is start/end or start/duration")?;
             let start = utc_instant(start)?;
             let end = if end.trim().starts_with('P') || end.trim().starts_with("-P") {
                 start + crate::caldav::parse_duration(end)?
@@ -155,9 +157,9 @@ fn utc_instant(value: &str) -> Result<DateTime<Utc>> {
     let value = value.trim();
     let bare = value
         .strip_suffix('Z')
-        .with_context(|| format!("a VFREEBUSY instant is UTC: {value:?}"))?;
+        .context("a VFREEBUSY instant is UTC (RFC 5545 §3.8.2.6), and this one is not")?;
     let naive = NaiveDateTime::parse_from_str(bare, "%Y%m%dT%H%M%S")
-        .with_context(|| format!("not a DATE-TIME: {value:?}"))?;
+        .context("a VFREEBUSY period holds DATE-TIMEs, and this one does not")?;
     Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
 }
 

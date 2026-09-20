@@ -5,7 +5,7 @@ description: Read the owner's free/busy through their Twalk deployment before pr
 
 # twalk-calendar
 
-Twalk lets you ask **one** thing about the owner's calendar: when they are busy, inside a window of at most fourteen days. Nothing else — not what they are doing, not with whom, not where. The answer is a list of busy intervals; every gap between them is free. This is the one governed pull of ADR 0032, and every read you make is recorded in the owner's deployment and shown to them, so read when a message needs it and not on every turn.
+Twalk lets you ask **one** thing about the owner's calendar: when they are busy, inside a window of at most fourteen days. Nothing else — not what they are doing, not with whom, not where. The answer is a list of busy intervals; every gap between them is free. This is the one governed pull of ADR 0032, and every read you make — served or refused — is recorded in the owner's deployment, for them to see, so read when a message needs it and not on every turn.
 
 ## When to use it
 
@@ -16,19 +16,21 @@ Do not use it to summarise the owner's day, to find out what a meeting is about,
 
 ## How to call it
 
-Run the script beside this file. It signs the request with the same secret your outbound hook signs answers with, so nothing new is configured on your side.
+Run the script beside this file. It signs the request with the same secret your outbound hook signs answers with; the one thing it needs beyond that is where the owner's Companion Gateway is.
 
 ```sh
-skills/twalk-calendar/freebusy.sh <connection> <from> <to>
+./freebusy.sh <connection> <from> <to>
 ```
+
+(`freebusy.sh` in this skill's directory, wherever it was installed; the examples below write it as `skills/twalk-calendar/freebusy.sh`, its path in the Twalk repository.)
 
 - `connection` — the owner's calendar connection, as the deployment names it (the operator told you; usually `calendar`).
 - `from`, `to` — RFC 3339 instants (`2026-09-24T08:00:00Z`), `to` after `from`, at most fourteen days apart. Ask for the days the conversation is about, not for the whole fortnight.
 
-The script needs two environment variables, both already in your `.env`:
+The script needs two environment variables in your `.env`:
 
-- `TWALK_GATEWAY_URL` — the owner's Companion Gateway, the same origin your outbound hook posts answers to (`https://twalk.example.org`).
-- `TWALK_ANSWER_SECRET` — the secret that hook signs with.
+- `TWALK_ANSWER_SECRET` — the secret your outbound hook signs with; already there.
+- `TWALK_GATEWAY_URL` — the owner's Companion Gateway, the same origin your outbound hook posts answers to (`https://twalk.example.org`); the operator adds it when they install this skill.
 
 It prints the Gateway's answer as JSON on stdout and exits non-zero on a refusal, with the refusal on stderr.
 
@@ -66,4 +68,8 @@ The Gateway answers a JSON error with a code; the script prints it on stderr.
 - `X-Hermes-Timestamp: <now, RFC 3339>`
 - `X-Hermes-Signature-256: sha256=<hex HMAC-SHA256>` over the line `GET`, newline, `/_twalk/hermes/freebusy`, newline, the query string exactly as sent, newline, the timestamp — keyed with `TWALK_ANSWER_SECRET`.
 
-An optional `X-Hermes-Delivery` names the attempt, so a retry is one read in the owner's record and not two.
+An optional `X-Hermes-Delivery` names the attempt: every call is a line in the owner's record, and a retry that carries the same delivery is recorded as the same attempt tried again. The script takes it from `TWALK_DELIVERY_ID` and invents one per run otherwise.
+
+The query string is signed **exactly as sent**, so encode it the way the script does: `:` as `%3A` and `+` as `%2B` in the instants (a `+` left bare reaches the Gateway as a space and the read is refused as `invalid_window`), and `%`, `&`, `=` likewise.
+
+The script hands the secret to `openssl` as an argument, where it is visible to other users of the host for the milliseconds the process runs. Hermes's host is the owner's own and single-user by ADR 0032's allowlist; on a host that is not, sign with a tool that reads the key from a file instead.

@@ -5,7 +5,8 @@
 //! and not a title, a participant or a location; a cancelled event
 //! occupies nothing; the endpoint refuses anybody else, a connection it
 //! does not hold, a window wider than fourteen days, and a calendar
-//! connection that is not connected — each with a code, each counted.
+//! connection that is not connected — each with a code, each counted on
+//! `/metrics`.
 
 mod support;
 
@@ -21,14 +22,32 @@ const OVERLAPPING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\
 const CANCELLED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-cancelled\r\nSUMMARY:Annulé\r\nSTATUS:CANCELLED\r\nDTSTART:20261006T140000Z\r\nDTEND:20261006T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const ALL_DAY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-allday\r\nSUMMARY:Déplacement\r\nDTSTART;VALUE=DATE:20261008\r\nDTEND;VALUE=DATE:20261009\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
-/// The environment with the endpoint served on a free port.
-fn env_with_endpoint(run: &Run, port: u16) -> Vec<(String, String)> {
+/// The environment with the endpoint served on a free port, and the
+/// metrics on another, so the counts can be read.
+fn env_with_endpoint(run: &Run, port: u16, metrics_port: u16) -> Vec<(String, String)> {
     let mut env = run.env_with_gateway();
     env.push((
         "COLLECTOR_HTTP_LISTEN".to_owned(),
         format!("127.0.0.1:{port}"),
     ));
+    env.push((
+        "COLLECTOR_METRICS_LISTEN".to_owned(),
+        format!("127.0.0.1:{metrics_port}"),
+    ));
     env
+}
+
+async fn metric(metrics_port: u16, outcome: &str) -> Result<u64> {
+    let text = reqwest::get(format!("http://127.0.0.1:{metrics_port}/metrics"))
+        .await?
+        .text()
+        .await?;
+    let needle = format!("twalk_collector_freebusy_reads_total{{outcome=\"{outcome}\"}} ");
+    Ok(text
+        .lines()
+        .find_map(|line| line.strip_prefix(&needle))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0))
 }
 
 fn free_port() -> Result<u16> {
@@ -85,11 +104,14 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
     run.sso.create_calendar(&other, "Perso");
     run.sso.put_event(&other, "overlap", OVERLAPPING);
     let port = free_port()?;
-    let collector = support::CollectorProc::start(&env_with_endpoint(&run, port))?;
+    let metrics_port = free_port()?;
+    let collector = support::CollectorProc::start(&env_with_endpoint(&run, port, metrics_port))?;
     collector
         .wait_logged("calendar taken as it stands", 1)
         .await?;
     wait_for_endpoint(port).await?;
+    // The wait above knocked without a token: counted, as every read is.
+    let knocks = metric(metrics_port, "unauthenticated").await?;
 
     let (status, body) = read(
         port,
@@ -198,6 +220,16 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
     .await?;
     assert_eq!(refused["error"], "connection_not_connected");
     assert_eq!(refused["state"], "pending_operator");
+
+    // Each counted under its code: two served, and one of each refusal —
+    // the `409` polled for above may have been counted more than once, and
+    // a `caldav_refused` may have slipped in before the state moved.
+    assert_eq!(metric(metrics_port, "served").await?, 2);
+    assert_eq!(metric(metrics_port, "unauthenticated").await?, knocks + 1);
+    for refusal in ["connection_unknown", "window_too_wide", "invalid_window"] {
+        assert_eq!(metric(metrics_port, refusal).await?, 1, "{refusal}");
+    }
+    assert!(metric(metrics_port, "connection_not_connected").await? >= 1);
     collector.stop().await;
     Ok(())
 }

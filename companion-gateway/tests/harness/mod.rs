@@ -1218,6 +1218,39 @@ pub fn hermes_signature(body: &str) -> String {
     format!("sha256={:x}", mac.finalize().into_bytes())
 }
 
+/// The query string of a free/busy read (#281), encoded the way the skill's
+/// script encodes it — `:` and `+` percent-encoded — since the signature
+/// covers the query as sent and the test signs what it sends.
+pub fn freebusy_query(connection: &str, from: &str, to: &str) -> String {
+    let encode = |value: &str| {
+        value
+            .replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('+', "%2B")
+            .replace('&', "%26")
+            .replace('=', "%3D")
+    };
+    format!(
+        "connection={}&from={}&to={}",
+        encode(connection),
+        encode(from),
+        encode(to)
+    )
+}
+
+/// The signature of a free/busy read (#281): hex HMAC-SHA256 over the
+/// canonical line `GET`, the path, the query as sent and the timestamp,
+/// newline-separated, prefixed `sha256=`. Computed from the wire format in
+/// the skill's document rather than from the Gateway's code, so the test
+/// states the contract.
+pub fn freebusy_signature(query: &str, timestamp: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(HERMES_ANSWER_SECRET.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(format!("GET\n/_twalk/hermes/freebusy\n{query}\n{timestamp}").as_bytes());
+    format!("sha256={:x}", mac.finalize().into_bytes())
+}
+
 /// One of Hermes's `transform_llm_output` pushes, carrying whatever the model
 /// is said to have written, stamped now.
 ///
