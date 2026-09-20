@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/connection.status.changed.schema.json",
+  "title": "fr.linagora.twalk.connection.status.changed.v1",
+  "description": "A connection changed state (ADR 0033, #274): the collector holding an OIDC grant for a mailbox or a calendar says whether it can reach the service, whether the grant still stands, and — when it cannot act — what the operator does next. Produced by the collector that holds the connection; a bridge's state is `bridge.status.changed.v1`, produced by the Companion Gateway, and the two are not merged because a bridge is a transport the Gateway supervises while a collector is the account itself. An operational event: it names nobody and carries no `consent` extension, so a persona is never woken by it (the SDK's trigger allowlist) and its subject is the connection, not a person.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "time",
+    "subject",
+    "datacontenttype",
+    "connection",
+    "data"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "specversion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$",
+      "description": "Deterministic identifier computed as sha256(connection + ':' + to_state + ':' + occurred_at). Re-emitting the same recorded transition produces the same id, and the bus deduplicates on it."
+    },
+    "source": {
+      "type": "string",
+      "format": "uri-reference",
+      "pattern": "^collector://[^/]+/connections/[a-z0-9][a-z0-9-]{0,63}$",
+      "description": "URI of the connection on the collector that holds it: collector://<host>/connections/<connection id>. The host is the collector's own name in the deployment (COLLECTOR_HOST), never a secret.",
+      "examples": [
+        "collector://collector.example.com/connections/mail-linagora"
+      ]
+    },
+    "type": {
+      "type": "string",
+      "const": "fr.linagora.twalk.connection.status.changed.v1",
+      "description": "CloudEvents type. Reverse-DNS convention with an explicit version suffix. Any breaking change to this schema requires incrementing the suffix (v2, v3, ...) rather than mutating v1."
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the event was produced (RFC 3339, UTC)."
+    },
+    "subject": {
+      "$ref": "definitions/connection.schema.json",
+      "description": "The connection whose state changed. Mirrors data.connection: a consumer filtering on the subject needs no data."
+    },
+    "datacontenttype": {
+      "type": "string",
+      "const": "application/json"
+    },
+    "dataschema": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URI pointing back to this JSON Schema.",
+      "examples": [
+        "https://schemas.twalk.dev/cloudevents/v1/connection.status.changed.schema.json"
+      ]
+    },
+    "traceparent": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$",
+      "description": "Optional W3C Trace Context traceparent header."
+    },
+    "connection": {
+      "$ref": "definitions/connection.schema.json",
+      "description": "Twalk extension (ADR 0033). The connection this event is about, duplicated from data.connection as a NATS header for server-side filtering, like every message-flow type carries it."
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "connection",
+        "kind",
+        "from_state",
+        "to_state",
+        "occurred_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "connection": {
+          "$ref": "definitions/connection.schema.json",
+          "description": "The connection, by the id the Companion Gateway's registry gave it (`GET /api/connections`). A collector refuses to start on an id the registry does not know."
+        },
+        "kind": {
+          "$ref": "definitions/kind.schema.json",
+          "description": "The connection's kind: `email`, `calendar`. Not the `network` extension, which a calendar is not a value of."
+        },
+        "from_state": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "connected",
+            "unreachable",
+            "reconnect_required",
+            "pending_operator"
+          ],
+          "description": "The state before the transition. `unknown` on the first publication of a run: what came before is not this process's to remember, and a consumer reads the first event of a run as the state, not as a change."
+        },
+        "to_state": {
+          "type": "string",
+          "enum": [
+            "connected",
+            "unreachable",
+            "reconnect_required",
+            "pending_operator"
+          ],
+          "description": "The state after the transition. `connected`: the grant renews and every service answers with it. `unreachable`: a service or the SSO did not answer; nothing is wrong with the grant, and the collector retries on its own. `reconnect_required`: the SSO refused to renew the grant (400/401 on refresh) — revoked, expired, or rotated away — and only the operator can give a new one (`twalk-collector consent --renew`). `pending_operator`: a fresh token was refused by a service (401/403) — the grant stands but lacks what that service expects, an audience or a scope — and the operator has to change the client, not the grant. Two refusals, never one: the operator does different things about them."
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 timestamp of when the transition was observed. Part of the id natural key."
+        },
+        "service": {
+          "type": "string",
+          "enum": [
+            "sso",
+            "jmap",
+            "caldav"
+          ],
+          "description": "Which service the transition is about, when one is: the SSO for `reconnect_required`, the service that refused a fresh token for `pending_operator`, the one that did not answer for `unreachable`. Absent on `connected`."
+        },
+        "hint": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "What the operator does next, in one sentence, for every state but `connected` — the log line's words, on the bus, so a dashboard can show them without reading the log. Never a token, never a URL with a code in it."
+        }
+      }
+    }
+  }
+}
