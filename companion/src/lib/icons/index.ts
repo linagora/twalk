@@ -109,6 +109,9 @@ export const icons = {
 	activate: Play,
 	revoke: LogOut,
 	locked: CircleSlash,
+	// A part of the outgoing message the user does not write (#121): a lock,
+	// not a prohibition — `locked` above is "not offered", this is "fixed".
+	fixed: LockKeyhole,
 
 	// The networks of screen 3. Lucide dropped its brand marks, so each card
 	// gets the symbol that says what the network *is* rather than a logo we

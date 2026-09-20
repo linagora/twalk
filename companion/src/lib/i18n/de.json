@@ -678,7 +678,6 @@
 	"approvals.editing.save": "Diesen Text freigeben und senden",
 	"approvals.editing.cancel": "Den Vorschlag behalten",
 	"approvals.editing.empty": "Eine leere Antwort würde eine leere Nachricht senden. Schreib etwas, oder behalte den Vorschlag.",
-
 	"approvals.disclosure.label": "Nach der Antwort angehängt, in einer eigenen Zeile — hier nicht bearbeitbar:",
 	"approvals.disclosure.fixed": "Dieser Satz geht mit jeder Antwort hinaus, die dein Assistent entwirft, in der Sprache, in der sie geschrieben wurde. Er lässt sich nicht aus einer einzelnen Antwort entfernen; in den Einstellungen lässt er sich für alle ausschalten, und das wird festgehalten.",
 	"approvals.disclosure.off": "Der Hinweis wird nicht angehängt: aus seit {date}.",

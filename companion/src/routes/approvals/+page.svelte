@@ -98,7 +98,7 @@
 	import { gateway } from '$lib/api/client';
 	import { approve, loadSuggestions } from '$lib/approvals/api';
 	import { loadDisclosure } from '$lib/settings/api';
-	import { disclosureDate, type DisclosureState } from '$lib/settings/model';
+	import { disclosureRecord, type DisclosureState } from '$lib/settings/model';
 	import { personaRows } from '$lib/dashboard/model';
 	import { emptyApprovalsKey, readRuntime, UNKNOWN, type Runtime } from '$lib/runtime/presence';
 	import { dismiss, dismissed, restoreAll } from '$lib/approvals/dismissed';
@@ -296,31 +296,38 @@
 {#snippet disclosureLine(row: Row)}
 	<!-- The rest of the outgoing message (#121): the sentence, fixed, or the
 	     reason there is none. One line, drawn once per row — under the editor
-	     while editing, under the body otherwise. -->
-	{#if disclosureSwitch !== null && !disclosureSwitch.enabled}
-		<p class="small muted disclosure-off" data-testid="disclosure-off">
-			<Icon name="info" size="dense" />
-			{$t('approvals.disclosure.off', {
-				date: disclosureSwitch.since === null ? '' : disclosureDate(disclosureSwitch.since, $locale)
-			})}
-		</p>
-	{:else if row.disclosure === null}
-		<p class="small muted" data-testid="disclosure-none">{$t('approvals.disclosure.none')}</p>
-	{:else}
-		<div class="disclosure" data-testid="disclosure" data-switch={disclosureSwitch === null ? 'unread' : 'on'}>
-			<p class="small muted disclosure__label">
-				<Icon name="locked" size="dense" />
-				{$t('approvals.disclosure.label')}
+	     while editing, under the body otherwise — and only on a row that is
+	     still to be decided: the switch read here is the switch *now*, and a
+	     reply already approved went out under the switch as it stood at the
+	     press, which the Gateway decided and this screen cannot read back
+	     yet. Saying "goes out with" or "is not added" about a sealed row
+	     would be a sentence about the present put on a message from the past. -->
+	{#if row.standing === 'approvable' && (outcomes[row.id]?.kind ?? 'none') !== 'sent'}
+		{#if disclosureSwitch !== null && !disclosureSwitch.enabled}
+			<p class="small muted disclosure-off" data-testid="disclosure-off">
+				<Icon name="info" size="dense" />
+				{$t('approvals.disclosure.off', {
+					date: disclosureRecord(disclosureSwitch, $locale).values.date
+				})}
 			</p>
-			<p class="disclosure__sentence" aria-readonly="true" data-testid="disclosure-sentence">
-				{row.disclosure}
-			</p>
-			<p class="small muted">
-				{disclosureSwitch === null
-					? $t('approvals.disclosure.unknown')
-					: $t('approvals.disclosure.fixed')}
-			</p>
-		</div>
+		{:else if row.disclosure === null}
+			<p class="small muted" data-testid="disclosure-none">{$t('approvals.disclosure.none')}</p>
+		{:else}
+			<div class="disclosure" data-testid="disclosure" data-switch={disclosureSwitch === null ? 'unread' : 'on'}>
+				<p class="small muted disclosure__label">
+					<Icon name="fixed" size="dense" />
+					{$t('approvals.disclosure.label')}
+				</p>
+				<p class="disclosure__sentence" aria-readonly="true" data-testid="disclosure-sentence">
+					{row.disclosure}
+				</p>
+				<p class="small muted">
+					{disclosureSwitch === null
+						? $t('approvals.disclosure.unknown')
+						: $t('approvals.disclosure.fixed')}
+				</p>
+			</div>
+		{/if}
 	{/if}
 {/snippet}
 

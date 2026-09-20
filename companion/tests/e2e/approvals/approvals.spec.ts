@@ -11,7 +11,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { watchBus } from '../dashboard/bus';
+import { watchBus, type BusWatch } from '../dashboard/bus';
 import {
 	bridgeStack,
 	decideAbout,
@@ -112,6 +112,11 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		await expect(row.getByTestId('approved-text')).toHaveCount(0);
 		await expect(row.getByTestId('delivered')).toBeVisible();
 		await expect(row.getByTestId('delivered')).toHaveAttribute('data-reach', 'pending');
+		// #121: once the reply is sealed, the screen stops speaking about the
+		// switch in the present tense — what went out is the Gateway's record,
+		// not the switch as it stands now.
+		await expect(row.getByTestId('disclosure')).toHaveCount(0);
+		await expect(row.getByTestId('disclosure-off')).toHaveCount(0);
 
 		// And it actually left the deployment.
 		const event = await bus.waitFor(
@@ -438,11 +443,13 @@ test('when the disclosure is off, the screen says so, and the reply goes out bar
 	// ADR 0019: turning it off is a deliberate act with a timestamp, and it is
 	// global — so this journey is the one that must put it back, whatever
 	// happens in between, or every journey after it would run undisclosed.
-	const decided = await switchDisclosure(request, token, false, 'the disclosure-off journey');
-	expect(decided.enabled).toBe(false);
-	expect(decided.actor).toBe(it.ownerId);
-	const bus = await watchBus(it.natsPort, REPLY_APPROVED_SUBJECT);
+	// The flip is inside the `try` so that the `finally` covers it too.
+	let bus: BusWatch | null = null;
 	try {
+		const decided = await switchDisclosure(request, token, false, 'the disclosure-off journey');
+		expect(decided.enabled).toBe(false);
+		expect(decided.actor).toBe(it.ownerId);
+		bus = await watchBus(it.natsPort, REPLY_APPROVED_SUBJECT);
 		await page.goto('/approvals');
 		const row = page.getByTestId(`suggestion-${published.suggestionId}`);
 		await expect(row).toBeVisible();
@@ -467,7 +474,7 @@ test('when the disclosure is off, the screen says so, and the reply goes out bar
 		expect(data.final.body).toBe(published.body);
 		expect('disclosure' in data).toBe(false);
 	} finally {
-		bus.close();
+		bus?.close();
 		const restored = await switchDisclosure(request, token, true);
 		expect(restored.enabled).toBe(true);
 	}

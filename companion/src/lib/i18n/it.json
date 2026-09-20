@@ -678,7 +678,6 @@
 	"approvals.editing.save": "Approva e invia questo testo",
 	"approvals.editing.cancel": "Mantieni ciò che era proposto",
 	"approvals.editing.empty": "Una risposta vuota invierebbe un messaggio vuoto. Scrivi qualcosa, oppure mantieni ciò che era proposto.",
-
 	"approvals.disclosure.label": "Aggiunta dopo la risposta, su una riga a parte — non modificabile qui:",
 	"approvals.disclosure.fixed": "Questa frase parte con ogni risposta scritta dal tuo assistente, nella lingua in cui è stata scritta. Non può essere tolta da una sola risposta; può essere disattivata per tutte, nelle impostazioni, e resta registrato.",
 	"approvals.disclosure.off": "La dichiarazione non viene aggiunta: disattivata dal {date}.",

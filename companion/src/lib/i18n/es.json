@@ -678,7 +678,6 @@
 	"approvals.editing.save": "Aprobar y enviar este texto",
 	"approvals.editing.cancel": "Conservar lo propuesto",
 	"approvals.editing.empty": "Una respuesta vacía enviaría un mensaje vacío. Escribe algo, o conserva lo propuesto.",
-
 	"approvals.disclosure.label": "Añadida después de la respuesta, en una línea aparte — no editable aquí:",
 	"approvals.disclosure.fixed": "Esta frase sale con cada respuesta redactada por tu asistente, en el idioma en que se escribió. No puede quitarse de una sola respuesta; puede desactivarse para todas, en los ajustes, y queda anotado.",
 	"approvals.disclosure.off": "La mención no se añade: desactivada desde el {date}.",
