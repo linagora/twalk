@@ -64,14 +64,26 @@
 		},
 
 		"collector": {
-			"what": "The collector at its OIDC seam and its process boundary (#274), against a fake SSO the harness runs and the shared test stack's bus: the operator's consent with PKCE, the grant written at 0600 and renewed with the refresh token rotated, a revoked grant read as reconnect_required, a service refusing a fresh token as pending_operator on its own connection only, a grant for another account publishing nothing, and every transition a valid connection.status.changed.v1.",
+			"what": "The collector's pure half and its OIDC seam (#274), against a fake SSO the harness runs in-process: the operator's consent with PKCE, the grant written at 0600 and left alone by a second run, the refresh token rotated on disk before the access token serves, a revoked grant read as reconnect_required and a refusing service as pending_operator, the two whoamis against the owner. No Docker, no stack.",
 			"component": "collector",
 			"workdir": "collector",
-			"run": "cargo test",
-			"needs": ["rust", "docker"],
+			"run": "cargo test --lib --test oidc",
+			"targets": ["oidc"],
+			"needs": ["rust"],
 			"tier": "required",
 			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"],
 			"triggers_note": "The Gateway's OpenAPI description is in here because the collector checks the connections it holds against the registry `GET /api/consent/snapshot` carries. `consent-cache/` is deliberately not: the collector labels no sender in #274, and the dependency arrives with the mail collector in lot 3 — `test_selection.py` derives it from `Cargo.toml`, so the line appears when the dependency does."
+		},
+
+		"collector-stack": {
+			"what": "The collector at its process boundary (#274), against the fake SSO and the shared test stack's bus: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1.",
+			"component": "collector",
+			"workdir": "collector",
+			"run": "cargo test --test status",
+			"targets": ["status"],
+			"needs": ["rust", "docker"],
+			"tier": "required",
+			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"]
 		},
 
 		"clerk": {

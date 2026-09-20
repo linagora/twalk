@@ -7,8 +7,8 @@ Verification that runs on a pull request and is a condition of merging it, rathe
 Open a pull request and it gets a verdict without anybody running anything by hand. Three checks decide it, and there are three rather than one because two facts must not share one signal:
 
 - **`routing`** — the routing table checked against the repository. Always runs, hosted, under a second.
-- **`verified`** — every selected suite that needs no Docker: the Python SDK, the shared harness's units, the Companion's Node-only suite. Always reports, including on a change that selects nothing.
-- **`verified-stack`** — every selected suite that needs a Docker host: the Sensor, the Gateway, Hermes, the clerk. It **fails** when such suites were selected and `vars.TWALK_STACK_RUNNER` names no runner, because a green tick that meant "those never ran" would be the defect this project keeps shipping.
+- **`verified`** — every selected suite that needs no Docker: the Python SDK, the shared harness's units, the consent cache's, the collector's OIDC seam against the harness's fake SSO, the Companion's Node-only suite. Always reports, including on a change that selects nothing.
+- **`verified-stack`** — every selected suite that needs a Docker host: the Sensor, the Gateway, Hermes, the clerk, the collector at its process boundary. It **fails** when such suites were selected and `vars.TWALK_STACK_RUNNER` names no runner, because a green tick that meant "those never ran" would be the defect this project keeps shipping.
 
 Running the suites locally is still the fastest way to find out whether your change works, and `AGENTS.md` holds the commands. What changed is that it is no longer the *verification*: a local run says the suites passed in your worktree, and `verified` says they passed on the change as it will land.
 

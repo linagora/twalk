@@ -51,7 +51,7 @@ cd ../../consent-cache
 cargo test            # the shared consent cache's own unit tests (no Docker)
 
 cd ../collector
-cargo test            # collector suite: the OIDC seam against the harness's fake SSO, the binary against the test stack's bus
+cargo test            # collector suites: the OIDC seam against the harness's fake SSO (no Docker), the binary against the test stack's bus
 ```
 
 The Python SDK's pure half — the consent gate, the envelopes, the configuration — is stdlib-only, so its unit tests need neither pip nor Docker (there is no pip on the host, by design: personas ship as images):
