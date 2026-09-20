@@ -46,6 +46,8 @@ use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
 use crate::portals::Portals;
 use crate::portals_http;
+use crate::runtime_presence::RuntimePresence;
+use crate::runtime_presence_http;
 use crate::session::Sessions;
 use crate::session_http;
 use crate::settings::Settings;
@@ -117,6 +119,11 @@ pub struct Gateway {
     /// empty list, because "nobody has suggested anything" and "this Gateway
     /// is not watching" are very different claims.
     suggestions: Option<Arc<Suggestions>>,
+    /// Whether a persona runtime is present ([`crate::runtime_presence`],
+    /// ticket #189): a read of the bus's consumer list, on whenever the bus
+    /// is configured. Without one `GET /api/runtime` answers
+    /// `503 runtime_not_configured` rather than `never`.
+    runtime_presence: Option<Arc<RuntimePresence>>,
     /// The model configuration and the language preference
     /// ([`crate::settings`], ticket #98): what the operator chose to reason
     /// with, and the language a persona falls back to. `None` on the same
@@ -161,6 +168,7 @@ impl Gateway {
             contacts: None,
             approvals: None,
             suggestions: None,
+            runtime_presence: None,
             settings: None,
             portals: None,
             answers: None,
@@ -289,6 +297,15 @@ impl Gateway {
         self.suggestions.clone()
     }
 
+    pub fn with_runtime_presence(mut self, presence: Option<Arc<RuntimePresence>>) -> Self {
+        self.runtime_presence = presence;
+        self
+    }
+
+    pub fn runtime_presence(&self) -> Option<Arc<RuntimePresence>> {
+        self.runtime_presence.clone()
+    }
+
     /// Adds the model and language settings (ticket #98), the same way. It
     /// is configured with sign-in rather than with consent: naming a model
     /// needs no bus, and an operator who has not set `GATEWAY_NATS_URL` can
@@ -382,6 +399,11 @@ pub fn router(gateway: Gateway) -> Router {
         // nowhere, carrying the persona's own words and none of the message
         // they answer.
         .merge(suggestions_http::routes())
+        // Whether a runtime is present (ticket #189): the same merge, the
+        // same guard. A projection of the bus's consumer list — the one trace
+        // a runtime leaves — so the screens can stop saying what was true
+        // the day their copy was written (#177).
+        .merge(runtime_presence_http::routes())
         // The model and the language (ticket #98): the same merge, the same
         // guard. Six of the seven operations are the owner's browser; the
         // seventh is the Hermes runtime's read, which the guard's table

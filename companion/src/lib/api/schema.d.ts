@@ -1063,6 +1063,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether a persona runtime is hosting personas here.
+         * @description A projection of the bus's consumer list, stored nowhere. The runtime
+         *     creates one durable consumer per persona it hosts (`persona-<id>`)
+         *     and the persona pulls from it in a loop; that consumer is the one
+         *     thing a runtime leaves behind, and it outlives the process that made
+         *     it — so existence alone would say "a runtime was once here", and this
+         *     read says more.
+         *
+         *     `presence` is one of three words, distinguishable by the caller and
+         *     not only in the Gateway's log:
+         *
+         *     - `never` — no persona consumer on the stream: no runtime configured
+         *       with a persona has ever run against this bus;
+         *     - `gone` — consumers exist and none is live: a runtime was here and
+         *       is not now;
+         *     - `present` — at least one consumer has a pull outstanding or a
+         *       message delivered and awaiting its ack: a runtime is here, hosting
+         *       personas.
+         *
+         *     A consumer is **live** when a process is on the other end right now:
+         *     a pull request waiting (`waiting_pulls`), or a message taken and not
+         *     yet acknowledged (`ack_pending`, which is what a persona in a model
+         *     call looks like between two fetches). The persona's loop leaves a gap
+         *     of milliseconds between one pull expiring and the next, so the read
+         *     samples the list more than once before calling a consumer idle. The
+         *     one residual is stated: a persona that crashed mid-message reads as
+         *     live until the bus redelivers, which is the consumer's `ack_wait`.
+         *
+         *     Not read: whether a `hermes` container or process is up. The
+         *     reference deployment deliberately keeps an unconfigured runtime
+         *     running and hosting nothing (ADR 0015, ADR 0023), so presence of the
+         *     process would be the wrong fact.
+         *
+         *     Each persona is listed with the counters its verdict was read from,
+         *     and with `activation` — the filter subject the runtime set on the
+         *     consumer (ADR 0013): `active`, or `paused`, which is a runtime that
+         *     is here and a persona that receives nothing.
+         */
+        get: operations["readRuntimePresence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/session": {
         parameters: {
             query?: never;
@@ -2670,6 +2725,36 @@ export interface components {
              */
             total: number;
         };
+        /** @description One persona the runtime created a consumer for. */
+        PersonaPresence: {
+            /** @description Messages delivered and not yet acknowledged at the last sample. */
+            ack_pending: number;
+            /**
+             * @description What the runtime set the consumer's filter subject to: the
+             *     inbound subject (`active`) or the paused subject nothing
+             *     publishes on (`paused`, ADR 0013).
+             * @enum {string}
+             */
+            activation: "active" | "paused";
+            /**
+             * @description The consumer's durable name on the stream.
+             * @example persona-assistant
+             */
+            consumer: string;
+            /**
+             * @description `live` - a pull is outstanding or a delivered message awaits its
+             *     ack; `idle` - neither, across every sample.
+             * @enum {string}
+             */
+            liveness: "live" | "idle";
+            /**
+             * @description The persona's id, as its consumer's name carries it.
+             * @example assistant
+             */
+            persona_id: string;
+            /** @description Pull requests outstanding at the last sample. */
+            waiting_pulls: number;
+        };
         /** @description One conversation, as the homeserver answers about it now. */
         Portal: {
             /**
@@ -3030,6 +3115,23 @@ export interface components {
             credential_source: "file" | "companion" | null;
             model: string;
             params: Record<string, unknown> | null;
+        };
+        /**
+         * @description Whether a persona runtime is present, read off the bus's consumer
+         *     list (ticket #189), and the evidence per persona.
+         */
+        RuntimePresence: {
+            /**
+             * @description One row per consumer the runtime created, live or not, in
+             *     consumer-name order. Empty exactly when `presence` is `never`.
+             */
+            personas: components["schemas"]["PersonaPresence"][];
+            /**
+             * @description `never` - no persona consumer exists; `gone` - consumers exist
+             *     and none is live; `present` - at least one is live.
+             * @enum {string}
+             */
+            presence: "never" | "gone" | "present";
         };
         /**
          * @description Everything the Hermes runtime injects into a persona's environment.
@@ -5500,6 +5602,63 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             503: components["responses"]["PortalsNotConfigured"];
+        };
+    };
+    readRuntimePresence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The read, as the bus answers about it right now. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimePresence"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `bus_unreachable` - the bus is configured and did not answer, so
+             *     whether a runtime is present is unknown. Never `never`: a bus that
+             *     cannot be asked and a bus with no runtime on it are two
+             *     situations, and the screen must be able to tell them apart.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            /**
+             * @description `runtime_not_configured` - this Gateway has no bus
+             *     (`GATEWAY_NATS_URL`), so there is nothing to read a runtime's
+             *     presence from. A refusal rather than `never`: "no runtime has
+             *     ever been here" and "this Gateway is not watching the bus" are
+             *     different claims, and only the first is about the runtime.
+             *     `sign_in_not_configured` when the whole API is closed.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "runtime_not_configured" | "sign_in_not_configured";
+                    };
+                };
+            };
         };
     };
     getSession: {
