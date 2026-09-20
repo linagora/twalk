@@ -1046,6 +1046,19 @@ fn the_networks_the_description_names_are_the_contracts() -> Result<()> {
         2,
         "openapi.yaml repeats the network or kind list instead of referencing Network or Kind"
     );
+    // The shape of a connection's id, the same way (#269): the contract's
+    // `definitions/connection.schema.json` is the authority, the
+    // description's `Connection.id` a copy held to it.
+    let id_pattern = twalk_test_harness::contract_definition("connection")?["pattern"]
+        .as_str()
+        .context("the connection definition has a pattern")?
+        .to_owned();
+    assert_eq!(
+        description.doc["components"]["schemas"]["Connection"]["properties"]["id"]["pattern"]
+            .as_str(),
+        Some(id_pattern.as_str()),
+        "openapi.yaml's Connection.id pattern disagrees with the contract"
+    );
     Ok(())
 }
 
@@ -3802,12 +3815,10 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         .filter_map(|connection| connection["id"].as_str())
         .collect();
     assert_eq!(
-        ids.len(),
-        connections.body["connections"]
-            .as_array()
-            .map(Vec::len)
-            .unwrap_or_default(),
-        "every connection has an id: {}",
+        ids,
+        ["whatsapp", "signal", "matrix"],
+        "one per bridge in GATEWAY_BRIDGES order, named after its network, and the native \
+         Matrix connection every deployment has: {}",
         connections.body
     );
     for connection in connections.body["connections"].as_array().unwrap() {
@@ -3816,6 +3827,16 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "derived from a bridge, a connection is named after its network: {connection}"
         );
     }
+    assert_eq!(
+        connections.body["connections"][0]["bridge_id"], STUB_BRIDGE_ID,
+        "a connection a bridge carries names it: {}",
+        connections.body
+    );
+    assert!(
+        connections.body["connections"][2]["bridge_id"].is_null(),
+        "the native connection rides no bridge: {}",
+        connections.body
+    );
     // The journal of moves (#255): this Gateway has a store, so the answer is
     // a list — empty, since nothing it can read has moved. A move against real
     // rooms is `tests/portals.rs`'s.

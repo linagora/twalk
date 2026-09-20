@@ -79,9 +79,8 @@
       "description": "Twalk extension. Identifies the network the SUBJECT is on, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. Unlike every other event type, this one is not about traffic in a room, so the value is derived from something that identifies the subject — a bridge ghost's localpart, or the fact that they share a room no bridge marked — and never from an ordering over the rooms they happen to be in (ADR 0027). The value matrix is a native Matrix account, reached through the user's own homeserver instead of through a bridge (ADR 0009); a native Matrix contact who is also a member of a bridged portal room is still matrix, because that membership is an invitation and not an identity on that network. A subject the Sensor cannot attribute to exactly one network produces no event at all rather than an event under a guessed network, since consent is looked up by (subject, network)."
     },
     "connection": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
-      "description": "Twalk extension (ADR 0033). The **connection** this event belongs to: the one configured account — a bridge, a mailbox, a calendar — the deployment observed it on or acts through, by the opaque stable id the deployment gave it (`whatsapp`, `mail-linagora`). `network` says what kind of thing that is; this says which one. Two facts, two fields: a deployment with two bridges of one network has two connections, and a consent decision is scoped to a connection. On a deployment with one connection per network the id is the network's name, which is what every existing decision was migrated onto. The Companion Gateway keeps the registry (`GET /api/connections`); a producer never derives an id, it is handed one."
+      "$ref": "definitions/connection.schema.json",
+      "description": "Twalk extension (ADR 0033). The **connection** this event belongs to — the one configured account the deployment observed it on or acts through — by the id the Companion Gateway's registry gave it. `network` says what kind of thing that is; this says which one. Handed to the producer, never derived by it; see definitions/connection.schema.json."
     },
     "consent": {
       "type": "string",

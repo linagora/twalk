@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/definitions/connection.schema.json",
+  "title": "Connection",
+  "description": "The id of a connection (ADR 0033): one configured account the deployment observes or acts through — a bridge, a mailbox, a calendar — by the opaque stable id the deployment gave it (`whatsapp`, `mail-linagora`). `network` (network.schema.json) says what kind of thing that is; this says which one. Two facts, two fields: a deployment with two bridges of one network has two connections, and a consent decision is scoped to a connection. On a deployment with one connection per network the id is the network's name, which is what every existing decision was migrated onto. The Companion Gateway keeps the registry (`GET /api/connections`); a producer never derives an id, it is handed one. The shape here is the one authority — the Gateway's own check and `openapi.yaml`'s copy are tested against it.",
+  "type": "string",
+  "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+}

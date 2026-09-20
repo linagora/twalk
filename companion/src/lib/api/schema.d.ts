@@ -580,11 +580,13 @@ export interface paths {
          *     `definitions/kind.schema.json` — and a label; the ones a bridge
          *     carries name the bridge and, when the operator named one, its bot.
          *
-         *     Configuration, read-only: `GATEWAY_CONNECTIONS` (`id=kind[=label]`,
-         *     a label of `bridge:<bridge_id>` naming the transport explicitly), or,
-         *     unset, one connection per bridge **whose id is the network's name** —
-         *     the id every existing consent decision was migrated onto (#270). A
-         *     second bridge of one network is declared, never derived.
+         *     Configuration, read-only: `GATEWAY_CONNECTIONS` (`id=kind[=label]`;
+         *     the bridge a connection rides is the `GATEWAY_BRIDGES` entry of the
+         *     same id, else the only bridge of its kind), or, unset, one connection
+         *     per bridge **whose id is the network's name** — the id every existing
+         *     consent decision was migrated onto (#270). A second bridge of one
+         *     network is declared, never derived. The native `matrix` connection —
+         *     the user's own account on the homeserver — is in every registry.
          *
          *     The Companion draws a card per connection and decides per connection
          *     (#272); `network` on a card is its kind.

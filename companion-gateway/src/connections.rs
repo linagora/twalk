@@ -22,22 +22,29 @@
 //! one connection per bridge, **whose id is the network's name**. That is
 //! the id every existing consent decision is migrated onto (#270), and it is
 //! correct only because it is done now, while every deployment has exactly
-//! one bridge per network; a second one is declared, never guessed.
+//! one bridge per network; a second one is declared, never guessed. The
+//! native Matrix connection — the user's own account on the homeserver,
+//! which the Sensor observes without any bridge (ADR 0009) — is in every
+//! registry, declared or derived, because every deployment has it by
+//! construction: the Sensor *is* an account on that homeserver.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::bridge::BridgeConfig;
 
-/// What an id may look like: opaque, stable, URL- and subject-safe.
-pub const ID_PATTERN: &str = "^[a-z0-9][a-z0-9-]{0,63}$";
-
-/// The contract's definition of the kinds, compiled in: the one authority
-/// (#268), carried by the binary rather than copied into it.
+/// The contract's definitions, compiled in: the one authority (#268),
+/// carried by the binary rather than copied into it.
 const KIND_DEFINITION: &str =
     include_str!("../../contracts/cloudevents/v1/definitions/kind.schema.json");
+const CONNECTION_DEFINITION: &str =
+    include_str!("../../contracts/cloudevents/v1/definitions/connection.schema.json");
+
+/// The kind of the native Matrix connection, and its id: the network's name,
+/// like every derived connection's.
+const MATRIX: &str = "matrix";
 
 /// Every kind the contract knows, in its order.
 pub fn kinds() -> Vec<String> {
@@ -51,6 +58,15 @@ pub fn kinds() -> Vec<String> {
                     .collect()
             })
         })
+        .unwrap_or_default()
+}
+
+/// What an id may look like, as the contract spells it — quoted in the
+/// refusal so the operator reads the rule, not a paraphrase of it.
+pub fn id_pattern() -> String {
+    serde_json::from_str::<serde_json::Value>(CONNECTION_DEFINITION)
+        .ok()
+        .and_then(|definition| definition["pattern"].as_str().map(str::to_owned))
         .unwrap_or_default()
 }
 
@@ -71,6 +87,18 @@ pub struct Connection {
     pub bridge_bot: Option<String>,
 }
 
+impl Connection {
+    fn carried_by(id: String, kind: String, label: String, bridge: Option<&BridgeConfig>) -> Self {
+        Self {
+            id,
+            kind,
+            label,
+            bridge_id: bridge.map(|bridge| bridge.bridge_id.clone()),
+            bridge_bot: bridge.and_then(|bridge| bridge.bot_user_id.clone()),
+        }
+    }
+}
+
 /// The registry: every connection, in the order declared.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Registry {
@@ -79,21 +107,38 @@ pub struct Registry {
 
 impl Registry {
     /// The registry as configured: `GATEWAY_CONNECTIONS` when set, otherwise
-    /// one connection per bridge whose id is the network's name.
+    /// one connection per bridge whose id is the network's name; and the
+    /// native Matrix connection either way, labelled with the homeserver's
+    /// name, unless the operator declared one.
     ///
     /// `declared` is the raw variable: `id=kind[=label]` entries, comma
-    /// separated. A declared connection that names a bridge's network takes
-    /// that bridge (and its bot) as its transport when it is the only one of
-    /// that kind; two bridges of one kind must each be named by
-    /// `bridge:<bridge_id>` as the label's transport, which is how a second
-    /// WhatsApp account is declared rather than guessed.
-    pub fn from_config(declared: Option<&str>, bridges: &[BridgeConfig]) -> Result<Self> {
+    /// separated. The bridge a declared connection rides is the one whose
+    /// `GATEWAY_BRIDGES` id is the connection's id, else the only bridge of
+    /// its kind. That is how a second WhatsApp account is declared rather
+    /// than guessed: two connections of one kind are each named after their
+    /// bridge, and two that are not is refused, because the Sensor could
+    /// not tell their portals apart.
+    pub fn from_config(
+        declared: Option<&str>,
+        bridges: &[BridgeConfig],
+        homeserver_name: &str,
+    ) -> Result<Self> {
         let kinds = kinds();
-        let kinds = &kinds[..];
-        let connections = match declared.map(str::trim).filter(|value| !value.is_empty()) {
+        let mut connections = match declared.map(str::trim).filter(|value| !value.is_empty()) {
             None => Self::derived_from_bridges(bridges),
             Some(declared) => Self::parse_declared(declared, bridges)?,
         };
+        if !connections
+            .iter()
+            .any(|connection| connection.kind == MATRIX)
+        {
+            connections.push(Connection::carried_by(
+                MATRIX.to_owned(),
+                MATRIX.to_owned(),
+                homeserver_name.to_owned(),
+                None,
+            ));
+        }
         for connection in &connections {
             if !kinds.iter().any(|kind| kind == &connection.kind) {
                 bail!(
@@ -109,17 +154,46 @@ impl Registry {
                 bail!(
                     "GATEWAY_CONNECTIONS names the connection {:?}, which is not a valid id: \
                      lower-case letters, digits and dashes, 1 to 64 characters, starting with a \
-                     letter or digit ({ID_PATTERN})",
+                     letter or digit ({})",
+                    connection.id,
+                    id_pattern()
+                );
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for connection in &connections {
+            if !seen.insert(connection.id.as_str()) {
+                bail!(
+                    "GATEWAY_CONNECTIONS names the connection {:?} twice",
                     connection.id
                 );
             }
         }
-        let mut seen = BTreeMap::new();
+        // Two connections of one kind that ride no bridge of their own are
+        // two the Sensor cannot tell apart: a portal names its bridge's bot,
+        // and neither connection names one.
         for connection in &connections {
-            if seen.insert(connection.id.clone(), ()).is_some() {
+            if connection.bridge_id.is_some() {
+                continue;
+            }
+            let of_kind: Vec<&Connection> = connections
+                .iter()
+                .filter(|other| other.kind == connection.kind)
+                .collect();
+            if of_kind.len() > 1 && bridges.iter().any(|b| b.network == connection.kind) {
                 bail!(
-                    "GATEWAY_CONNECTIONS names the connection {:?} twice",
-                    connection.id
+                    "GATEWAY_CONNECTIONS names {} connections of the kind {:?} and {:?} is not \
+                     named after the bridge that carries it: name each after its GATEWAY_BRIDGES \
+                     id ({})",
+                    of_kind.len(),
+                    connection.kind,
+                    connection.id,
+                    bridges
+                        .iter()
+                        .filter(|b| b.network == connection.kind)
+                        .map(|b| b.bridge_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }
@@ -136,13 +210,12 @@ impl Registry {
             if connections.iter().any(|known| known.kind == bridge.network) {
                 continue;
             }
-            connections.push(Connection {
-                id: bridge.network.clone(),
-                kind: bridge.network.clone(),
-                label: bridge.bridge_id.clone(),
-                bridge_id: Some(bridge.bridge_id.clone()),
-                bridge_bot: bridge.bot_user_id.clone(),
-            });
+            connections.push(Connection::carried_by(
+                bridge.network.clone(),
+                bridge.network.clone(),
+                bridge.bridge_id.clone(),
+                Some(bridge),
+            ));
         }
         connections
     }
@@ -167,41 +240,21 @@ impl Registry {
                 .next()
                 .map(str::trim)
                 .filter(|label| !label.is_empty())
-                .map(str::to_owned);
-            // The transport: `bridge:<bridge_id>` as the label names it
-            // explicitly; otherwise the only bridge of that kind, if there is
-            // exactly one.
-            let (label, bridge) = match label.as_deref().and_then(|l| l.strip_prefix("bridge:")) {
-                Some(bridge_id) => {
-                    let bridge = bridges
-                        .iter()
-                        .find(|bridge| bridge.bridge_id == bridge_id)
-                        .with_context(|| {
-                            format!(
-                                "GATEWAY_CONNECTIONS entry {entry:?} names the bridge \
-                                 {bridge_id:?}, which GATEWAY_BRIDGES does not"
-                            )
-                        })?;
-                    (bridge_id.to_owned(), Some(bridge))
-                }
-                None => {
-                    let of_kind: Vec<&BridgeConfig> =
-                        bridges.iter().filter(|b| b.network == kind).collect();
-                    let bridge = if of_kind.len() == 1 {
-                        Some(of_kind[0])
-                    } else {
-                        None
-                    };
-                    (label.unwrap_or_else(|| id.clone()), bridge)
-                }
-            };
-            connections.push(Connection {
-                id,
-                kind,
-                label,
-                bridge_id: bridge.map(|b| b.bridge_id.clone()),
-                bridge_bot: bridge.and_then(|b| b.bot_user_id.clone()),
-            });
+                .map(str::to_owned)
+                .unwrap_or_else(|| id.clone());
+            // The transport: the bridge named like the connection, else the
+            // only bridge of its kind. None for a mailbox or a calendar.
+            let bridge = bridges
+                .iter()
+                .find(|bridge| bridge.bridge_id == id)
+                .or_else(|| {
+                    let mut of_kind = bridges.iter().filter(|bridge| bridge.network == kind);
+                    match (of_kind.next(), of_kind.next()) {
+                        (Some(only), None) => Some(only),
+                        _ => None,
+                    }
+                });
+            connections.push(Connection::carried_by(id, kind, label, bridge));
         }
         Ok(connections)
     }
@@ -212,6 +265,17 @@ impl Registry {
 
     pub fn get(&self, id: &str) -> Option<&Connection> {
         self.connections.iter().find(|c| c.id == id)
+    }
+
+    /// The single connection of a kind, when the kind has exactly one: what
+    /// an event that names its network but no connection resolves to — a
+    /// lookup in the registry, not a derivation from the name.
+    pub fn only_of_kind(&self, kind: &str) -> Option<&Connection> {
+        let mut of_kind = self.connections.iter().filter(|c| c.kind == kind);
+        match (of_kind.next(), of_kind.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
     }
 
     /// The bridges no connection covers: a second bridge of a kind that was
@@ -230,6 +294,8 @@ impl Registry {
     }
 }
 
+/// The contract's `pattern` for an id, by hand so the Gateway carries no
+/// regex engine for one rule; the unit test holds it to the contract.
 pub fn id_is_valid(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {
@@ -256,6 +322,14 @@ mod tests {
         }
     }
 
+    fn ids(registry: &Registry) -> Vec<&str> {
+        registry
+            .connections()
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect()
+    }
+
     #[test]
     fn the_kinds_compiled_in_are_the_contracts() {
         assert_eq!(
@@ -265,24 +339,54 @@ mod tests {
     }
 
     #[test]
+    fn the_id_check_agrees_with_the_contracts_pattern() {
+        // The contract's `definitions/connection.schema.json` is the one
+        // authority on what an id looks like; the check here is a hand copy
+        // so the Gateway needs no regex engine, and this is what keeps the
+        // copy honest: the contract's own validator and the copy must agree
+        // on every candidate, including the ones at the edges.
+        let definition =
+            twalk_test_harness::contract_definition("connection").expect("the definition");
+        let validator = jsonschema::validator_for(&definition).expect("a valid schema");
+        for candidate in [
+            "whatsapp",
+            "mail-linagora",
+            "a",
+            "0",
+            &"a".repeat(64),
+            &"a".repeat(65),
+            "",
+            "-a",
+            "Mail",
+            "a_b",
+            "a.b",
+            "a b",
+            "é",
+        ] {
+            assert_eq!(
+                id_is_valid(candidate),
+                validator.is_valid(&serde_json::json!(candidate)),
+                "{candidate:?}: the hand copy and the contract disagree"
+            );
+        }
+    }
+
+    #[test]
     fn with_nothing_declared_each_bridge_is_a_connection_named_after_its_network() {
         // The migration id (#270): every existing decision lands on it, which
         // is correct only because every deployment has one bridge per network
-        // today.
+        // today. And the native Matrix connection, which every deployment
+        // has by construction and no bridge carries.
         let registry = Registry::from_config(
             None,
             &[
                 bridge("mautrix-whatsapp", "whatsapp", Some("@whatsappbot:x")),
                 bridge("mautrix-signal", "signal", None),
             ],
+            "matrix.example.com",
         )
         .unwrap();
-        let ids: Vec<&str> = registry
-            .connections()
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        assert_eq!(ids, ["whatsapp", "signal"]);
+        assert_eq!(ids(&registry), ["whatsapp", "signal", "matrix"]);
         assert_eq!(
             registry.get("whatsapp").unwrap().bridge_bot.as_deref(),
             Some("@whatsappbot:x")
@@ -291,6 +395,22 @@ mod tests {
             registry.get("signal").unwrap().bridge_id.as_deref(),
             Some("mautrix-signal")
         );
+        let matrix = registry.get("matrix").unwrap();
+        assert_eq!(
+            (
+                matrix.kind.as_str(),
+                matrix.label.as_str(),
+                matrix.bridge_id.is_none(),
+                matrix.bridge_bot.is_none()
+            ),
+            ("matrix", "matrix.example.com", true, true)
+        );
+    }
+
+    #[test]
+    fn a_deployment_with_no_bridge_still_has_its_native_matrix_connection() {
+        let registry = Registry::from_config(None, &[], "matrix.example.com").unwrap();
+        assert_eq!(ids(&registry), ["matrix"]);
     }
 
     #[test]
@@ -299,10 +419,10 @@ mod tests {
             bridge("mautrix-whatsapp", "whatsapp", None),
             bridge("mautrix-whatsapp-work", "whatsapp", None),
         ];
-        let registry = Registry::from_config(None, &bridges).unwrap();
+        let registry = Registry::from_config(None, &bridges, "x").unwrap();
         assert_eq!(
-            registry.connections().len(),
-            1,
+            ids(&registry),
+            ["whatsapp", "matrix"],
             "the first wins the name, the second is nobody's"
         );
         assert_eq!(
@@ -316,20 +436,48 @@ mod tests {
     }
 
     #[test]
-    fn a_declaration_names_a_second_account_and_its_transport() {
+    fn a_declaration_names_a_second_account_and_the_bridge_that_carries_it() {
+        // Two bridges of one kind: each connection is named after the bridge
+        // it rides, which is what ties it to that bridge's bot. A connection
+        // of a kind with exactly one bridge takes that bridge without being
+        // named after it, and a connection no bridge carries has none.
         let bridges = [
             bridge("mautrix-whatsapp", "whatsapp", Some("@whatsappbot:x")),
             bridge("mautrix-whatsapp-work", "whatsapp", Some("@workbot:x")),
+            bridge("mautrix-signal", "signal", Some("@signalbot:x")),
         ];
         let registry = Registry::from_config(
-            Some("whatsapp=whatsapp=bridge:mautrix-whatsapp,wa-work=whatsapp=bridge:mautrix-whatsapp-work,mail-linagora=email=Twake Mail"),
+            Some(
+                "mautrix-whatsapp=whatsapp=Home,mautrix-whatsapp-work=whatsapp=Work,\
+                 signal=signal,mail-linagora=email=Twake Mail",
+            ),
             &bridges,
+            "matrix.example.com",
         )
         .unwrap();
-        assert_eq!(registry.connections().len(), 3);
         assert_eq!(
-            registry.get("wa-work").unwrap().bridge_bot.as_deref(),
+            ids(&registry),
+            [
+                "mautrix-whatsapp",
+                "mautrix-whatsapp-work",
+                "signal",
+                "mail-linagora",
+                "matrix"
+            ]
+        );
+        assert_eq!(
+            registry
+                .get("mautrix-whatsapp-work")
+                .unwrap()
+                .bridge_bot
+                .as_deref(),
             Some("@workbot:x")
+        );
+        assert_eq!(registry.get("mautrix-whatsapp").unwrap().label, "Home");
+        let signal = registry.get("signal").unwrap();
+        assert_eq!(
+            (signal.label.as_str(), signal.bridge_bot.as_deref()),
+            ("signal", Some("@signalbot:x"))
         );
         let mail = registry.get("mail-linagora").unwrap();
         assert_eq!(
@@ -344,15 +492,50 @@ mod tests {
     }
 
     #[test]
-    fn a_kind_the_contract_does_not_know_a_bad_id_and_a_duplicate_are_refused_loudly() {
+    fn a_declared_matrix_connection_is_the_operators_and_not_added_twice() {
+        let registry =
+            Registry::from_config(Some("matrix=matrix=Own homeserver"), &[], "x").unwrap();
+        assert_eq!(ids(&registry), ["matrix"]);
+        assert_eq!(registry.get("matrix").unwrap().label, "Own homeserver");
+    }
+
+    #[test]
+    fn two_declared_connections_of_one_kind_that_no_bridge_tells_apart_are_refused() {
+        // Neither is named after a bridge, and the kind has two: the
+        // registry would hand the Sensor two connections it cannot tell
+        // apart, so the operator is told to name them after their bridges.
+        let bridges = [
+            bridge("mautrix-whatsapp", "whatsapp", Some("@whatsappbot:x")),
+            bridge("mautrix-whatsapp-work", "whatsapp", Some("@workbot:x")),
+        ];
+        let refused =
+            Registry::from_config(Some("wa-home=whatsapp,wa-work=whatsapp"), &bridges, "x")
+                .unwrap_err()
+                .to_string();
+        assert!(refused.contains("GATEWAY_CONNECTIONS"), "{refused}");
+        assert!(refused.contains("mautrix-whatsapp-work"), "{refused}");
+    }
+
+    #[test]
+    fn a_kind_the_contract_does_not_know_a_bad_id_and_a_duplicate_are_refused_naming_the_variable()
+    {
         let refused = |declared: &str| {
-            Registry::from_config(Some(declared), &[])
+            Registry::from_config(Some(declared), &[], "x")
                 .unwrap_err()
                 .to_string()
         };
-        assert!(refused("irc-home=irc").contains("kind.schema.json"));
-        assert!(refused("Mail=email").contains("not a valid id"));
-        assert!(refused("a=email,a=calendar").contains("twice"));
-        assert!(refused("a").contains("has no kind"));
+        for (declared, reason) in [
+            ("irc-home=irc", "kind.schema.json"),
+            ("Mail=email", "not a valid id"),
+            ("a=email,a=calendar", "twice"),
+            ("a", "has no kind"),
+        ] {
+            let message = refused(declared);
+            assert!(message.contains(reason), "{declared}: {message}");
+            assert!(
+                message.contains("GATEWAY_CONNECTIONS"),
+                "{declared}: {message}"
+            );
+        }
     }
 }

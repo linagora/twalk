@@ -143,6 +143,11 @@ async fn main() -> Result<()> {
     // and one bus: the outbox that publishes decisions (#49) and the
     // projection that consumes the inbound stream to know who is waiting for
     // one (#54).
+    // The registry of connections (ADR 0033, #269): configuration, held once
+    // and handed to everything that needs it — the API, the consent snapshot
+    // the Sensor stamps events from, the approvals that resolve an old event
+    // against it, and the store that keeps it for the migrations to come.
+    let connections = Arc::new(config.connections.clone());
     let (consent, contacts, approvals, suggestions, answers, store) = match &config.consent {
         Some(consent) => {
             let (store, outbox, owner) = open_consent(consent, &metrics)?;
@@ -158,6 +163,7 @@ async fn main() -> Result<()> {
             let approvals = Arc::new(Approvals::new(
                 store.clone(),
                 metrics.clone(),
+                connections.clone(),
                 consent.owner.clone(),
                 consent.nats_url.clone(),
                 config.approval_lookup_window,
@@ -405,18 +411,14 @@ async fn main() -> Result<()> {
     // homeserver, the Sensor's Matrix ID and each bridge's appservice token
     // — nothing of the store, the bus or the owner's session — so it is
     // built from configuration alone and is on whenever those three exist.
-    // The registry of connections (ADR 0033, #269): configuration, held once
-    // and handed to everything that needs it — the API, the consent snapshot
-    // the Sensor stamps events from, and the store that keeps it for the
-    // migrations to come. A bridge no connection covers is said now, because
-    // its portals' traffic will not be published until it is named.
-    let connections = Arc::new(config.connections.clone());
+    // A bridge no connection covers is said now, because its portals'
+    // traffic will not be published until it is named.
     for uncovered in connections.uncovered_bridges(&config.bridges) {
         warn!(
             bridge = %uncovered.bridge_id,
             network = %uncovered.network,
             "no connection covers this bridge: a second bridge of one network is declared, never \
-             derived — name it in GATEWAY_CONNECTIONS (id=network=bridge:<bridge_id>), or the \
+             derived — name it in GATEWAY_CONNECTIONS after its GATEWAY_BRIDGES id (<bridge_id>=<network>=<label>), or the \
              Sensor publishes nothing from its portals (ADR 0033)"
         );
     }

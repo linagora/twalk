@@ -652,6 +652,10 @@ impl Config {
         let connections = crate::connections::Registry::from_config(
             env("GATEWAY_CONNECTIONS").as_deref(),
             &bridges,
+            sign_in
+                .as_ref()
+                .map(|sign_in| sign_in.homeserver_name.as_str())
+                .unwrap_or("matrix"),
         )?;
         Ok(Self {
             listen: optional("GATEWAY_LISTEN", "0.0.0.0:8080")?,

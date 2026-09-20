@@ -12,12 +12,15 @@
 //! The lookup is by the **bridge bot** that built the room, read from the
 //! portal's own `m.bridge` marker: a registry entry that names that bot is
 //! the answer. An entry that names no bot — the operator configured none —
-//! is the answer when it is the only connection of the room's kind, which
-//! is every deployment today. Two connections of one kind with no bot on
-//! either is a registry that cannot tell them apart, and the event is not
-//! published rather than published under a guess: a message attributed to
-//! the wrong perimeter is a message a decision about the *other* perimeter
-//! would govern. Native Matrix traffic is the `matrix` connection.
+//! is the answer when it is the only connection of the room's kind: there
+//! is nothing for the room's bot to disagree with. An entry that names
+//! *another* bot is not the answer, however alone it is: the registry said
+//! which bot is this perimeter's, and this room's is not it. In every such
+//! case — no connection of the kind, several and none naming the bot, one
+//! naming a different bot — the event is not published rather than
+//! published under a guess: a message attributed to the wrong perimeter is
+//! a message a decision about the *other* perimeter would govern. Native
+//! Matrix traffic — a room no bot built — is the `matrix` connection.
 //!
 //! A deployment with no Gateway at all has no registry to be handed; it has
 //! exactly one connection per network by construction, and the implicit
@@ -57,7 +60,7 @@ pub enum Resolution {
     Connection(String),
     /// No entry names this room's bot and the room's kind has no single
     /// entry to fall back on: not published, counted.
-    Unknown { reason: &'static str },
+    Unknown { reason: String },
 }
 
 impl Registry {
@@ -117,9 +120,10 @@ impl Registry {
     }
 
     /// The connection of a room: by its bridge bot when the registry names
-    /// it, else the single connection of the room's kind. `bridge_bot` is the
-    /// `bridgebot` the room's own `m.bridge` marker names — `None` for a
-    /// native Matrix room, whose kind is `matrix`.
+    /// it, else the single connection of the room's kind when that one names
+    /// no bot of its own. `bridge_bot` is the `bridgebot` the room's own
+    /// `m.bridge` marker names — `None` for a native Matrix room, whose kind
+    /// is `matrix`.
     pub fn resolve(&self, bridge_bot: Option<&str>, network: Network) -> Resolution {
         if let Some(bot) = bridge_bot {
             if let Some(connection) = self
@@ -136,13 +140,23 @@ impl Registry {
             .filter(|connection| connection.kind == network.as_str())
             .collect();
         match of_kind.as_slice() {
-            [only] => Resolution::Connection(only.id.clone()),
+            [only] => match (&only.bridge_bot, bridge_bot) {
+                (Some(named), Some(_)) => Resolution::Unknown {
+                    reason: format!(
+                        "the only connection of this kind, {}, is {named}'s and this room was \
+                         built by another bot",
+                        only.id
+                    ),
+                },
+                _ => Resolution::Connection(only.id.clone()),
+            },
             [] => Resolution::Unknown {
-                reason: "no connection of this kind is registered",
+                reason: "no connection of this kind is registered".to_owned(),
             },
             _ => Resolution::Unknown {
                 reason: "several connections of this kind are registered and none names this \
-                         room's bridge bot",
+                         room's bridge bot"
+                    .to_owned(),
             },
         }
     }
@@ -189,6 +203,24 @@ mod tests {
         assert_eq!(
             registry.resolve(None, Network::Matrix),
             Resolution::Connection("matrix".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_bot_the_kinds_only_connection_does_not_name_publishes_nothing() {
+        // The reference deployment: one WhatsApp connection, and the Gateway
+        // named its bot. A portal built by some other bot of that kind is
+        // not that connection's — not published, and said.
+        let registry = handed(json!([
+            { "id": "whatsapp", "kind": "whatsapp", "bridge_bot": "@whatsappbot:x" },
+        ]));
+        assert!(matches!(
+            registry.resolve(Some("@otherbot:x"), Network::Whatsapp),
+            Resolution::Unknown { reason } if reason.contains("@whatsappbot:x")
+        ));
+        assert_eq!(
+            registry.resolve(Some("@whatsappbot:x"), Network::Whatsapp),
+            Resolution::Connection("whatsapp".to_owned())
         );
     }
 

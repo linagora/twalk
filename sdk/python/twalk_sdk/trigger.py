@@ -105,12 +105,12 @@ class Trigger:
     def connection(self) -> Optional[str]:
         """The connection the trigger arrived on (ADR 0033, #269): the one
         configured account, by the id the deployment gave it — `network` is
-        its kind. An event older than #269 carries none and is read as its
-        network's single connection, whose id is the network's name: the id
-        every existing consent decision was migrated onto. A persona copies
-        it onto everything it publishes and never derives one.
+        its kind. A persona copies it onto everything it publishes and never
+        derives one: a trigger that carries none (published before #269) is
+        one the persona cannot answer on the bus, and the envelope says so
+        rather than guess a perimeter.
         """
-        return self._attribute("connection") or self._attribute("network")
+        return self._attribute("connection")
 
     @property
     def consent(self) -> Optional[str]:

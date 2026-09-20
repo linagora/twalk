@@ -91,10 +91,6 @@ impl StubGateway {
         &self.service_token
     }
 
-    /// Serves this state from now on: the entries, and the stream sequence
-    /// they reflect. The Sensor will follow the stream from `stream_sequence`
-    /// **plus one**, so pass the sequence of the last decision the entries
-    /// account for.
     /// Serves this registry of connections with the snapshot from now on.
     pub fn serve_connections(&self, connections: Vec<Value>) {
         self.state
@@ -103,6 +99,10 @@ impl StubGateway {
             .connections = Some(connections);
     }
 
+    /// Serves this state from now on: the entries, and the stream sequence
+    /// they reflect. The Sensor will follow the stream from `stream_sequence`
+    /// **plus one**, so pass the sequence of the last decision the entries
+    /// account for.
     pub fn serve(&self, entries: Vec<Value>, stream_sequence: u64) {
         let mut state = self.lock();
         state.entries = entries;

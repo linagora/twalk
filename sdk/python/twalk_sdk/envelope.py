@@ -160,6 +160,11 @@ def _base_event(
             f"consent extensions (network={trigger.network!r}, "
             f"consent={trigger.consent!r})"
         )
+    if not trigger.connection:
+        raise EnvelopeError(
+            "a message-flow event must carry the trigger's connection (ADR 0033): "
+            "the trigger names none, and a persona never derives one"
+        )
     event: Dict[str, Any] = {
         "specversion": SPEC_VERSION,
         "id": event_id,

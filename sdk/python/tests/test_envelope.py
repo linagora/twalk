@@ -194,16 +194,19 @@ class NatsHeadersTest(unittest.TestCase):
         self.assertEqual(event["connection"], "wa-work")
         self.assertEqual(nats_headers(event)["connection"], "wa-work")
 
-    def test_a_trigger_older_than_the_connection_reads_as_its_networks_one(self) -> None:
-        # The bus keeps events published before #269: they carry no
-        # connection and are read as their network's single one, the id every
-        # existing decision was migrated onto.
+    def test_a_trigger_that_names_no_connection_is_refused_and_never_guessed(self) -> None:
+        # The bus may keep events published before #269, which carry no
+        # connection. The persona does not stand the network's name in for
+        # it: which perimeter that was is the registry's to say, not the
+        # persona's, and an envelope stamped with a guess is one the wrong
+        # decisions would govern.
         raw = fixture("inbound.message.received")
         del raw["connection"]
-        event = thinking_event(
-            persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
-        )
-        self.assertEqual(event["connection"], "whatsapp")
+        with self.assertRaises(EnvelopeError) as refused:
+            thinking_event(
+                persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
+            )
+        self.assertIn("connection", str(refused.exception))
 
     def test_the_traceparent_header_is_absent_when_the_event_has_none(self) -> None:
         raw = fixture("inbound.message.received")

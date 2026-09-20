@@ -960,11 +960,15 @@ async fn every_event_is_stamped_with_the_connection_the_registry_names_for_its_r
     Ok(())
 }
 
-/// A room no connection covers publishes nothing — never a guessed
+/// A room whose bot no connection names publishes nothing — never a guessed
 /// perimeter, whose decisions would be another account's — and the silence
-/// is counted and said.
+/// is counted and said. The registry here is the reference deployment's:
+/// one WhatsApp connection, its bot named by the Gateway. The room is built
+/// by a bot of the same kind that is not that one, which is exactly the
+/// case a by-kind guess would get wrong.
 #[tokio::test]
-async fn a_room_no_connection_covers_is_not_published_and_the_drop_is_counted() -> Result<()> {
+async fn a_room_whose_bot_no_connection_names_is_not_published_and_the_drop_is_counted(
+) -> Result<()> {
     const METRICS_LISTEN: &str = "127.0.0.1:19013";
     const METRICS_URL: &str = "http://127.0.0.1:19013/metrics";
 
@@ -976,8 +980,11 @@ async fn a_room_no_connection_covers_is_not_published_and_the_drop_is_counted() 
 
     let gateway = StubGateway::start(SERVICE_TOKEN).await?;
     gateway.serve(Vec::new(), 0);
-    // A registry handed over that names no WhatsApp connection at all.
-    gateway.serve_connections(vec![json!({ "id": "signal", "kind": "signal" })]);
+    // The one WhatsApp connection is another bot's.
+    gateway.serve_connections(vec![
+        json!({ "id": "whatsapp", "kind": "whatsapp", "bridge_bot": "@bot_beta:test.twalk" }),
+        json!({ "id": "matrix", "kind": "matrix" }),
+    ]);
     bus.delete_consumer(STREAM, CONSENT_CONSUMER).await?;
     let url = gateway.url();
     let sensor = SensorProc::start(&harness::sensor_env_with(&[

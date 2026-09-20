@@ -390,23 +390,39 @@ pub struct Trigger {
     pub room_id: String,
 }
 
+/// The connection an event on the bus belongs to: the one it carries, or —
+/// for an event published before #269, or by a producer that has not
+/// learned the extension yet — the registry's single connection of its
+/// kind. A lookup in the registry the Gateway keeps, never a name derived
+/// from the network: when the kind has no connection, or two, the Gateway
+/// does not guess which perimeter the event was about, and says so.
+pub fn connection_of(
+    registry: &crate::connections::Registry,
+    carried: Option<&str>,
+    network: Network,
+) -> Result<String, Refusal> {
+    if let Some(id) = carried.map(str::trim).filter(|id| !id.is_empty()) {
+        return Ok(id.to_owned());
+    }
+    registry
+        .only_of_kind(network.as_str())
+        .map(|connection| connection.id.clone())
+        .ok_or_else(|| {
+            Refusal::SuggestionUnreadable(format!(
+                "it names no connection, and the registry has {} of the kind {:?} to stand in",
+                registry
+                    .connections()
+                    .iter()
+                    .filter(|c| c.kind == network.as_str())
+                    .count(),
+                network.as_str()
+            ))
+        })
+}
+
 /// The room id out of an inbound event's `source`
 /// (`matrix://<homeserver>/!room:server`), or `None` when the source is not
 /// one.
-/// The connection an event carries, or — for one published before #269, or by
-/// a producer that has not learned the extension yet — its network's single
-/// connection, whose id is the network's name (the migration id of #270).
-/// The fallback is what makes an old bus readable, and it is correct for the
-/// same reason the migration is: every deployment has one connection per
-/// network today.
-pub fn connection_or_networks(connection: Option<&str>, network: Network) -> String {
-    connection
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| network.as_str().to_owned())
-}
-
 pub fn room_from_source(source: &str) -> Option<String> {
     let rest = source.strip_prefix("matrix://")?;
     let (_homeserver, room) = rest.split_once('/')?;
@@ -804,6 +820,9 @@ pub struct Approvals {
     /// of that journal's projection and not a call to anybody.
     store: Arc<Store>,
     metrics: Arc<Metrics>,
+    /// The registry of connections (#269): what an event on the bus that
+    /// names none is resolved against, by kind.
+    connections: Arc<crate::connections::Registry>,
     /// This deployment's owner: who an approval is by (ADR 0011).
     owner: String,
     nats_url: String,
@@ -816,6 +835,7 @@ impl Approvals {
     pub fn new(
         store: Arc<Store>,
         metrics: Arc<Metrics>,
+        connections: Arc<crate::connections::Registry>,
         owner: String,
         nats_url: String,
         lookup_window: u64,
@@ -824,6 +844,7 @@ impl Approvals {
         Self {
             store,
             metrics,
+            connections,
             owner,
             nats_url,
             lookup_window,
@@ -905,7 +926,7 @@ impl Approvals {
             ))
         })?;
         Ok(TriggerEnvelope {
-            connection: connection_or_networks(document.connection.as_deref(), network),
+            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
             event_id: document.id,
             event_type: document.event_type,
             contact: document.subject,
@@ -1253,7 +1274,7 @@ impl Approvals {
             source: document.source,
             persona_id: document.data.persona_id,
             trigger_event_id: document.subject,
-            connection: connection_or_networks(document.connection.as_deref(), network),
+            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
             network,
             consent_label,
             suggestion: Content {
@@ -1618,6 +1639,42 @@ mod tests {
             );
         }
         assert!(is_event_id(&"0123456789abcdef".repeat(4)));
+    }
+
+    #[test]
+    fn an_event_that_names_no_connection_is_resolved_in_the_registry_or_refused() {
+        // A producer older than #269 on a deployment with one connection per
+        // kind: the registry's single one of that kind stands in — read
+        // there, not spelled from the network's name. Two of the kind, or
+        // none, and the Gateway will not guess which perimeter it was.
+        let registry = crate::connections::Registry::from_config(
+            Some("wa-home=whatsapp,wa-work=whatsapp,signal=signal"),
+            &[],
+            "example.com",
+        )
+        .expect("a registry");
+        assert_eq!(
+            connection_of(&registry, Some(" wa-work "), Network::Whatsapp).unwrap(),
+            "wa-work",
+            "what the event carries is what it belongs to"
+        );
+        assert_eq!(
+            connection_of(&registry, None, Network::Signal).unwrap(),
+            "signal"
+        );
+        assert_eq!(
+            connection_of(&registry, None, Network::Matrix).unwrap(),
+            "matrix",
+            "the native connection every registry has"
+        );
+        for (network, count) in [(Network::Whatsapp, "2"), (Network::Telegram, "0")] {
+            match connection_of(&registry, Some(""), network) {
+                Err(Refusal::SuggestionUnreadable(reason)) => {
+                    assert!(reason.contains(count), "{reason}");
+                }
+                other => panic!("{network:?}: expected a refusal, got {other:?}"),
+            }
+        }
     }
 
     #[test]
