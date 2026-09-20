@@ -17,6 +17,7 @@
 pub mod bus;
 pub mod contract;
 pub mod jmap_fake;
+pub mod jmap_push;
 pub mod sso;
 pub mod stack;
 pub mod stub_llm;

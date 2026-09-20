@@ -253,6 +253,10 @@ async fn run(config: Config) -> Result<()> {
     // keeps it fresh, the consumer sends with whatever is current, and
     // waits when there is none.
     let shared_access: twalk_collector::replies::SharedAccess = Arc::default();
+    // Rung by the push listener when the server says the Email state
+    // changed: the run loop wakes and the mail poll runs at once.
+    let mail_wake: Arc<tokio::sync::Notify> = Arc::default();
+    let mut woken_for_mail = false;
     if let Some(mailbox) = &mailbox {
         tokio::spawn(twalk_collector::replies::consume_approvals(
             jetstream.clone(),
@@ -269,6 +273,14 @@ async fn run(config: Config) -> Result<()> {
                 base: config.send_retry_base,
                 max_attempts: config.send_retry_max_attempts,
             },
+        ));
+        // Push (#277): the server's doorbell, ringing the mail poll ahead of
+        // its interval. The poll stays as the fallback.
+        tokio::spawn(twalk_collector::push::listen(
+            config.services.jmap_session_url.clone(),
+            shared_access.clone(),
+            mail_wake.clone(),
+            metrics.clone(),
         ));
     }
 
@@ -485,8 +497,9 @@ async fn run(config: Config) -> Result<()> {
         }
         // The mailbox, on the same terms: the grant stands, JMAP answered
         // as the owner, the poll interval is up.
-        let mail_poll_is_due =
-            last_mail_poll.is_none_or(|last| last.elapsed() >= config.mail_poll_interval);
+        let mail_poll_is_due = woken_for_mail
+            || last_mail_poll.is_none_or(|last| last.elapsed() >= config.mail_poll_interval);
+        woken_for_mail = false;
         if let (Some(mailbox), Some(token), true, true) =
             (&mailbox, &access, mail_is_connected, mail_poll_is_due)
         {
@@ -531,7 +544,14 @@ async fn run(config: Config) -> Result<()> {
                 Err(error) => warn!(%error, "the mailbox could not be polled this round"),
             }
         }
-        tokio::time::sleep(config.health_interval).await;
+        // The round ends at the health interval, or the moment the server
+        // says a mail arrived — whichever comes first.
+        tokio::select! {
+            _ = tokio::time::sleep(config.health_interval) => {}
+            _ = mail_wake.notified() => {
+                woken_for_mail = true;
+            }
+        }
     }
 }
 
