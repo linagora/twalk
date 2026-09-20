@@ -159,9 +159,11 @@ pub fn journal_line(
     }
 }
 
-/// A bridge's state change. The bridge is named by its id — a deployment's
-/// bridge instance, never a network (ADR 0005) — and the state by the
-/// contract's word, translated when there is a translation.
+/// A bridge's state change. The bridge is named by its id alone — a
+/// deployment's bridge instance, never a network (ADR 0005), and by the
+/// contract's own pattern always `bridge-…`, so a word "Bridge" before it
+/// would read twice in both languages — and the state by the contract's
+/// word, translated when there is a translation.
 pub fn activity_bridge(l: Lang, bridge_id: &str, state: &str) -> String {
     let state = match (l, state) {
         (Lang::Fr, "starting") => "démarre",
@@ -171,7 +173,7 @@ pub fn activity_bridge(l: Lang, bridge_id: &str, state: &str) -> String {
         (Lang::Fr, "session_expired") => "session expirée",
         (_, other) => other,
     };
-    format!("Bridge {bridge_id} · {state}")
+    format!("{bridge_id} · {state}")
 }
 
 /// A consent decision, by the kind of subject it is about, its new state
@@ -471,27 +473,27 @@ mod tests {
     fn activity_bridge_names_the_bridge_and_its_state() {
         assert_eq!(
             activity_bridge(Lang::Fr, "bridge-whatsapp-1", "disconnected"),
-            "Bridge bridge-whatsapp-1 · déconnecté"
+            "bridge-whatsapp-1 · déconnecté"
         );
         assert_eq!(
             activity_bridge(Lang::Fr, "bridge-whatsapp-1", "connected"),
-            "Bridge bridge-whatsapp-1 · connecté"
+            "bridge-whatsapp-1 · connecté"
         );
         assert_eq!(
             activity_bridge(Lang::Fr, "bridge-signal-1", "session_expired"),
-            "Bridge bridge-signal-1 · session expirée"
+            "bridge-signal-1 · session expirée"
         );
         assert_eq!(
             activity_bridge(Lang::En, "bridge-signal-1", "degraded"),
-            "Bridge bridge-signal-1 · degraded"
+            "bridge-signal-1 · degraded"
         );
         assert_eq!(
             activity_bridge(Lang::En, "bridge-gmessages-1", "starting"),
-            "Bridge bridge-gmessages-1 · starting"
+            "bridge-gmessages-1 · starting"
         );
         assert_eq!(
             activity_bridge(Lang::En, "bridge-gmessages-1", "rebooting"),
-            "Bridge bridge-gmessages-1 · rebooting"
+            "bridge-gmessages-1 · rebooting"
         );
     }
 

@@ -32,6 +32,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -54,6 +55,25 @@ pub const TEST_OWNER_SECRET_HEX: &str =
 /// The public key of [`TEST_OWNER_SECRET_HEX`], as the compose file has it.
 pub const TEST_OWNER_PUBKEY_HEX: &str =
     "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+/// How long one request to the relay may take before the test gives up on
+/// it and asks again (or fails with its diagnosis): a relay on loopback
+/// answers in milliseconds, and a request still open after ten seconds is
+/// a hung relay, which must fail a test rather than hang it for ever.
+pub const RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The sweep interval every clerk under test runs with
+/// (`CLERK_SWEEP_SECONDS` in [`relay_env`]): two seconds, so a test can
+/// watch an expired post go and derive its own bound from this number.
+pub const SWEEP_SECONDS: u64 = 2;
+
+/// A reqwest client with [`RELAY_REQUEST_TIMEOUT`] on every request.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(RELAY_REQUEST_TIMEOUT)
+        .build()
+        .expect("a reqwest client with a timeout builds")
+}
 
 /// Every kind the clerk writes or could write, for a search that must find
 /// **nothing** of a contact on any channel (`buzz-core`'s names): a forum
@@ -133,7 +153,7 @@ async fn do_ensure_relay() -> Result<()> {
     }
     // Healthy is the health listener answering; the public listener is
     // what the tests speak to, so wait for its NIP-11 document.
-    let http = reqwest::Client::new();
+    let http = http_client();
     let url = relay_url();
     poll_until(
         || async {
@@ -171,7 +191,7 @@ impl RelayStack {
             url: relay_url(),
             owner: Keys::parse(TEST_OWNER_SECRET_HEX).context("the owner's test key")?,
             project: stack_id(),
-            http: reqwest::Client::new(),
+            http: http_client(),
         })
     }
 
@@ -368,7 +388,7 @@ pub fn relay_env(
         ("CLERK_CHANNEL_ACTIVITY", channels.activity.clone()),
         ("CLERK_CHANNEL_JOURNAL", channels.journal.clone()),
         ("CLERK_USER_LANGUAGE", "fr".to_owned()),
-        ("CLERK_SWEEP_SECONDS", "2".to_owned()),
+        ("CLERK_SWEEP_SECONDS", SWEEP_SECONDS.to_string()),
         ("CLERK_LOG_LEVEL", "info".to_owned()),
     ]
     .into_iter()

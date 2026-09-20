@@ -118,10 +118,13 @@ pub fn posted_report(
 }
 
 /// A `bridge.status.changed` event, as much of it as `activite` needs: which
-/// bridge and its new state. No room, no operator identity — a bridge
-/// transition is operational and names nobody.
+/// bridge and its new state, and the event's own `id`, which the line it
+/// becomes is tagged with so a redelivery finds it (`relay::stream_message`).
+/// No room, no operator identity — a bridge transition is operational and
+/// names nobody.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct BridgeStatus {
+    pub id: String,
     pub data: BridgeStatusData,
 }
 
@@ -136,14 +139,16 @@ pub struct BridgeStatusData {
 }
 
 /// A `consent.state.changed` event, as much of it as `activite` needs:
-/// who the decision is about, what it became, and which networks it
-/// covers. `data.subject.id` is deliberately not kept — naming the
-/// contact in `activite` is the leak this component exists not to
-/// reproduce (ADR 0012's own concern, applied here) — only `subject.type`,
-/// which lets a sentence say "a contact" or "a persona" without saying
-/// which one.
+/// what kind of subject the decision is about, what it became, which
+/// networks it covers, and the event's own `id` for the line's tag.
+/// `data.subject.id` is deliberately not kept — naming the contact in
+/// `activite` is the leak this component exists not to reproduce (ADR
+/// 0012's own concern, applied here) — only `subject.type`, which lets a
+/// sentence say "a contact" or "a persona" without saying which one. The
+/// envelope's `subject` (the same Matrix ID) has no member either.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ConsentChange {
+    pub id: String,
     pub data: ConsentData,
 }
 
@@ -236,6 +241,10 @@ mod tests {
     fn a_bridge_status_is_read_from_the_contract_fixture() {
         let bytes = fixture("bridge.status.changed.json");
         let status: BridgeStatus = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            status.id,
+            "029285728dfbbe8e00996a1e7a4c9baceb984a94e8360eb4b593ff9a70d661d9"
+        );
         assert_eq!(status.data.bridge_id, "bridge-gmessages-1");
         assert_eq!(status.data.state, "connected");
     }
@@ -244,6 +253,10 @@ mod tests {
     fn a_consent_change_is_read_from_the_contract_fixture() {
         let bytes = fixture("consent.state.changed.json");
         let change: ConsentChange = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            change.id,
+            "3255d503fa47d8d6f7f75194d2761fb149268fda34343c2a0890d8e9a36a6034"
+        );
         assert_eq!(change.data.subject.kind, "persona");
         assert_eq!(change.data.new_state, "granted");
         assert_eq!(

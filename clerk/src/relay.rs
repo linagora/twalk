@@ -13,27 +13,40 @@
 //! mirrored rather than reinvented, because a header the relay's own tooling
 //! builds is one the relay is known to accept.
 //!
-//! Three things this module decides and three it deliberately leaves alone.
+//! Four things this module decides and three it deliberately leaves alone.
 //! It **decides** what crosses the wire: the event's kind and tags as the
 //! caller gave them, the signature, and the header. It decides how a failure
 //! is **named**: nothing answered ([`RelayError::Unreachable`]), the relay
-//! answered and said no ([`RelayError::Refused`], with the status and the body
-//! it sent), or the relay answered something that is not a relay's answer
-//! ([`RelayError::Malformed`]) — and which of those a caller may sensibly try
-//! again ([`RelayError::is_transient`]: a relay that could not be reached, a
-//! `429` and a `5xx`, never a `4xx` that says the request itself was wrong).
-//! And it decides that the clerk's **key file is nobody else's to read**:
-//! [`load_keys`] refuses a file another account on the host could open, naming
-//! the `chmod` that fixes it, because the key signs everything the clerk says.
+//! answered and said no ([`RelayError::Refused`], with the status and the
+//! relay's own short reason), or the relay answered something that is not a
+//! relay's answer ([`RelayError::Malformed`]) — and which of those a caller
+//! may sensibly try again ([`RelayError::is_transient`]: a relay that could
+//! not be reached, a `429` and a `5xx`, never a `4xx` that says the request
+//! itself was wrong). It decides that **no error carries a body's text**: a
+//! `2xx` from `/query` that does not deserialise is the clerk's own posts,
+//! which quote suggestions, and the error is what `settle` logs — so
+//! [`RelayError::Malformed`] names the parse failure's category, its line
+//! and column and the body's length, and [`RelayError::Refused`] keeps only
+//! the `error` or `message` field of a JSON refusal, cut to
+//! [`REASON_CHARS`], or nothing. And it decides that the clerk's **key file
+//! is nobody else's to read**: [`load_keys`] refuses a file another account
+//! on the host could open, naming the `chmod` that fixes it, because the key
+//! signs everything the clerk says.
 //!
 //! It **does not retry**: a caller knows whether a post is worth a second try
 //! and a second later, and this module does not — a retry loop here would turn
 //! one rate limit into a burst. It **holds no memory** of what it published:
 //! the relay is the clerk's memory (ADR 0035), read back through
-//! [`Relay::own_posts`]. And it **knows no kinds beyond the four the clerk
-//! uses** — a forum post, a stream message, a delete and its own posts back —
-//! so a fifth would be a decision made here, in the open, rather than a tag
-//! list assembled somewhere else.
+//! [`Relay::own_posts`] for a forum post and [`Relay::own_lines_about`] for a
+//! stream message — every stream message carries the bus event it was
+//! written for as a tag (`["r", "twalk:event:<id>"]`, [`event_reference`]),
+//! because the relay refuses a `created_at` more than fifteen minutes from
+//! its own clock (`buzz-relay`'s ingest, `MAX_TIMESTAMP_DRIFT_SECS`), so a
+//! line cannot be made to hash to one Nostr id across a redelivery by dating
+//! it from the bus event's `time`. And it **knows no kinds beyond the four
+//! the clerk uses** — a forum post, a stream message, a delete and its own
+//! posts back — so a fifth would be a decision made here, in the open,
+//! rather than a tag list assembled somewhere else.
 
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
@@ -64,10 +77,16 @@ pub const KIND_DELETE: u16 = 9005;
 /// still in flight after ten is one that will not succeed.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How much of a refusal's body a log line shows. The relay's own error
-/// bodies are one short JSON object; anything longer is a proxy's HTML page,
-/// which nobody reads in a log.
-const LOGGED_BODY_CHARS: usize = 300;
+/// How much of a refusal's reason an error carries. The relay's own reasons
+/// (`{"error": "invalid: …"}`) are one short sentence; a longer one is cut,
+/// and a body that is not a JSON object with an `error` or `message` string
+/// — a proxy's HTML page — contributes nothing at all, because a body the
+/// clerk did not expect is a body it must not repeat.
+pub const REASON_CHARS: usize = 120;
+
+/// What every stream message's `r` tag starts with: the bus event the line
+/// was written for, `twalk:event:<CloudEvents id>` ([`event_reference`]).
+pub const EVENT_REFERENCE_PREFIX: &str = "twalk:event:";
 
 /// The variable `deploy/docker-compose/provision-nostr-key.sh` writes the
 /// key under, in the env-style file Hermes reads the same key from.
@@ -93,13 +112,15 @@ pub enum RelayError {
     /// Nothing answered: connection refused, DNS, TLS, or the request timed
     /// out. The relay may be down or may be starting.
     Unreachable(String),
-    /// The relay answered with a status outside `2xx`. `body` is the whole
-    /// body it sent, because a `429`'s `retry in Ns` is in there and a caller
-    /// may want it; the log line and [`fmt::Display`] cut it short.
-    Refused { status: u16, body: String },
+    /// The relay answered with a status outside `2xx`. `reason` is the
+    /// `error` or `message` string of its JSON body, cut to [`REASON_CHARS`],
+    /// or empty when the body was not that shape — never the body itself.
+    Refused { status: u16, reason: String },
     /// Either this side could not build the request (a tag the `nostr` crate
     /// would not parse, a signature that failed) or the relay answered `2xx`
-    /// with something that is not the answer this route gives.
+    /// with something that is not the answer this route gives — described by
+    /// the parse failure's category and position and the body's length,
+    /// never its text ([`malformed_answer`]).
     Malformed(String),
 }
 
@@ -122,11 +143,13 @@ impl fmt::Display for RelayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RelayError::Unreachable(why) => write!(f, "the relay could not be reached: {why}"),
-            RelayError::Refused { status, body } => {
+            RelayError::Refused { status, reason } if reason.is_empty() => {
+                write!(f, "the relay refused the request with HTTP {status}")
+            }
+            RelayError::Refused { status, reason } => {
                 write!(
                     f,
-                    "the relay refused the request with HTTP {status}: {}",
-                    cut(body)
+                    "the relay refused the request with HTTP {status}: {reason}"
                 )
             }
             RelayError::Malformed(why) => write!(f, "the relay's answer could not be used: {why}"),
@@ -136,14 +159,65 @@ impl fmt::Display for RelayError {
 
 impl std::error::Error for RelayError {}
 
-/// The first [`LOGGED_BODY_CHARS`] characters of a body, marked when cut.
-fn cut(body: &str) -> String {
-    let body = body.trim();
-    if body.chars().count() <= LOGGED_BODY_CHARS {
-        return body.to_owned();
-    }
-    let shown: String = body.chars().take(LOGGED_BODY_CHARS).collect();
-    format!("{shown}… [cut]")
+/// A refusal as the error carries it: the `error` or `message` string of a
+/// JSON object body, cut to [`REASON_CHARS`] (marked when cut), and nothing
+/// from any other shape of body.
+fn refusal(status: u16, body: &str) -> RelayError {
+    let reason = serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            ["error", "message"]
+                .into_iter()
+                .find_map(|field| value.get(field)?.as_str().map(str::to_owned))
+        })
+        .map(|reason| {
+            let reason = reason.trim();
+            if reason.chars().count() <= REASON_CHARS {
+                reason.to_owned()
+            } else {
+                let shown: String = reason.chars().take(REASON_CHARS).collect();
+                format!("{shown}… [cut]")
+            }
+        })
+        .unwrap_or_default();
+    RelayError::Refused { status, reason }
+}
+
+/// A `2xx` whose body is not the answer the route gives, as the error
+/// carries it: the status, the URL, serde_json's category of failure and
+/// the line and column it stopped at, and how long the body was — and none
+/// of the body, because for `/query` that body is the clerk's own posts,
+/// which quote suggestions, and the error is what ends up in a log line.
+fn malformed_answer(status: u16, url: &str, body: &str, error: &serde_json::Error) -> RelayError {
+    RelayError::Malformed(format!(
+        "HTTP {status} from {url} is not the answer that route gives: {:?} at line {} column {} \
+         of a body of {} bytes",
+        error.classify(),
+        error.line(),
+        error.column(),
+        body.len()
+    ))
+}
+
+/// The value of a stream message's `r` tag for the bus event `bus_event_id`:
+/// what [`Relay::own_lines_about`] finds a line by, and what makes a
+/// redelivery of that event a line already written rather than a second one.
+pub fn event_reference(bus_event_id: &str) -> String {
+    format!("{EVENT_REFERENCE_PREFIX}{bus_event_id}")
+}
+
+/// Whether `event` carries the `r` tag for `bus_event_id`. Checked here as
+/// well as asked of the relay, because the relay answers a `#r` filter by
+/// reading its newest `limit` rows and filtering them itself, and a client
+/// that took the answer on trust would take the newest line for the right
+/// one if that ever changed.
+pub fn references_event(event: &Event, bus_event_id: &str) -> bool {
+    let wanted = event_reference(bus_event_id);
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .any(|tag| tag.len() >= 2 && tag[0] == "r" && tag[1] == wanted)
 }
 
 /// A Buzz relay, reached over HTTP under the clerk's own key.
@@ -237,14 +311,22 @@ impl Relay {
             .await
     }
 
-    /// A stream message (kind 9) in `channel`: one line in a running feed.
+    /// A stream message (kind 9) in `channel`: one line in a running feed,
+    /// tagged with the bus event it was written for
+    /// (`["r", "twalk:event:<bus_event_id>"]`), which is how the line is
+    /// found again on a redelivery ([`Relay::own_lines_about`]).
     pub async fn stream_message(
         &self,
         channel: &str,
         content: &str,
+        bus_event_id: &str,
     ) -> Result<Published, RelayError> {
-        self.publish(KIND_STREAM_MESSAGE, vec![tag("h", channel)], content)
-            .await
+        self.publish(
+            KIND_STREAM_MESSAGE,
+            vec![tag("h", channel), tag("r", &event_reference(bus_event_id))],
+            content,
+        )
+        .await
     }
 
     /// A delete (kind 9005) of `event_id`, one of the clerk's own events in
@@ -266,6 +348,26 @@ impl Relay {
         self.query(vec![filter]).await
     }
 
+    /// The clerk's own stream messages in `channel` written for the bus
+    /// event `bus_event_id`: the relay as the clerk's memory for a line, the
+    /// way [`Relay::own_posts`] and the reference line are for a post. The
+    /// relay is asked with a `#r` filter over its newest `limit` lines by
+    /// this key, and the answer is checked tag by tag
+    /// ([`references_event`]) before it is believed.
+    pub async fn own_lines_about(
+        &self,
+        channel: &str,
+        bus_event_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Event>, RelayError> {
+        let filter = own_lines_filter(&self.public_key_hex(), channel, bus_event_id, limit);
+        let lines = self.query(vec![filter]).await?;
+        Ok(lines
+            .into_iter()
+            .filter(|line| references_event(line, bus_event_id))
+            .collect())
+    }
+
     /// One authenticated `POST` to `path`, the body signed into a fresh
     /// NIP-98 header, the `2xx` answer read as `T`.
     async fn post<T: serde::de::DeserializeOwned>(
@@ -285,29 +387,20 @@ impl Relay {
             .await
             .map_err(|e| RelayError::Unreachable(e.to_string()))?;
         let status = response.status();
+        // A body that could not be read after a status was received: the
+        // connection went while the answer was in flight. `Unreachable` is a
+        // loose word for it, but it is the right retry class — transient
+        // either way — and the message says what actually happened.
         let text = response
             .text()
             .await
             .map_err(|e| RelayError::Unreachable(format!("reading the answer to {url}: {e}")))?;
         if !status.is_success() {
-            warn!(
-                url = %url,
-                status = status.as_u16(),
-                body = %cut(&text),
-                "the relay refused the request"
-            );
-            return Err(RelayError::Refused {
-                status: status.as_u16(),
-                body: text,
-            });
+            let error = refusal(status.as_u16(), &text);
+            warn!(url = %url, %error, "the relay refused the request");
+            return Err(error);
         }
-        serde_json::from_str(&text).map_err(|e| {
-            RelayError::Malformed(format!(
-                "HTTP {} from {url} is not the answer that route gives ({e}): {}",
-                status.as_u16(),
-                cut(&text)
-            ))
-        })
+        serde_json::from_str(&text).map_err(|e| malformed_answer(status.as_u16(), &url, &text, &e))
     }
 }
 
@@ -321,6 +414,18 @@ pub fn own_posts_filter(pubkey_hex: &str, channel: &str, kind: u16, limit: u32) 
     serde_json::json!({
         "kinds": [kind],
         "#h": [channel],
+        "authors": [pubkey_hex],
+        "limit": limit,
+    })
+}
+
+/// The filter that finds the clerk's own stream messages written for one
+/// bus event: [`own_posts_filter`] for kind 9 plus `"#r": ["twalk:event:<id>"]`.
+pub fn own_lines_filter(pubkey_hex: &str, channel: &str, bus_event_id: &str, limit: u32) -> Value {
+    serde_json::json!({
+        "kinds": [KIND_STREAM_MESSAGE],
+        "#h": [channel],
+        "#r": [event_reference(bus_event_id)],
         "authors": [pubkey_hex],
         "limit": limit,
     })
@@ -521,10 +626,31 @@ mod tests {
         assert_ne!(header, again);
     }
 
-    fn scratch_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("twalk-clerk-relay-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A directory under the temp dir, removed when dropped — on a failing
+    /// assertion as much as on a passing test, so a red run does not leave
+    /// `twalk-clerk-relay-*` behind.
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new() -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("twalk-clerk-relay-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
     }
 
     fn write_key(dir: &Path, name: &str, contents: &str, mode: u32) -> PathBuf {
@@ -539,7 +665,7 @@ mod tests {
         let keys = Keys::generate();
         let hex = keys.secret_key().to_secret_hex();
         let nsec = keys.secret_key().to_bech32().unwrap();
-        let dir = scratch_dir();
+        let dir = ScratchDir::new();
 
         let hex_path = write_key(&dir, "hex.key", &format!("{hex}\n"), 0o600);
         assert_eq!(
@@ -571,8 +697,6 @@ mod tests {
 
         let err = load_keys(&dir.join("missing.key")).unwrap_err().to_string();
         assert!(err.contains("missing.key"), "{err}");
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -581,7 +705,7 @@ mod tests {
         let keys = Keys::generate();
         let hex = keys.secret_key().to_secret_hex();
         let nsec = keys.secret_key().to_bech32().unwrap();
-        let dir = scratch_dir();
+        let dir = ScratchDir::new();
 
         // The shape `deploy/docker-compose/provision-nostr-key.sh` writes,
         // and the one Hermes reads: comments, other variables, and the key
@@ -634,8 +758,6 @@ mod tests {
             "{err}"
         );
         assert!(err.contains(&without.display().to_string()), "{err}");
-
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -666,10 +788,61 @@ mod tests {
     }
 
     #[test]
+    fn own_lines_filter_names_the_bus_event_as_well() {
+        let filter = own_lines_filter(
+            "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+            "29a57768-7513-43bc-9cc2-6915453467f4",
+            "57f0e4d352d1ba5e6bf0e92223634253cd852e3d7d018ea91025dc098c1a564a",
+            1000,
+        );
+        assert_eq!(
+            filter,
+            serde_json::json!({
+                "kinds": [9],
+                "#h": ["29a57768-7513-43bc-9cc2-6915453467f4"],
+                "#r": ["twalk:event:57f0e4d352d1ba5e6bf0e92223634253cd852e3d7d018ea91025dc098c1a564a"],
+                "authors": ["3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"],
+                "limit": 1000,
+            })
+        );
+    }
+
+    #[test]
+    fn a_line_is_recognised_by_its_r_tag_and_not_by_its_content() {
+        let keys = Keys::generate();
+        let id = "57f0e4d352d1ba5e6bf0e92223634253cd852e3d7d018ea91025dc098c1a564a";
+        let other = "0000000000000000000000000000000000000000000000000000000000000000";
+        let line = |tags: Vec<Vec<String>>, content: &str| {
+            EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE), content)
+                .tags(
+                    tags.iter()
+                        .map(|t| Tag::parse(t.iter().map(String::as_str)).unwrap()),
+                )
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        let about_id = line(
+            vec![tag("h", "chan"), tag("r", &event_reference(id))],
+            "Sent · WhatsApp",
+        );
+        // A line about another event whose *content* names this one is not
+        // a line about this one: the tag decides, never the text.
+        let about_other = line(
+            vec![tag("h", "chan"), tag("r", &event_reference(other))],
+            &format!("Sent · WhatsApp · twalk:event:{id}"),
+        );
+        let untagged = line(vec![tag("h", "chan")], &format!("twalk:event:{id}"));
+        assert!(references_event(&about_id, id));
+        assert!(!references_event(&about_other, id));
+        assert!(references_event(&about_other, other));
+        assert!(!references_event(&untagged, id));
+    }
+
+    #[test]
     fn a_rate_limit_and_a_server_error_are_transient_and_a_refusal_is_not() {
         let refused = |status| RelayError::Refused {
             status,
-            body: String::new(),
+            reason: String::new(),
         };
         assert!(RelayError::Unreachable("connection refused".into()).is_transient());
         assert!(refused(429).is_transient());
@@ -682,21 +855,71 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_is_logged_with_its_body_cut_short() {
+    fn a_refusal_keeps_the_relays_reason_cut_short_and_nothing_of_another_body() {
+        // The relay's own shape: `{"error": "…"}` (`api_error`), or the
+        // `message` of a `/events` answer.
+        let err = refusal(
+            400,
+            r#"{"error":"invalid: event timestamp too far from server time"}"#,
+        );
+        assert_eq!(
+            err.to_string(),
+            "the relay refused the request with HTTP 400: invalid: event timestamp too far from \
+             server time"
+        );
+        let err = refusal(429, r#"{"message":"rate limited: retry in 12s"}"#);
+        assert_eq!(
+            err.to_string(),
+            "the relay refused the request with HTTP 429: rate limited: retry in 12s"
+        );
+
+        // A long reason is cut at REASON_CHARS.
         let long = "x".repeat(1000);
-        let err = RelayError::Refused {
-            status: 400,
-            body: long.clone(),
-        };
+        let err = refusal(400, &format!(r#"{{"error":"{long}"}}"#));
         let shown = err.to_string();
-        assert!(shown.contains("400"));
-        assert!(shown.len() < 400, "{}", shown.len());
-        assert!(shown.contains(&"x".repeat(300)));
-        assert!(!shown.contains(&"x".repeat(301)));
-        // The error itself keeps the whole body: a caller may need the
-        // relay's `retry in Ns` hint, and truncation is for the log line.
-        if let RelayError::Refused { body, .. } = err {
-            assert_eq!(body, long);
+        assert!(shown.contains(&"x".repeat(120)), "{shown}");
+        assert!(!shown.contains(&"x".repeat(121)), "{shown}");
+        assert!(shown.ends_with("… [cut]"), "{shown}");
+
+        // A body of any other shape — a proxy's HTML page, a bare string,
+        // a JSON object whose reason is not a string — contributes nothing.
+        for body in [
+            "<html><body>MARKER-502 Bad Gateway</body></html>",
+            "MARKER-plain",
+            r#"{"error":{"nested":"MARKER-nested"}}"#,
+            r#"["MARKER-array"]"#,
+            "",
+        ] {
+            let err = refusal(502, body);
+            assert_eq!(
+                err.to_string(),
+                "the relay refused the request with HTTP 502",
+                "{body}"
+            );
         }
+    }
+
+    #[test]
+    fn a_2xx_body_that_is_not_the_answer_is_described_and_never_quoted() {
+        // What `/query` answers with is the clerk's own posts, which quote
+        // suggestions: a body that fails to parse must not end up in the
+        // error, and through it in the log.
+        let marker = "MARKER-a-suggestions-words-7c1e";
+        let body = format!(r#"[{{"content":"{marker}","kind":9}}, not json"#);
+        let parse_error = serde_json::from_str::<Vec<Event>>(&body).unwrap_err();
+        let err = malformed_answer(200, "http://127.0.0.1:17800/query", &body, &parse_error);
+        let shown = err.to_string();
+        assert!(!shown.contains(marker), "{shown}");
+        assert!(!shown.contains("content"), "{shown}");
+        assert!(
+            shown.contains("HTTP 200 from http://127.0.0.1:17800/query"),
+            "{shown}"
+        );
+        assert!(shown.contains("at line 1 column"), "{shown}");
+        assert!(
+            shown.contains(&format!("a body of {} bytes", body.len())),
+            "{shown}"
+        );
+        assert!(!err.is_transient());
     }
 }

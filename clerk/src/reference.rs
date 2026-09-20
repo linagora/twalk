@@ -8,18 +8,32 @@
 //! needs one. The line is visible rather than hidden in a tag: what the
 //! clerk reads to find its way, the owner reads too (ticket #265).
 //!
-//! Two rulings are the ones to know. [`parse`] reads the **last** line that
-//! starts with [`PREFIX`], because the body above it is a suggestion's own
-//! words and could contain anything, including that prefix. And
+//! Three rulings are the ones to know. [`parse`] reads the **last** line
+//! that starts with [`PREFIX`], because the body above it is a suggestion's
+//! own words and could contain anything, including that prefix.
 //! [`has_expired`] answers `false` for an expiry it cannot read: an
-//! unparsable timestamp never deletes, because the safe failure of a sweep
-//! is to leave a post standing, not to delete one it does not understand.
+//! unparsable timestamp never deletes on the suggestion's own clock,
+//! because the safe failure of a sweep is to leave a post standing, not to
+//! delete one it does not understand. And a post the sweep **cannot date
+//! at all** — no `expires_at` in its reference line (the contract makes the
+//! field optional), one it cannot parse, or no reference line it
+//! recognises — still goes, once the event's own `created_at`, which the
+//! relay stamps, is [`UNDATABLE_CEILING`] old ([`past_ceiling`]): seven
+//! days, ADR 0028's own bound, because the promise is that the relay never
+//! holds a quoted word longer than a suggestion lives, and a post nobody
+//! can date must not be the one exception that stays for ever.
+
+use std::time::Duration;
 
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 /// What every reference line starts with.
 pub const PREFIX: &str = "twalk:suggestion:";
+
+/// How old a post the sweep cannot date may be before it is deleted on the
+/// relay's own `created_at`: ADR 0028's seven days.
+pub const UNDATABLE_CEILING: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// What a reference line says: which suggestion the post is about, and
 /// when it expires, as the event carried it.
@@ -75,13 +89,26 @@ fn is_suggestion_id(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// An RFC 3339 expiry as seconds since the epoch, or `None` when it does
+/// not read as one.
+pub fn expires_at_unix(expires_at: &str) -> Option<i64> {
+    OffsetDateTime::parse(expires_at, &Rfc3339)
+        .ok()
+        .map(|expires| expires.unix_timestamp())
+}
+
 /// Whether an RFC 3339 expiry has passed at `now_unix`. `false` when the
-/// expiry cannot be read: an unparsable expiry never deletes.
+/// expiry cannot be read: an unparsable expiry never deletes on its own
+/// account ([`past_ceiling`] is what does, much later).
 pub fn has_expired(expires_at: &str, now_unix: i64) -> bool {
-    match OffsetDateTime::parse(expires_at, &Rfc3339) {
-        Ok(expires) => expires.unix_timestamp() <= now_unix,
-        Err(_) => false,
-    }
+    expires_at_unix(expires_at).is_some_and(|expires| expires <= now_unix)
+}
+
+/// Whether a post the sweep cannot date, stamped `created_at_unix` by the
+/// relay, has stood for [`UNDATABLE_CEILING`] at `now_unix`.
+pub fn past_ceiling(created_at_unix: i64, now_unix: i64) -> bool {
+    let ceiling = created_at_unix.saturating_add(UNDATABLE_CEILING.as_secs() as i64);
+    ceiling <= now_unix
 }
 
 #[cfg(test)]
@@ -159,5 +186,19 @@ mod tests {
         assert!(!has_expired("2026-09-17T11:00:00+02:00", at - 7201));
         assert!(has_expired("2026-09-17T11:00:00+02:00", at - 7200));
         assert!(has_expired("2026-09-17T11:00:00+02:00", at - 1));
+    }
+
+    #[test]
+    fn an_undatable_post_reaches_the_ceiling_after_seven_days() {
+        const WEEK: i64 = 7 * 24 * 60 * 60;
+        let created = 1789642800;
+        assert_eq!(UNDATABLE_CEILING.as_secs() as i64, WEEK);
+        assert!(!past_ceiling(created, created));
+        assert!(!past_ceiling(created, created + WEEK - 1));
+        assert!(past_ceiling(created, created + WEEK));
+        assert!(past_ceiling(created, created + WEEK + 1));
+        // A relay clock that stamped the post in the future does not make
+        // it past anything, and the arithmetic does not overflow on it.
+        assert!(!past_ceiling(i64::MAX, created));
     }
 }

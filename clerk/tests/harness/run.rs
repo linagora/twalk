@@ -85,10 +85,15 @@ impl Run {
         let (key_file, clerk_pubkey, channels) = seed(&stack, &id, &dir).await?;
 
         let mut env = relay_env(&stack, &key_file, &channels, &id);
-        for (name, value) in &mut env {
-            if name == "CLERK_USER_LANGUAGE" {
-                *value = language.to_owned();
-            }
+        let language_entry = env
+            .iter_mut()
+            .find(|(name, _)| name == "CLERK_USER_LANGUAGE");
+        anyhow::ensure!(
+            language_entry.is_some(),
+            "relay_env no longer sets CLERK_USER_LANGUAGE, so a run cannot choose its language"
+        );
+        if let Some((_, value)) = language_entry {
+            *value = language.to_owned();
         }
         let clerk = start_clerk(&env).await?;
         Ok(Self {
@@ -153,12 +158,37 @@ impl Run {
         reach: &str,
         posted_as: &str,
     ) -> Result<()> {
+        self.publish_posted_report_as(approval, reach, posted_as, "posted")
+            .await
+    }
+
+    /// The same report a second time, under a **different** `Nats-Msg-Id`
+    /// (`<id>:posted-again`), for the same reason as
+    /// [`publish_again`](Self::publish_again): what a redelivery looks
+    /// like to the clerk is the same approval id and headers twice.
+    pub async fn publish_posted_report_again(
+        &self,
+        approval: &Value,
+        reach: &str,
+        posted_as: &str,
+    ) -> Result<()> {
+        self.publish_posted_report_as(approval, reach, posted_as, "posted-again")
+            .await
+    }
+
+    async fn publish_posted_report_as(
+        &self,
+        approval: &Value,
+        reach: &str,
+        posted_as: &str,
+        msg_id_suffix: &str,
+    ) -> Result<()> {
         validate_against_contract(approval, "persona.reply.approved")?;
         let mut headers = async_nats::HeaderMap::new();
         headers.insert("reach", reach);
         headers.insert("posted-as", posted_as);
         self.bus
-            .publish_event_with_headers(&self.posted_subject(), "posted", headers, approval)
+            .publish_event_with_headers(&self.posted_subject(), msg_id_suffix, headers, approval)
             .await
     }
 
@@ -338,9 +368,11 @@ impl Run {
     /// Stops the clerk and gives back everything this run claimed on the
     /// shared stacks.
     pub async fn shutdown(mut self) -> Result<()> {
-        self.stopped = true;
         let status = self.clerk.stop().await?;
         anyhow::ensure!(status.success(), "the clerk did not exit cleanly: {status}");
+        // Only now: a stop that failed above returns early, and `Drop` must
+        // still terminate the process and delete the stream.
+        self.stopped = true;
         self.bus.delete_stream(&self.id).await?;
         tokio::fs::remove_dir_all(&self.dir)
             .await
@@ -434,6 +466,18 @@ pub fn reference_names(content: &str, id: &str) -> bool {
         == Some(id)
 }
 
+/// Whether a stream message carries the tag the clerk writes for the bus
+/// event `id` — `["r", "twalk:event:<id>"]` — spelled again here for the
+/// same reason as [`reference_names`]: the suite reads the relay back on
+/// its own terms.
+pub fn line_references_event(line: &Event, id: &str) -> bool {
+    let wanted = format!("twalk:event:{id}");
+    line.tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .any(|tag| tag.len() >= 2 && tag[0] == "r" && tag[1] == wanted)
+}
+
 /// Polls `attempt` every [`RELAY_POLL`] until it yields `Some`, for at
 /// most [`RELAY_WAIT`]. A query the relay refused (its rate limit, a
 /// moment of unavailability) is a `None` here, not a failure: what the
@@ -447,6 +491,9 @@ where
 
 /// [`wait_on_relay`] with a bound of the test's own: for a fact that must
 /// hold by a given time — an expired post gone within so many sweeps.
+/// Each attempt is bounded by what is left of `within`, so a relay that
+/// hangs on one query fails the test at its deadline with its diagnosis
+/// rather than hanging it for ever.
 pub async fn wait_on_relay_for<T, Fut>(
     mut attempt: impl FnMut() -> Fut,
     description: &str,
@@ -457,7 +504,7 @@ where
 {
     let deadline = tokio::time::Instant::now() + within;
     loop {
-        if let Some(value) = attempt().await {
+        if let Ok(Some(value)) = tokio::time::timeout_at(deadline, attempt()).await {
             return Ok(value);
         }
         if tokio::time::Instant::now() >= deadline {

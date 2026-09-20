@@ -14,14 +14,23 @@
 //! outcome rather than a silence. A message the clerk cannot read is
 //! `skipped{unreadable}` and acked: it will not read better on a redelivery.
 //! A suggestion already past its `expires_at` is `skipped{expired}` and
-//! acked. A suggestion the relay already holds a post for — found by reading
-//! the reference line off the clerk's own posts, never a store of its own —
-//! is `skipped{duplicate}` and acked, which is what makes a redelivery safe.
-//! And a relay failure is one of two things: **transient** (unreachable,
-//! `429`, `5xx`), which is `Nak`ed with [`nak_delay`] so the bus redelivers
-//! it later, or a **refusal** of the request itself, which is logged once
-//! with the relay's own body and acked — a post the relay will refuse again
-//! is not retried for ever. Both count as a relay failure on `/metrics`.
+//! acked. A message the relay already holds the clerk's answer to is
+//! `skipped{duplicate}` and acked, which is what makes a redelivery safe on
+//! every channel and never a store of the clerk's own: a suggestion's post
+//! is found by reading the reference line off the clerk's own forum posts,
+//! and a journal or activity line by the `r` tag every stream message
+//! carries, `twalk:event:<bus event id>` — so a SIGTERM between the relay's
+//! `2xx` and the ack, a lost ack or an `ACK_WAIT` overrun redelivers a
+//! message whose line is then found rather than written twice. (Dating the
+//! line from the bus event's `time` so that a redelivery hashed to the same
+//! Nostr id was the simpler mechanism and does not work: the relay refuses
+//! a `created_at` more than fifteen minutes from its clock, and a
+//! redelivery after a relay outage is precisely that old.) And a relay
+//! failure is one of two things: **transient** (unreachable, `429`, `5xx`),
+//! which is `Nak`ed with [`nak_delay`] so the bus redelivers it later, or a
+//! **refusal** of the request itself, which is logged once with the relay's
+//! own reason and acked — a post the relay will refuse again is not retried
+//! for ever. Both count as a relay failure on `/metrics`.
 //!
 //! The suggestions consumer starts from the **beginning** of the stream
 //! (`DeliverPolicy::All`): a suggestion that expired while the clerk was
@@ -33,8 +42,15 @@
 //! What the sweep does is the other half of ADR 0035: every
 //! `Config::sweep`, it reads the clerk's own posts in `approbations`,
 //! deletes each one whose reference line says its suggestion has expired,
-//! and says so once in `activite` (#219). A relay error there is a warning
-//! and a counted failure, never a stop — the next sweep is a minute away.
+//! and says so once in `activite` (#219). A post it **cannot date** — no
+//! `expires_at` it can read, or no reference line it recognises — stands
+//! until the relay's own `created_at` on it is seven days old
+//! (`reference::UNDATABLE_CEILING`, ADR 0028), then goes as
+//! `deleted{undatable}`, and a sweep whose count of them changed says how many at
+//! `warn`, so a channel quietly accumulating posts nobody can date is
+//! visible before the week is out ([`verdict`]). A relay error there is a
+//! warning and a counted failure, never a stop — the next sweep is a
+//! minute away.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -64,23 +80,33 @@ pub const ACTIVITY_CONSUMER: &str = "clerk-activity";
 /// How long the bus waits for an ack before redelivering, and how many
 /// deliveries it makes before giving a message up. Sixty seconds covers a
 /// slow relay several times over ([`crate::relay::REQUEST_TIMEOUT`] is ten).
-/// Twenty deliveries under [`nak_delay`] — 2 + 4 + 8 + 16 + 32 seconds and
-/// then fifteen more a minute apart, about sixteen minutes — is how long a
-/// relay may be down before the bus stops asking, which is inside the hour
-/// a suggestion lives by default (`TWALK_SUGGESTION_TTL_SECONDS`): the
-/// suggestions consumer reads from the beginning of the stream precisely
-/// not to lose a suggestion that is still alive, and one that has expired
-/// by the time the relay is back is skipped on its redelivery anyway.
+/// Sixty-four deliveries is sized to **the hour a suggestion lives by
+/// default** (`TWALK_SUGGESTION_TTL_SECONDS`): under [`nak_delay`] the
+/// first five retries are 2, 4, 8, 16 and 32 seconds apart and every one
+/// after that a minute, so the sixty-three naks sum to 3542 seconds and
+/// the sixty-fourth delivery comes fifty-nine minutes after the first —
+/// the last one that can still find the suggestion alive, since a
+/// sixty-fifth would land past its expiry and be skipped as expired. A
+/// relay outage shorter than a suggestion's life therefore loses nothing,
+/// which is what the ticket's "retries with backoff" means. The same
+/// sizing bounds what a poisoned message can cost: at most that hour of
+/// naks, because a suggestion past its `expires_at` is skipped and acked
+/// on the delivery that finds it so, and a message the bus has
+/// redelivered sixty-four times is announced as given up rather than
+/// vanishing.
 pub const ACK_WAIT: Duration = Duration::from_secs(60);
-pub const MAX_DELIVER: i64 = 20;
+pub const MAX_DELIVER: i64 = 64;
 
 /// The ceiling of [`nak_delay`].
 pub const NAK_DELAY_MAX: Duration = Duration::from_secs(60);
 
 /// How many of its own posts the clerk reads back to find out whether a
-/// suggestion is already posted or has expired: the relay's own maximum for
-/// one query. More open suggestions than that would be a product with a
-/// different problem.
+/// suggestion is already posted or has expired, and how many of its own
+/// lines it reads back to find out whether a bus event is already
+/// journalled: the relay's own maximum for one query. More open
+/// suggestions than that would be a product with a different problem, and
+/// a redelivery is at most about an hour old ([`MAX_DELIVER`]), so a
+/// channel with a thousand newer lines would be one too.
 pub const OWN_POSTS_LIMIT: u32 = 1000;
 
 /// One durable pull consumer.
@@ -272,7 +298,11 @@ fn posted_subject(config: &Config) -> String {
     format!("{}.posted", config.bus_subject(REPLY_APPROVED))
 }
 
-/// One durable consumer, created or found.
+/// One durable consumer, created or found. Found means **returned as it
+/// is**: the bus keeps a durable's configuration from the day it was
+/// created, so a change to [`ACK_WAIT`], [`MAX_DELIVER`] or the filter
+/// subjects in this binary does not reach a consumer that already exists —
+/// `nats consumer rm <stream> <durable>` and a restart is what applies it.
 async fn open(
     clerk: &Clerk,
     jetstream: &async_nats::jetstream::Context,
@@ -409,10 +439,11 @@ async fn settle(
         }
         Err(error) => {
             clerk.metrics.record_relay_failure();
-            // Logged once, with the relay's own body (`RelayError`'s Display
-            // carries it, cut short), and acked: the same request would be
-            // refused the same way, and a post refused five times a minute
-            // apart is not a post the owner gets.
+            // Logged once, with the relay's own reason (`RelayError`'s
+            // Display carries it, cut short, and never a body's text), and
+            // acked: the same request would be refused the same way, and a
+            // post refused five times a minute apart is not a post the owner
+            // gets.
             warn!(
                 %error,
                 subject,
@@ -488,11 +519,13 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
     // Nak here would only be redelivered into the duplicate branch above,
     // so the line's failure is counted and logged and the message is done.
     let line = text::activity_suggested(clerk.lang, &suggestion.network);
-    activity_line(clerk, &line).await;
+    activity_line(clerk, &line, id).await;
     Ok(())
 }
 
-/// One `.posted` report: a line in `journal`.
+/// One `.posted` report: a line in `journal`, unless the relay already
+/// holds one for this report — found by the `r` tag, so a redelivery of a
+/// report already journalled is `skipped{duplicate}` and not a second line.
 async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), RelayError> {
     let Some(report) = events::posted_report(&message.payload, message.headers.as_ref()) else {
         skip(
@@ -503,6 +536,16 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
         );
         return Ok(());
     };
+    let journal = clerk.config.channel_journal.as_str();
+    if already_lined(clerk, journal, &report.approval_id).await? {
+        skip(
+            clerk,
+            Skipped::Duplicate,
+            "posted report",
+            &format!("approval_id={}", report.approval_id),
+        );
+        return Ok(());
+    }
     let line = text::journal_line(
         clerk.lang,
         &report.network,
@@ -513,7 +556,7 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
     );
     let published = clerk
         .relay
-        .stream_message(&clerk.config.channel_journal, &line)
+        .stream_message(journal, &line, &report.approval_id)
         .await?;
     let total = clerk.metrics.record_post(Channel::Journal);
     info!(
@@ -528,14 +571,16 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
 }
 
 /// One bridge transition or consent decision: a line in `activite`, by
-/// which subject it arrived on.
+/// which subject it arrived on — unless the relay already holds this
+/// event's line, found by the `r` tag, in which case `skipped{duplicate}`.
 async fn handle_activity(clerk: &Clerk, message: &Message) -> Result<(), RelayError> {
     let subject = message.subject.as_str();
-    let line = if subject == clerk.config.bus_subject(BRIDGE_STATUS) {
+    let (id, line) = if subject == clerk.config.bus_subject(BRIDGE_STATUS) {
         match serde_json::from_slice::<BridgeStatus>(&message.payload) {
-            Ok(status) => {
-                text::activity_bridge(clerk.lang, &status.data.bridge_id, &status.data.state)
-            }
+            Ok(status) => (
+                status.id,
+                text::activity_bridge(clerk.lang, &status.data.bridge_id, &status.data.state),
+            ),
             Err(error) => {
                 skip(
                     clerk,
@@ -555,12 +600,13 @@ async fn handle_activity(clerk: &Clerk, message: &Message) -> Result<(), RelayEr
                     .as_ref()
                     .map(|scope| scope.networks.as_slice())
                     .unwrap_or(&[]);
-                text::activity_consent(
+                let line = text::activity_consent(
                     clerk.lang,
                     &change.data.subject.kind,
                     &change.data.new_state,
                     networks,
-                )
+                );
+                (change.id, line)
             }
             Err(error) => {
                 skip(
@@ -581,22 +627,44 @@ async fn handle_activity(clerk: &Clerk, message: &Message) -> Result<(), RelayEr
         );
         return Ok(());
     };
-    let published = clerk
-        .relay
-        .stream_message(&clerk.config.channel_activity, &line)
-        .await?;
+    let activity = clerk.config.channel_activity.as_str();
+    if already_lined(clerk, activity, &id).await? {
+        skip(clerk, Skipped::Duplicate, "activity", &format!("id={id}"));
+        return Ok(());
+    }
+    let published = clerk.relay.stream_message(activity, &line, &id).await?;
     let total = clerk.metrics.record_post(Channel::Activity);
-    info!(subject, event_id = %published.event_id, total, "posted to activite");
+    info!(subject, id, event_id = %published.event_id, total, "posted to activite");
     Ok(())
+}
+
+/// Whether the relay already holds a line of the clerk's in `channel` for
+/// the bus event `bus_event_id`: the relay as the clerk's memory for a
+/// stream message, the way [`already_posted`] is for a forum post.
+async fn already_lined(
+    clerk: &Clerk,
+    channel: &str,
+    bus_event_id: &str,
+) -> Result<bool, RelayError> {
+    let lines = clerk
+        .relay
+        .own_lines_about(channel, bus_event_id, OWN_POSTS_LIMIT)
+        .await?;
+    Ok(!lines.is_empty())
 }
 
 /// A line in `activite` that follows something already done — a post, a
 /// deletion — so its own failure is counted and logged and nothing is
-/// retried on its account.
-async fn activity_line(clerk: &Clerk, line: &str) {
+/// retried on its account. `bus_event_id` is the suggestion the line is
+/// about, which is what its `r` tag names — and the "produced" and the
+/// "expired" lines of one suggestion therefore share it, so nothing here
+/// may ask [`already_lined`] with a suggestion's id on `activite`: these
+/// two lines are idempotent through the forum post they follow (its
+/// reference line, and its deletion), not through their own tag.
+async fn activity_line(clerk: &Clerk, line: &str, bus_event_id: &str) {
     match clerk
         .relay
-        .stream_message(&clerk.config.channel_activity, line)
+        .stream_message(&clerk.config.channel_activity, line, bus_event_id)
         .await
     {
         Ok(_) => {
@@ -612,31 +680,94 @@ async fn activity_line(clerk: &Clerk, line: &str) {
 /// One counted, logged skip. `detail` is the clerk's own account of the
 /// message — an id, a subject, a parse failure's category and position —
 /// and never a contact's words, which the log must not carry either.
+///
+/// An expired suggestion is `info`, not `warn`: the suggestions consumer
+/// reads from the beginning of the stream on purpose, so a first start
+/// against a real stream skips every suggestion that expired in ninety days
+/// of history, and that expected replay must not read as ninety days of
+/// warnings. The others are `warn`, because an unreadable message is a
+/// producer to look at and a duplicate is a redelivery to know about.
 fn skip(clerk: &Clerk, why: Skipped, what: &str, detail: &str) {
     let total = clerk.metrics.record_skipped(why);
-    warn!(
-        why = why.as_str(),
-        detail,
-        total,
-        "skipped a {what} that was {}",
-        why.as_str()
-    );
+    match why {
+        Skipped::Expired => info!(
+            why = why.as_str(),
+            detail,
+            total,
+            "skipped a {what} that was {}",
+            why.as_str()
+        ),
+        Skipped::Unreadable | Skipped::Duplicate => warn!(
+            why = why.as_str(),
+            detail,
+            total,
+            "skipped a {what} that was {}",
+            why.as_str()
+        ),
+    }
 }
 
 /// Never returns: every `Config::sweep`, starting now, one [`sweep_once`].
 pub async fn sweep(clerk: Arc<Clerk>) {
     let mut ticker = tokio::time::interval(clerk.config.sweep);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut undatable_last_time = 0u64;
     loop {
         ticker.tick().await;
-        sweep_once(&clerk).await;
+        let undatable = sweep_once(&clerk).await;
+        // Once per change rather than once a minute for seven days: the
+        // `/metrics` row is the durable signal, the line is the alert.
+        if undatable != undatable_last_time && undatable > 0 {
+            warn!(
+                undatable,
+                ceiling_days = reference::UNDATABLE_CEILING.as_secs() / (24 * 60 * 60),
+                "the sweep read posts it could not date from their reference line; each is deleted \
+                 once the relay's own created_at on it is past the ceiling"
+            );
+        }
+        undatable_last_time = undatable;
+    }
+}
+
+/// What the sweep decides about one of the clerk's own posts in
+/// `approbations` ([`verdict`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Dated by its reference line, and not yet expired.
+    Stands,
+    /// Its reference line has no expiry the sweep can read — or there is
+    /// no reference line it recognises — and the relay's own `created_at`
+    /// is under the ceiling: it stands, and is counted as undatable.
+    StandsUndated,
+    /// Its suggestion has expired: deleted as `expired`.
+    Expired,
+    /// Undatable and seven days old on the relay's own `created_at`
+    /// (`reference::UNDATABLE_CEILING`): deleted as `undatable`.
+    PastCeiling,
+}
+
+/// The sweep's decision about one post: its content (the reference line is
+/// read off it), the `created_at` the relay stamped on it, and the time.
+/// Pure, so that the ceiling is unit-tested here rather than waited seven
+/// days for.
+pub fn verdict(content: &str, created_at_unix: i64, now_unix: i64) -> Verdict {
+    let expires_at = reference::parse(content)
+        .and_then(|reference| reference.expires_at)
+        .and_then(|expires_at| reference::expires_at_unix(&expires_at));
+    match expires_at {
+        Some(expires_at) if expires_at <= now_unix => Verdict::Expired,
+        Some(_) => Verdict::Stands,
+        None if reference::past_ceiling(created_at_unix, now_unix) => Verdict::PastCeiling,
+        None => Verdict::StandsUndated,
     }
 }
 
 /// Reads the clerk's own posts in `approbations` and deletes each one whose
 /// reference line says its suggestion has expired, saying so in `activite`
-/// (#219). A relay error is a warning and a counted failure, never a stop.
-pub async fn sweep_once(clerk: &Clerk) {
+/// (#219) — and each one it cannot date once it is seven days old, counted
+/// apart. A relay error is a warning and a counted failure, never a stop.
+/// Answers how many posts it read and could not date, for [`sweep`] to say.
+pub async fn sweep_once(clerk: &Clerk) -> u64 {
     let now = now_unix();
     let approvals = clerk.config.channel_approvals.as_str();
     let posts = match clerk
@@ -652,49 +783,67 @@ pub async fn sweep_once(clerk: &Clerk) {
                 next_in_seconds = clerk.config.sweep.as_secs(),
                 "the sweep could not read the clerk's own posts"
             );
-            return;
+            return 0;
         }
     };
     let mut deleted = 0u64;
+    let mut undatable = 0u64;
     for post in &posts {
-        let Some(reference) = reference::parse(&post.content) else {
-            continue;
+        let why = match verdict(&post.content, post.created_at.as_secs() as i64, now) {
+            Verdict::Stands => continue,
+            Verdict::StandsUndated => {
+                undatable += 1;
+                continue;
+            }
+            Verdict::Expired => Deleted::Expired,
+            Verdict::PastCeiling => {
+                undatable += 1;
+                Deleted::Undatable
+            }
         };
-        let Some(expires_at) = reference.expires_at.as_deref() else {
-            continue;
-        };
-        if !reference::has_expired(expires_at, now) {
-            continue;
-        }
         let event_id = post.id.to_hex();
+        // The suggestion the post is about, for the log line and the
+        // activity line's tag; a post with no reference line the sweep
+        // recognises has none, and is named by its event id alone.
+        let suggestion_id = reference::parse(&post.content)
+            .map(|reference| reference.suggestion_id)
+            .unwrap_or_default();
         match clerk.relay.delete(approvals, &event_id).await {
             Ok(_) => {
                 deleted += 1;
-                let total = clerk.metrics.record_deleted(Deleted::Expired);
+                let total = clerk.metrics.record_deleted(why);
                 info!(
-                    suggestion_id = %reference.suggestion_id,
+                    why = why.as_str(),
+                    suggestion_id,
                     event_id = %event_id,
-                    expires_at,
+                    created_at = post.created_at.as_secs(),
                     total,
-                    "deleted an expired suggestion's post"
+                    "deleted a suggestion's post"
                 );
-                activity_line(clerk, &text::activity_expired(clerk.lang)).await;
+                let about = if suggestion_id.is_empty() {
+                    event_id.as_str()
+                } else {
+                    suggestion_id.as_str()
+                };
+                activity_line(clerk, &text::activity_expired(clerk.lang), about).await;
             }
             Err(error) => {
                 clerk.metrics.record_relay_failure();
                 warn!(
                     %error,
-                    suggestion_id = %reference.suggestion_id,
+                    why = why.as_str(),
+                    suggestion_id,
                     event_id = %event_id,
-                    "an expired suggestion's post could not be deleted; the next sweep will try again"
+                    "a suggestion's post could not be deleted; the next sweep will try again"
                 );
             }
         }
     }
     clerk.metrics.record_sweep();
     if deleted > 0 {
-        info!(read = posts.len(), deleted, "sweep done");
+        info!(read = posts.len(), deleted, undatable, "sweep done");
     }
+    undatable
 }
 
 /// A parse failure as the log may carry it: serde_json's category and the
@@ -755,6 +904,64 @@ mod tests {
         assert!(already_posted(&[quoting_id], OTHER));
         assert!(!already_posted(&[prose], ID));
         assert!(!already_posted(&[], ID));
+    }
+
+    #[test]
+    fn the_sweep_dates_a_post_by_its_reference_line_and_then_by_the_ceiling() {
+        const WEEK: i64 = 7 * 24 * 60 * 60;
+        // 2026-09-17T11:00:00Z is 1789642800 seconds after the epoch.
+        let expires = 1789642800;
+        let created = expires - 3600;
+        let dated = format!(
+            "Réponse proposée\n« Oui »\ntwalk:suggestion:{ID} expires 2026-09-17T11:00:00Z"
+        );
+
+        // Dated: the reference line decides, and the ceiling never enters
+        // into it — a dated post a month old that has not expired stands.
+        assert_eq!(verdict(&dated, created, expires - 1), Verdict::Stands);
+        assert_eq!(verdict(&dated, created, expires), Verdict::Expired);
+        assert_eq!(
+            verdict(&dated, created - WEEK * 4, expires - 1),
+            Verdict::Stands
+        );
+
+        // Undatable, three ways: no expiry in the reference line (the
+        // contract's `expires_at` is optional), one that does not parse,
+        // and no reference line the sweep recognises at all. Each stands
+        // while the relay's `created_at` is under the ceiling, and goes
+        // once it is seven days old.
+        for undatable in [
+            format!("« Oui »\ntwalk:suggestion:{ID}"),
+            format!("« Oui »\ntwalk:suggestion:{ID} expires tomorrow"),
+            "« Oui »\nno reference line".to_owned(),
+        ] {
+            assert_eq!(
+                verdict(&undatable, created, created + WEEK - 1),
+                Verdict::StandsUndated,
+                "{undatable}"
+            );
+            assert_eq!(
+                verdict(&undatable, created, created + WEEK),
+                Verdict::PastCeiling,
+                "{undatable}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_deliver_retries_for_the_default_suggestion_life_and_not_past_it() {
+        // The retry schedule the bus follows under `nak_delay`, summed over
+        // the naks MAX_DELIVER deliveries allow, lands the last delivery
+        // within the last minute of TWALK_SUGGESTION_TTL_SECONDS's default
+        // hour: still alive, and one more would be past it. A relay outage
+        // shorter than a suggestion's life loses nothing, and a poisoned
+        // message costs at most that hour.
+        let hour = Duration::from_secs(3600);
+        let retried_for: Duration = (1..MAX_DELIVER).map(nak_delay).sum();
+        assert_eq!(retried_for, Duration::from_secs(3542));
+        assert!(retried_for >= hour - NAK_DELAY_MAX, "{retried_for:?}");
+        assert!(retried_for < hour, "{retried_for:?}");
+        assert!(retried_for + nak_delay(MAX_DELIVER) >= hour);
     }
 
     #[test]

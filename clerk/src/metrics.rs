@@ -41,12 +41,19 @@ impl Channel {
 pub enum Deleted {
     /// The suggestion it answered for expired (the sweep, `Config::sweep`).
     Expired,
+    /// The sweep could not date it — no `expires_at` it could read in the
+    /// reference line — and it had stood for `reference::UNDATABLE_CEILING`
+    /// on the relay's own `created_at` (ADR 0028's seven days).
+    Undatable,
 }
 
 impl Deleted {
+    pub const ALL: [Deleted; 2] = [Deleted::Expired, Deleted::Undatable];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Expired => "expired",
+            Self::Undatable => "undatable",
         }
     }
 }
@@ -58,8 +65,9 @@ pub enum Skipped {
     Expired,
     /// The event did not deserialise into the shape the clerk expects.
     Unreadable,
-    /// A post already exists for this suggestion (the relay is the clerk's
-    /// own memory — see `lib.rs` — and a redelivery must not double-post).
+    /// A post already exists for this suggestion, or a line for this bus
+    /// event (the relay is the clerk's own memory — see `lib.rs` — and a
+    /// redelivery must not double-post on any channel).
     Duplicate,
 }
 
@@ -80,6 +88,7 @@ pub struct Metrics {
     posts_activite: AtomicU64,
     posts_journal: AtomicU64,
     deleted_expired: AtomicU64,
+    deleted_undatable: AtomicU64,
     skipped_expired: AtomicU64,
     skipped_unreadable: AtomicU64,
     skipped_duplicate: AtomicU64,
@@ -110,6 +119,7 @@ impl Metrics {
             posts_activite: AtomicU64::new(0),
             posts_journal: AtomicU64::new(0),
             deleted_expired: AtomicU64::new(0),
+            deleted_undatable: AtomicU64::new(0),
             skipped_expired: AtomicU64::new(0),
             skipped_unreadable: AtomicU64::new(0),
             skipped_duplicate: AtomicU64::new(0),
@@ -141,12 +151,16 @@ impl Metrics {
         self.posts_counter(channel).fetch_add(1, Ordering::Relaxed) + 1
     }
 
+    fn deleted_counter(&self, why: Deleted) -> &AtomicU64 {
+        match why {
+            Deleted::Expired => &self.deleted_expired,
+            Deleted::Undatable => &self.deleted_undatable,
+        }
+    }
+
     /// One post deleted, and why. Returns the running total.
     pub fn record_deleted(&self, why: Deleted) -> u64 {
-        let counter = match why {
-            Deleted::Expired => &self.deleted_expired,
-        };
-        counter.fetch_add(1, Ordering::Relaxed) + 1
+        self.deleted_counter(why).fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// One event read off the bus that did not become a post, and why.
@@ -166,11 +180,13 @@ impl Metrics {
     }
 
     /// Renders the Prometheus text exposition (format version 0.0.4).
-    /// `now_unix_seconds` is unused by any sample today, but is taken the
-    /// way the Sensor's `render` is — a scrape time the caller controls,
-    /// rather than a clock this module reads for itself — so a gauge that
-    /// needs one later costs nothing to add.
-    pub fn render(&self, _now_unix_seconds: u64) -> String {
+    /// `now_unix_seconds` is taken the way the Sensor's `render` takes it —
+    /// a scrape time the caller controls, rather than a clock this module
+    /// reads for itself — so a gauge that needs one later costs nothing to
+    /// add; no sample uses it today, and that is said here rather than
+    /// hidden behind an underscore.
+    pub fn render(&self, now_unix_seconds: u64) -> String {
+        let _ = now_unix_seconds;
         let mut out = String::new();
 
         out.push_str("# HELP twalk_clerk_posts_total Posts written to the relay, by channel.\n");
@@ -185,11 +201,13 @@ impl Metrics {
 
         out.push_str("# HELP twalk_clerk_deleted_total Posts deleted, by why.\n");
         out.push_str("# TYPE twalk_clerk_deleted_total counter\n");
-        out.push_str(&format!(
-            "twalk_clerk_deleted_total{{why=\"{}\"}} {}\n",
-            Deleted::Expired.as_str(),
-            self.deleted_expired.load(Ordering::Relaxed)
-        ));
+        for why in Deleted::ALL {
+            out.push_str(&format!(
+                "twalk_clerk_deleted_total{{why=\"{}\"}} {}\n",
+                why.as_str(),
+                self.deleted_counter(why).load(Ordering::Relaxed)
+            ));
+        }
 
         out.push_str(
             "# HELP twalk_clerk_skipped_total Events read off the bus that did not become a post, by why.\n",
@@ -253,10 +271,12 @@ mod tests {
                 "channel {channel} should exist at zero: {body}"
             );
         }
-        assert!(
-            body.contains("twalk_clerk_deleted_total{why=\"expired\"} 0\n"),
-            "{body}"
-        );
+        for why in ["expired", "undatable"] {
+            assert!(
+                body.contains(&format!("twalk_clerk_deleted_total{{why=\"{why}\"}} 0\n")),
+                "why {why} should exist at zero: {body}"
+            );
+        }
         for why in ["expired", "unreadable", "duplicate"] {
             assert!(
                 body.contains(&format!("twalk_clerk_skipped_total{{why=\"{why}\"}} 0\n")),
@@ -279,6 +299,8 @@ mod tests {
         assert_eq!(metrics.record_post(Channel::Approvals), 2);
         assert_eq!(metrics.record_post(Channel::Journal), 1);
         assert_eq!(metrics.record_deleted(Deleted::Expired), 1);
+        assert_eq!(metrics.record_deleted(Deleted::Undatable), 1);
+        assert_eq!(metrics.record_deleted(Deleted::Undatable), 2);
         assert_eq!(metrics.record_skipped(Skipped::Unreadable), 1);
         assert_eq!(metrics.record_relay_failure(), 1);
         metrics.record_sweep();
@@ -300,6 +322,10 @@ mod tests {
         );
         assert!(
             body.contains("twalk_clerk_deleted_total{why=\"expired\"} 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains("twalk_clerk_deleted_total{why=\"undatable\"} 2\n"),
             "{body}"
         );
         assert!(

@@ -13,13 +13,18 @@
 //! event, a second bridge transition is published and its line waited
 //! for, and the feed is then asserted to hold exactly the lines the two
 //! transitions and the one decision account for.
+//!
+//! And one transition is one line however often the bus delivers it: the
+//! clerk finds the line it already wrote by the `r` tag it carries,
+//! `twalk:event:<the event's id>` (the journal suite says why not by the
+//! event's own timestamp), which the redelivery test reads back too.
 
 mod harness;
 
 use anyhow::Result;
 use harness::{
-    bridge_status, consent_change_about_a_contact, thinking, Run, CONTACT_MATRIX_ID,
-    MATRIX_USER_ID_SUBJECT_PATTERN,
+    bridge_status, consent_change_about_a_contact, line_references_event, thinking, Run,
+    CONTACT_MATRIX_ID, MATRIX_USER_ID_SUBJECT_PATTERN,
 };
 use serde_json::json;
 
@@ -132,6 +137,52 @@ async fn bridge_transitions_and_consent_decisions_are_lines_and_thinking_is_not(
     run.assert_metric("twalk_clerk_posts_total{channel=\"activite\"} 3")
         .await?;
     run.assert_metric_now("twalk_clerk_skipped_total{why=\"unreadable\"} 0")
+        .await?;
+
+    run.shutdown().await
+}
+
+#[tokio::test]
+async fn a_redelivered_transition_is_still_one_line() -> Result<()> {
+    let run = Run::start("activite-redelivery").await?;
+
+    let status = bridge_status(&run.id, 1)?;
+    let id = status["id"].as_str().unwrap().to_owned();
+    let bridge_id = status["data"]["bridge_id"].as_str().unwrap().to_owned();
+    run.publish("bridge.status.changed", &status).await?;
+    let line = run
+        .wait_for_line(&run.channels.activity, &bridge_id)
+        .await?;
+    assert!(
+        line_references_event(&line, &id),
+        "the line is tagged with the event it was written for: {:?}",
+        line.tags
+    );
+
+    // The same transition again, then a consent decision whose line proves
+    // the consumer went past the redelivery.
+    run.publish_again("bridge.status.changed", &status).await?;
+    let decision = consent_change_about_a_contact(&run.id, 2)?;
+    run.publish("consent.state.changed", &decision).await?;
+    run.wait_for_line(&run.channels.activity, "Consentement")
+        .await?;
+
+    let about_it: Vec<_> = run
+        .lines_in(&run.channels.activity)
+        .await?
+        .into_iter()
+        .filter(|line| line_references_event(line, &id))
+        .collect();
+    assert_eq!(
+        about_it.len(),
+        1,
+        "a redelivered transition is still one line: {about_it:?}"
+    );
+    let lines = run.lines_in(&run.channels.activity).await?;
+    assert_eq!(lines.len(), 2, "one transition and one decision: {lines:?}");
+    run.assert_metric("twalk_clerk_skipped_total{why=\"duplicate\"} 1")
+        .await?;
+    run.assert_metric("twalk_clerk_posts_total{channel=\"activite\"} 2")
         .await?;
 
     run.shutdown().await

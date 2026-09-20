@@ -19,8 +19,11 @@ anyhow = "1"
 # it only behind features the clerk has no use for.
 base64 = "0.22"
 # The bus, as every other component speaks it: three durable JetStream pull
-# consumers (approbations, journal, activite) over `inbound.>`/`persona.>`/
-# `outbound.>` (ticket #265).
+# consumers (approbations, journal, activite) over exactly four subjects —
+# `persona.suggest.produced`, `persona.reply.approved.v1.posted`,
+# `bridge.status.changed` and `consent.state.changed` — and never
+# `inbound.>` or `outbound.>`, whose events carry a contact's words
+# (ticket #265).
 async-nats = "0.50"
 # The health/metrics origin (`/health`, `/metrics`), the same shape as the
 # Companion Gateway's own skeleton (`companion-gateway/src/http.rs`).

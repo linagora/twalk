@@ -153,20 +153,30 @@ impl ClerkProc {
     }
 }
 
+/// How long [`ClerkProc::terminate`] gives the clerk to exit on SIGTERM
+/// before the child handle is dropped and `kill_on_drop` sends SIGKILL.
+const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+
 impl ClerkProc {
-    /// Ends the process without waiting on it, from a context that cannot
-    /// await — a `Drop`: a SIGTERM first, which is what lets it say
-    /// goodbye in the log a failure is read from, then the `kill_on_drop`
-    /// SIGKILL as the child handle goes. A clerk already stopped is left
-    /// alone.
+    /// Ends the process from a context that cannot await — a `Drop`: a
+    /// SIGTERM first, then up to [`TERMINATE_GRACE`] of waiting for the
+    /// exit, so the `clerk stopped` line does reach the log a failure is
+    /// read from, and only then the `kill_on_drop` SIGKILL as the child
+    /// handle goes, for a clerk that did not stop on its own. A clerk
+    /// already stopped is left alone.
     pub fn terminate(&mut self) {
-        if let Some(child) = self.child.take() {
+        if let Some(mut child) = self.child.take() {
             if let Some(pid) = child.id() {
                 let _ = std::process::Command::new("kill")
                     .args(["-TERM", &pid.to_string()])
                     .status();
+                let deadline = std::time::Instant::now() + TERMINATE_GRACE;
+                while matches!(child.try_wait(), Ok(None)) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
             }
-            // `child` goes out of scope here: `kill_on_drop` finishes it.
+            // `child` goes out of scope here: `kill_on_drop` finishes one
+            // still running.
         }
     }
 }

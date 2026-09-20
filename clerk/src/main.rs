@@ -50,9 +50,21 @@ async fn main() -> Result<()> {
         pubkey = %relay.public_key_hex(),
         stream = %config.stream,
         language = %config.user_language,
+        language_unset = config.user_language_unset,
         fallback_to_english,
         "clerk starting"
     );
+    // Unset is a supported state and is said rather than chosen silently:
+    // on the reference deployment the personas' language comes from the
+    // Companion's settings, which the clerk cannot read (it holds no
+    // Gateway credential), so a French deployment gets an English clerk
+    // unless the operator knows to set this.
+    if config.user_language_unset {
+        warn!(
+            "CLERK_USER_LANGUAGE is not set; the clerk writes in English. Set it in \
+             deploy/docker-compose/.env"
+        );
+    }
     if fallback_to_english {
         warn!(
             language = %config.user_language,

@@ -65,8 +65,17 @@ pub struct Config {
     /// The Buzz channel the clerk posts one line per posted reply to.
     pub channel_journal: String,
     /// The language the clerk writes its own sentences in — never a
-    /// contact's words, which it never quotes. One of [`USER_LANGUAGES`].
+    /// contact's words, which it never quotes. One of [`USER_LANGUAGES`];
+    /// `en` when `CLERK_USER_LANGUAGE` is unset, which
+    /// [`Config::user_language_unset`] records so the binary can say so.
     pub user_language: String,
+    /// Whether `user_language` is the default rather than a choice: on the
+    /// reference deployment the personas' language comes from the
+    /// Companion's settings (#184), which the clerk cannot read, so an
+    /// unset variable is a French deployment with an English clerk — a
+    /// supported state, and one to be told about at startup rather than
+    /// discovered on the relay.
+    pub user_language_unset: bool,
     /// Where `/health` and `/metrics` are served.
     pub listen: SocketAddr,
     /// How often the clerk looks for a post whose suggestion has expired
@@ -85,6 +94,7 @@ impl Config {
     /// never has to serialise with every other test that does, since the
     /// process environment is one global the whole binary shares.
     pub fn from_vars(vars: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        let user_language = optional(vars, "CLERK_USER_LANGUAGE");
         let config = Self {
             nats_url: optional(vars, "CLERK_NATS_URL")
                 .unwrap_or_else(|| DEFAULT_NATS_URL.to_owned()),
@@ -96,7 +106,8 @@ impl Config {
             channel_approvals: required(vars, "CLERK_CHANNEL_APPROVALS")?,
             channel_activity: required(vars, "CLERK_CHANNEL_ACTIVITY")?,
             channel_journal: required(vars, "CLERK_CHANNEL_JOURNAL")?,
-            user_language: optional(vars, "CLERK_USER_LANGUAGE").unwrap_or_else(|| "en".to_owned()),
+            user_language_unset: user_language.is_none(),
+            user_language: user_language.unwrap_or_else(|| "en".to_owned()),
             listen: optional(vars, "CLERK_LISTEN")
                 .unwrap_or_else(|| DEFAULT_LISTEN.to_owned())
                 .parse()
@@ -235,8 +246,20 @@ mod tests {
     fn a_full_configuration_is_accepted_with_the_defaults() {
         let c = Config::from_vars(&vars(FULL)).unwrap();
         assert_eq!(c.user_language, "en");
+        assert!(c.user_language_unset, "unset is English, and known to be");
         assert_eq!(c.sweep, Duration::from_secs(60));
         assert_eq!(c.listen.to_string(), "127.0.0.1:8084");
+    }
+
+    #[test]
+    fn a_language_that_was_set_is_not_the_default_even_when_it_is_english() {
+        for (set, unset) in [("fr", false), ("en", false), ("", true)] {
+            let mut v = FULL.to_vec();
+            v.push(("CLERK_USER_LANGUAGE", set));
+            let c = Config::from_vars(&vars(&v)).unwrap();
+            assert_eq!(c.user_language_unset, unset, "{set:?}");
+            assert_eq!(c.user_language, if unset { "en" } else { set }, "{set:?}");
+        }
     }
 
     #[test]
@@ -301,5 +324,109 @@ mod tests {
             c.bus_subject("fr.linagora.twalk.persona.suggest.produced.v1"),
             "twalk.persona.suggest.produced.v1"
         );
+    }
+
+    /// The `environment:` block of the `clerk` service in
+    /// `deploy/docker-compose/compose.yaml`, as `(key, value)` pairs, read
+    /// by a line scan of the indented block rather than a YAML parser: no
+    /// Cargo package here depends on `serde_yaml` (the Companion Gateway
+    /// uses `serde_yaml_ng`, for its own reasons), and a scan that knows
+    /// compose's two-space indentation is enough to find one mapping. It
+    /// fails, rather than answering an empty block, when the service or
+    /// the block is not where it looks.
+    fn compose_clerk_environment() -> Vec<(String, String)> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deploy/docker-compose/compose.yaml"
+        );
+        let compose =
+            std::fs::read_to_string(path).expect("the reference deployment's compose file");
+        let mut lines = compose.lines();
+        lines
+            .by_ref()
+            .find(|line| *line == "  clerk:")
+            .expect("a `clerk:` service at the services' indentation");
+        let mut in_service = lines.take_while(|line| {
+            // The service ends at the next line indented two spaces or less
+            // that is not blank and not a comment.
+            let indent = line.len() - line.trim_start().len();
+            line.trim().is_empty() || line.trim_start().starts_with('#') || indent > 2
+        });
+        in_service
+            .by_ref()
+            .find(|line| *line == "    environment:")
+            .expect("an `environment:` block on the clerk service");
+        in_service
+            .take_while(|line| {
+                let indent = line.len() - line.trim_start().len();
+                line.trim().is_empty() || line.trim_start().starts_with('#') || indent > 4
+            })
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let (key, value) = line
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("an environment entry is `KEY: value`: {line:?}"));
+                (key.trim().to_owned(), value.trim().to_owned())
+            })
+            .collect()
+    }
+
+    /// The ticket's container-environment criterion, guarded at the file
+    /// that decides it: the clerk's compose service is handed its own
+    /// `CLERK_*` variables and nothing of the Gateway's or Hermes's — not
+    /// the service token that opens the consent snapshot, not Hermes's key,
+    /// no token or secret of any kind — with one named exception, the
+    /// `${HERMES_USER_LANGUAGE:-}` fallback source for the clerk's own
+    /// language, a preference and not a credential. Asserting it on a container Docker
+    /// really started is #284's deployment suite; this is what fails first
+    /// if a later edit adds a variable here.
+    #[test]
+    fn the_compose_service_holds_no_gateway_or_hermes_credential() {
+        let environment = compose_clerk_environment();
+        assert!(
+            !environment.is_empty(),
+            "the clerk service's environment block was found but empty"
+        );
+        let keys: Vec<&str> = environment.iter().map(|(k, _)| k.as_str()).collect();
+        for required in [
+            "CLERK_NATS_URL",
+            "CLERK_RELAY_URL",
+            "CLERK_NOSTR_KEY_FILE",
+            "CLERK_CHANNEL_APPROVALS",
+            "CLERK_CHANNEL_ACTIVITY",
+            "CLERK_CHANNEL_JOURNAL",
+            "CLERK_USER_LANGUAGE",
+        ] {
+            assert!(keys.contains(&required), "{required} missing from {keys:?}");
+        }
+        for (key, value) in &environment {
+            assert!(
+                key.starts_with("CLERK_"),
+                "the clerk's environment holds only CLERK_* variables; found {key}"
+            );
+            // What the value may name: the deployment's own CLERK_* and
+            // NATS_PORT interpolations, and HERMES_USER_LANGUAGE as a
+            // fallback source — never a Gateway variable, any other Hermes
+            // one, Hermes's key, or anything called a token or a secret.
+            let names = value
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|name| !name.is_empty());
+            for name in names {
+                assert!(
+                    !name.starts_with("GATEWAY_"),
+                    "{key} references the Gateway's {name}"
+                );
+                assert!(
+                    !name.starts_with("HERMES_") || name == "HERMES_USER_LANGUAGE",
+                    "{key} references Hermes's {name}"
+                );
+                assert_ne!(name, "BUZZ_PRIVATE_KEY", "{key} references Hermes's key");
+                assert!(
+                    !name.ends_with("_TOKEN") && !name.ends_with("_SECRET"),
+                    "{key} references a credential: {name}"
+                );
+            }
+        }
     }
 }
