@@ -71,6 +71,29 @@ pub const TEST_OWNER_PUBKEY_HEX: &str =
 /// a hung relay, which must fail a test rather than hang it for ever.
 pub const RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The longest one request waits, in all, for the relay's per-key quota to
+/// reset before it is a failure: a window and a half — one full window is
+/// the most any `retry in Ns` can ask for, and a second `429` right after
+/// it means the suite is over the quota on its own and should say so.
+pub const QUOTA_WAIT_BUDGET: Duration = Duration::from_secs(90);
+
+/// What a `429` that names no reset time is waited out for.
+const QUOTA_WAIT_DEFAULT: Duration = Duration::from_secs(5);
+
+/// The seconds a `rate-limited: quota exceeded; retry in Ns` body asks
+/// for, if it is that body.
+fn retry_in(body: &str) -> Option<Duration> {
+    let seconds: u64 = body
+        .split("retry in ")
+        .nth(1)?
+        .split('s')
+        .next()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
 /// The sweep interval every clerk under test runs with
 /// (`CLERK_SWEEP_SECONDS` in [`relay_env`]): two seconds, so a test can
 /// watch an expired post go and derive its own bound from this number.
@@ -235,23 +258,54 @@ impl RelayStack {
     /// the relay refuses an event whose author is not the key that signed
     /// the request (`event pubkey does not match authenticated identity`),
     /// so a stranger's reaction must be posted as the stranger.
+    ///
+    /// A `429` is not a failure of the thing under test: the relay counts
+    /// every request of a key in a fixed sixty-second window
+    /// (`human_api_calls_per_min`, 300), the whole suite of a binary seeds,
+    /// reacts and reads as the one owner key, and two suites run back to
+    /// back land in one window. The answer names when the window resets
+    /// (`retry in Ns`), so the request waits **that long** — the relay's
+    /// number, not a chosen one — and is sent again, within
+    /// [`QUOTA_WAIT_BUDGET`] in all, and says so on stderr so a slow run
+    /// explains itself. A signed request is a fresh NIP-98 event each time.
     async fn signed_post_as(&self, keys: &Keys, path: &str, body: String) -> Result<Value> {
         let url = format!("{}{path}", self.url);
-        let response = self
-            .http
-            .post(&url)
-            .header("Authorization", authorization(keys, &url, "POST", &body)?)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            bail!("POST {url} answered {status}: {text}");
+        let deadline = tokio::time::Instant::now() + QUOTA_WAIT_BUDGET;
+        loop {
+            let response = self
+                .http
+                .post(&url)
+                .header("Authorization", authorization(keys, &url, "POST", &body)?)
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .with_context(|| format!("POST {url}"))?;
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let wait = retry_in(&text).unwrap_or(QUOTA_WAIT_DEFAULT) + Duration::from_secs(1);
+                if tokio::time::Instant::now() + wait > deadline {
+                    bail!(
+                        "POST {url} answered {status} and the relay's quota did not reset within \
+                         {}s: {text}",
+                        QUOTA_WAIT_BUDGET.as_secs()
+                    );
+                }
+                eprintln!(
+                    "the relay rate-limited key {}…; waiting {}s as it asked ({text})",
+                    &keys.public_key().to_hex()[..8],
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            if !status.is_success() {
+                bail!("POST {url} answered {status}: {text}");
+            }
+            return serde_json::from_str(&text)
+                .with_context(|| format!("POST {url} answered non-JSON: {text}"));
         }
-        serde_json::from_str(&text).with_context(|| format!("POST {url} answered non-JSON: {text}"))
     }
 
     /// Submits one signed event and requires the relay to accept it: a
@@ -303,8 +357,15 @@ impl RelayStack {
     /// which is what lets it write at all: the relay requires membership
     /// and the clerk's key is nobody until this.
     pub async fn add_member(&self, pubkey_hex: &str) -> Result<()> {
+        self.add_member_as(pubkey_hex, "member").await
+    }
+
+    /// [`add_member`](Self::add_member) with `role` — `member` or `admin`,
+    /// the relay's own vocabulary — because a relay **admin** can react to
+    /// a post like anyone else and the clerk must decide by key, not role.
+    pub async fn add_member_as(&self, pubkey_hex: &str, role: &str) -> Result<()> {
         let event = EventBuilder::new(Kind::Custom(9030), "")
-            .tags([tag(["p", pubkey_hex])?, tag(["role", "member"])?])
+            .tags([tag(["p", pubkey_hex])?, tag(["role", role])?])
             .sign_with_keys(&self.owner)
             .context("signing the add-member command")?;
         self.submit(&event).await
@@ -336,25 +397,37 @@ impl RelayStack {
     /// it), signed by the owner: what lets a key read the channel and
     /// react in it.
     pub async fn add_to_channel(&self, channel: &str, pubkey_hex: &str) -> Result<()> {
+        self.add_to_channel_as(channel, pubkey_hex, "member").await
+    }
+
+    /// [`add_to_channel`](Self::add_to_channel) with `role` (`member` or
+    /// `admin`).
+    pub async fn add_to_channel_as(
+        &self,
+        channel: &str,
+        pubkey_hex: &str,
+        role: &str,
+    ) -> Result<()> {
         let put_user = EventBuilder::new(Kind::Custom(9000), "")
             .tags([
                 tag(["h", channel])?,
                 tag(["p", pubkey_hex])?,
-                tag(["role", "member"])?,
+                tag(["role", role])?,
             ])
             .sign_with_keys(&self.owner)
             .context("signing the put-user event")?;
         self.submit(&put_user).await
     }
 
-    /// A fresh key that is a member of the relay and of `channel`, and
-    /// nothing else — not the owner, not the clerk: a **stranger** whose
-    /// gesture on a post must decide nothing.
-    pub async fn stranger_in(&self, channel: &str) -> Result<Keys> {
+    /// A fresh key that is a `role` (`member` or `admin`) of the relay and
+    /// of `channel`, and nothing else — not the owner, not the clerk: a
+    /// **stranger** whose gesture on a post must decide nothing, whatever
+    /// their role, because the clerk decides by key.
+    pub async fn stranger_in(&self, channel: &str, role: &str) -> Result<Keys> {
         let keys = Keys::generate();
         let pubkey = keys.public_key().to_hex();
-        self.add_member(&pubkey).await?;
-        self.add_to_channel(channel, &pubkey).await?;
+        self.add_member_as(&pubkey, role).await?;
+        self.add_to_channel_as(channel, &pubkey, role).await?;
         Ok(keys)
     }
 
@@ -368,7 +441,17 @@ impl RelayStack {
     /// One `POST /query` as the owner with `filters` — a JSON array of
     /// NIP-01 filters — answered as events, newest first.
     pub async fn query(&self, filters: Value) -> Result<Vec<Event>> {
-        let answer = self.signed_post("/query", filters.to_string()).await?;
+        self.query_as(&self.owner, filters).await
+    }
+
+    /// [`query`](Self::query) signed by `keys` — a member of the channels
+    /// the filters name — rather than the owner: a run reads as a key of
+    /// its own so that its reads draw on that key's quota and not on the
+    /// owner's, which every run's seed and every owner's gesture need.
+    pub async fn query_as(&self, keys: &Keys, filters: Value) -> Result<Vec<Event>> {
+        let answer = self
+            .signed_post_as(keys, "/query", filters.to_string())
+            .await?;
         serde_json::from_value(answer).context("the query answered something other than events")
     }
 

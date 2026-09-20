@@ -65,14 +65,21 @@ use twalk_test_harness::sha256_hex;
 use super::events::now_rfc3339;
 
 /// The ports a stub Gateway may bind: this suite's own band, one per test
-/// (`decisions.rs` takes `17900 + n`), so that the tests of one binary run
-/// in parallel without sharing a stub.
-pub const PORT_RANGE: std::ops::Range<u16> = 17900..17999;
+/// (`decisions.rs` takes `17400 + n`), so that the tests of one binary run
+/// in parallel without sharing a stub. 17400–17499 because it is the one
+/// hundred nothing in the repository claims: the Sensor's suites have
+/// 17200–17399, the Hermes stub Gateway 17500–17699, #172's stacks
+/// 17700–17899 (the clerk's own relay is 17800), and 17900–18099 is
+/// #175's bridges block — `twalk-bridges-test` publishes its telegram
+/// bridge on 17906 on any host that has run
+/// `sensor/tests/bridges_deployment.rs`, which is where this band lived
+/// first and failed a test with `Address already in use`.
+pub const PORT_RANGE: std::ops::Range<u16> = 17400..17499;
 
 /// The last port of the band, deliberately outside [`PORT_RANGE`] and
 /// therefore bound by no stub: the address of a Companion Gateway that is
 /// not there. `CLERK_GATEWAY_URL` for the test that watches the clerk retry.
-pub const UNREACHABLE_GATEWAY_URL: &str = "http://127.0.0.1:17999";
+pub const UNREACHABLE_GATEWAY_URL: &str = "http://127.0.0.1:17499";
 
 /// The Companion Gateway's device-token cookie (`clerk/src/gateway.rs`,
 /// `DEVICE_COOKIE`), spelled again here so a rename on either side fails
@@ -234,8 +241,12 @@ impl StubGateway {
 
     /// Starts a stub on the first free port of [`PORT_RANGE`], for a test
     /// that does not care which.
+    /// Scanned from the **top** of the band, because `decisions.rs` takes its
+    /// ports from the bottom (`17400 + n`) and this test runs in the same
+    /// binary, in parallel: a port claimed here a moment before a test binds
+    /// it by number would fail that test for a reason it could not see.
     pub async fn start_anywhere() -> Result<Self> {
-        for port in PORT_RANGE {
+        for port in PORT_RANGE.rev() {
             let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
             if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
                 return Self::serve(listener).await;
