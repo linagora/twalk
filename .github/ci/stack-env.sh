@@ -36,6 +36,10 @@
 # TWALK_PORTALS_TEST_* is the portal register over it; TWALK_LOOP_TEST_* is the
 # whole loop.
 #
+# TWALK_CLERK_TEST_* is the clerk's own test stack: a real Buzz relay (relay,
+# Postgres, Redis) beside the shared Synapse/NATS one, seeded fresh per run
+# under a bus prefix of its own, at 18370.
+#
 # The `_TEARDOWN` flags are deliberately **not** set, and since #199 that is a
 # choice rather than a workaround. It used to be a workaround:
 # `companion-gateway/tests/deployment.rs` called its own `teardown()` at the end
@@ -86,6 +90,8 @@ TWALK_LOOP_TEST_STACK=twalk-ci-loop
 TWALK_LOOP_TEST_SYNAPSE_PORT=18350
 TWALK_LOOP_TEST_NATS_PORT=18351
 TWALK_LOOP_TEST_GATEWAY_PORT=18352
+TWALK_CLERK_TEST_STACK=twalk-ci-clerk
+TWALK_CLERK_TEST_RELAY_PORT=18370
 TWALK_TEST_PORT=18360
 TWALK_TEST_BRIDGE_PORT=18361
 TWALK_TEST_SESSION_PORT=18362

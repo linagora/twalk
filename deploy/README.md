@@ -113,10 +113,10 @@ A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversat
 | `docker-compose/provision.sh` | Matrix account provisioning (the Sensor, ad-hoc accounts) |
 | `docker-compose/provision-bridges.sh` | Step 1 above: registrations, Synapse's configuration, the restart |
 | `docker-compose/provision-owner-device.sh` | The operator route of ADR 0034: the `Twalk` device on the owner's own account, its credential written where the Sensor reads it |
-| `docker-compose/provision-hermes-nostr-key.sh` | The Nostr key Hermes — the agent runtime of ADR 0032, not this stack's persona runtime — signs Buzz events with; written into Hermes's own env file (`BUZZ_PRIVATE_KEY`), never into this stack's, because Twalk holds no Buzz key. Prints the public half, which the relay must be told to accept |
-| `docker-compose/provision-buzz-channels.sh` | The operator route of #218: the owner's four Buzz channels, created **as the owner** from a key file only they write, Hermes added as a bot member, the UUIDs written where Hermes reads them — no UUID typed by hand |
+| `docker-compose/provision-nostr-key.sh` | A Nostr key for a Buzz writer, generated once into the env file it is given (`BUZZ_PRIVATE_KEY`, with the public half beside it), never into this stack's `.env`. Two writers use it: Hermes — the agent runtime of ADR 0032, not this stack's persona runtime — into its own env file, and the clerk (#265) into a file of its own. Prints the public half, which the relay must be told to accept. `provision-hermes-nostr-key.sh` is the old name, kept as a symlink |
+| `docker-compose/provision-buzz-channels.sh` | The operator route of #218: the owner's four Buzz channels, created **as the owner** from a key file only they write, Hermes added as a bot member when its env file holds a key, every `--bot <pubkey>` (the clerk's) added the same way, the UUIDs written where Hermes reads them and the three `CLERK_CHANNEL_*` lines printed for this stack's `.env` — no UUID typed by hand |
 | `docker-compose/synapse/homeserver.yaml` | Synapse's configuration template (Jinja2, rendered by the image) |
-| `docker-compose/*.Dockerfile` | One image per Twalk component |
+| `docker-compose/*.Dockerfile` | One image per Twalk component, the clerk's (`clerk.Dockerfile`) included |
 | `docker-compose/hermes-entrypoint.sh` | Hermes's entrypoint: start the runtime, or say why it is hosting nothing |
 | `docker-compose/run-persona-image.sh` | The argv every persona in `HERMES_PERSONAS` names, shipped in the Hermes image as `run-persona` |
 | `../bridges/` | Each bridge's base configuration, and the generator the one-shots run |
