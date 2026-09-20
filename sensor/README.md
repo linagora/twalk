@@ -42,6 +42,18 @@ The report is the approval event, unchanged, republished on `twalk.persona.reply
 
 When an owner device is configured and a reply targets a **portal** room it has not joined, nothing is posted: the send fails transiently, is retried, and ends on the dead-letter subject if the device never joins. Posting as `@sensor:` there would produce an event id and total silence, which is the outcome all of this exists to remove.
 
+## The bus's retention policy
+
+The `twalk` stream holds contacts' messages in cleartext — portal rooms are end-to-end encrypted, so the bus is the one place in a deployment where they exist at rest — and the Sensor is what decides how long ([ADR 0037](../docs/architecture/adr/0037-the-bus-keeps-ninety-days-and-two-gigabytes-and-no-more.md), [#174](https://github.com/linagora/twalk/issues/174)). `src/bus.rs` names every field of the stream's configuration; three are the operator's:
+
+| Variable | Default | What it decides |
+| --- | --- | --- |
+| `SENSOR_BUS_MAX_AGE_DAYS` | `90` | How long an event is kept. Zero is refused: NATS reads it as "for ever", which is the undecided policy this replaced. |
+| `SENSOR_BUS_MAX_BYTES` | `2147483648` (two GiB) | How large the stream may grow before the oldest events are discarded. Not the working limit — ninety days of a real account's traffic is nearer 90 MB — but the reason the user's disk is never the thing that gives way. |
+| `SENSOR_BUS_DUPLICATE_WINDOW_SECONDS` | `86400` (a day) | How long the bus remembers a `Nats-Msg-Id`. A correctness setting: a restart re-syncs from Matrix and republishes, and under NATS's two-minute default a republished event reached every consumer twice. It cannot be longer than the age. |
+
+The rest is fixed: `discard old`, `s2` compression, file storage, one replica, no count ceiling. At every start the Sensor creates the stream with the policy or **updates an existing one in place**, logging each field it changed (`max_age: 0s (for ever) → 7776000s (90d)`); shortening the age expires every event older than it at that moment. An update the bus refuses — a field JetStream cannot change on a live stream, such as its storage — is an `ERROR` naming the field and the two options, and the Sensor runs on the stream's existing policy: Twalk never deletes or recreates the stream, because expired events are gone for good and that is the operator's act. `tests/bus_policy.rs` asserts all of it on the bus's own `STREAM.INFO`.
+
 ## Tests
 
 The integration tests (ticket 01) live in `tests/`. They boot a real Synapse and a real NATS JetStream via docker compose and verify behaviour at the process boundary; bots play the role of bridges over the Matrix client-server API.
