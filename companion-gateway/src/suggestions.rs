@@ -180,6 +180,12 @@ pub struct Listed {
     /// What the persona proposed: the text the screen draws and the user
     /// approves or edits.
     pub suggestion: Content,
+    /// The sentence the reply will disclose itself with, in the language the
+    /// persona wrote in (`data.disclosure`, ticket #121) — what the approval
+    /// screen shows fixed beside the editable body, or `None` when the
+    /// suggestion carries none. Whether it is *appended* is the switch's
+    /// business at the moment of approval, not this read's.
+    pub disclosure: Option<String>,
     pub stream_sequence: u64,
     pub standing: Standing,
     /// The approval this Gateway recorded, when there is one. `publication`
@@ -258,6 +264,8 @@ struct SuggestionData {
     persona_id: String,
     trigger: TriggerReference,
     suggestion: SuggestionContent,
+    #[serde(default)]
+    disclosure: Option<String>,
     #[serde(default)]
     attempt: Option<u64>,
     #[serde(default)]
@@ -462,6 +470,7 @@ impl Suggestions {
                 body: document.data.suggestion.body,
                 format,
             },
+            disclosure: document.data.disclosure,
             stream_sequence: sequence,
             standing,
             approval,
@@ -960,6 +969,7 @@ mod tests {
                     "contact": { "display_name": "Aicha Benali" }
                 },
                 "suggestion": { "body": "Pas de problème, à 20h !", "format": "text/plain" },
+                "disclosure": "Rédigé avec mon assistant IA.",
                 "rationale": "SHE ASKED TO MOVE THE APPOINTMENT TO 20H",
                 "confidence": 0.9,
                 "attempt": 1,
@@ -983,6 +993,11 @@ mod tests {
         }
         assert_eq!(document.data.trigger.event_id, "b".repeat(64));
         assert_eq!(document.data.suggestion.body, "Pas de problème, à 20h !");
+        assert_eq!(
+            document.data.disclosure.as_deref(),
+            Some("Rédigé avec mon assistant IA."),
+            "the persona's own sentence is read, so the screen can show it (#121)"
+        );
     }
 
     #[test]

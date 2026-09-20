@@ -49,22 +49,31 @@
 //!
 //! The answer itself is a small JSON object — a reply, the language it is
 //! written in, and the reference it belongs to — and every part of it is
-//! required. **The language especially**: ADR 0031 has the persona compose the
-//! disclosure in the language of the reply, and an answer with no language
-//! would let that silently fall back to the user's own, which is how a French
+//! required. **The language especially**: ADR 0031 has the disclosure written
+//! in the language of the reply, and an answer with no language would let
+//! that silently fall back to the user's own, which is how a French
 //! disclosure ends up under an English reply with nothing anywhere to signal
 //! it. So an answer with no language is **refused**, not defaulted: a refusal
 //! is a `422` with its own code, a line in the log and a counted outcome,
 //! while a default would be a guess nobody ever sees.
 //!
-//! # The one place this is provisional
+//! # The language becomes the sentence here, and nowhere else on this path
 //!
-//! The language is carried onto the bus as a NATS **header**, because
-//! `persona.suggest.produced.v1` has `additionalProperties: false` at both
-//! levels and therefore has nowhere to put it. That is a real gap rather than
-//! a tidy design: the header is invisible to `GET /api/suggestions`, so the
-//! Companion cannot show it and the disclosure cannot yet read it. Closing it
-//! means a field in the contract, which is a change of its own.
+//! On the SDK path the persona selects the disclosure itself and publishes it
+//! as `data.disclosure` (ticket #121). Hermes is outside this deployment and
+//! holds no copy of the contract, so its answer names a **language** and this
+//! module turns it into the sentence: the tag's primary subtag (`fr-CA` is
+//! French) is looked up in the contract's own table
+//! (`contracts/disclosure/v1/sentences.json`, [`crate::disclosure`]), and the
+//! suggestion is published with the sentence as `data.disclosure`, exactly as
+//! the SDK would have — so `GET /api/suggestions` shows it and the approval
+//! appends it like any other. A language the table has no sentence for is a
+//! `422` of its own, counted, and **no suggestion at all**: ADR 0031's posture
+//! that a suggestion which cannot be disclosed is one that should not exist,
+//! and a contribution request an operator can read and fix with one line in
+//! the contract. Until #121 the language travelled as a NATS header because
+//! the contract had nowhere to put it; that header is gone, because the
+//! member it stood in for exists.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -77,7 +86,8 @@ use sha2::Sha256;
 use tracing::{info, warn};
 
 use crate::approval::{
-    is_event_id, Approvals, Format, Refusal, TriggerEnvelope, MAX_BODY, SUGGEST_PRODUCED_TYPE,
+    is_event_id, Approvals, Format, Refusal, TriggerEnvelope, CONTRACT_MAX_BODY, MAX_BODY,
+    SUGGEST_PRODUCED_TYPE,
 };
 use crate::metrics::Metrics;
 
@@ -187,7 +197,12 @@ struct PushExtra {
 pub struct Answer {
     pub reference: Reference,
     pub reply: String,
+    /// The primary subtag of the language the answer declared — `fr` for
+    /// `fr-CA` — which is the one the sentence was chosen by.
     pub language: String,
+    /// The contract's sentence for that language: what the suggestion
+    /// carries as `data.disclosure` (ticket #121).
+    pub disclosure: &'static str,
 }
 
 /// `TWALK-REF:<persona_id>:<trigger event id>:<attempt>` — the three facts the
@@ -294,6 +309,13 @@ pub fn parse_answer(written: &str) -> Result<Answer, AnswerRefusal> {
     if !is_language_tag(&language) {
         return Err(AnswerRefusal::LanguageUnreadable(language));
     }
+    // The tag is a tag; now, is there a sentence for it? By the primary
+    // subtag, because the region says nothing about which sentence a
+    // contact can read — and refused, never defaulted, when there is none.
+    let Some(disclosure) = crate::disclosure::sentence_for(&language) else {
+        return Err(AnswerRefusal::LanguageUnsupported(language));
+    };
+    let language = crate::disclosure::primary_subtag(&language).to_owned();
     let reply = object
         .get("reply")
         .and_then(Value::as_str)
@@ -310,6 +332,7 @@ pub fn parse_answer(written: &str) -> Result<Answer, AnswerRefusal> {
         reference,
         reply,
         language,
+        disclosure,
     })
 }
 
@@ -318,20 +341,18 @@ fn unfence(text: &str) -> &str {
         return text;
     };
     let rest = rest.split_once('\n').map(|(_tag, body)| body).unwrap_or("");
-    rest.trim_end()
-        .strip_suffix("```")
-        .unwrap_or(rest)
-        .trim()
+    rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
 }
 
 /// Whether a string is a language tag in the shape ADR 0016 needs: a
 /// primary subtag of two or three letters, optionally refined.
 ///
-/// Deliberately **not** the Companion's closed list of five: that list is the
-/// languages the *interface* ships and the language the user falls back to,
-/// while this is the language of a reply to a contact, who may write in any
-/// language at all (ADR 0016 — a suggestion follows the conversation and never
-/// the user). So the shape is checked and the value is not.
+/// The shape only. The value is then looked up in the contract's sentence
+/// table ([`crate::disclosure::sentence_for`]), and the two checks are kept
+/// apart because they are two refusals an operator reads differently:
+/// `French` is a model that did not answer with a tag, while `ja` is a
+/// perfectly good tag the contract has no sentence for yet — a contribution
+/// request, not a prompt defect.
 pub fn is_language_tag(value: &str) -> bool {
     let mut subtags = value.split('-');
     let Some(primary) = subtags.next() else {
@@ -366,7 +387,9 @@ pub enum AnswerRefusal {
     /// The push's own timestamp is outside [`CLOCK_SKEW_SECONDS`]. Its own
     /// answer, because a well-formed and correctly signed push that is hours
     /// old is a replay and not a mistake.
-    Stale { timestamp: String },
+    Stale {
+        timestamp: String,
+    },
     /// The answer is not the JSON object the route asks Hermes to write.
     Unreadable(String),
     /// No `TWALK-REF:` token anywhere in the answer, so there is no telling
@@ -376,6 +399,10 @@ pub enum AnswerRefusal {
     /// deliberately not defaulted.
     NoLanguage,
     LanguageUnreadable(String),
+    /// A language tag the contract holds no disclosure sentence for
+    /// (ticket #121). No suggestion: a reply that cannot be disclosed is one
+    /// that should not exist (ADR 0031).
+    LanguageUnsupported(String),
     EmptyReply,
     ReplyTooLong(usize),
     /// A fact the approval path establishes the same way.
@@ -398,13 +425,14 @@ impl AnswerRefusal {
             AnswerRefusal::NoReference => "hermes_answer_has_no_reference",
             AnswerRefusal::NoLanguage => "hermes_answer_has_no_language",
             AnswerRefusal::LanguageUnreadable(_) => "hermes_answer_language_unreadable",
+            AnswerRefusal::LanguageUnsupported(_) => "hermes_answer_language_unsupported",
             AnswerRefusal::EmptyReply => "hermes_answer_is_empty",
             AnswerRefusal::ReplyTooLong(_) => "hermes_answer_too_long",
             AnswerRefusal::Shared(refusal) => refusal.code(),
         }
     }
 
-    /// The status. `422` for the four facts about the *answer*, which is the
+    /// The status. `422` for the facts about the *answer*, which is the
     /// distinction worth keeping: a `400` says the request was malformed and
     /// these requests are not — they are well-formed, correctly signed pushes
     /// carrying an answer this Gateway cannot turn into a suggestion, and an
@@ -418,6 +446,7 @@ impl AnswerRefusal {
             | AnswerRefusal::NoReference
             | AnswerRefusal::NoLanguage
             | AnswerRefusal::LanguageUnreadable(_)
+            | AnswerRefusal::LanguageUnsupported(_)
             | AnswerRefusal::EmptyReply
             | AnswerRefusal::ReplyTooLong(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AnswerRefusal::Shared(refusal) => refusal.status(),
@@ -456,9 +485,16 @@ impl AnswerRefusal {
             }
             AnswerRefusal::LanguageUnreadable(value) => format!(
                 "the answer names the language {value:?}, which is not a language tag (two or \
-                 three lowercase letters, optionally refined: fr, en, pt-BR). Any language is \
-                 allowed — a suggestion follows the conversation and not the user (ADR 0016) — but \
-                 it has to be a tag."
+                 three lowercase letters, optionally refined: fr, en, fr-CA). It has to be a \
+                 tag, because the tag is what selects the disclosure the reply carries."
+            ),
+            AnswerRefusal::LanguageUnsupported(value) => format!(
+                "the answer is written in {value:?}, and the contract holds no disclosure \
+                 sentence for that language (contracts/disclosure/v1/sentences.json has {}). \
+                 No suggestion is published: a reply that cannot be disclosed is one that should \
+                 not exist (ADR 0031). Adding the sentence to the contract is one line, and \
+                 this refusal is the request for it.",
+                crate::disclosure::languages().join(", ")
             ),
             AnswerRefusal::EmptyReply => {
                 "the answer's reply is empty. An empty suggestion is a row on the approval screen \
@@ -466,7 +502,9 @@ impl AnswerRefusal {
                     .to_owned()
             }
             AnswerRefusal::ReplyTooLong(length) => format!(
-                "the answer's reply is {length} characters and the contract's limit is {MAX_BODY}"
+                "the answer's reply is {length} characters and the limit is {MAX_BODY}: the \
+                 contract allows {CONTRACT_MAX_BODY}, less the line the disclosure is appended \
+                 on at approval (ADR 0031)"
             ),
             AnswerRefusal::Shared(refusal) => refusal.message(),
         }
@@ -536,7 +574,8 @@ impl Answers {
     /// Whether this signature is one this Gateway's secret produces over these
     /// bytes. Constant-time, through the `hmac` crate's own verification.
     pub fn authenticates(&self, presented: Option<&str>, body: &[u8]) -> bool {
-        let Some(presented) = presented.and_then(|value| value.trim().strip_prefix(SIGNATURE_PREFIX))
+        let Some(presented) =
+            presented.and_then(|value| value.trim().strip_prefix(SIGNATURE_PREFIX))
         else {
             return false;
         };
@@ -596,9 +635,6 @@ impl Answers {
             ("network", trigger.network.as_str()),
             ("connection", trigger.connection.as_str()),
             ("consent", trigger.consent_label.as_str()),
-            // The provisional carrier for the one fact the contract has no
-            // field for — see the module docstring.
-            ("language", answer.language.as_str()),
         ];
         if let Some(traceparent) = &trigger.traceparent {
             extensions.push(("traceparent", traceparent.as_str()));
@@ -665,8 +701,8 @@ impl Answers {
 
     /// The suggestion, exactly as a persona's own SDK would have built it.
     ///
-    /// Every attribute but the body comes from the trigger or from
-    /// configuration: the id from the contract's natural key, the `subject`
+    /// Every attribute but the body and the disclosure comes from the trigger
+    /// or from configuration: the id from the contract's natural key, the `subject`
     /// and `trigger` reference from the message being answered, the `network`,
     /// `consent` and trace copied from it, and the `source` from the persona
     /// id plus this Gateway's configured Hermes domain. So a consumer cannot
@@ -704,6 +740,10 @@ impl Answers {
                     "body": answer.reply,
                     "format": Format::Plain.as_str(),
                 },
+                // The sentence, not the tag: what the SDK publishes, so a
+                // consumer cannot tell this suggestion came from outside
+                // (ticket #121, ADR 0031).
+                "disclosure": answer.disclosure,
                 "attempt": answer.reference.attempt,
                 "expires_at": expires_at,
             }
@@ -765,8 +805,10 @@ fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let mut instant =
-        days_from_civil(year, month as u32, day as u32) * 86_400 + hour * 3600 + minute * 60 + second;
+    let mut instant = days_from_civil(year, month as u32, day as u32) * 86_400
+        + hour * 3600
+        + minute * 60
+        + second;
     // The offset, when there is one. `Z` and a missing offset are both UTC.
     let tail = &value[19..];
     let offset_at = tail.find(['+', '-']);
@@ -787,7 +829,8 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
     let month = month as i64;
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day as i64 - 1;
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day as i64 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
@@ -828,7 +871,11 @@ mod tests {
             format!("the reference is TWALK-REF:assistant:{TRIGGER}:1."),
             format!("  TWALK-REF:assistant:{TRIGGER}:1  "),
         ] {
-            assert_eq!(Reference::find(&haystack), Some(expected.clone()), "{haystack}");
+            assert_eq!(
+                Reference::find(&haystack),
+                Some(expected.clone()),
+                "{haystack}"
+            );
         }
     }
 
@@ -867,7 +914,46 @@ mod tests {
         .expect("the route asks Hermes for exactly this");
         assert_eq!(answer.reply, "D'accord, à 20h !");
         assert_eq!(answer.language, "fr");
+        assert_eq!(
+            answer.disclosure, "Rédigé avec mon assistant IA.",
+            "the tag became the contract's sentence (#121)"
+        );
         assert_eq!(answer.reference.attempt, 1);
+    }
+
+    #[test]
+    fn a_refined_tag_is_read_by_its_primary_subtag() {
+        let answer = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"Correct, à 20h !","language":"fr-CA"}}"#
+        ))
+        .expect("Canadian French is French");
+        assert_eq!(answer.language, "fr");
+        assert_eq!(answer.disclosure, "Rédigé avec mon assistant IA.");
+    }
+
+    #[test]
+    fn a_language_the_contract_has_no_sentence_for_is_no_suggestion() {
+        let refusal = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"はい、20時に。","language":"ja"}}"#
+        ))
+        .expect_err("a reply that cannot be disclosed is one that should not exist (ADR 0031)");
+        assert_eq!(refusal.code(), "hermes_answer_language_unsupported");
+        assert_eq!(
+            refusal.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let message = refusal.message();
+        assert!(message.contains("\"ja\""), "{message}");
+        assert!(
+            message.contains("de, en, es, fr, it"),
+            "the refusal names the five, so it reads as a contribution request: {message}"
+        );
+        // And a region does not rescue a language the table lacks.
+        let refusal = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"ok","language":"pt-BR"}}"#
+        ))
+        .expect_err("Brazilian Portuguese is Portuguese, and there is no Portuguese sentence");
+        assert_eq!(refusal.code(), "hermes_answer_language_unsupported");
     }
 
     #[test]
@@ -903,9 +989,9 @@ mod tests {
     }
 
     #[test]
-    fn any_language_is_allowed_and_only_the_shape_is_checked() {
-        // A suggestion follows the conversation (ADR 0016), so the five the
-        // Companion ships are not the limit.
+    fn the_shape_of_a_tag_is_checked_apart_from_whether_it_has_a_sentence() {
+        // Two refusals, kept apart: `ar` is a tag with no sentence, `French`
+        // is not a tag at all.
         for tag in ["fr", "en", "ar", "zh", "pt-BR", "sr-Latn-RS"] {
             assert!(is_language_tag(tag), "{tag}");
         }
