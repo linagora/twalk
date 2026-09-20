@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .disclosure import DISCLOSURE_MAX_CHARS, SENTENCES
 from .trigger import Trigger
 
 THINKING_TYPE = "fr.linagora.twalk.persona.thinking.emitted.v1"
@@ -43,7 +44,14 @@ FIRST_ATTEMPT = 1
 
 #: The schemas' own caps, applied on the way out: a chatty model must not be
 #: able to make a persona publish an event the contract refuses.
-MAX_BODY_CHARS = 65536
+#:
+#: The body's cap is the schema's 65 536 **less the disclosure and its
+#: newline**: the Companion Gateway appends ``"\n" + disclosure`` to the body
+#: at approval (ADR 0031), ``final.body`` on ``persona.reply.approved`` is
+#: capped at 65 536 too, and a body the schema accepts here must not become
+#: one the schema refuses there. The Gateway applies the same arithmetic to
+#: an edited body.
+MAX_BODY_CHARS = 65536 - 1 - DISCLOSURE_MAX_CHARS
 MAX_RATIONALE_CHARS = 2048
 
 SUGGESTION_FORMATS = ("text/plain", "text/markdown", "text/html")
@@ -72,12 +80,26 @@ class Suggestion:
     ``body`` is the reply in its canonical text form. ``confidence`` and
     ``rationale`` are optional and exist for oversight display only — a
     confidence is not a correctness claim.
+
+    ``language`` is for an author who **knows** what language the reply is
+    in — a persona that only ever writes French, or one whose model was
+    asked for a structured answer that names it. Left ``None``, which is
+    what the reference persona does, the SDK asks the model after the
+    handler returns (:meth:`twalk_sdk.llm.Llm.language_of`). ``disclosure``
+    is the sentence that language selects, and it is the SDK's to fill in
+    (:mod:`twalk_sdk.disclosure`): the process loop sets it from the
+    language, whatever the handler put there, so that what a contact is
+    told is always one of the contract's own sentences — a value that is
+    not one of them is refused on construction, for the same reason an
+    author cannot forget the consent gate.
     """
 
     body: str
     format: str = "text/plain"
     confidence: Optional[float] = None
     rationale: Optional[str] = None
+    language: Optional[str] = None
+    disclosure: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.format not in SUGGESTION_FORMATS:
@@ -87,6 +109,13 @@ class Suggestion:
         if self.confidence is not None and not 0.0 <= self.confidence <= 1.0:
             raise EnvelopeError(
                 f"confidence must be between 0 and 1, got {self.confidence!r}"
+            )
+        if self.disclosure is not None and self.disclosure not in SENTENCES.values():
+            raise EnvelopeError(
+                "disclosure must be one of the contract's sentences "
+                "(contracts/disclosure/v1/sentences.json, ADR 0031) — it is "
+                "selected by language, never written; set `language` instead, "
+                f"got {self.disclosure!r}"
             )
 
 
@@ -270,6 +299,12 @@ def suggest_event(
         data["rationale"] = cap_chars(suggestion.rationale, MAX_RATIONALE_CHARS)
     if expires_at:
         data["expires_at"] = expires_at
+    if suggestion.disclosure:
+        # A field of its own, never inside the body (ADR 0031): the body is
+        # the user's to edit and the sentence is not. Omitted when the loop
+        # set none, which the schema allows and the SDK's own loop never
+        # does — a suggestion with no sentence is one it refused to publish.
+        data["disclosure"] = suggestion.disclosure
     event["data"] = data
     return event
 
