@@ -27,7 +27,12 @@
 //!    appending the sentence is not an edit;
 //! 5. **a suggestion with no sentence** goes out undisclosed even while the
 //!    switch is on: the Gateway composes nothing (ADR 0031), and the
-//!    contract allows a suggestion without the member.
+//!    contract allows a suggestion without the member;
+//! 6. **a suggestion whose sentence is not the contract's** — contract-valid
+//!    on the bus, since the schema says only `string, 1..200` — is refused
+//!    at approval as `suggestion_unreadable`, listed with no sentence rather
+//!    than drawn as fixed, and sent neither with that text nor without a
+//!    line: the Gateway appends the contract's sentences and nothing else.
 //!
 //! The switch is global and so is the store it lives in, so each test here
 //! runs its own Gateway on its own state directory: a decision taken by one
@@ -588,5 +593,112 @@ async fn a_suggestion_with_no_sentence_goes_out_undisclosed_because_the_gateway_
         "and no member is invented: {event}"
     );
     assert_eq!(answer["edited"], json!(false));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 6. A sentence the contract does not hold: refused, and never drawn
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_disclosure_the_contract_does_not_hold_is_refused_at_approval_and_listed_as_none(
+) -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("disclosure-forged").await?;
+    assert_eq!(
+        running.switch().await?["enabled"],
+        json!(true),
+        "the switch is on: what is being tested is the sentence, not a decision"
+    );
+
+    // A persona's own wording, the length of a real sentence: the schema
+    // allows it (`string, 1..200`, and `suggest_event` validates it), the
+    // bus has no authentication, and the approval screen draws this member
+    // as the fixed sentence that goes out with every reply. ADR 0031's
+    // guarantee is that nothing but the contract's sentence is ever
+    // appended, and on this path only the Gateway can keep it.
+    const FORGED: &str = "Written by an assistant you can trust.";
+    assert_eq!(FORGED.chars().count(), 38);
+    let mut replies = bus.subscribe_raw(APPROVED_SUBJECT).await?;
+    let (suggestion_id, body) = conversation(&running, &bus, "forged", Some(FORGED)).await?;
+
+    // The listing: the row says the suggestion carries no sentence, and the
+    // forgery is nowhere in the answer.
+    let (status, listed) = running
+        .get(&format!("/api/suggestions/{suggestion_id}"))
+        .await?;
+    anyhow::ensure!(status == reqwest::StatusCode::OK, "{status}: {listed}");
+    assert_eq!(
+        listed["disclosure"],
+        Value::Null,
+        "a sentence the contract does not hold is listed as none rather than drawn as fixed: \
+         {listed}"
+    );
+    assert_eq!(listed["suggestion"]["body"], json!(body));
+    assert!(
+        !listed.to_string().contains(FORGED),
+        "the forged sentence must not reach a screen: {listed}"
+    );
+
+    // The approval: refused, with the contract file named and the text not
+    // echoed — the same code and status as a body the line no longer fits
+    // after, because in both the request was fine and the suggestion is
+    // what this Gateway cannot turn into a contract event.
+    let (status, refusal) = running
+        .post(
+            "/api/approvals",
+            &json!({ "suggestion_event_id": suggestion_id }),
+        )
+        .await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a forged disclosure is refused, never appended and never withheld: {refusal}"
+    );
+    assert_eq!(refusal["error"], json!("suggestion_unreadable"));
+    let detail = refusal["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("contracts/disclosure/v1/sentences.json"),
+        "the refusal names the contract's table: {refusal}"
+    );
+    assert!(
+        !detail.contains(FORGED),
+        "and does not relay the forgery: {detail}"
+    );
+
+    // Nothing was sent: no approved reply about this suggestion on core
+    // NATS, which sees every publish, and the suggestion still approvable
+    // as far as the listing can tell — the refusal recorded nothing.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mut sent = Vec::new();
+    while let Ok(event) = replies.try_recv() {
+        if event["subject"].as_str() == Some(suggestion_id.as_str()) {
+            sent.push(event);
+        }
+    }
+    assert!(
+        sent.is_empty(),
+        "a refused approval publishes nothing, and the bus saw: {sent:?}"
+    );
+    let (_, listed) = running
+        .get(&format!("/api/suggestions/{suggestion_id}"))
+        .await?;
+    assert_eq!(listed["standing"], json!("approvable"), "{listed}");
+    assert_eq!(listed["approval"], Value::Null, "{listed}");
+
+    // And the edited path is no way around it: the sentence is not in the
+    // field the user edits, so an edit changes nothing about the refusal.
+    let (status, refusal) = running
+        .post(
+            "/api/approvals",
+            &json!({
+                "suggestion_event_id": suggestion_id,
+                "final": { "body": "À demain, alors.", "format": "text/plain" }
+            }),
+        )
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["error"], json!("suggestion_unreadable"));
     Ok(())
 }

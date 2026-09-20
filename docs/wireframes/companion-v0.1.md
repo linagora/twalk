@@ -440,7 +440,7 @@ So the shipped screen compares the homeserver the typed name resolves to against
 
 **Overruled — the merged Server-Sent Events stream.** There is no `/api/events/stream` on the Companion Gateway and no subscription anywhere in the Companion: this screen **polls** every 15 seconds. The wireframe also named `agent.suggest.produced.v1`, which is not a contract type — the domain is `persona.*` (`persona.suggest.produced`), and "agent" is not the word for a persona in this project (`CONTEXT.md`).
 
-**Overruled — the bottom navigation bar.** Home, Bridges, Personas, Consent, Settings was never built. Two of the five have no screen at all in v0.1 (the consent inbox is v0.2; the model and language settings live on the Gateway and have no Companion screen yet), and the other three are steps of a journey the dashboard already links to. A tab bar advertising two empty rooms is worse than three links that work.
+**Overruled — the bottom navigation bar.** Home, Bridges, Personas, Consent, Settings was never built. When it was decided, two of the five had no screen at all (the consent inbox was v0.2, and the model and language settings lived on the Gateway with no Companion screen); both exist now — `/consent` since [#170](https://github.com/linagora/twalk/issues/170), `/settings` since [#101](https://github.com/linagora/twalk/issues/101) — and the dashboard links to them, as it does to the other three, which are steps of a journey. A tab bar was worse than links that work when two of its rooms were empty, and nothing since has argued for one.
 
 **States.**
 
@@ -560,8 +560,8 @@ What replaces "inferred from `navigator.language`" is not a browser setting but 
 - Onboarding tour or product tour (deferred, decided only after v0.1 user feedback).
 - Native mobile shell (deferred, likely never — see ADR 0002).
 - Auto-sending a reply without human approval (struck from screen 4 by the design review; it needs its own ADR and its own design before it is a feature at all — [#74](https://github.com/linagora/twalk/issues/74)).
-- A model and language configuration screen (the Gateway holds both, [#98](https://github.com/linagora/twalk/issues/98); the Companion has no screen for them yet, and ADR 0015 means a deployment without a model produces no suggestions).
-- The persona disclosure control ADR 0019 requires — built by [#121](https://github.com/linagora/twalk/issues/121) as a card on the settings screen, with the sentence shown fixed on the approval screen; what remains is that screen 4 says nothing about it.
+- A model and language configuration screen — the Gateway holds both ([#98](https://github.com/linagora/twalk/issues/98)) and the Companion's `/settings` ([#101](https://github.com/linagora/twalk/issues/101)) is that screen; what this list kept is that ADR 0015 means a deployment without a model produces no suggestions, and the screen says so rather than hiding it.
+- The persona disclosure control ADR 0019 requires — built by [#121](https://github.com/linagora/twalk/issues/121) as a card on the settings screen, with the sentence shown fixed on the approval screen for a suggestion still to be decided (a sent, expired or approved row carries no line, since the record does not say under which switch it went out); what remains is that screen 4 says nothing about it.
 - The per-conversation observation chooser (decided and specified in screen 7 above; the Gateway's half is in, the screen is [#143](https://github.com/linagora/twalk/issues/143)).
 - Telling a contact their conversation is processed at all, which is a different question from a persona's own disclosure and is genuinely undecided ([#122](https://github.com/linagora/twalk/issues/122), residual risk 14 of [`security-model.md`](../architecture/security-model.md)).
 

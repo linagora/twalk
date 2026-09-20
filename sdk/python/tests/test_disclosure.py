@@ -17,12 +17,18 @@ from fixtures import CONTRACT_DIR
 from twalk_sdk import (
     DISCLOSURE_MAX_CHARS,
     LANGUAGE_ASK,
+    LANGUAGE_ASK_MAX_TOKENS,
     LANGUAGES,
     SENTENCES,
     DisclosureError,
+    LanguageAskFailed,
+    LlmError,
+    LlmSpentItsBudgetThinking,
+    LlmUnreachable,
     parse_language_answer,
     sentence_for,
 )
+from twalk_sdk.disclosure import TAG_ECHO_MAX_CHARS
 
 SENTENCES_FILE = (
     Path(__file__).resolve().parents[3] / "contracts" / "disclosure" / "v1" / "sentences.json"
@@ -146,6 +152,64 @@ class DisclosureErrorTest(unittest.TestCase):
         message = str(DisclosureError("pt", declared_by_persona=True))
         self.assertIn("the language the persona declared: pt", message)
         self.assertNotIn("the model answered", message)
+
+    def test_the_models_first_token_is_echoed_capped_never_whole(self) -> None:
+        # `parse_language_answer` returns whatever the model said first. A
+        # model that ignored the system prompt and echoed or translated the
+        # draft puts the first word of the persona's reply there: message
+        # content, so the ERROR line carries at most 32 characters of it.
+        long = "Selbstverständlichkeitserklärungen" + "x" * 40
+        self.assertEqual(len(long), 74)
+        message = str(DisclosureError(long))
+        self.assertNotIn(long, message)
+        self.assertIn(long[:TAG_ECHO_MAX_CHARS] + "…", message)
+        self.assertEqual(TAG_ECHO_MAX_CHARS, 32)
+        # A tag-shaped answer is named whole.
+        self.assertIn("the model answered: fr-ca.", str(DisclosureError("fr-ca")))
+
+
+class LanguageAskFailedTest(unittest.TestCase):
+    """The ask's failure says it was the ask (#121 final review, I1)."""
+
+    def budget_cause(self) -> LlmSpentItsBudgetThinking:
+        return LlmSpentItsBudgetThinking(
+            "the model spent its whole 5-token budget on reasoning and never "
+            "answered: finish_reason='length', no content, and 40 characters "
+            "of reasoning_content"
+        )
+
+    def test_a_reasoning_model_out_of_budget_on_the_ask_is_named_as_the_ask(self) -> None:
+        # The reference model is a reasoning Qwen behind LiteLLM (#162): on
+        # the SDK path it spends the ask's five tokens thinking, after the
+        # reply was drafted and billed. The line must say which call it was
+        # and where the budget is set, or the operator looks for a reply
+        # that was fine.
+        error = LanguageAskFailed(self.budget_cause())
+        message = str(error)
+        self.assertTrue(message.startswith("the language ask exhausted the model's budget"), message)
+        self.assertIn("after the reply is drafted", message)
+        self.assertIn("the reply itself was drafted and is not the problem", message)
+        self.assertIn(f"carries {LANGUAGE_ASK_MAX_TOKENS} tokens", message)
+        self.assertIn("governs the ask as it governs the reply", message)
+        self.assertIn("a reasoning model", message)
+        self.assertIn('TWALK_LLM_PARAMS={"max_tokens":2000}', message)
+        self.assertIn('HERMES_LLM_PARAMS={"max_tokens":2000}', message)
+        # The cause's own account follows, so nothing #162 said is lost.
+        self.assertIn("5-token budget on reasoning", message)
+        self.assertEqual(LANGUAGE_ASK_MAX_TOKENS, 5)
+
+    def test_it_is_retried_exactly_when_its_cause_would_be(self) -> None:
+        # The wrapper decides nothing about retry: a budget spent thinking
+        # about a one-word question terminates the delivery, as it does
+        # about the reply, and an endpoint that was briefly away is retried.
+        terminated = LanguageAskFailed(self.budget_cause())
+        self.assertIs(terminated.transient, False)
+        self.assertIsInstance(terminated, LlmError)
+        retried = LanguageAskFailed(LlmUnreachable("nothing answered at http://llm:8080/v1"))
+        self.assertIs(retried.transient, True)
+        self.assertTrue(str(retried).startswith("the language ask did not get an answer"))
+        self.assertIn("nothing answered at http://llm:8080/v1", str(retried))
+        self.assertIs(retried.cause.transient, True)
 
 
 if __name__ == "__main__":

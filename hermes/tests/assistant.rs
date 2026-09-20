@@ -290,9 +290,10 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
     );
 
     // 4. the language ask (ADR 0031): the second and last request, shaped
-    //    for one token, about the reply and nothing else — it carries no
-    //    word the contact wrote, which is what makes it cheap to send to a
-    //    model at all.
+    //    for one token, about the reply and nothing else. What is asserted
+    //    is that the contact's *message* is not sent with it — the marker
+    //    is absent — and no more than that: the ask goes to the model that
+    //    already holds the message, and a real reply may well quote it.
     let all = run.llm.requests();
     assert_eq!(
         all.len(),

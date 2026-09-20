@@ -402,7 +402,9 @@ pub struct Suggestion {
     /// Hermes, by [`crate::hermes_answer`]) and carried as `data.disclosure`
     /// (ticket #121, ADR 0031). `None` on a suggestion published before the
     /// member existed or by a persona that set none; nothing is appended
-    /// then, because this Gateway composes no sentence of its own.
+    /// then, because this Gateway composes no sentence of its own. When it
+    /// is set it is one of the contract's five, verbatim, or the suggestion
+    /// was refused at the read ([`contract_sentence`]).
     pub disclosure: Option<String>,
     pub expires_at: Option<String>,
     pub traceparent: Option<String>,
@@ -1598,7 +1600,7 @@ impl Approvals {
                 body: document.data.suggestion.body,
                 format,
             },
-            disclosure: document.data.disclosure,
+            disclosure: contract_sentence(document.data.disclosure)?,
             expires_at: document.data.expires_at,
             traceparent: document.traceparent,
             stream_sequence: sequence,
@@ -1900,6 +1902,45 @@ fn fits_with_disclosure(body: &str, sentence: &str) -> bool {
     body.chars().count() + 1 + sentence.chars().count() <= CONTRACT_MAX_BODY
 }
 
+/// The suggestion's `data.disclosure` as this Gateway will append it: one
+/// of the contract's five sentences, verbatim, or none — never anything
+/// else (ticket #121, ADR 0031).
+///
+/// The schema says only `string, 1..200`, and the reference bus has no
+/// authentication, so without this check anything that can publish a
+/// suggestion — a third-party persona, or anything on the bus — could put
+/// two hundred characters of its own after the user's reply, in the block
+/// the approval screen draws as *fixed* and trains the user not to read,
+/// and this Gateway would send it. ADR 0031's guarantee is that the model
+/// never writes the sentence so it cannot be argued out of it; a sentence
+/// the contract does not hold is refused for the same reason and in the
+/// same shape as a body the line no longer fits after
+/// ([`fits_with_disclosure`]): `suggestion_unreadable`, because the request
+/// was fine and what cannot be turned into a contract event is the
+/// suggestion — and refused rather than sent without the line, since a reply
+/// going out undisclosed is the outcome the ADR exists to prevent. An empty
+/// string is refused with the rest: the schema does not allow one either.
+///
+/// The text itself is not echoed: the refusal names the contract file and
+/// the length, which is what an operator needs to find the persona that
+/// published it, and a forged sentence is not something to relay to a
+/// screen.
+fn contract_sentence(member: Option<String>) -> Result<Option<String>, Refusal> {
+    match member {
+        None => Ok(None),
+        Some(sentence) if crate::disclosure::is_contract_sentence(&sentence) => Ok(Some(sentence)),
+        Some(other) => Err(Refusal::SuggestionUnreadable(format!(
+            "its disclosure is not one of the contract's sentences: {} characters that \
+             contracts/disclosure/v1/sentences.json does not hold, verbatim, in any of its {} \
+             languages. What a contact is told is the contract's own sentence and never a \
+             persona's wording (ADR 0031), so this Gateway will not append it, and will not \
+             send the reply without it either",
+            other.chars().count(),
+            crate::disclosure::languages().len()
+        ))),
+    }
+}
+
 /// Whether an RFC 3339 instant is at or before another.
 ///
 /// Compared as instants rather than as strings: a suggestion's `expires_at`
@@ -2156,6 +2197,43 @@ mod tests {
             &"x".repeat(CONTRACT_MAX_BODY - sentence.chars().count()),
             sentence
         ));
+    }
+
+    #[test]
+    fn a_disclosure_the_contract_does_not_hold_is_refused_not_appended_and_not_withheld() {
+        // The contract's own, verbatim: read as it is. None: none.
+        assert_eq!(
+            contract_sentence(Some("Rédigé avec mon assistant IA.".to_owned())).unwrap(),
+            Some("Rédigé avec mon assistant IA.".to_owned())
+        );
+        assert_eq!(contract_sentence(None).unwrap(), None);
+        // A persona's own wording, the length of a real sentence and
+        // contract-valid on the bus (`string, 1..200`): what a rogue
+        // persona would put after the user's reply. Refused as
+        // `suggestion_unreadable` — the request was fine — with the contract
+        // file named and the text not echoed.
+        let forged = "Written by an assistant you can trust.";
+        assert_eq!(forged.chars().count(), 38);
+        let refusal = contract_sentence(Some(forged.to_owned()))
+            .expect_err("a sentence outside the contract is refused");
+        assert_eq!(refusal.code(), "suggestion_unreadable");
+        assert_eq!(refusal.status(), axum::http::StatusCode::CONFLICT);
+        let message = refusal.message();
+        assert!(
+            message.contains("contracts/disclosure/v1/sentences.json"),
+            "{message}"
+        );
+        assert!(message.contains("38 characters"), "{message}");
+        assert!(
+            !message.contains(forged),
+            "the forged text is not relayed: {message}"
+        );
+        assert!(message.contains("Nothing was sent"), "{message}");
+        // And the empty string the schema refuses is refused here too.
+        assert_eq!(
+            contract_sentence(Some(String::new())).unwrap_err().code(),
+            "suggestion_unreadable"
+        );
     }
 
     #[test]

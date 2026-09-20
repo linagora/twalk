@@ -178,7 +178,6 @@ test('the disclosure is on until switched off on the record, and the record says
 	// two presses, the `finally` puts it back on, or one red here would be
 	// ten reds there with the cause hidden.
 	try {
-
 		// On by default, and the record says nobody ever decided rather than
 		// dating a decision nobody took (ADR 0019).
 		const toggle = card.getByTestId('disclosure-switch');

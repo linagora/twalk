@@ -2020,12 +2020,7 @@ impl Store {
             .execute(
                 "INSERT INTO disclosure_decision (new_state, occurred_at, actor, reason) \
                  VALUES (?, ?, ?, ?)",
-                rusqlite::params![
-                    if enabled { "on" } else { "off" },
-                    occurred_at,
-                    actor,
-                    reason
-                ],
+                rusqlite::params![DisclosureState::word(enabled), occurred_at, actor, reason],
             )
             .context("failed to record the disclosure decision")?;
         self.disclosure_state()
@@ -2055,11 +2050,9 @@ impl Store {
         let Some((new_state, occurred_at, actor, reason)) = row else {
             return Ok(DisclosureState::DEFAULT);
         };
-        let enabled = match new_state.as_str() {
-            "on" => true,
-            "off" => false,
-            other => anyhow::bail!("the disclosure journal holds the state {other:?}"),
-        };
+        let enabled = DisclosureState::enabled_from(&new_state).ok_or_else(|| {
+            anyhow::anyhow!("the disclosure journal holds the state {new_state:?}")
+        })?;
         Ok(DisclosureState {
             enabled,
             since: Some(occurred_at),

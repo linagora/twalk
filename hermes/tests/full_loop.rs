@@ -70,7 +70,11 @@
 //! it at approval. This is the one place all three are real at once, so the
 //! body is asserted with the line on the bus and in the room — as the
 //! contact reads it — and the draft the user approved is asserted to be
-//! exactly the first line of it.
+//! exactly the first line of it. And the other half of that criterion: a
+//! message the user writes themselves, from their own account into the same
+//! room, reaches the contact bare and is published as
+//! `outbound.message.sent` with no sentence and no `disclosure` member —
+//! the line discloses a persona's draft, and nothing else.
 //!
 //! The stack, its ports and its teardown are documented in
 //! `hermes/tests/harness/deployment.rs`.
@@ -79,8 +83,8 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    owner, validate_against_contract, Contact, Deployment, APPROVED_TYPE, DEPLOY_SERVER_NAME,
-    MODEL, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
+    owner, poll_deploy, validate_against_contract, Contact, Deployment, APPROVED_TYPE,
+    DEPLOY_SERVER_NAME, MODEL, OUTBOUND_TYPE, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
 };
 use serde_json::{json, Value};
 
@@ -451,6 +455,69 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
         posted["content"].get("m.relates_to").is_none(),
         "the approved reply lands in the room without being a native Matrix reply, which is \
          ADR 0022's named gap: {posted}"
+    );
+
+    // --- 4b. What the user writes themselves carries nothing --------------
+    //
+    // #121's other half: the sentence discloses a persona's draft, and a
+    // message the user typed is not one. The owner's own account posts it —
+    // Matrix to the room, as their client would, touching no Gateway — so
+    // the same network that just carried a disclosed reply now carries a
+    // bare one, and the Sensor publishes it as `outbound.message.sent` (ADR
+    // 0018) with no `disclosure` member. A distinct text rather than the
+    // draft over again, because the room is already asserted above never
+    // to hold the draft bare, and a second copy would make that assertion
+    // ambiguous about which one it found.
+    let direct = format!("Et je passe te voir dimanche. [{}]", marker("direct"));
+    let owner_account = Contact {
+        user_id: owner(),
+        token: stack.owner_token.clone(),
+    };
+    stack.says(&owner_account, &direct).await?;
+    stack.wait_for_room_body(&decided, &direct).await?;
+    let bodies = stack.room_bodies(&decided).await?;
+    assert!(
+        bodies.iter().any(|body| body == &direct),
+        "the user's own message reaches the room exactly as typed: {bodies:?}"
+    );
+    assert!(
+        !bodies
+            .iter()
+            .any(|body| body != &direct && body.contains(&direct)),
+        "and in no other form — nothing appended a line to what the user wrote: {bodies:?}"
+    );
+    let own = poll_deploy(
+        || async {
+            stack
+                .published(OUTBOUND_TYPE)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|message| message.payload["data"]["body"].as_str() == Some(&direct))
+        },
+        "the Sensor to publish the user's own message as outbound.message.sent",
+    )
+    .await?;
+    validate_against_contract(&own.payload, "outbound.message.sent")?;
+    assert_eq!(
+        own.payload["subject"].as_str(),
+        Some(owner().as_str()),
+        "the user's own message is the user's, and not a contact's (ADR 0018): {}",
+        own.payload
+    );
+    assert!(
+        own.payload["data"].get("disclosure").is_none(),
+        "what the user wrote themselves discloses nothing, so the event carries no such \
+         member: {}",
+        own.payload
+    );
+    assert!(
+        !own.payload["data"]["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(DISCLOSURE),
+        "and no sentence in the body either: {}",
+        own.payload
     );
 
     // --- 5. Consent revoked between the suggestion and the approval -------

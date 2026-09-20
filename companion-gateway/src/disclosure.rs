@@ -96,6 +96,21 @@ pub fn sentence_for(tag: &str) -> Option<&'static str> {
         .map(String::as_str)
 }
 
+/// Whether a sentence is one of the contract's five, verbatim.
+///
+/// The check the SDK path needs and the Hermes path does not: on the
+/// Hermes path the sentence is *selected here* from a language tag, so it
+/// cannot be anything else, but on the SDK path it arrives on the bus as
+/// `data.disclosure`, and the schema says only `string, 1..200`. The
+/// reference bus has no authentication, so "what a contact is told is one
+/// of the contract's own sentences" — the property ADR 0031 exists for, and
+/// the reason the model never writes the sentence — holds at approval only
+/// if this Gateway asks. Verbatim, not trimmed, not case-folded: a sentence
+/// that differs from the contract's by a character is not the contract's.
+pub fn is_contract_sentence(candidate: &str) -> bool {
+    sentences().values().any(|sentence| sentence == candidate)
+}
+
 /// The body as the contact receives it: the reply, then the sentence on a
 /// line of its own. After and not before, because a prefix is precisely what
 /// a bridge's relay mode does and ADR 0025 rejected that by name.
@@ -125,12 +140,24 @@ impl DisclosureState {
         reason: None,
     };
 
-    /// The row's own vocabulary.
-    pub fn as_str(&self) -> &'static str {
-        if self.enabled {
+    /// The journal's own vocabulary for a state: what `new_state` holds.
+    /// The one place the two words are spelled, so the writer and the reader
+    /// in [`crate::store`] cannot drift from each other.
+    pub fn word(enabled: bool) -> &'static str {
+        if enabled {
             "on"
         } else {
             "off"
+        }
+    }
+
+    /// The reverse: a `new_state` read back, or `None` for a word the
+    /// journal never writes.
+    pub fn enabled_from(word: &str) -> Option<bool> {
+        match word {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
         }
     }
 }
@@ -282,6 +309,30 @@ mod tests {
     }
 
     #[test]
+    fn only_the_contracts_own_sentences_verbatim_are_sentences() {
+        for (_, sentence) in sentences() {
+            assert!(is_contract_sentence(sentence), "{sentence}");
+        }
+        for forged in [
+            // A persona's own wording, the length of a real sentence.
+            "Written by an assistant you can trust.",
+            // One character off the contract's: a period lost, a case
+            // changed, a blank added. Not the contract's.
+            "Rédigé avec mon assistant IA",
+            "rédigé avec mon assistant IA.",
+            " Rédigé avec mon assistant IA.",
+            "Rédigé avec mon assistant IA.\n",
+            // The schema refuses an empty member and so does this.
+            "",
+            // A language tag is what Hermes sends and not what a persona
+            // sends: a tag on the bus is not a sentence.
+            "fr",
+        ] {
+            assert!(!is_contract_sentence(forged), "{forged:?}");
+        }
+    }
+
+    #[test]
     fn the_sentence_goes_after_the_body_on_a_line_of_its_own() {
         assert_eq!(
             append(
@@ -344,6 +395,10 @@ mod tests {
                 reason: None
             }
         );
-        assert_eq!(state.as_str(), "on");
+        assert_eq!(DisclosureState::word(state.enabled), "on");
+        assert_eq!(DisclosureState::word(false), "off");
+        assert_eq!(DisclosureState::enabled_from("on"), Some(true));
+        assert_eq!(DisclosureState::enabled_from("off"), Some(false));
+        assert_eq!(DisclosureState::enabled_from("ON"), None);
     }
 }

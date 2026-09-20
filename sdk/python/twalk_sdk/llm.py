@@ -38,7 +38,7 @@ from .completion import (
     completion_text,
 )
 from .config import LlmConfig
-from .disclosure import LANGUAGE_ASK, parse_language_answer
+from .disclosure import LANGUAGE_ASK, LANGUAGE_ASK_MAX_TOKENS, parse_language_answer
 
 __all__ = [
     "Llm",
@@ -141,18 +141,25 @@ class Llm:
         """Asks the model which language ``text`` is written in.
 
         One completion — :data:`~twalk_sdk.disclosure.LANGUAGE_ASK` as the
-        system prompt, the text as the user message, five tokens of budget
-        and no temperature — and one token read back: the tag the model
-        answered (``fr``, ``fr-ca``, ``ja``) or ``None`` for ``other``. What
-        the tag selects, and what happens when it selects nothing, is the
-        persona loop's (:mod:`twalk_sdk.persona`); this is only the ask.
+        system prompt, the text as the user message,
+        :data:`~twalk_sdk.disclosure.LANGUAGE_ASK_MAX_TOKENS` of budget and
+        no temperature — and one token read back: the tag the model answered
+        (``fr``, ``fr-ca``, ``ja``) or ``None`` for ``other``. What the tag
+        selects, and what happens when it selects nothing, is the persona
+        loop's (:mod:`twalk_sdk.persona`); this is only the ask.
 
         The same four failures as :meth:`complete`, because it is the same
         call: an endpoint that was briefly away is retried through the
-        trigger's redelivery, like the reply's own completion.
+        trigger's redelivery, like the reply's own completion. The budget is
+        the operator's when ``TWALK_LLM_PARAMS`` names ``max_tokens`` — the
+        parameters are merged last — which is what a reasoning model needs,
+        and the loop says so when the ask is what ran out
+        (:class:`~twalk_sdk.disclosure.LanguageAskFailed`).
         """
         answer = await self.complete(
-            [system(LANGUAGE_ASK), user(text)], temperature=0, max_tokens=5
+            [system(LANGUAGE_ASK), user(text)],
+            temperature=0,
+            max_tokens=LANGUAGE_ASK_MAX_TOKENS,
         )
         return parse_language_answer(answer)
 

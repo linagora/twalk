@@ -199,12 +199,7 @@ describe('every refusal the Gateway describes has a sentence', () => {
 		'utf8'
 	);
 
-	function codesUnder(path: string): string[] {
-		const start = description.indexOf(`\n  ${path}:\n`);
-		expect(start, path).toBeGreaterThan(-1);
-		const next = description.indexOf('\n  /', start + 1);
-		const section = description.slice(start, next === -1 ? undefined : next);
-		const codes = new Set<string>();
+	function enumsIn(section: string, codes: Set<string>): void {
 		for (const match of section.matchAll(/enum:\s*\[([^\]]*)\]/g)) {
 			for (const code of match[1]?.split(',') ?? []) {
 				const trimmed = code.trim();
@@ -221,6 +216,26 @@ describe('every refusal the Gateway describes has a sentence', () => {
 				}
 			}
 		}
+	}
+
+	// The codes under a path, inline and behind a `$ref` to a shared response
+	// alike: the disclosure routes answer `consent_not_configured` only through
+	// `#/components/responses/DisclosureNotConfigured`, and a walk that stopped
+	// at the reference could not prove that code has a sentence.
+	function codesUnder(path: string): string[] {
+		const start = description.indexOf(`\n  ${path}:\n`);
+		expect(start, path).toBeGreaterThan(-1);
+		const next = description.indexOf('\n  /', start + 1);
+		const section = description.slice(start, next === -1 ? undefined : next);
+		const codes = new Set<string>();
+		enumsIn(section, codes);
+		for (const match of section.matchAll(/\$ref: "#\/components\/responses\/([A-Za-z]+)"/g)) {
+			const responseStart = description.indexOf(`\n    ${match[1]}:\n`);
+			expect(responseStart, match[1]).toBeGreaterThan(-1);
+			const rest = description.slice(responseStart + 1);
+			const sibling = rest.search(/\n    [A-Za-z]+:\n/);
+			enumsIn(sibling === -1 ? rest : rest.slice(0, sibling), codes);
+		}
 		return [...codes];
 	}
 
@@ -231,6 +246,10 @@ describe('every refusal the Gateway describes has a sentence', () => {
 				expect(known.has(code), `${path}: ${code}`).toBe(true);
 			}
 		}
+		// And the walk really reaches behind the references, or the line above
+		// proves nothing about the codes the shared responses carry.
+		expect(codesUnder('/api/settings/disclosure')).toContain('consent_not_configured');
+		expect(codesUnder('/api/settings/model')).toContain('settings_not_configured');
 	});
 
 	it('for the probe, whose four answers are four fixes', () => {

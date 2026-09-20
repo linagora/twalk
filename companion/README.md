@@ -531,6 +531,14 @@ sentence at all is said to go out without one rather than given one, and a
 switch that could not be read is said to be unread rather than guessed on.
 Nothing on this origin composes the sentence.
 
+**A sealed row carries no line at all** — approved, expired, or just sent. The
+switch the screen reads is the switch *now*, and a reply that went out
+yesterday went out under yesterday's; the approval record does not say whether
+the sentence was appended, so a line drawn from today's switch under a sent
+reply would be a guess presented as a fact. The row says nothing rather than
+that, and `approvals.spec.ts` asserts both testids absent after *sent*.
+Recording the fact on the approval is a follow-up the final review names.
+
 The switch itself is a card on `/settings`, beside the language card, and three
 things about it are deliberate. It shows the sentence **as an example in the
 interface's language** — the catalogues' copy of the contract's

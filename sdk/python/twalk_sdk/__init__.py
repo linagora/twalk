@@ -65,8 +65,10 @@ from .consent import GRANTED, consent_of, is_granted
 from .disclosure import (
     DISCLOSURE_MAX_CHARS,
     LANGUAGE_ASK,
+    LANGUAGE_ASK_MAX_TOKENS,
     SENTENCES,
     DisclosureError,
+    LanguageAskFailed,
     parse_language_answer,
     sentence_for,
 )
@@ -132,6 +134,8 @@ __all__ = [
     "InboundMessage",
     "LANGUAGES",
     "LANGUAGE_ASK",
+    "LANGUAGE_ASK_MAX_TOKENS",
+    "LanguageAskFailed",
     "LANGUAGE_NAMES",
     "Llm",
     "LlmAnsweredNothing",

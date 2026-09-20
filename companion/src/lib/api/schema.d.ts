@@ -3615,7 +3615,11 @@ export interface components {
              *     approval is the switch's business (`GET /api/settings/disclosure`),
              *     not this read's. `null` when the suggestion carries none — one
              *     published before the member existed, or by a persona that set
-             *     none — and the reply then goes out undisclosed.
+             *     none — and the reply then goes out undisclosed. Always one of
+             *     the contract's five sentences verbatim: a value on the bus that
+             *     is none of them is listed as `null` rather than drawn as fixed,
+             *     and `POST /api/approvals` refuses that suggestion as
+             *     `suggestion_unreadable`.
              */
             disclosure: string | null;
             /**
@@ -4666,8 +4670,15 @@ export interface operations {
              *       sent unedited, a body so long that the disclosure appended
              *       after it would exceed the contract's 65 536, which only a
              *       persona that ignored the SDK's cap can publish; editing the
-             *       reply shorter is the way out). Found and not understood, which
-             *       is not "not found".
+             *       reply shorter is the way out — or a `disclosure` that is not
+             *       one of the contract's own sentences, verbatim, from
+             *       `contracts/disclosure/v1/sentences.json`: the schema allows
+             *       any string of 1..200, the bus has no authentication, and what
+             *       a contact is told is the contract's sentence and never a
+             *       persona's wording (ADR 0031), so the reply is neither sent
+             *       with that text after it nor sent without a line; `detail`
+             *       names the file and the length, not the text). Found and not
+             *       understood, which is not "not found".
              */
             409: {
                 headers: {

@@ -94,7 +94,8 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from .config import Config
 from .consent import GRANTED, consent_of, is_granted
-from .disclosure import DisclosureError, sentence_for
+from .completion import LlmError
+from .disclosure import DisclosureError, LanguageAskFailed, sentence_for
 from .envelope import (
     FIRST_ATTEMPT,
     Suggestion,
@@ -564,11 +565,21 @@ class Persona:
         line and no retry, the way it does for a model that spent its whole
         budget reasoning. No suggestion is published, which is the point —
         a reply that cannot be disclosed is one that should not exist.
+
+        The ask itself can fail the four ways any completion can, and the
+        failure is re-raised as :class:`LanguageAskFailed` with the cause's
+        own ``transient``: the ERROR line then says it was the *ask* and
+        not the reply that failed, and names the budget remedy — because on
+        a reasoning model the ask's five tokens are spent thinking, every
+        time, after a reply that was drafted fine (#162, one call later).
         """
         declared = suggestion.language is not None
         language = suggestion.language
         if language is None:
-            language = await self.llm.language_of(suggestion.body)
+            try:
+                language = await self.llm.language_of(suggestion.body)
+            except LlmError as error:
+                raise LanguageAskFailed(error) from error
         sentence = sentence_for(language)
         if sentence is None:
             raise DisclosureError(language, declared_by_persona=declared)
