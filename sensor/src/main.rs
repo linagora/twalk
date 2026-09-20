@@ -2637,7 +2637,7 @@ fn apply_consent_snapshot(
     registry: &std::sync::RwLock<connection::Registry>,
     metrics: &Metrics,
 ) -> u64 {
-    consent_cache.apply_snapshot(snapshot);
+    consent_cache.apply_snapshot(&snapshot.state);
     if let Some(handed) = &snapshot.connections {
         *registry
             .write()
@@ -2648,11 +2648,11 @@ fn apply_consent_snapshot(
             "the registry of connections is the Gateway's: every event is stamped from it"
         );
     }
-    metrics.record_consent_snapshot(snapshot.entries.len());
+    metrics.record_consent_snapshot(snapshot.state.entries.len());
     // Each refusal counted, and each reason said once with its number: a
     // persona entry is not a refusal and gets no line.
     let mut refused: Vec<(consent::Unusable, usize)> = Vec::new();
-    for why in &snapshot.unusable {
+    for why in &snapshot.state.unusable {
         if metrics.record_consent_refused(*why).is_some() {
             match refused.iter_mut().find(|(known, _)| known == why) {
                 Some((_, count)) => *count += 1,
@@ -2670,11 +2670,11 @@ fn apply_consent_snapshot(
         );
     }
     info!(
-        entries = snapshot.entries.len(),
-        next_stream_sequence = snapshot.next_stream_sequence,
+        entries = snapshot.state.entries.len(),
+        next_stream_sequence = snapshot.state.next_stream_sequence,
         "applied the Companion Gateway's consent snapshot"
     );
-    snapshot.next_stream_sequence
+    snapshot.state.next_stream_sequence
 }
 
 /// Retries the snapshot until it answers, doubling the delay up to a ceiling.

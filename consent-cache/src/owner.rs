@@ -44,7 +44,7 @@
 //! and no ghost Matrix ID at all, so deriving from the login id finds the
 //! phone-number ghost and misses the LID ghost the messages arrive under.
 //! The set is therefore **confirmed by the deployment and handed to the
-//! Sensor**, through [`Config::owner_identities`](crate::config::Config).
+//! Sensor**, through the Sensor's `Config::owner_identities`.
 //!
 //! **The display name is a hint, never an identity.** Both WhatsApp ghosts
 //! above carry the same display name, and a contact may set any display name
@@ -58,7 +58,7 @@
 //! behaviour that existed before this module: their message is published as
 //! `inbound.message.received`, labelled with the user's decision about them,
 //! and a persona is gated on it as usual. That is the safe failure — the same
-//! reasoning as `QuotedAuthor::Unknown` in [`crate::normalize`], where unknown
+//! reasoning as `QuotedAuthor::Unknown` in the Sensor's `normalize`, where unknown
 //! is not consent. The unsafe failure would be the other one: exempting a
 //! sender from the consent model on a guess.
 

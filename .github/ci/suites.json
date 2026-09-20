@@ -52,6 +52,17 @@
 			"triggers": ["tests/harness/", "contracts/"]
 		},
 
+		"consent-cache": {
+			"what": "The shared consent cache's own unit tests (#273): the state keyed on (subject, connection), the decision from snapshot plus stream, the exclusion of the owner's identities and the bridges' bots. No Docker, no stack.",
+			"component": "consent-cache",
+			"workdir": "consent-cache",
+			"run": "cargo test",
+			"needs": ["rust"],
+			"tier": "required",
+			"triggers": ["consent-cache/", "companion-gateway/openapi.yaml"],
+			"triggers_note": "The crate parses the Gateway's `ConsentSnapshot` and `ConsentStateEntry` documents, so a change to the description is a change to what it reads."
+		},
+
 		"clerk": {
 			"what": "The clerk at its process boundary, against the shared test stack for the bus and a real Buzz relay the suite brings up itself: one post per suggestion across a redelivery and a restart, nothing of a contact on the relay, the journal with its reach, the activity feed and what it leaves out, the sweep that deletes an expired suggestion's post, and the write half against a stub Companion Gateway — a ✅ by the owner is one approval, a stranger's is none, every refusal is the Companion's sentence.",
 			"component": "clerk",
@@ -129,7 +140,8 @@
 				"sensor/",
 				"contracts/",
 				"tests/harness/",
-				"companion-gateway/openapi.yaml"
+				"companion-gateway/openapi.yaml",
+				"consent-cache/"
 			],
 			"triggers_note": "The Gateway's OpenAPI description is in here because the Sensor's one HTTP seam reads `GET /api/consent/snapshot` from it and `sensor/tests/harness/gateway.rs` is a stub that transcribes that endpoint's shape. `test_selection.py` derives that dependency from the repository, so removing this line fails the routing check rather than going unnoticed."
 		},
@@ -142,7 +154,7 @@
 			"targets": ["deployment", "bridges_deployment"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
-			"triggers": ["sensor/", "contracts/", "tests/harness/", "deploy/docker-compose/", "bridges/"]
+			"triggers": ["sensor/", "contracts/", "tests/harness/", "deploy/docker-compose/", "bridges/", "consent-cache/"]
 		},
 
 		"gateway": {
@@ -218,7 +230,8 @@
 				"sdk/python/",
 				"sensor/",
 				"companion-gateway/",
-				"deploy/docker-compose/"
+				"deploy/docker-compose/",
+				"consent-cache/"
 			]
 		},
 
@@ -244,7 +257,8 @@
 				"companion-gateway/",
 				"contracts/",
 				"tests/harness/",
-				"sensor/"
+				"sensor/",
+				"consent-cache/"
 			]
 		}
 	},

@@ -9,6 +9,9 @@ description = "The Twalk Sensor: a Matrix client that decrypts portal-room event
 path = "src/lib.rs"
 
 [dependencies]
+# The consent cache every component that labels a sender shares (#273): the
+# decisions are the crate's, the I/O is the Sensor's (`src/consent.rs`).
+twalk-consent-cache = { path = "../consent-cache" }
 anyhow = "1"
 async-nats = "0.50"
 futures = "0.3"
