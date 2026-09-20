@@ -54,6 +54,7 @@ use axum::{Extension, Router};
 use serde_json::{json, Value};
 use tracing::{debug, error};
 
+use crate::connections::Unresolved;
 use crate::consent::{Decision, Effective, Invalid, Network, Subject};
 use crate::http::Gateway;
 use crate::outbox::Refused;
@@ -230,48 +231,46 @@ async fn effective_consent(
         );
     };
     // The perimeter (#270): `connection` when the caller names one, else the
-    // single connection of the kind `network` names — a lookup in the
-    // registry, refused when the kind has none or several.
-    let connection = match query.get("connection").filter(|value| !value.is_empty()) {
-        Some(id) => match gateway.connections().get(id) {
-            Some(connection) => connection.clone(),
-            None => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "unknown_value",
-                    &format!("connection has the unknown value {id:?}"),
-                )
-            }
-        },
-        None => {
-            let Some(network) = query.get("network").filter(|value| !value.is_empty()) else {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "malformed_request",
-                    "the connection query parameter is required (or network, for a network \
-                     with one connection)",
-                );
-            };
-            if Network::parse(network).is_none() {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "unknown_value",
-                    &format!("network has the unknown value {network:?}"),
-                );
-            }
-            match gateway.connections().only_of_kind(network) {
-                Some(connection) => connection.clone(),
-                None => {
-                    return api_error(
-                        StatusCode::BAD_REQUEST,
-                        "malformed_request",
-                        &format!(
-                            "network {network:?} does not name one connection on this \
-                             deployment: pass the connection query parameter"
-                        ),
-                    )
-                }
-            }
+    // single connection of the kind `network` names — the registry's one
+    // resolver, refused when the kind has none or several.
+    let carried = query.get("connection").filter(|value| !value.is_empty());
+    let kind = match query.get("network").filter(|value| !value.is_empty()) {
+        Some(network) if Network::parse(network).is_none() => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_value",
+                &format!("network has the unknown value {network:?}"),
+            );
+        }
+        Some(network) => network.as_str(),
+        None if carried.is_none() => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                "the connection query parameter is required (or network, for a network with \
+                 one connection)",
+            );
+        }
+        None => "",
+    };
+    let connection = match gateway
+        .connections()
+        .resolve(carried.map(String::as_str), kind)
+    {
+        Ok(connection) => connection.clone(),
+        Err(Unresolved::UnknownId(id)) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "unknown_value",
+                &format!("connection has the unknown value {id:?}"),
+            )
+        }
+        Err(why) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                &format!("{why}: pass the connection query parameter"),
+            )
         }
     };
     let Some(network) = Network::parse(&connection.kind) else {

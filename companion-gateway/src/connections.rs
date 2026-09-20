@@ -99,6 +99,37 @@ impl Connection {
     }
 }
 
+/// Why [`Registry::resolve`] could not name a connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unresolved {
+    /// An id was carried, and the registry does not know it.
+    UnknownId(String),
+    /// Nothing was carried, and the kind has no connection.
+    NoneOfKind(String),
+    /// Nothing was carried, and the kind has several: the registry will
+    /// not pick one.
+    SeveralOfKind { kind: String, ids: Vec<String> },
+}
+
+impl std::fmt::Display for Unresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unresolved::UnknownId(id) => {
+                write!(f, "the connection {id:?} is not in the registry")
+            }
+            Unresolved::NoneOfKind(kind) => {
+                write!(f, "no connection of the kind {kind:?} is registered")
+            }
+            Unresolved::SeveralOfKind { kind, ids } => write!(
+                f,
+                "{} connections of the kind {kind:?} are registered ({}) and none was named",
+                ids.len(),
+                ids.join(", ")
+            ),
+        }
+    }
+}
+
 /// The registry: every connection, in the order declared.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Registry {
@@ -267,14 +298,42 @@ impl Registry {
         self.connections.iter().find(|c| c.id == id)
     }
 
+    /// Every connection of a kind, in the order declared.
+    pub fn of_kind(&self, kind: &str) -> Vec<&Connection> {
+        self.connections.iter().filter(|c| c.kind == kind).collect()
+    }
+
     /// The single connection of a kind, when the kind has exactly one: what
     /// an event that names its network but no connection resolves to — a
     /// lookup in the registry, not a derivation from the name.
     pub fn only_of_kind(&self, kind: &str) -> Option<&Connection> {
-        let mut of_kind = self.connections.iter().filter(|c| c.kind == kind);
-        match (of_kind.next(), of_kind.next()) {
-            (Some(only), None) => Some(only),
+        match self.of_kind(kind).as_slice() {
+            [only] => Some(only),
             _ => None,
+        }
+    }
+
+    /// The connection an event, a query or a decision is about: the id it
+    /// carries when it carries one — which must be the registry's — else the
+    /// single connection of the kind it names. The one resolver every read
+    /// of the registry goes through (#270), so that the approval path, the
+    /// pending-contact projection and the consent API cannot disagree about
+    /// what an event older than #269 belongs to: a lookup, never a guess,
+    /// and when the registry cannot say, [`Unresolved`] says why.
+    pub fn resolve(&self, carried: Option<&str>, kind: &str) -> Result<&Connection, Unresolved> {
+        if let Some(id) = carried.map(str::trim).filter(|id| !id.is_empty()) {
+            return self
+                .get(id)
+                .ok_or_else(|| Unresolved::UnknownId(id.to_owned()));
+        }
+        let of_kind = self.of_kind(kind);
+        match of_kind.as_slice() {
+            [only] => Ok(only),
+            [] => Err(Unresolved::NoneOfKind(kind.to_owned())),
+            several => Err(Unresolved::SeveralOfKind {
+                kind: kind.to_owned(),
+                ids: several.iter().map(|c| c.id.clone()).collect(),
+            }),
         }
     }
 
@@ -489,6 +548,37 @@ mod tests {
             ("email", "Twake Mail", true)
         );
         assert!(registry.uncovered_bridges(&bridges).is_empty());
+    }
+
+    #[test]
+    fn the_resolver_takes_what_is_carried_else_the_kinds_only_one_and_never_guesses() {
+        let registry = Registry::from_config(
+            Some("wa-home=whatsapp,wa-work=whatsapp,signal=signal"),
+            &[],
+            "example.com",
+        )
+        .unwrap();
+        assert_eq!(
+            registry.resolve(Some(" wa-work "), "whatsapp").unwrap().id,
+            "wa-work"
+        );
+        assert_eq!(registry.resolve(None, "signal").unwrap().id, "signal");
+        assert_eq!(registry.resolve(Some(""), "matrix").unwrap().id, "matrix");
+        assert_eq!(
+            registry.resolve(Some("wa-old"), "whatsapp").unwrap_err(),
+            Unresolved::UnknownId("wa-old".to_owned())
+        );
+        assert_eq!(
+            registry.resolve(None, "telegram").unwrap_err(),
+            Unresolved::NoneOfKind("telegram".to_owned())
+        );
+        assert_eq!(
+            registry.resolve(None, "whatsapp").unwrap_err(),
+            Unresolved::SeveralOfKind {
+                kind: "whatsapp".to_owned(),
+                ids: vec!["wa-home".to_owned(), "wa-work".to_owned()]
+            }
+        );
     }
 
     #[test]

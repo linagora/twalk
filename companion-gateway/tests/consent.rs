@@ -355,6 +355,96 @@ async fn a_decision_over_several_networks_carries_the_sorted_scope_and_no_networ
     Ok(())
 }
 
+/// #270's write API, over HTTP: a decision written with `scope.connections`
+/// and one written with `scope.networks` alone — a caller not yet migrated —
+/// both land as a row keyed on the connection, read back the same way, and
+/// the recorded answer carries both members either way.
+#[tokio::test]
+async fn a_decision_written_by_connection_or_by_network_lands_on_the_connection() -> Result<()> {
+    let fixture = Fixture::start("scope-members").await?;
+    let by_connection = contact("by-connection");
+    let by_network = contact("by-network");
+
+    let recorded = fixture
+        .decide_ok(json!({
+            "subject": { "type": "contact", "id": by_connection },
+            "new_state": "granted",
+            "scope": { "connections": ["signal"] }
+        }))
+        .await?;
+    assert_eq!(
+        recorded["scope"],
+        json!({ "connections": ["signal"], "networks": ["signal"] }),
+        "the recorded scope is the perimeter and its kind: {recorded}"
+    );
+    let recorded = fixture
+        .decide_ok(json!({
+            "subject": { "type": "contact", "id": by_network },
+            "new_state": "granted",
+            "scope": { "networks": ["signal"] }
+        }))
+        .await?;
+    assert_eq!(
+        recorded["scope"],
+        json!({ "connections": ["signal"], "networks": ["signal"] }),
+        "the network was read as its single connection: {recorded}"
+    );
+
+    // Both are one row each, keyed on `signal`, whichever member wrote them —
+    // and the effective read answers by connection or by network alike.
+    let (_, state) = fixture.get("/api/consent/state").await?;
+    for id in [&by_connection, &by_network] {
+        let rows: Vec<&Value> = state["entries"]
+            .as_array()
+            .context("entries")?
+            .iter()
+            .filter(|entry| entry["subject"]["id"].as_str() == Some(id.as_str()))
+            .collect();
+        assert_eq!(rows.len(), 1, "{id}: one row: {state}");
+        assert_eq!(
+            rows[0]["connection"].as_str(),
+            Some("signal"),
+            "{}",
+            rows[0]
+        );
+        assert_eq!(rows[0]["network"].as_str(), Some("signal"), "{}", rows[0]);
+        for query in ["connection=signal", "network=signal"] {
+            let (status, resolved) = fixture
+                .get(&format!(
+                    "/api/consent/effective?contact={}&{query}",
+                    urlencoding(id)
+                ))
+                .await?;
+            assert_eq!(status, reqwest::StatusCode::OK, "{resolved}");
+            assert_eq!(resolved["state"].as_str(), Some("granted"), "{resolved}");
+            assert_eq!(
+                resolved["connection"].as_str(),
+                Some("signal"),
+                "{resolved}"
+            );
+        }
+    }
+
+    // The two members disagreeing is refused as malformed, not recorded as
+    // either.
+    let (status, refused) = fixture
+        .decide(json!({
+            "subject": { "type": "contact", "id": by_network },
+            "new_state": "revoked",
+            "scope": { "connections": ["signal"], "networks": ["whatsapp"] }
+        }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["error"].as_str(),
+        Some("malformed_request"),
+        "{refused}"
+    );
+
+    fixture.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_network_default_is_overridden_by_a_contact_decision() -> Result<()> {
     let fixture = Fixture::start("precedence").await?;

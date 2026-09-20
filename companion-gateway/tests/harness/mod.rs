@@ -291,16 +291,16 @@ pub fn gateway_state_dir(static_dir: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// One connection per network a suite decides on, named after it.
+pub const TEST_CONNECTIONS: &str =
+    "whatsapp=whatsapp,signal=signal,telegram=telegram,discord=discord,sms=sms";
+
 /// The environment the Gateway runs from in tests: port 0 (the kernel picks),
 /// the given static directory, debug logs for the Gateway's own target, and
 /// the sign-in configuration (ticket #52) — the owner, the homeserver's
 /// federation API and a state directory of its own. A test that never signs
 /// in still runs a fully configured Gateway, and never contacts the
 /// homeserver.
-/// One connection per network a suite decides on, named after it.
-pub const TEST_CONNECTIONS: &str =
-    "whatsapp=whatsapp,signal=signal,telegram=telegram,discord=discord,sms=sms";
-
 pub fn gateway_env(static_dir: &Path) -> Vec<(String, String)> {
     vec![
         ("GATEWAY_LISTEN".to_owned(), "127.0.0.1:0".to_owned()),

@@ -488,11 +488,9 @@ pub const MIGRATIONS: [&str; 8] = [
     END;
 
     INSERT OR IGNORE INTO connection (id, kind, label, created_at)
-    SELECT DISTINCT network, network, network, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    FROM consent_decision_network;
-    INSERT OR IGNORE INTO connection (id, kind, label, created_at)
-    SELECT DISTINCT network, network, network, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    FROM contact_seen;
+    SELECT network, network, network, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    FROM (SELECT network FROM consent_decision_network
+          UNION SELECT network FROM contact_seen);
     INSERT INTO consent_decision_connection (sequence, connection)
     SELECT sequence, network FROM consent_decision_network;
 
@@ -559,7 +557,7 @@ pub const MIGRATIONS: [&str; 8] = [
         SELECT 1 FROM consent_state c
         WHERE c.connection = s.connection
           AND ((c.subject_type = 'contact' AND c.subject_id = s.contact_id)
-            OR c.subject_type = 'network')
+            OR (c.subject_type = 'network' AND c.subject_id = k.kind))
     );
 
     CREATE TABLE approval_v8 (
@@ -1300,9 +1298,10 @@ impl Store {
         })
     }
 
-    /// The effective consent state of a contact on one network, with the
-    /// precedence applied: the contact's own decision if it has one, the
-    /// network's default otherwise, and `pending` when neither exists.
+    /// The effective consent state of a contact on one connection (#270),
+    /// with the precedence applied: the contact's own decision on it if
+    /// there is one, the network's default on it otherwise, and `pending`
+    /// when neither exists.
     ///
     /// An owner identity resolves to `pending` with no decision named, and no
     /// row is read for it — not the owner's own, and not the network's default
@@ -1463,7 +1462,17 @@ impl Store {
     /// when new, kind and label refreshed when known. Never deleted here — a
     /// connection that left the configuration may still be what a recorded
     /// decision is scoped to, and forgetting it would orphan the decision.
-    pub fn record_connections(&self, connections: &[crate::connections::Connection]) -> Result<()> {
+    ///
+    /// Returns the ids the store holds that the registry does **not** name:
+    /// a connection that left the configuration, or the one the migration
+    /// (#270) attached every earlier decision to on a deployment whose
+    /// declared ids are not the networks' names. A decision scoped to such
+    /// an id governs no live connection, and the Gateway says so at
+    /// startup rather than letting the user's earlier answers go quiet.
+    pub fn record_connections(
+        &self,
+        connections: &[crate::connections::Connection],
+    ) -> Result<Vec<String>> {
         let now = crate::consent::rfc3339_millis(std::time::SystemTime::now());
         let connection = self.connection();
         for entry in connections {
@@ -1477,7 +1486,18 @@ impl Store {
                 )
                 .context("failed to record a connection")?;
         }
-        Ok(())
+        let mut statement = connection
+            .prepare("SELECT id FROM connection ORDER BY id")
+            .context("failed to prepare the connections query")?;
+        let known = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .context("failed to read the connections")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to read a connection row")?;
+        Ok(known
+            .into_iter()
+            .filter(|id| !connections.iter().any(|entry| &entry.id == id))
+            .collect())
     }
 
     /// Journals one move, once: a second record about the same successor is
@@ -2001,6 +2021,28 @@ fn restrict_to_owner(path: &Path, mode: u32) {
     }
 }
 
+/// What the two test modules below share.
+#[cfg(test)]
+mod test_support {
+    use super::Network;
+
+    /// One connection per network, named after it — the reference
+    /// deployment's registry, and the id every migrated decision landed on
+    /// (#270). Recorded on every test store, because the views join on it.
+    pub fn implicit_registry() -> Vec<crate::connections::Connection> {
+        Network::ALL
+            .iter()
+            .map(|network| crate::connections::Connection {
+                id: network.as_str().to_owned(),
+                kind: network.as_str().to_owned(),
+                label: network.as_str().to_owned(),
+                bridge_id: None,
+                bridge_bot: None,
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2076,24 +2118,9 @@ mod tests {
         // The registry every Gateway records at startup (#269), one
         // connection per network named after it: what the views join on.
         store
-            .record_connections(&implicit_registry())
+            .record_connections(&test_support::implicit_registry())
             .expect("the registry records");
         store
-    }
-
-    /// One connection per network, named after it — the reference
-    /// deployment's registry, and the id every migrated decision landed on.
-    fn implicit_registry() -> Vec<crate::connections::Connection> {
-        Network::ALL
-            .iter()
-            .map(|network| crate::connections::Connection {
-                id: network.as_str().to_owned(),
-                kind: network.as_str().to_owned(),
-                label: network.as_str().to_owned(),
-                bridge_id: None,
-                bridge_bot: None,
-            })
-            .collect()
     }
 
     /// The owner every store in these tests belongs to: their Matrix ID, and
@@ -2152,7 +2179,7 @@ mod tests {
         // and the user's decision about them is recorded like anybody's.
         let before = Store::open(&dir, Arc::new(Owner::new(OWNER, []))).expect("the store opens");
         before
-            .record_connections(&implicit_registry())
+            .record_connections(&test_support::implicit_registry())
             .expect("the registry records");
         let owners_row = record(
             &before,
@@ -2554,6 +2581,14 @@ mod tests {
                 &["whatsapp"],
                 "2026-09-06T10:00:00.000Z",
             );
+            decide(
+                "contact",
+                "@e:example.com",
+                "unset",
+                "granted",
+                &["whatsapp"],
+                "2026-09-07T10:00:00.000Z",
+            );
             for (contact, network, at) in [
                 ("@a:example.com", "whatsapp", "2026-09-01T09:00:00.000Z"),
                 ("@c:example.com", "whatsapp", "2026-09-02T09:00:00.000Z"),
@@ -2591,6 +2626,14 @@ mod tests {
         // the migration is `granted` on `whatsapp` after it — read the way
         // an approval reads it, by connection.
         let store = Store::open(&dir, Arc::new(Owner::new(OWNER, []))).unwrap();
+        let effective = store
+            .effective("@e:example.com", "whatsapp", Network::Whatsapp)
+            .unwrap();
+        assert_eq!(
+            (effective.state, effective.decided_by.map(|s| s.id)),
+            (State::Granted, Some("@e:example.com".to_owned())),
+            "granted on whatsapp before, granted on whatsapp after"
+        );
         let effective = store
             .effective("@a:example.com", "whatsapp", Network::Whatsapp)
             .unwrap();
@@ -3471,24 +3514,9 @@ mod bridge_status_tests {
         // The registry every Gateway records at startup (#269), one
         // connection per network named after it: what the views join on.
         store
-            .record_connections(&implicit_registry())
+            .record_connections(&test_support::implicit_registry())
             .expect("the registry records");
         store
-    }
-
-    /// One connection per network, named after it — the reference
-    /// deployment's registry, and the id every migrated decision landed on.
-    fn implicit_registry() -> Vec<crate::connections::Connection> {
-        Network::ALL
-            .iter()
-            .map(|network| crate::connections::Connection {
-                id: network.as_str().to_owned(),
-                kind: network.as_str().to_owned(),
-                label: network.as_str().to_owned(),
-                bridge_id: None,
-                bridge_bot: None,
-            })
-            .collect()
     }
 
     fn transition(from: ContractState, to: ContractState, occurred_at: &str) -> Transition {
@@ -3668,12 +3696,17 @@ mod bridge_status_tests {
 
         // The next start: WhatsApp relabelled, Matrix gone from the
         // configuration, Signal new.
-        store
+        let stale = store
             .record_connections(&[
                 connection("whatsapp", "whatsapp", "Home", Some("mautrix-whatsapp")),
                 connection("signal", "signal", "mautrix-signal", Some("mautrix-signal")),
             ])
             .expect("recorded again");
+        assert_eq!(
+            stale,
+            ["matrix"],
+            "the connection the registry no longer names is kept, and named back"
+        );
         let second = rows(&store);
         let ids: Vec<&str> = second.iter().map(|row| row.0.as_str()).collect();
         assert_eq!(ids, ["matrix", "signal", "whatsapp"], "never deleted here");

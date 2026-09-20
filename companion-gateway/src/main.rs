@@ -603,9 +603,17 @@ fn open_consent(
     // The registry, recorded before anything else touches the store (#269,
     // #270): a sighting and a decision both reference a connection row, and
     // the projection task starts consuming as soon as it is spawned.
-    store
+    let stale = store
         .record_connections(connections.connections())
         .context("failed to record the connections in the store")?;
+    for id in stale {
+        warn!(
+            connection = %id,
+            "the store holds a connection the registry does not name: the decisions scoped to \
+             it govern no live connection until GATEWAY_CONNECTIONS names it again (a store \
+             migrated across #270 attached every earlier decision to its network's name)"
+        );
+    }
     info!(
         store = %store.path().display(),
         owner = %consent.owner,

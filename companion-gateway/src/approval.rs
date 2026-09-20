@@ -393,33 +393,22 @@ pub struct Trigger {
     pub room_id: String,
 }
 
-/// The connection an event on the bus belongs to: the one it carries, or —
-/// for an event published before #269, or by a producer that has not
-/// learned the extension yet — the registry's single connection of its
-/// kind. A lookup in the registry the Gateway keeps, never a name derived
-/// from the network: when the kind has no connection, or two, the Gateway
-/// does not guess which perimeter the event was about, and says so.
+/// The connection an event on the bus belongs to: the one it carries — which
+/// must be the registry's — or, for an event published before #269 or by a
+/// producer that has not learned the extension yet, the registry's single
+/// connection of its kind. [`crate::connections::Registry::resolve`], with
+/// the refusal every unreadable event gets: the Gateway does not guess which
+/// perimeter the event was about, and says why it could not tell.
 pub fn connection_of(
     registry: &crate::connections::Registry,
     carried: Option<&str>,
     network: Network,
 ) -> Result<String, Refusal> {
-    if let Some(id) = carried.map(str::trim).filter(|id| !id.is_empty()) {
-        return Ok(id.to_owned());
-    }
     registry
-        .only_of_kind(network.as_str())
+        .resolve(carried, network.as_str())
         .map(|connection| connection.id.clone())
-        .ok_or_else(|| {
-            Refusal::SuggestionUnreadable(format!(
-                "it names no connection, and the registry has {} of the kind {:?} to stand in",
-                registry
-                    .connections()
-                    .iter()
-                    .filter(|c| c.kind == network.as_str())
-                    .count(),
-                network.as_str()
-            ))
+        .map_err(|why| {
+            Refusal::SuggestionUnreadable(format!("its connection cannot be told: {why}"))
         })
 }
 
@@ -1674,6 +1663,13 @@ mod tests {
             "wa-work",
             "what the event carries is what it belongs to"
         );
+        assert!(
+            matches!(
+                connection_of(&registry, Some("wa-old"), Network::Whatsapp),
+                Err(Refusal::SuggestionUnreadable(_))
+            ),
+            "a carried id the registry does not know is not trusted either"
+        );
         assert_eq!(
             connection_of(&registry, None, Network::Signal).unwrap(),
             "signal"
@@ -1683,10 +1679,10 @@ mod tests {
             "matrix",
             "the native connection every registry has"
         );
-        for (network, count) in [(Network::Whatsapp, "2"), (Network::Telegram, "0")] {
+        for (network, reason_names) in [(Network::Whatsapp, "2 connections"), (Network::Telegram, "no connection")] {
             match connection_of(&registry, Some(""), network) {
                 Err(Refusal::SuggestionUnreadable(reason)) => {
-                    assert!(reason.contains(count), "{reason}");
+                    assert!(reason.contains(reason_names), "{reason}");
                 }
                 other => panic!("{network:?}: expected a refusal, got {other:?}"),
             }

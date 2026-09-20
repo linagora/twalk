@@ -413,7 +413,7 @@ impl Decision {
                 let value = entry
                     .as_str()
                     .ok_or_else(|| Invalid::Malformed(format!("scope.{member}")))?;
-                if !values.contains(&value.to_owned()) {
+                if !values.iter().any(|known| known == value) {
                     values.push(value.to_owned());
                 }
             }
@@ -455,15 +455,14 @@ impl Decision {
                     .ok_or_else(|| Invalid::Malformed("scope.connections".to_owned()))?;
                 let mut ids = Vec::new();
                 for network in networks {
-                    match registry.only_of_kind(network.as_str()) {
-                        Some(connection) => ids.push(connection.id.clone()),
-                        None => {
+                    match registry.resolve(None, network.as_str()) {
+                        Ok(connection) => ids.push(connection.id.clone()),
+                        Err(_) => {
                             return Err(Invalid::ScopeNeedsConnections {
                                 network: network.as_str().to_owned(),
                                 connections: registry
-                                    .connections()
+                                    .of_kind(network.as_str())
                                     .iter()
-                                    .filter(|c| c.kind == network.as_str())
                                     .map(|c| c.id.clone())
                                     .collect(),
                             })

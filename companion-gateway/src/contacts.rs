@@ -21,7 +21,7 @@
 //!
 //! That is not a convention to be careful about; it is enforced by the shape
 //! of the types. The projection deserialises each inbound event into
-//! [`InboundHeader`], which has **three fields and no `data` member at all**,
+//! [`InboundHeader`], which has **four envelope attributes and no `data` member at all**,
 //! so there is no expression anywhere downstream of it that could reach a
 //! body. The raw bytes stay in the NATS message and are dropped with it. The
 //! store is a four-column table whose columns are asserted by a test
@@ -189,10 +189,11 @@ impl Correspondent {
             return None;
         }
         let network = Network::parse(&header.network)?;
-        let connection = match header.connection.as_deref().filter(|id| !id.is_empty()) {
-            Some(id) => registry.get(id)?.id.clone(),
-            None => registry.only_of_kind(network.as_str())?.id.clone(),
-        };
+        let connection = registry
+            .resolve(header.connection.as_deref(), network.as_str())
+            .ok()?
+            .id
+            .clone();
         Some(Self {
             contact: header.subject.clone(),
             connection,
@@ -535,7 +536,7 @@ async fn drain(
     while let Some(message) = batch.next().await {
         let message =
             message.map_err(|error| anyhow::anyhow!("failed to read a message: {error}"))?;
-        // Three attributes out of the event, and the rest of its bytes are
+        // Four attributes out of the event, and the rest of its bytes are
         // never parsed. See `InboundHeader`.
         match serde_json::from_slice::<InboundHeader>(&message.payload) {
             Ok(header) => {
