@@ -548,6 +548,7 @@ async fn main() -> Result<()> {
                                 Some(owner),
                                 &bridge_bots,
                                 &consent_cache,
+                                &connection,
                             )
                             .await,
                         }),
@@ -588,7 +589,7 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| sender.localpart().to_owned());
-                let consent = consent_cache.state(sender.as_str(), network);
+                let consent = consent_cache.state(sender.as_str(), &connection);
                 // The native network identifier is contact PII: derived
                 // here, but published only for a granted contact (the
                 // builders enforce the gate).
@@ -610,7 +611,7 @@ async fn main() -> Result<()> {
                         quoted: if consent.reduces_publication() {
                             None
                         } else {
-                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache).await
+                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache, &connection).await
                         },
                     }),
                     None => None,
@@ -755,6 +756,7 @@ async fn main() -> Result<()> {
                         Some(owner),
                         &bridge_bots,
                         &consent_cache,
+                        &connection,
                     )
                     .await;
                     let input = normalize::OutboundReaction {
@@ -793,7 +795,7 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| reactor.localpart().to_owned());
-                let consent = consent_cache.state(reactor.as_str(), network);
+                let consent = consent_cache.state(reactor.as_str(), &connection);
                 let network_identifier =
                     network::ghost_network_identifier(network, reactor.localpart());
                 let target_event_id = event.content.relates_to.event_id.clone();
@@ -805,7 +807,7 @@ async fn main() -> Result<()> {
                 let excerpt = if consent.reduces_publication() {
                     None
                 } else {
-                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache).await
+                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache, &connection).await
                 };
                 let input = normalize::InboundReaction {
                     matrix_event_id: event.event_id.to_string(),
@@ -1072,7 +1074,7 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| sender.localpart().to_owned());
-                let consent = consent_cache.state(sender.as_str(), network);
+                let consent = consent_cache.state(sender.as_str(), &connection);
                 let network_identifier =
                     network::ghost_network_identifier(network, sender.localpart());
                 let last_active_at = event
@@ -2246,6 +2248,7 @@ async fn quoted_message(
     owner: Option<&twalk_sensor::owner::Owner>,
     bridge_bots: &twalk_sensor::bridge_bot::BridgeBots,
     consent_cache: &ConsentCache,
+    connection: &str,
 ) -> Option<normalize::QuotedExcerpt> {
     let timeline_event = room.event(event_id, None).await.ok()?;
     let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
@@ -2268,9 +2271,11 @@ async fn quoted_message(
         // costs a line of service output, not a person's visibility.
         normalize::QuotedAuthor::Unknown
     } else {
+        // The quoted author's decision on this room's connection (#271):
+        // the room is the perimeter, and the quoted message travelled in it.
         match resolve_network(room, &message.sender).await {
-            Some(network) => normalize::QuotedAuthor::Contact(
-                consent_cache.state(message.sender.as_str(), network),
+            Some(_) => normalize::QuotedAuthor::Contact(
+                consent_cache.state(message.sender.as_str(), connection),
             ),
             None => normalize::QuotedAuthor::Unknown,
         }
@@ -2575,7 +2580,12 @@ async fn bring_up_consent<S>(
              of connections is the implicit one — one connection per network, named after it \
              — which is correct while such a deployment has one bridge per network (ADR 0033)"
         );
-        tokio::spawn(consume_consent_changes(jetstream, consent_cache, None));
+        tokio::spawn(consume_consent_changes(
+            jetstream,
+            consent_cache,
+            None,
+            metrics,
+        ));
         return;
     };
     match source.fetch_snapshot().await {
@@ -2585,6 +2595,7 @@ async fn bring_up_consent<S>(
                 jetstream,
                 consent_cache,
                 Some(start),
+                metrics,
             ));
         }
         Err(error) => {
@@ -2599,7 +2610,7 @@ async fn bring_up_consent<S>(
             tokio::spawn(async move {
                 let snapshot = retry_consent_snapshot(&source, &metrics).await;
                 let start = apply_consent_snapshot(&consent_cache, &snapshot, &registry, &metrics);
-                consume_consent_changes(jetstream, consent_cache, Some(start)).await;
+                consume_consent_changes(jetstream, consent_cache, Some(start), metrics).await;
             });
         }
     }
@@ -2624,6 +2635,20 @@ fn apply_consent_snapshot(
         );
     }
     metrics.record_consent_snapshot(snapshot.entries.len());
+    let mut refused = 0;
+    for why in &snapshot.unusable {
+        if metrics.record_consent_unusable(*why) > 0 {
+            refused += 1;
+        }
+    }
+    if refused > 0 {
+        warn!(
+            refused,
+            "the consent snapshot holds entries this Sensor could not apply — an entry that \
+             names no connection is a Gateway older than #270, and its subjects stay pending \
+             here rather than labelled by a guessed perimeter (#271)"
+        );
+    }
     info!(
         entries = snapshot.entries.len(),
         next_stream_sequence = snapshot.next_stream_sequence,
@@ -2684,9 +2709,10 @@ async fn consume_consent_changes(
     jetstream: async_nats::jetstream::Context,
     consent_cache: ConsentCache,
     start_sequence: Option<u64>,
+    metrics: Arc<Metrics>,
 ) {
     loop {
-        match run_consent_consumer(&jetstream, &consent_cache, start_sequence).await {
+        match run_consent_consumer(&jetstream, &consent_cache, start_sequence, &metrics).await {
             Ok(()) => error!("the consent-change message stream ended; rebuilding the consumer"),
             Err(error) => error!(%error, "the consent-change consumer failed; rebuilding it"),
         }
@@ -2707,6 +2733,7 @@ async fn run_consent_consumer(
     jetstream: &async_nats::jetstream::Context,
     consent_cache: &ConsentCache,
     start_sequence: Option<u64>,
+    metrics: &Metrics,
 ) -> Result<()> {
     let stream = jetstream
         .get_stream(normalize::STREAM_NAME)
@@ -2769,31 +2796,35 @@ async fn run_consent_consumer(
         }
         match serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
             Ok(event) => match consent::ConsentChange::parse(&event) {
-                Some(change) => {
+                Ok(change) => {
                     consent_cache.apply(&change);
                     info!(
                         subject = change.subject_label(),
                         state = change.new_state.as_str(),
-                        networks = ?change.networks,
+                        connections = ?change.connections,
                         "applied a consent change"
                     );
                 }
                 // A persona-scoped decision is well-formed traffic that
-                // simply never labels a sender (ADR 0013); a malformed
-                // contact or network change is worth a warning.
-                None => match event
-                    .pointer("/data/subject/type")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    Some("contact") | Some("network") | None => warn!(
+                // simply never labels a sender (ADR 0013) and is not
+                // counted; a change that names no connection, or is
+                // malformed, is counted and said (#271): the decision it
+                // carries is one this Sensor will not guess the perimeter
+                // of, and its sender stays labelled as before.
+                Err(consent::Unusable::NotAboutASender) => {}
+                Err(why) => {
+                    let total = metrics.record_consent_unusable(why);
+                    warn!(
                         id = event
                             .get("id")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("<none>"),
-                        "unusable consent.state.changed event, skipping"
-                    ),
-                    Some(_) => {}
-                },
+                        reason = why.as_str(),
+                        total,
+                        "unusable consent.state.changed event, skipping: a decision scoped by \
+                         network alone is not read as its network's connection"
+                    );
+                }
             },
             Err(error) => {
                 warn!(%error, "consent.state.changed payload is not valid JSON, skipping")

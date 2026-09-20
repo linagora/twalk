@@ -75,6 +75,9 @@ fn consent_change(
     event["data"]["subject"] = json!({ "type": "contact", "id": subject_id });
     event["data"]["old_state"] = json!(old_state);
     event["data"]["new_state"] = json!(new_state);
+    // The reference deployment's shape (#270): one connection per network,
+    // named after it — so the scope's connections are the networks' names.
+    event["data"]["scope"]["connections"] = json!(networks);
     event["data"]["scope"]["networks"] = json!(networks);
     event["data"]["occurred_at"] = json!(now);
     validate_against_contract(&event, "consent.state.changed")?;
@@ -502,6 +505,7 @@ async fn publish_network_default(
     event["data"]["subject"] = json!({ "type": "network", "id": network });
     event["data"]["old_state"] = json!(old_state);
     event["data"]["new_state"] = json!(new_state);
+    event["data"]["scope"]["connections"] = json!([network]);
     event["data"]["scope"]["networks"] = json!([network]);
     event["data"]["occurred_at"] = json!(now);
     validate_against_contract(&event, "consent.state.changed")?;
@@ -954,6 +958,123 @@ async fn every_event_is_stamped_with_the_connection_the_registry_names_for_its_r
             .map(|(_, value)| value.as_str()),
         Some("wa-work"),
         "and the bus header duplicates it for server-side filtering"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// Two bridges of one network, one contact in a portal of each, one
+/// decision per connection (ADR 0033, #271): the events carry `granted` on
+/// the connection the user granted and `pending` on the other. This is the
+/// whole reason the perimeter exists — a decision about the work account
+/// says nothing about the home one — and the case a cache keyed on the
+/// network would get wrong in both directions.
+#[tokio::test]
+async fn one_contact_on_two_connections_of_one_network_holds_one_decision_per_connection(
+) -> Result<()> {
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let work_bot = Bot::login("bot_alpha").await?;
+    let home_bot = Bot::login("bot_beta").await?;
+    let puppet = Bot::login("whatsapp_33612345678").await?;
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    // The snapshot: the contact granted on the work account only, each
+    // entry keyed on its connection — served at the stream's head, so the
+    // decisions earlier runs of this journey left on the shared bus are
+    // the snapshot's business and not replayed.
+    gateway.serve(
+        vec![json!({
+            "subject": { "type": "contact", "id": puppet.user_id() },
+            "connection": "wa-work",
+            "network": "whatsapp",
+            "state": "granted",
+            "decided_at": "2026-09-17T10:00:00.000Z",
+            "decision_sequence": 1,
+        })],
+        consent_head(&bus).await?,
+    );
+    gateway.serve_connections(vec![
+        json!({ "id": "wa-work", "kind": "whatsapp", "bridge_bot": work_bot.user_id() }),
+        json!({ "id": "wa-home", "kind": "whatsapp", "bridge_bot": home_bot.user_id() }),
+        json!({ "id": "matrix", "kind": "matrix" }),
+    ]);
+    bus.delete_consumer(STREAM, CONSENT_CONSUMER).await?;
+    let sensor = SensorProc::start(&harness::sensor_env_with(&[
+        ("SENSOR_GATEWAY_URL", &gateway.url()),
+        ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
+        (
+            "SENSOR_ALLOWED_INVITERS",
+            &format!("{},{}", work_bot.user_id(), home_bot.user_id()),
+        ),
+    ]))?;
+
+    let mut rooms = Vec::new();
+    for (bot, name) in [
+        (&work_bot, "two-accounts-work"),
+        (&home_bot, "two-accounts-home"),
+    ] {
+        let room_id = make_whatsapp_portal(bot, name).await?;
+        bot.invite(&room_id, SENSOR_USER_ID).await?;
+        bot.wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+            .await?;
+        bot.invite(&room_id, puppet.user_id()).await?;
+        puppet.join_room(&room_id).await?;
+        rooms.push(room_id);
+    }
+    let [work_room, home_room] = rooms.as_slice() else {
+        unreachable!()
+    };
+
+    for (room_id, connection, consent) in [
+        (work_room, "wa-work", "granted"),
+        (home_room, "wa-home", "pending"),
+    ] {
+        let event_id = puppet
+            .send_message(room_id, &format!("hello on {connection}"))
+            .await?;
+        let stored = wait_for_matrix_event(&bus, room_id, &event_id).await?;
+        validate_against_contract(&stored.payload, "inbound.message.received")?;
+        assert_eq!(stored.payload["connection"].as_str(), Some(connection));
+        assert_eq!(
+            stored.payload["consent"].as_str(),
+            Some(consent),
+            "{connection}: the same contact, the decision of *this* perimeter: {}",
+            stored.payload
+        );
+    }
+
+    // A decision on the stream, scoped to the home account: it lands there
+    // and nowhere else.
+    let mut event = consent_change(puppet.user_id(), &["whatsapp"], "unset", "revoked")?;
+    event["data"]["scope"]["connections"] = json!(["wa-home"]);
+    validate_against_contract(&event, "consent.state.changed")?;
+    publish_event(&bus, &event).await?;
+    poll_until(
+        || async {
+            let event_id = puppet
+                .send_message(home_room, "after the revocation at home")
+                .await
+                .ok()?;
+            let stored = wait_for_matrix_event(&bus, home_room, &event_id)
+                .await
+                .ok()?;
+            (stored.payload["consent"].as_str() == Some("revoked")).then_some(())
+        },
+        "the home account's message to carry the revocation",
+    )
+    .await?;
+    let event_id = puppet
+        .send_message(work_room, "still granted at work")
+        .await?;
+    let stored = wait_for_matrix_event(&bus, work_room, &event_id).await?;
+    assert_eq!(
+        stored.payload["consent"].as_str(),
+        Some("granted"),
+        "the revocation at home is not a revocation at work: {}",
+        stored.payload
     );
 
     sensor.stop().await;

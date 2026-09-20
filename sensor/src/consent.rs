@@ -25,8 +25,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::network::Network;
-
 pub const CONSENT_CHANGED_TYPE: &str = "fr.linagora.twalk.consent.state.changed.v1";
 
 /// Durable name of the JetStream pull consumer feeding the consent cache:
@@ -96,35 +94,83 @@ pub enum ConsentSubject {
     NetworkDefault,
 }
 
-/// One (subject, network) of the consent state — the shape the Gateway's
-/// snapshot is a list of, and the shape one scoped network of a decision
-/// reduces to.
+/// One (subject, connection) of the consent state — the shape the Gateway's
+/// snapshot is a list of, and the shape one scoped connection of a decision
+/// reduces to (ADR 0033, #271). The connection is the perimeter: two
+/// connections of one network hold two decisions about one contact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentEntry {
     pub subject: ConsentSubject,
-    pub network: Network,
+    /// The connection's id, as the Gateway's registry spells it.
+    pub connection: String,
     pub state: Consent,
+}
+
+/// Why an entry or a change was not applied — counted, because a decision
+/// the cache silently did not take is a sender labelled by the wrong state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unusable {
+    /// A `persona` subject: activating a persona is a consent decision (ADR
+    /// 0013), but it is not state a sender is labelled by. Well-formed and
+    /// not counted as a defect.
+    NotAboutASender,
+    /// The entry or the scope names no connection (#271) — a Gateway older
+    /// than #270, or a producer that still scopes by network. Never read as
+    /// the network's connection: that is a guess about the perimeter, and
+    /// the Gateway is the one that knows.
+    NoConnection,
+    /// Missing or mistyped members.
+    Malformed,
+}
+
+impl Unusable {
+    /// The metric's label value.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Unusable::NotAboutASender => "not_about_a_sender",
+            Unusable::NoConnection => "no_connection",
+            Unusable::Malformed => "malformed",
+        }
+    }
 }
 
 impl ConsentEntry {
     /// Parses one `ConsentStateEntry` of the Gateway's snapshot
-    /// (`companion-gateway/openapi.yaml`). `None` for an entry this Sensor
-    /// cannot label a sender by: a `persona` subject, or a network this
-    /// version does not know — both are well-formed answers from a Gateway
-    /// that knows more than this build does, and dropping them is how the
-    /// two versions stay compatible.
-    pub fn parse(entry: &Value) -> Option<Self> {
-        let network = Network::from_contract_value(entry.get("network")?.as_str()?)?;
-        let state = Consent::from_label(entry.get("state")?.as_str()?);
-        let subject = entry.get("subject")?;
-        let subject = match subject.get("type")?.as_str()? {
-            "contact" => ConsentSubject::Contact(subject.get("id")?.as_str()?.to_owned()),
+    /// (`companion-gateway/openapi.yaml`). Refused, with the reason, for an
+    /// entry this Sensor cannot label a sender by: a `persona` subject, an
+    /// entry that names its network but no connection.
+    pub fn parse(entry: &Value) -> Result<Self, Unusable> {
+        let connection = entry
+            .get("connection")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or(Unusable::NoConnection)?
+            .to_owned();
+        let state = Consent::from_label(
+            entry
+                .get("state")
+                .and_then(Value::as_str)
+                .ok_or(Unusable::Malformed)?,
+        );
+        let subject = entry.get("subject").ok_or(Unusable::Malformed)?;
+        let subject = match subject
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(Unusable::Malformed)?
+        {
+            "contact" => ConsentSubject::Contact(
+                subject
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or(Unusable::Malformed)?
+                    .to_owned(),
+            ),
             "network" => ConsentSubject::NetworkDefault,
-            _ => return None,
+            _ => return Err(Unusable::NotAboutASender),
         };
-        Some(Self {
+        Ok(Self {
             subject,
-            network,
+            connection,
             state,
         })
     }
@@ -136,46 +182,65 @@ impl ConsentEntry {
 pub struct ConsentChange {
     pub subject: ConsentSubject,
     pub new_state: Consent,
-    /// The networks the decision applies to (the contract's scope).
-    pub networks: Vec<Network>,
+    /// The connections the decision applies to (the contract's
+    /// `scope.connections`, #270).
+    pub connections: Vec<String>,
 }
 
 impl ConsentChange {
     /// Extracts the labelling change from a `consent.state.changed` event.
-    /// Returns None when the event cannot label a sender: malformed, scoped
-    /// to no network this version knows, or about a persona.
-    pub fn parse(event: &Value) -> Option<Self> {
-        let data = event.get("data")?;
-        let subject = data.get("subject")?;
-        let subject = match subject.get("type").and_then(Value::as_str)? {
-            "contact" => ConsentSubject::Contact(subject.get("id")?.as_str()?.to_owned()),
+    /// Refused, with the reason, when the event cannot label a sender:
+    /// malformed, scoped to no connection, or about a persona.
+    /// `scope.networks` is not read: a decision that names only its network
+    /// is one whose perimeter this Sensor would have to guess.
+    pub fn parse(event: &Value) -> Result<Self, Unusable> {
+        let data = event.get("data").ok_or(Unusable::Malformed)?;
+        let subject = data.get("subject").ok_or(Unusable::Malformed)?;
+        let subject = match subject
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(Unusable::Malformed)?
+        {
+            "contact" => ConsentSubject::Contact(
+                subject
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or(Unusable::Malformed)?
+                    .to_owned(),
+            ),
             "network" => ConsentSubject::NetworkDefault,
-            _ => return None,
+            _ => return Err(Unusable::NotAboutASender),
         };
-        let new_state = Consent::from_label(data.get("new_state")?.as_str()?);
-        let networks: Vec<Network> = data
-            .get("scope")?
-            .get("networks")?
-            .as_array()?
+        let new_state = Consent::from_label(
+            data.get("new_state")
+                .and_then(Value::as_str)
+                .ok_or(Unusable::Malformed)?,
+        );
+        let connections: Vec<String> = data
+            .get("scope")
+            .and_then(|scope| scope.get("connections"))
+            .and_then(Value::as_array)
+            .ok_or(Unusable::NoConnection)?
             .iter()
             .filter_map(Value::as_str)
-            .filter_map(Network::from_contract_value)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
             .collect();
-        if networks.is_empty() {
-            return None;
+        if connections.is_empty() {
+            return Err(Unusable::NoConnection);
         }
-        Some(Self {
+        Ok(Self {
             subject,
             new_state,
-            networks,
+            connections,
         })
     }
 
-    /// What this decision is in the state: one entry per scoped network.
+    /// What this decision is in the state: one entry per scoped connection.
     pub fn entries(&self) -> impl Iterator<Item = ConsentEntry> + '_ {
-        self.networks.iter().map(|network| ConsentEntry {
+        self.connections.iter().map(|connection| ConsentEntry {
             subject: self.subject.clone(),
-            network: *network,
+            connection: connection.clone(),
             state: self.new_state,
         })
     }
@@ -190,17 +255,19 @@ impl ConsentChange {
     }
 }
 
-/// The Sensor's view of current consent state, keyed by (subject, network):
-/// a contact reachable on several networks holds one decision per network,
-/// and each published event labels the sender by the network the event
-/// arrived on.
+/// The Sensor's view of current consent state, keyed by (subject,
+/// connection) (ADR 0033, #271): a contact reachable through several
+/// connections holds one decision per connection — two WhatsApp accounts
+/// are two perimeters, and a decision about one says nothing about the
+/// other — and each published event labels the sender by the connection
+/// the event arrived on, the one it is stamped with.
 ///
-/// A network also holds a **default**, which applies to every contact on it
-/// that has no decision of its own — the user grants a whole network rather
-/// than each of hundreds of contacts. The precedence is the Gateway's
-/// (`GET /api/consent/effective`): the contact's own decision wins, the
-/// network's default answers otherwise, and `pending` is what is left. An
-/// absent subject means "never decided", never "revoked".
+/// A connection also holds a **default**, which applies to every contact on
+/// it that has no decision of its own — the user grants a whole connection
+/// rather than each of hundreds of contacts. The precedence is the
+/// Gateway's (`GET /api/consent/effective`): the contact's own decision
+/// wins, the connection's default answers otherwise, and `pending` is what
+/// is left. An absent subject means "never decided", never "revoked".
 ///
 /// In-memory only, and filled in one order: the Gateway's snapshot first,
 /// then the durable consumer from the sequence after it (ADR 0010). The
@@ -243,8 +310,8 @@ pub struct ConsentCache {
 
 #[derive(Debug, Default)]
 struct States {
-    contacts: HashMap<(String, Network), Consent>,
-    networks: HashMap<Network, Consent>,
+    contacts: HashMap<(String, String), Consent>,
+    defaults: HashMap<String, Consent>,
 }
 
 impl ConsentCache {
@@ -280,19 +347,20 @@ impl ConsentCache {
         None
     }
 
-    /// The consent state that applies to a subject on a network: its own
-    /// decision, the network's default, or `pending` when neither exists.
-    pub fn state(&self, subject_id: &str, network: Network) -> Consent {
+    /// The consent state that applies to a subject on a connection: its own
+    /// decision there, the connection's default, or `pending` when neither
+    /// exists.
+    pub fn state(&self, subject_id: &str, connection: &str) -> Consent {
         let states = self.read();
         states
             .contacts
-            .get(&(subject_id.to_owned(), network))
-            .or_else(|| states.networks.get(&network))
+            .get(&(subject_id.to_owned(), connection.to_owned()))
+            .or_else(|| states.defaults.get(connection))
             .copied()
             .unwrap_or(Consent::Pending)
     }
 
-    /// Records one consent decision: one state per scoped network,
+    /// Records one consent decision: one state per scoped connection,
     /// overwriting the subject's previous state on each.
     pub fn apply(&self, change: &ConsentChange) {
         let mut states = self.write();
@@ -307,8 +375,8 @@ impl ConsentCache {
     /// Replaces the whole state with the Gateway's snapshot.
     ///
     /// A replacement and not a merge, because that is what the snapshot is:
-    /// every (subject, network) ever decided about, revocations as explicit
-    /// as grants. In practice it only ever runs on a cold cache, before the
+    /// every (subject, connection) ever decided about, revocations as
+    /// explicit as grants. In practice it only ever runs on a cold cache, before the
     /// stream consumer is created — which is precisely why nothing has to
     /// arbitrate between the two.
     pub fn apply_snapshot(&self, snapshot: &ConsentSnapshot) {
@@ -336,7 +404,7 @@ impl ConsentCache {
         };
         tracing::warn!(
             subject = %id,
-            network = %entry.network.as_str(),
+            connection = %entry.connection,
             state = %entry.state.as_str(),
             "refusing a consent decision about {who}: it is not a contact and has no consent \
              state (ADR 0021, issue #152). The Companion Gateway should not be holding this row"
@@ -360,10 +428,10 @@ impl ConsentCache {
 fn insert(states: &mut States, entry: ConsentEntry) {
     match entry.subject {
         ConsentSubject::Contact(id) => {
-            states.contacts.insert((id, entry.network), entry.state);
+            states.contacts.insert((id, entry.connection), entry.state);
         }
         ConsentSubject::NetworkDefault => {
-            states.networks.insert(entry.network, entry.state);
+            states.defaults.insert(entry.connection, entry.state);
         }
     }
 }
@@ -373,6 +441,11 @@ fn insert(states: &mut States, entry: ConsentEntry) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsentSnapshot {
     pub entries: Vec<ConsentEntry>,
+    /// The entries the Gateway served that this Sensor could not label a
+    /// sender by, and why — `NoConnection` is the one an operator must hear
+    /// about: a Gateway older than #270 serves a state this Sensor will not
+    /// guess the perimeter of, and every sender in it stays `pending`.
+    pub unusable: Vec<Unusable>,
     /// The registry of connections the Gateway serves with the snapshot
     /// (ADR 0033, #269) — `None` for a deployment with no Gateway, which has
     /// the implicit registry, one connection per network named after it.
@@ -391,6 +464,7 @@ impl ConsentSnapshot {
     pub fn empty() -> Self {
         Self {
             entries: Vec::new(),
+            unusable: Vec::new(),
             connections: None,
             next_stream_sequence: 1,
         }
@@ -413,16 +487,17 @@ impl ConsentSnapshot {
             .get("entries")
             .and_then(Value::as_array)
             .context("the consent snapshot has no entries array")?;
-        let parsed: Vec<ConsentEntry> = entries.iter().filter_map(ConsentEntry::parse).collect();
-        if parsed.len() != entries.len() {
-            tracing::debug!(
-                served = entries.len(),
-                applied = parsed.len(),
-                "the consent snapshot holds entries this Sensor does not label senders by"
-            );
+        let mut parsed = Vec::new();
+        let mut unusable = Vec::new();
+        for entry in entries {
+            match ConsentEntry::parse(entry) {
+                Ok(entry) => parsed.push(entry),
+                Err(why) => unusable.push(why),
+            }
         }
         Ok(Self {
             entries: parsed,
+            unusable,
             connections: Some(crate::connection::Registry::from_snapshot(document)),
             next_stream_sequence,
         })
@@ -545,19 +620,19 @@ mod tests {
         assert_eq!(Consent::from_label("unsure"), Consent::Pending);
     }
 
-    fn contact_change(subject_id: &str, new_state: Consent, networks: &[Network]) -> ConsentChange {
+    fn contact_change(subject_id: &str, new_state: Consent, connections: &[&str]) -> ConsentChange {
         ConsentChange {
             subject: ConsentSubject::Contact(subject_id.to_owned()),
             new_state,
-            networks: networks.to_vec(),
+            connections: connections.iter().map(|id| (*id).to_owned()).collect(),
         }
     }
 
-    fn network_change(new_state: Consent, networks: &[Network]) -> ConsentChange {
+    fn network_change(new_state: Consent, connections: &[&str]) -> ConsentChange {
         ConsentChange {
             subject: ConsentSubject::NetworkDefault,
             new_state,
-            networks: networks.to_vec(),
+            connections: connections.iter().map(|id| (*id).to_owned()).collect(),
         }
     }
 
@@ -589,20 +664,20 @@ mod tests {
         cache.apply(&contact_change(
             "@whatsapp_33660469852:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         cache.apply(&contact_change(
             "@michel:example.com",
             Consent::Revoked,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         assert_eq!(
-            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33660469852:example.com", "whatsapp"),
             Consent::Pending,
             "nothing was stored about the ghost"
         );
         assert_eq!(
-            cache.state("@michel:example.com", Network::Whatsapp),
+            cache.state("@michel:example.com", "whatsapp"),
             Consent::Pending,
             "nor about the operator's own Matrix ID, which is always one of their identities"
         );
@@ -613,30 +688,31 @@ mod tests {
         let cache = cache_with_an_owner();
         cache.apply_snapshot(&ConsentSnapshot {
             connections: None,
+            unusable: vec![],
             entries: vec![
                 ConsentEntry {
                     subject: ConsentSubject::Contact(
                         "@whatsapp_33660469852:example.com".to_owned(),
                     ),
-                    network: Network::Whatsapp,
+                    connection: "whatsapp".to_owned(),
                     state: Consent::Granted,
                 },
                 ConsentEntry {
                     subject: ConsentSubject::Contact(
                         "@whatsapp_33612345678:example.com".to_owned(),
                     ),
-                    network: Network::Whatsapp,
+                    connection: "whatsapp".to_owned(),
                     state: Consent::Granted,
                 },
             ],
             next_stream_sequence: 12,
         });
         assert_eq!(
-            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33660469852:example.com", "whatsapp"),
             Consent::Pending
         );
         assert_eq!(
-            cache.state("@whatsapp_33612345678:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33612345678:example.com", "whatsapp"),
             Consent::Granted,
             "and a real contact in the same snapshot is unaffected: this refuses one subject, \
              not the snapshot"
@@ -655,40 +731,41 @@ mod tests {
         cache.apply(&contact_change(
             "@whatsappbot:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         cache.apply_snapshot(&ConsentSnapshot {
             connections: None,
+            unusable: vec![],
             entries: vec![
                 ConsentEntry {
                     subject: ConsentSubject::Contact("@signalbot:example.com".to_owned()),
-                    network: Network::Signal,
+                    connection: "signal".to_owned(),
                     state: Consent::Granted,
                 },
                 ConsentEntry {
                     subject: ConsentSubject::Contact(
                         "@signal_75af9e9a-b173-4fa0-9228-03d4a03a1e2c:example.com".to_owned(),
                     ),
-                    network: Network::Signal,
+                    connection: "signal".to_owned(),
                     state: Consent::Granted,
                 },
             ],
             next_stream_sequence: 12,
         });
         assert_eq!(
-            cache.state("@whatsappbot:example.com", Network::Whatsapp),
+            cache.state("@whatsappbot:example.com", "whatsapp"),
             Consent::Pending,
             "nothing was stored about the bot the stream named"
         );
         assert_eq!(
-            cache.state("@signalbot:example.com", Network::Signal),
+            cache.state("@signalbot:example.com", "signal"),
             Consent::Pending,
             "nor about the one the snapshot named"
         );
         assert_eq!(
             cache.state(
                 "@signal_75af9e9a-b173-4fa0-9228-03d4a03a1e2c:example.com",
-                Network::Signal
+                "signal"
             ),
             Consent::Granted,
             "and a ghost of the same bridge — a person the bridge stands in for — keeps its \
@@ -707,13 +784,9 @@ mod tests {
             "@whatsappbot:evil.example",
             "@telegrambot:example.com",
         ] {
-            cache.apply(&contact_change(
-                lookalike,
-                Consent::Granted,
-                &[Network::Whatsapp],
-            ));
+            cache.apply(&contact_change(lookalike, Consent::Granted, &["whatsapp"]));
             assert_eq!(
-                cache.state(lookalike, Network::Whatsapp),
+                cache.state(lookalike, "whatsapp"),
                 Consent::Granted,
                 "{lookalike} is not one of the bots the deployment named"
             );
@@ -729,10 +802,10 @@ mod tests {
         cache.apply(&contact_change(
             "@whatsapp_33660469853:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         assert_eq!(
-            cache.state("@whatsapp_33660469853:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33660469853:example.com", "whatsapp"),
             Consent::Granted
         );
     }
@@ -745,13 +818,13 @@ mod tests {
         // row. Refusing the owner's own rows is not enough on its own, which
         // is why the producers no longer consult this cache for them at all.
         let cache = cache_with_an_owner();
-        cache.apply(&network_change(Consent::Granted, &[Network::Whatsapp]));
+        cache.apply(&network_change(Consent::Granted, &["whatsapp"]));
         assert_eq!(
-            cache.state("@whatsapp_33612345678:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33612345678:example.com", "whatsapp"),
             Consent::Granted
         );
         assert_eq!(
-            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33660469852:example.com", "whatsapp"),
             Consent::Granted,
             "the fallback still answers for the operator's ghost, which is exactly how their \
              own reaction came to be labelled `granted` — the fix is that no producer asks"
@@ -764,10 +837,10 @@ mod tests {
         cache.apply(&contact_change(
             "@whatsapp_33660469852:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         assert_eq!(
-            cache.state("@whatsapp_33660469852:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33660469852:example.com", "whatsapp"),
             Consent::Granted
         );
     }
@@ -776,7 +849,7 @@ mod tests {
     fn a_cache_miss_labels_the_sender_pending() {
         let cache = ConsentCache::default();
         assert_eq!(
-            cache.state("@whatsapp_33612345678:example.com", Network::Whatsapp),
+            cache.state("@whatsapp_33612345678:example.com", "whatsapp"),
             Consent::Pending
         );
     }
@@ -787,16 +860,10 @@ mod tests {
         cache.apply(&contact_change(
             "@a:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
-        assert_eq!(
-            cache.state("@a:example.com", Network::Whatsapp),
-            Consent::Granted
-        );
-        assert_eq!(
-            cache.state("@a:example.com", Network::Telegram),
-            Consent::Pending
-        );
+        assert_eq!(cache.state("@a:example.com", "whatsapp"), Consent::Granted);
+        assert_eq!(cache.state("@a:example.com", "telegram"), Consent::Pending);
     }
 
     #[test]
@@ -805,20 +872,11 @@ mod tests {
         cache.apply(&contact_change(
             "@a:example.com",
             Consent::Granted,
-            &[Network::Whatsapp, Network::Telegram],
+            &["whatsapp", "telegram"],
         ));
-        assert_eq!(
-            cache.state("@a:example.com", Network::Whatsapp),
-            Consent::Granted
-        );
-        assert_eq!(
-            cache.state("@a:example.com", Network::Telegram),
-            Consent::Granted
-        );
-        assert_eq!(
-            cache.state("@a:example.com", Network::Signal),
-            Consent::Pending
-        );
+        assert_eq!(cache.state("@a:example.com", "whatsapp"), Consent::Granted);
+        assert_eq!(cache.state("@a:example.com", "telegram"), Consent::Granted);
+        assert_eq!(cache.state("@a:example.com", "signal"), Consent::Pending);
     }
 
     #[test]
@@ -827,24 +885,21 @@ mod tests {
         cache.apply(&contact_change(
             "@a:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         cache.apply(&contact_change(
             "@b:example.com",
             Consent::Granted,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         cache.apply(&contact_change(
             "@a:example.com",
             Consent::Revoked,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
+        assert_eq!(cache.state("@a:example.com", "whatsapp"), Consent::Revoked);
         assert_eq!(
-            cache.state("@a:example.com", Network::Whatsapp),
-            Consent::Revoked
-        );
-        assert_eq!(
-            cache.state("@b:example.com", Network::Whatsapp),
+            cache.state("@b:example.com", "whatsapp"),
             Consent::Granted,
             "a decision about one subject never touches another"
         );
@@ -853,14 +908,14 @@ mod tests {
     #[test]
     fn a_contacts_own_decision_wins_over_the_networks_default() {
         let cache = ConsentCache::default();
-        cache.apply(&network_change(Consent::Granted, &[Network::Whatsapp]));
+        cache.apply(&network_change(Consent::Granted, &["whatsapp"]));
         assert_eq!(
-            cache.state("@unknown:example.com", Network::Whatsapp),
+            cache.state("@unknown:example.com", "whatsapp"),
             Consent::Granted,
             "a contact with no decision of its own takes the network's default"
         );
         assert_eq!(
-            cache.state("@unknown:example.com", Network::Signal),
+            cache.state("@unknown:example.com", "signal"),
             Consent::Pending,
             "the default is scoped to its own network"
         );
@@ -868,36 +923,33 @@ mod tests {
         cache.apply(&contact_change(
             "@a:example.com",
             Consent::Revoked,
-            &[Network::Whatsapp],
+            &["whatsapp"],
         ));
         assert_eq!(
-            cache.state("@a:example.com", Network::Whatsapp),
+            cache.state("@a:example.com", "whatsapp"),
             Consent::Revoked,
             "the contact's own decision overrides the network's default"
         );
         assert_eq!(
-            cache.state("@b:example.com", Network::Whatsapp),
+            cache.state("@b:example.com", "whatsapp"),
             Consent::Granted,
             "and overrides it for that contact only"
         );
 
         // The default itself is revised like any other decision.
-        cache.apply(&network_change(Consent::Revoked, &[Network::Whatsapp]));
-        assert_eq!(
-            cache.state("@b:example.com", Network::Whatsapp),
-            Consent::Revoked
-        );
-        assert_eq!(
-            cache.state("@a:example.com", Network::Whatsapp),
-            Consent::Revoked
-        );
+        cache.apply(&network_change(Consent::Revoked, &["whatsapp"]));
+        assert_eq!(cache.state("@b:example.com", "whatsapp"), Consent::Revoked);
+        assert_eq!(cache.state("@a:example.com", "whatsapp"), Consent::Revoked);
     }
 
+    /// A `consent.state.changed` as the Gateway publishes it since #270:
+    /// the scope's connections, and their kinds beside them for consumers
+    /// not yet migrated — which this Sensor no longer is.
     fn consent_event(
         subject_type: &str,
         subject_id: &str,
         new_state: &str,
-        networks: Value,
+        connections: Value,
     ) -> Value {
         json!({
             "type": CONSENT_CHANGED_TYPE,
@@ -905,7 +957,7 @@ mod tests {
                 "subject": { "type": subject_type, "id": subject_id },
                 "old_state": "unset",
                 "new_state": new_state,
-                "scope": { "networks": networks },
+                "scope": { "connections": connections, "networks": ["whatsapp"] },
                 "occurred_at": "2026-09-17T10:05:00Z"
             }
         })
@@ -925,7 +977,7 @@ mod tests {
             ConsentSubject::Contact("@whatsapp_33612345678:example.com".to_owned())
         );
         assert_eq!(change.new_state, Consent::Granted);
-        assert_eq!(change.networks, vec![Network::Whatsapp]);
+        assert_eq!(change.connections, vec!["whatsapp"]);
     }
 
     #[test]
@@ -944,7 +996,7 @@ mod tests {
         .unwrap();
         assert_eq!(change.subject, ConsentSubject::NetworkDefault);
         assert_eq!(change.new_state, Consent::Granted);
-        assert_eq!(change.networks, vec![Network::Whatsapp]);
+        assert_eq!(change.connections, vec!["whatsapp"]);
     }
 
     #[test]
@@ -952,7 +1004,10 @@ mod tests {
         // Activating a persona is a consent decision (ADR 0013) and never a
         // state a sender is labelled by.
         let persona = consent_event("persona", "assistant", "granted", json!(["whatsapp"]));
-        assert_eq!(ConsentChange::parse(&persona), None);
+        assert_eq!(
+            ConsentChange::parse(&persona),
+            Err(Unusable::NotAboutASender)
+        );
     }
 
     #[test]
@@ -968,40 +1023,57 @@ mod tests {
     }
 
     #[test]
-    fn changes_without_a_known_network_are_rejected() {
-        let unknown_only = consent_event("contact", "@a:example.com", "granted", json!(["irc"]));
-        assert_eq!(ConsentChange::parse(&unknown_only), None);
+    fn a_change_scoped_by_network_alone_is_refused_and_never_read_as_the_networks_connection() {
+        // A producer older than #270, or one that still scopes by network:
+        // the perimeter is not this Sensor's to guess (#271). The reason is
+        // what the metric counts.
+        let mut networks_only =
+            consent_event("contact", "@a:example.com", "granted", json!(["whatsapp"]));
+        networks_only["data"]["scope"]
+            .as_object_mut()
+            .unwrap()
+            .remove("connections");
+        assert_eq!(
+            ConsentChange::parse(&networks_only),
+            Err(Unusable::NoConnection)
+        );
         let empty_scope = consent_event("contact", "@a:example.com", "granted", json!([]));
-        assert_eq!(ConsentChange::parse(&empty_scope), None);
-        // Unknown entries are dropped; the known ones still apply.
-        let mixed = consent_event(
+        assert_eq!(
+            ConsentChange::parse(&empty_scope),
+            Err(Unusable::NoConnection)
+        );
+        // An id is opaque: whatever the registry named is applied as is.
+        let two = consent_event(
             "contact",
             "@a:example.com",
             "granted",
-            json!(["irc", "sms"]),
+            json!(["wa-home", "wa-work"]),
         );
         assert_eq!(
-            ConsentChange::parse(&mixed).unwrap().networks,
-            vec![Network::Sms]
+            ConsentChange::parse(&two).unwrap().connections,
+            vec!["wa-home", "wa-work"]
         );
     }
 
     #[test]
     fn malformed_changes_are_rejected() {
-        assert_eq!(ConsentChange::parse(&json!({"unrelated": true})), None);
+        assert_eq!(
+            ConsentChange::parse(&json!({"unrelated": true})),
+            Err(Unusable::Malformed)
+        );
         let mut no_id = consent_event("contact", "@a:example.com", "granted", json!(["whatsapp"]));
         no_id["data"]["subject"]
             .as_object_mut()
             .unwrap()
             .remove("id");
-        assert_eq!(ConsentChange::parse(&no_id), None);
+        assert_eq!(ConsentChange::parse(&no_id), Err(Unusable::Malformed));
         let mut no_state =
             consent_event("contact", "@a:example.com", "granted", json!(["whatsapp"]));
         no_state["data"]
             .as_object_mut()
             .unwrap()
             .remove("new_state");
-        assert_eq!(ConsentChange::parse(&no_state), None);
+        assert_eq!(ConsentChange::parse(&no_state), Err(Unusable::Malformed));
     }
 
     /// The Gateway's document, as `companion-gateway/openapi.yaml` describes
@@ -1024,6 +1096,7 @@ mod tests {
             json!([
                 {
                     "subject": { "type": "network", "id": "whatsapp" },
+                    "connection": "whatsapp",
                     "network": "whatsapp",
                     "state": "granted",
                     "decided_at": "2026-09-17T10:00:00.000Z",
@@ -1031,6 +1104,7 @@ mod tests {
                 },
                 {
                     "subject": { "type": "contact", "id": "@a:example.com" },
+                    "connection": "whatsapp",
                     "network": "whatsapp",
                     "state": "revoked",
                     "decided_at": "2026-09-17T10:01:00.000Z",
@@ -1048,12 +1122,12 @@ mod tests {
             vec![
                 ConsentEntry {
                     subject: ConsentSubject::NetworkDefault,
-                    network: Network::Whatsapp,
+                    connection: "whatsapp".to_owned(),
                     state: Consent::Granted,
                 },
                 ConsentEntry {
                     subject: ConsentSubject::Contact("@a:example.com".to_owned()),
-                    network: Network::Whatsapp,
+                    connection: "whatsapp".to_owned(),
                     state: Consent::Revoked,
                 },
             ]
@@ -1062,18 +1136,9 @@ mod tests {
         // Applied, the precedence is the Gateway's own.
         let cache = ConsentCache::default();
         cache.apply_snapshot(&snapshot);
-        assert_eq!(
-            cache.state("@a:example.com", Network::Whatsapp),
-            Consent::Revoked
-        );
-        assert_eq!(
-            cache.state("@b:example.com", Network::Whatsapp),
-            Consent::Granted
-        );
-        assert_eq!(
-            cache.state("@b:example.com", Network::Signal),
-            Consent::Pending
-        );
+        assert_eq!(cache.state("@a:example.com", "whatsapp"), Consent::Revoked);
+        assert_eq!(cache.state("@b:example.com", "whatsapp"), Consent::Granted);
+        assert_eq!(cache.state("@b:example.com", "signal"), Consent::Pending);
     }
 
     #[test]
@@ -1089,19 +1154,23 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_entry_this_sensor_cannot_use_is_dropped_and_the_rest_applies() {
+    fn a_snapshot_entry_this_sensor_cannot_use_is_dropped_counted_and_the_rest_applies() {
+        // A persona subject is well-formed and not a sender's state; an
+        // entry with a network and no connection is a Gateway older than
+        // #270, refused and counted rather than read as the network's
+        // connection (#271); the rest applies.
         let snapshot = ConsentSnapshot::parse(&snapshot_document(
             3,
             json!([
-                { "subject": { "type": "persona", "id": "assistant" }, "network": "whatsapp",
-                  "state": "granted", "decided_at": "2026-09-17T10:00:00.000Z",
-                  "decision_sequence": 1 },
-                { "subject": { "type": "contact", "id": "@a:example.com" }, "network": "irc",
+                { "subject": { "type": "persona", "id": "assistant" }, "connection": "whatsapp",
+                  "network": "whatsapp", "state": "granted",
+                  "decided_at": "2026-09-17T10:00:00.000Z", "decision_sequence": 1 },
+                { "subject": { "type": "contact", "id": "@a:example.com" }, "network": "whatsapp",
                   "state": "granted", "decided_at": "2026-09-17T10:00:00.000Z",
                   "decision_sequence": 2 },
-                { "subject": { "type": "contact", "id": "@b:example.com" }, "network": "signal",
-                  "state": "granted", "decided_at": "2026-09-17T10:00:00.000Z",
-                  "decision_sequence": 3 }
+                { "subject": { "type": "contact", "id": "@b:example.com" }, "connection": "signal",
+                  "network": "signal", "state": "granted",
+                  "decided_at": "2026-09-17T10:00:00.000Z", "decision_sequence": 3 }
             ]),
         ))
         .unwrap();
@@ -1109,11 +1178,34 @@ mod tests {
             snapshot.entries,
             vec![ConsentEntry {
                 subject: ConsentSubject::Contact("@b:example.com".to_owned()),
-                network: Network::Signal,
+                connection: "signal".to_owned(),
                 state: Consent::Granted,
             }],
-            "a persona subject and an unknown network are dropped, not fatal"
+            "a persona subject and an entry without a connection are dropped, not fatal"
         );
+        assert_eq!(
+            snapshot.unusable,
+            vec![Unusable::NotAboutASender, Unusable::NoConnection],
+            "and each says why, so the one that matters is counted"
+        );
+    }
+
+    #[test]
+    fn two_connections_of_one_network_hold_two_decisions_about_one_contact() {
+        // The whole reason the perimeter exists (ADR 0033): a decision on
+        // the work account says nothing about the home one, and a default
+        // on one connection is that connection's alone.
+        let cache = ConsentCache::default();
+        cache.apply(&contact_change(
+            "@a:example.com",
+            Consent::Granted,
+            &["wa-work"],
+        ));
+        cache.apply(&network_change(Consent::Revoked, &["wa-home"]));
+        assert_eq!(cache.state("@a:example.com", "wa-work"), Consent::Granted);
+        assert_eq!(cache.state("@a:example.com", "wa-home"), Consent::Revoked);
+        assert_eq!(cache.state("@b:example.com", "wa-work"), Consent::Pending);
+        assert_eq!(cache.state("@b:example.com", "wa-home"), Consent::Revoked);
     }
 
     #[test]
