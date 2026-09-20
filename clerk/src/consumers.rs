@@ -89,7 +89,10 @@
 //! a suggestion the Gateway already records as approved is not posted at
 //! all (`skipped{already_approved}`). The read never blocks the post: a
 //! Gateway that does not answer, refuses, or does not hold the suggestion
-//! yields the "not read" line naming why, in the same tick. The session
+//! yields the "not read" line naming why, in the same tick. Every read is
+//! counted by its outcome (`twalk_clerk_delivery_reads_total{outcome}`),
+//! the ones that could not be made included, so an outage of the read is
+//! a slope on `/metrics` and not only a sentence on the relay. The session
 //! cell is shared with the loop ([`Clerk::session`]) so that a `401` met
 //! on either side stops the calls on both.
 
@@ -110,7 +113,7 @@ use crate::events::{
     SUGGEST_PRODUCED,
 };
 use crate::gateway::{Gateway, GatewayError, Outcome, Read};
-use crate::metrics::{ApprovalOutcome, Channel, Deleted, Metrics, Skipped};
+use crate::metrics::{ApprovalOutcome, Channel, Deleted, DeliveryRead, Metrics, Skipped};
 use crate::reference::{self, Reference};
 use crate::refusals::{self, Remedy};
 use crate::relay::{answered_gesture, Relay, RelayError, KIND_FORUM_POST};
@@ -657,11 +660,27 @@ enum BeforePost {
 /// A `401` is the same breaker as the decisions loop's: the session is
 /// marked [`Session::Dead`] and no further call is made, for a suggestion
 /// or for a ✅, until a refresh of the loop's own brings it back.
+///
+/// Every call is one sample of `twalk_clerk_delivery_reads_total{outcome}`
+/// ([`DeliveryRead`]), the reads that could not be made included: the
+/// four "not read" reasons are otherwise visible only on the relay and in
+/// the log, and a read that silently stopped answering must be a slope.
 async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
+    let (before, outcome) = read_before_post_uncounted(clerk, id).await;
+    clerk.metrics.record_delivery_read(outcome);
+    before
+}
+
+/// [`read_before_post`] without the counter: what the post carries, and
+/// which outcome that was.
+async fn read_before_post_uncounted(clerk: &Clerk, id: &str) -> (BeforePost, DeliveryRead) {
     use refusals::Unread;
     let l = clerk.lang;
     let Some(gateway) = clerk.gateway.as_ref() else {
-        return BeforePost::Post(refusals::delivery_unread_line(l, Unread::NoDevice));
+        return (
+            BeforePost::Post(refusals::delivery_unread_line(l, Unread::NoDevice)),
+            DeliveryRead::NoDevice,
+        );
     };
     if clerk.session() == Session::Dead {
         warn!(
@@ -670,11 +689,14 @@ async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
             "the Companion Gateway will not have the clerk's session, so the suggestion's \
              delivery is not read and it is posted as such; run provision-clerk-device.sh"
         );
-        return BeforePost::Post(refusals::delivery_unread_line(l, Unread::GatewayRefused));
+        return (
+            BeforePost::Post(refusals::delivery_unread_line(l, Unread::GatewayRefused)),
+            DeliveryRead::Refused,
+        );
     }
-    let unread = match gateway.suggestion(id).await {
+    let (unread, outcome) = match gateway.suggestion(id).await {
         Ok(Read::Found(read)) if read.standing == "approved" => {
-            return BeforePost::AlreadyApproved;
+            return (BeforePost::AlreadyApproved, DeliveryRead::AlreadyApproved);
         }
         Ok(Read::Found(read)) => {
             debug!(
@@ -684,7 +706,10 @@ async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
                 detail = %read.delivery.detail,
                 "read the suggestion's delivery from the Companion Gateway"
             );
-            return BeforePost::Post(refusals::delivery_line(l, &read.delivery));
+            return (
+                BeforePost::Post(refusals::delivery_line(l, &read.delivery)),
+                DeliveryRead::Found,
+            );
         }
         Ok(Read::Refused { status, code }) if matches!(status, 404 | 410) => {
             warn!(
@@ -693,7 +718,7 @@ async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
                 code,
                 "the Companion Gateway does not hold the suggestion; posted as not read"
             );
-            Unread::NotFound
+            (Unread::NotFound, DeliveryRead::NotFound)
         }
         Ok(Read::Refused { status, code }) => {
             warn!(
@@ -702,7 +727,7 @@ async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
                 code,
                 "the Companion Gateway refused the suggestion read; posted as not read"
             );
-            Unread::GatewayRefused
+            (Unread::GatewayRefused, DeliveryRead::Refused)
         }
         Err(GatewayError::Unauthenticated) => {
             clerk.set_session(Session::Dead);
@@ -713,7 +738,7 @@ async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
                  revoked or its refresh token died; the suggestion is posted as not read, and \
                  no further call is made until a refresh succeeds; run provision-clerk-device.sh"
             );
-            Unread::GatewayRefused
+            (Unread::GatewayRefused, DeliveryRead::Refused)
         }
         Err(error) => {
             warn!(
@@ -723,10 +748,13 @@ async fn read_before_post(clerk: &Clerk, id: &str) -> BeforePost {
                 "the Companion Gateway gave no usable answer to the suggestion read; posted as \
                  not read"
             );
-            Unread::GatewayUnreachable
+            (Unread::GatewayUnreachable, DeliveryRead::Unreachable)
         }
     };
-    BeforePost::Post(refusals::delivery_unread_line(l, unread))
+    (
+        BeforePost::Post(refusals::delivery_unread_line(l, unread)),
+        outcome,
+    )
 }
 
 /// One `.posted` report: a line in `journal`, unless the relay already
