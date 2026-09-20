@@ -1,0 +1,14 @@
+[package]
+name = "twalk-consent-cache"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The consent cache every Twalk component that labels a sender shares: the state keyed on (subject, connection), the decision from snapshot plus stream, and the exclusion of the owner's identities and the bridges' bots (ADR 0033)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+tracing = "0.1"

@@ -3,6 +3,7 @@
 /hermes/target/
 /companion-gateway/target/
 /tests/harness/target/
+/consent-cache/target/
 .env
 # Backups a deploy edit leaves beside it: the same secrets, never versioned
 .env.bak*

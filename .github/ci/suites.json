@@ -51,6 +51,16 @@
 			"triggers": ["tests/harness/", "contracts/"]
 		},
 
+		"consent-cache": {
+			"what": "The shared consent cache's own unit tests (#273): the state keyed on (subject, connection), the decision from snapshot plus stream, the exclusion of the owner's identities and the bridges' bots. No Docker, no stack.",
+			"component": "consent-cache",
+			"workdir": "consent-cache",
+			"run": "cargo test",
+			"needs": ["rust"],
+			"tier": "required",
+			"triggers": ["consent-cache/"]
+		},
+
 		"sdk-python": {
 			"what": "The Python persona SDK's pure half: the consent gate, the deterministic ids, the envelopes, the completion reader, the language list — stdlib only, against the contract's own fixtures.",
 			"component": "sdk",
@@ -91,7 +101,8 @@
 				"sensor/",
 				"contracts/",
 				"tests/harness/",
-				"companion-gateway/openapi.yaml"
+				"companion-gateway/openapi.yaml",
+				"consent-cache/"
 			],
 			"triggers_note": "The Gateway's OpenAPI description is in here because the Sensor's one HTTP seam reads `GET /api/consent/snapshot` from it and `sensor/tests/harness/gateway.rs` is a stub that transcribes that endpoint's shape. `test_selection.py` derives that dependency from the repository, so removing this line fails the routing check rather than going unnoticed."
 		},
@@ -104,7 +115,7 @@
 			"targets": ["deployment", "bridges_deployment"],
 			"needs": ["rust", "docker", "deployment"],
 			"tier": "advisory",
-			"triggers": ["sensor/", "contracts/", "tests/harness/", "deploy/docker-compose/", "bridges/"]
+			"triggers": ["sensor/", "contracts/", "tests/harness/", "deploy/docker-compose/", "bridges/", "consent-cache/"]
 		},
 
 		"gateway": {
@@ -179,7 +190,8 @@
 				"sdk/python/",
 				"sensor/",
 				"companion-gateway/",
-				"deploy/docker-compose/"
+				"deploy/docker-compose/",
+				"consent-cache/"
 			]
 		},
 
@@ -205,7 +217,8 @@
 				"companion-gateway/",
 				"contracts/",
 				"tests/harness/",
-				"sensor/"
+				"sensor/",
+				"consent-cache/"
 			]
 		}
 	},

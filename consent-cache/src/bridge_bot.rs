@@ -34,7 +34,7 @@
 //! that is joined to no rooms (ADR 0026, issue #171) — and the deployment
 //! already names those accounts once, in `SENSOR_ALLOWED_INVITERS` — that is
 //! how the Sensor accepts a portal invitation at all. This set is a second,
-//! separate list ([`Config::bridge_bots`](crate::config::Config)), for the
+//! separate list (the Sensor's `Config::bridge_bots`), for the
 //! same reason [`crate::owner`]'s is: exact matches against what the
 //! deployment confirmed, and nothing inferred.
 //!

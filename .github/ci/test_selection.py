@@ -100,6 +100,17 @@ def harness_consumers() -> set[str]:
     return consumers
 
 
+def consent_cache_consumers() -> set[str]:
+    """Components with a Cargo path dependency on `consent-cache/` (#273)."""
+    consumers: set[str] = set()
+    for path in tracked_files():
+        if path.name != "Cargo.toml" or component_of(path) == "consent-cache":
+            continue
+        if re.search(r"twalk-consent-cache\s*=.*path", read(path)):
+            consumers.add(component_of(path))
+    return consumers
+
+
 def contract_consumers() -> set[str]:
     """Components whose code names a file that really exists under `contracts/`."""
     consumers: set[str] = set()
@@ -127,6 +138,7 @@ def openapi_consumers() -> set[str]:
 
 DERIVATIONS = {
     "tests/harness/": harness_consumers,
+    "consent-cache/": consent_cache_consumers,
     "contracts/": contract_consumers,
     "companion-gateway/openapi.yaml": openapi_consumers,
 }
