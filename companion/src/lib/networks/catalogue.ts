@@ -45,9 +45,18 @@ export interface NetworkCard {
 	readonly preview: boolean;
 	/**
 	 * Whether this network needs a bridge the deployment configured. `false`
-	 * for Matrix, whose card is active whatever the Gateway lists.
+	 * for Matrix, whose card is active whatever the Gateway lists, and for
+	 * a kind a collector holds.
 	 */
 	readonly needsBridge: boolean;
+	/**
+	 * Whether this kind is read by the collector rather than a bridge (ADR
+	 * 0033, #275): the owner's own mailbox and calendars. Its card has no
+	 * login journey — the grant is given by the operator at the terminal —
+	 * and its state is what the collector said on the bus, shown as one of
+	 * four sentences.
+	 */
+	readonly collector: boolean;
 	/**
 	 * Unusable on an iOS-only device. The SMS preview goes through Google
 	 * Messages on an Android phone, so an iPhone cannot feed it — the card is
@@ -69,6 +78,7 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		milestone: 'v0.1',
 		preview: false,
 		needsBridge: true,
+		collector: false,
 		androidOnly: false,
 		route: '/networks/whatsapp'
 	},
@@ -80,6 +90,7 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		milestone: 'v0.1',
 		preview: false,
 		needsBridge: true,
+		collector: false,
 		androidOnly: false,
 		route: '/networks/signal'
 	},
@@ -91,6 +102,7 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		milestone: 'v0.1',
 		preview: true,
 		needsBridge: true,
+		collector: false,
 		androidOnly: true,
 		route: '/networks/sms'
 	},
@@ -102,6 +114,7 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		milestone: 'v0.1',
 		preview: false,
 		needsBridge: false,
+		collector: false,
 		androidOnly: false,
 		route: '/networks/matrix'
 	},
@@ -119,6 +132,7 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		milestone: 'v0.1',
 		preview: false,
 		needsBridge: true,
+		collector: false,
 		androidOnly: false,
 		route: '/networks/telegram'
 	},
@@ -130,6 +144,36 @@ export const NETWORK_CARDS: readonly NetworkCard[] = [
 		milestone: 'v0.2',
 		preview: false,
 		needsBridge: true,
+		collector: false,
+		androidOnly: false,
+		route: null
+	},
+	// The two kinds the collector holds (ADR 0033, #274–#280): the owner's
+	// own mailbox and their calendars. A card each, since a connection is a
+	// card (#272); no route, since the grant is the operator's to give at
+	// the terminal and there is nothing for a browser to do but read the
+	// state.
+	{
+		network: 'email',
+		icon: 'email',
+		titleKey: 'network.email.name',
+		subtitleKey: 'network.email.subtitle',
+		milestone: 'v0.1',
+		preview: false,
+		needsBridge: false,
+		collector: true,
+		androidOnly: false,
+		route: null
+	},
+	{
+		network: 'calendar',
+		icon: 'calendar',
+		titleKey: 'network.calendar.name',
+		subtitleKey: 'network.calendar.subtitle',
+		milestone: 'v0.1',
+		preview: false,
+		needsBridge: false,
+		collector: true,
 		androidOnly: false,
 		route: null
 	}
@@ -168,7 +212,38 @@ export function manageRouteFor(state: Pick<CardState, 'card' | 'href'>): string 
 export type BridgeRow = ConfiguredBridge;
 
 /** Why a card cannot be tapped, or `null` when it can. */
-export type CardBlock = 'coming-soon' | 'no-bridge' | 'ios';
+export type CardBlock = 'coming-soon' | 'no-bridge' | 'no-collector' | 'ios';
+
+/**
+ * What a collector connection said about itself (#275): the contract's four
+ * states, plus `unknown` for one nobody has spoken for yet — the same
+ * honesty as `ConnectionState`'s `unknown`, for the same reason.
+ */
+export type CollectorState =
+	| 'connected'
+	| 'unreachable'
+	| 'reconnect_required'
+	| 'pending_operator'
+	| 'unknown';
+
+/** A collector connection's state and the operator's hint, or `null` on a bridge's card. */
+export interface CollectorStatus {
+	readonly state: CollectorState;
+	readonly hint: string | null;
+	readonly occurredAt: string | null;
+}
+
+/**
+ * The registry entry's `status`, read as the card's state. Never a state
+ * of the bridge's: a bridge speaks through `GET /api/bridges`.
+ */
+export function collectorStatusOf(connection: Connection | null): CollectorStatus {
+	const status = connection?.status;
+	if (status === undefined || status === null) {
+		return { state: 'unknown', hint: null, occurredAt: null };
+	}
+	return { state: status.state, hint: status.hint ?? null, occurredAt: status.occurred_at };
+}
 
 /** A card joined with what this deployment and this browser allow. */
 export interface CardState {
@@ -203,6 +278,8 @@ export interface CardState {
 	 */
 	readonly linked: boolean;
 	readonly blockedBy: CardBlock | null;
+	/** For a collector's card: what the collector said (#275). `null` on a bridge's. */
+	readonly collector: CollectorStatus | null;
 }
 
 /**
@@ -253,7 +330,12 @@ function cardState(
 		blockedBy = 'ios';
 	} else if (card.needsBridge && (noConnection || (options.bridgesKnown && bridge === null))) {
 		blockedBy = 'no-bridge';
+	} else if (card.collector && noConnection) {
+		blockedBy = 'no-collector';
 	}
+	// A collector's connection is connected when its collector said so, and
+	// its `link` stays `unknown`: a bridge's link is not what it has.
+	const collector = card.collector ? collectorStatusOf(connection) : null;
 	return {
 		card,
 		connection,
@@ -262,9 +344,10 @@ function cardState(
 		href: card.route === null || noConnection ? null : linkTo(card.route, connection, siblings),
 		bridgeId: bridge?.bridge_id ?? null,
 		link,
-		connected: isConnected(link),
+		connected: collector === null ? isConnected(link) : collector.state === 'connected',
 		linked: link.linked,
-		blockedBy
+		blockedBy,
+		collector
 	};
 }
 

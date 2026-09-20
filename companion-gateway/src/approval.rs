@@ -667,6 +667,16 @@ pub enum Refusal {
     /// "not yet". A different sentence for the user from a revocation, so a
     /// different code.
     ConsentPending { contact: String, network: Network },
+    /// The connection the reply would leave by last said it cannot send
+    /// (#275): the collector holding it published `reconnect_required`,
+    /// `pending_operator` or `unreachable`, and an approval published now
+    /// would sit on the bus for a sender that will not take it. The state
+    /// and the operator's own hint travel in the detail.
+    ConnectionNotConnected {
+        connection: String,
+        state: String,
+        hint: Option<String>,
+    },
     /// This suggestion has already been approved by this person. The answer
     /// carries the first approval, so a client that lost the first response
     /// learns where the reply went rather than being told to try again.
@@ -698,6 +708,7 @@ impl Refusal {
             Refusal::NeverConsented { .. } => "suggestion_was_never_consented",
             Refusal::ConsentRevoked { .. } => "consent_revoked",
             Refusal::ConsentPending { .. } => "consent_pending",
+            Refusal::ConnectionNotConnected { .. } => "connection_not_connected",
             Refusal::AlreadyApproved(_) => "already_approved",
             Refusal::BusUnreachable(_) => "bus_unreachable",
             Refusal::StoreUnavailable(_) => "store_unavailable",
@@ -732,7 +743,9 @@ impl Refusal {
             Refusal::SuggestionUnreadable(_) => StatusCode::CONFLICT,
             Refusal::Expired { .. } => StatusCode::CONFLICT,
             Refusal::NeverConsented { .. } => StatusCode::CONFLICT,
-            Refusal::ConsentRevoked { .. } | Refusal::ConsentPending { .. } => StatusCode::CONFLICT,
+            Refusal::ConsentRevoked { .. }
+            | Refusal::ConsentPending { .. }
+            | Refusal::ConnectionNotConnected { .. } => StatusCode::CONFLICT,
             Refusal::AlreadyApproved(_) => StatusCode::CONFLICT,
             Refusal::BusUnreachable(_) => StatusCode::BAD_GATEWAY,
             Refusal::StoreUnavailable(_) | Refusal::Unrecorded(_) => {
@@ -798,6 +811,17 @@ impl Refusal {
                 "consent for {contact} on {} is pending: nothing may be sent to a contact the \
                  user has not granted. Decide about this contact first",
                 network.as_str()
+            ),
+            Refusal::ConnectionNotConnected {
+                connection,
+                state,
+                hint,
+            } => format!(
+                "the connection {connection} is {state}, not connected: the reply would sit on \
+                 the bus for a sender that cannot take it, so nothing was published. {}",
+                hint.as_deref().unwrap_or(
+                    "The collector holding the connection says what to do next in its log"
+                )
             ),
             Refusal::AlreadyApproved(approval) => format!(
                 "this suggestion was already approved by {} at {}, and published on the bus as \
@@ -896,7 +920,10 @@ impl Approvals {
     /// lookup an approval makes, which is anchored on the suggestion it
     /// already found. There is no suggestion to anchor on here: the answer is
     /// what will create one.
-    pub async fn trigger_envelope(&self, trigger_event_id: &str) -> Result<TriggerEnvelope, Refusal> {
+    pub async fn trigger_envelope(
+        &self,
+        trigger_event_id: &str,
+    ) -> Result<TriggerEnvelope, Refusal> {
         let jetstream = self.jetstream().await.map_err(|error| {
             warn!(%error, "the bus did not answer a trigger lookup");
             Refusal::BusUnreachable(format!("{error:#}"))
@@ -1179,6 +1206,11 @@ impl Approvals {
         // is refused, because refusing a send is recoverable and sending is
         // not ([`Self::consent_now`], shared with the answer path since #206).
         self.consent_now(&trigger.contact, &trigger.connection, trigger.network)?;
+        // And the connection itself (#275): a collector that said its
+        // connection cannot send is believed, before anything is published.
+        // A connection that never said anything — a bridge's — is not
+        // refused here; the bridge's reach is #216's `.posted` report.
+        self.connection_can_send(&trigger.connection)?;
 
         let content = request
             .edited
@@ -1277,12 +1309,7 @@ impl Approvals {
     /// and the extensions duplicated as headers — the same shape the
     /// Sensor and the SDK publish with, so a consumer filtering on headers
     /// sees this event like any other.
-    async fn publish(
-        &self,
-        event_id: &str,
-        envelope: &Value,
-        approval: &Approval,
-    ) -> Result<u64> {
+    async fn publish(&self, event_id: &str, envelope: &Value, approval: &Approval) -> Result<u64> {
         let mut extensions = vec![
             ("network", approval.suggestion.network.as_str()),
             ("connection", approval.suggestion.connection.as_str()),
@@ -1414,6 +1441,20 @@ impl Approvals {
             network,
             room_id,
         })
+    }
+
+    /// Whether the connection last said it was `connected` — or never said
+    /// anything, which is not a refusal (#275).
+    fn connection_can_send(&self, connection: &str) -> Result<(), Refusal> {
+        match self.store.connection_status(connection) {
+            Ok(Some(current)) if !current.is_connected() => Err(Refusal::ConnectionNotConnected {
+                connection: connection.to_owned(),
+                state: current.state,
+                hint: current.hint,
+            }),
+            Ok(_) => Ok(()),
+            Err(error) => Err(Refusal::StoreUnavailable(format!("{error:#}"))),
+        }
     }
 
     /// Reads one subject from `start` forward, for at most the window, and
@@ -1830,7 +1871,10 @@ mod tests {
             "matrix",
             "the native connection every registry has"
         );
-        for (network, reason_names) in [(Network::Whatsapp, "2 connections"), (Network::Telegram, "no connection")] {
+        for (network, reason_names) in [
+            (Network::Whatsapp, "2 connections"),
+            (Network::Telegram, "no connection"),
+        ] {
             match connection_of(&registry, Some(""), network) {
                 Err(Refusal::SuggestionUnreadable(reason)) => {
                     assert!(reason.contains(reason_names), "{reason}");

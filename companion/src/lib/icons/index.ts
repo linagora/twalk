@@ -33,6 +33,7 @@ import FileDown from '@lucide/svelte/icons/file-down';
 import Gamepad2 from '@lucide/svelte/icons/gamepad-2';
 import Globe from '@lucide/svelte/icons/globe';
 import Hash from '@lucide/svelte/icons/hash';
+import CalendarDays from '@lucide/svelte/icons/calendar-days';
 import Mail from '@lucide/svelte/icons/mail';
 import Inbox from '@lucide/svelte/icons/inbox';
 import Info from '@lucide/svelte/icons/info';
@@ -119,8 +120,10 @@ export const icons = {
 	matrix: Hash,
 	telegram: Send,
 	discord: Gamepad2,
-	// A mailbox is a network (ADR 0033); its card lands with the collector.
+	// A mailbox is a network (ADR 0033), a calendar a kind of connection:
+	// the two the collector holds (#274–#280), a card each since #275.
 	email: Mail,
+	calendar: CalendarDays,
 	account: AtSign,
 
 	// The conversation chooser of #143, one per kind of conversation the

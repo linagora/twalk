@@ -126,6 +126,9 @@ const TABLE: &[(&str, Remedy)] = &[
     ("suggestion_was_never_consented", Remedy::None),
     ("already_approved", Remedy::Reload),
     ("trigger_has_no_room", Remedy::None),
+    // The connection the reply would leave by cannot send right now (#275):
+    // the operator's to fix on the server, nothing for the owner to do here.
+    ("connection_not_connected", Remedy::None),
     ("suggestion_unreadable", Remedy::None),
     // The things behind the Gateway.
     ("bus_unreachable", Remedy::Retry),
@@ -395,6 +398,7 @@ mod tests {
             ("suggestion_was_never_consented", Remedy::None),
             ("already_approved", Remedy::Reload),
             ("trigger_has_no_room", Remedy::None),
+            ("connection_not_connected", Remedy::None),
             ("suggestion_unreadable", Remedy::None),
             ("bus_unreachable", Remedy::Retry),
             ("store_unavailable", Remedy::Retry),

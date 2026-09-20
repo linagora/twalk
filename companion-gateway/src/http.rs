@@ -146,6 +146,10 @@ pub struct Gateway {
     /// Always present: with no bridge and no declaration it is empty, which
     /// is a fact and not a refusal.
     connections: Arc<crate::connections::Registry>,
+    /// What each connection last said about itself (#275), read off the bus
+    /// into the store: `None` on a Gateway with no store, where nothing is
+    /// recorded and no connection has a status.
+    connection_statuses: Option<Arc<crate::store::Store>>,
     /// Hermes's answers ([`crate::hermes_answer`], ticket #206). `None` when
     /// no seam is configured, which is every deployment that has not opted
     /// into ADR 0032's integration — and then the route says which variable
@@ -177,6 +181,7 @@ impl Gateway {
             settings: None,
             portals: None,
             connections: Arc::new(crate::connections::Registry::default()),
+            connection_statuses: None,
             answers: None,
             now_unix_seconds,
         }
@@ -332,6 +337,16 @@ impl Gateway {
     pub fn with_portals(mut self, portals: Option<Arc<Portals>>) -> Self {
         self.portals = portals;
         self
+    }
+
+    /// The store the connection statuses are read from (#275).
+    pub fn with_connection_statuses(mut self, store: Option<Arc<crate::store::Store>>) -> Self {
+        self.connection_statuses = store;
+        self
+    }
+
+    pub fn connection_statuses(&self) -> Option<Arc<crate::store::Store>> {
+        self.connection_statuses.clone()
     }
 
     pub fn with_connections(mut self, connections: Arc<crate::connections::Registry>) -> Self {

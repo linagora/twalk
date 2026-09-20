@@ -73,7 +73,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 8] = [
+pub const MIGRATIONS: [&str; 9] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -609,6 +609,40 @@ pub const MIGRATIONS: [&str; 8] = [
                    PARTITION BY c.bridge_id ORDER BY c.sequence DESC
                ) AS recency
         FROM bridge_status_change c
+    )
+    WHERE recency = 1;
+    "#,
+    // v9 — what a connection said about itself (issue #275): every
+    // `connection.status.changed.v1` the collector published, consumed off
+    // the bus, and the current state as a view over them. The Gateway is a
+    // reader here, not the producer: a collector holds the connection and
+    // says its state; the Gateway keeps it so an approval towards a
+    // connection that cannot send is refused before it is published, and
+    // the Companion shows the state and its hint.
+    r#"
+    CREATE TABLE connection_status_change (
+        sequence     INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- The contract's deterministic id: recording a redelivered
+        -- transition twice is idempotent.
+        event_id     TEXT NOT NULL UNIQUE,
+        connection   TEXT NOT NULL,
+        kind         TEXT NOT NULL CHECK (kind IN ('whatsapp', 'telegram', 'signal', 'discord', 'sms', 'matrix', 'email', 'calendar')),
+        from_state   TEXT NOT NULL CHECK (from_state IN ('unknown', 'connected', 'unreachable', 'reconnect_required', 'pending_operator')),
+        to_state     TEXT NOT NULL CHECK (to_state IN ('connected', 'unreachable', 'reconnect_required', 'pending_operator')),
+        occurred_at  TEXT NOT NULL,
+        service      TEXT CHECK (service IS NULL OR service IN ('sso', 'jmap', 'caldav')),
+        hint         TEXT,
+        recorded_at  TEXT NOT NULL
+    );
+    CREATE INDEX connection_status_change_connection
+        ON connection_status_change (connection, sequence);
+    CREATE VIEW connection_status_current AS
+    SELECT connection, kind, to_state AS state, occurred_at, service, hint, sequence
+    FROM (
+        SELECT c.*, ROW_NUMBER() OVER (
+                   PARTITION BY c.connection ORDER BY c.sequence DESC
+               ) AS recency
+        FROM connection_status_change c
     )
     WHERE recency = 1;
     "#,
@@ -1456,6 +1490,120 @@ impl Store {
             })?)),
             None => Ok(None),
         }
+    }
+
+    // -- Connection status (issue #275) ----------------------------------
+
+    /// Records one `connection.status.changed.v1` transition, idempotently:
+    /// the event's id is unique, so a redelivery records nothing twice.
+    /// Returns whether the row was new.
+    pub fn record_connection_status_change(
+        &self,
+        change: &crate::connection_status::Change,
+        recorded_at: &str,
+    ) -> Result<bool> {
+        let connection = self.connection();
+        let inserted = connection
+            .execute(
+                "INSERT OR IGNORE INTO connection_status_change
+                    (event_id, connection, kind, from_state, to_state, occurred_at, service, hint, recorded_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    change.event_id,
+                    change.connection,
+                    change.kind,
+                    change.from_state,
+                    change.to_state,
+                    change.occurred_at,
+                    change.service,
+                    change.hint,
+                    recorded_at,
+                ],
+            )
+            .context("failed to record a connection status change")?;
+        Ok(inserted > 0)
+    }
+
+    /// The state a connection last said it was in, or `None` when it never
+    /// said — a bridge's connection, or a collector that has not run.
+    pub fn connection_status(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<crate::connection_status::Current>> {
+        let connection = self.connection();
+        connection
+            .query_row(
+                "SELECT connection, kind, state, occurred_at, service, hint
+                 FROM connection_status_current WHERE connection = ?",
+                [connection_id],
+                |row| {
+                    Ok(crate::connection_status::Current {
+                        connection: row.get(0)?,
+                        kind: row.get(1)?,
+                        state: row.get(2)?,
+                        occurred_at: row.get(3)?,
+                        service: row.get(4)?,
+                        hint: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to read the connection's current status")
+    }
+
+    /// Every connection's current state, for the registry document.
+    pub fn connection_statuses(&self) -> Result<Vec<crate::connection_status::Current>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT connection, kind, state, occurred_at, service, hint
+                 FROM connection_status_current ORDER BY connection",
+            )
+            .context("failed to prepare the connection statuses read")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(crate::connection_status::Current {
+                    connection: row.get(0)?,
+                    kind: row.get(1)?,
+                    state: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                    service: row.get(4)?,
+                    hint: row.get(5)?,
+                })
+            })
+            .context("failed to read the connection statuses")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read a connection status row")
+    }
+
+    /// The most recent transitions, newest first, for the dashboard's feed.
+    pub fn connection_status_changes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::connection_status::Change>> {
+        let connection = self.connection();
+        let mut statement = connection
+            .prepare(
+                "SELECT event_id, connection, kind, from_state, to_state, occurred_at, service, hint
+                 FROM connection_status_change ORDER BY sequence DESC LIMIT ?",
+            )
+            .context("failed to prepare the connection status changes read")?;
+        let rows = statement
+            .query_map([limit as i64], |row| {
+                Ok(crate::connection_status::Change {
+                    event_id: row.get(0)?,
+                    connection: row.get(1)?,
+                    kind: row.get(2)?,
+                    from_state: row.get(3)?,
+                    to_state: row.get(4)?,
+                    occurred_at: row.get(5)?,
+                    service: row.get(6)?,
+                    hint: row.get(7)?,
+                })
+            })
+            .context("failed to read the connection status changes")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("failed to read a connection status change row")
     }
 
     /// Records the registry of connections as configured (#269): inserted

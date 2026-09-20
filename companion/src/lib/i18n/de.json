@@ -862,5 +862,18 @@
 	"conversations.bridgeAskedNothing": "{bridge} hat geantwortet, und das Konto, als das dein Twalk-Server gefragt hat ({account}), ist in überhaupt keiner Unterhaltung. Entweder hat dieses Netzwerk noch keine gebaut, oder dein Server fragt als das falsche Konto — das Zweite ist ein Konfigurationsproblem, und die Logs nennen die Einstellung.",
 	"api.trouble.unreachable": "Dein Twalk-Server war nicht erreichbar: es hat überhaupt nichts geantwortet. Prüfe, dass er läuft, und prüfe deine Verbindung.",
 	"api.trouble.sessionRefused": "Dein Twalk-Server hat geantwortet und diese Sitzung nicht akzeptiert. Melde dich erneut an, um weiterzumachen — sonst ist nichts falsch.",
-	"api.trouble.refused": "Dein Twalk-Server hat geantwortet, konnte dies aber nicht tun. Versuche es erneut, und öffne die Diagnose, wenn es anhält."
+	"api.trouble.refused": "Dein Twalk-Server hat geantwortet, konnte dies aber nicht tun. Versuche es erneut, und öffne die Diagnose, wenn es anhält.",
+	"network.email.name": "Postfach",
+	"network.email.subtitle": "Ihr eigenes Postfach, vom Collector mit der erteilten Freigabe gelesen",
+	"network.calendar.name": "Kalender",
+	"network.calendar.subtitle": "Ihre eigenen Kalender, vom Collector mit derselben Freigabe gelesen",
+	"networks.card.noCollector": "Auf Ihrem Twalk-Server ist kein Collector für dieses Konto konfiguriert.",
+	"networks.collector.unreachable": "Nicht erreichbar — neuer Versuch",
+	"networks.collector.reconnectRequired": "Erneut auf dem Server anmelden",
+	"networks.collector.pendingOperator": "Betreiber muss handeln",
+	"dashboard.feed.connection.connected": "Die Verbindung {connection} ist wieder verbunden",
+	"dashboard.feed.connection.unreachable": "Die Verbindung {connection} erreicht ihren Dienst nicht; der Collector versucht es erneut",
+	"dashboard.feed.connection.reconnect_required": "Die Verbindung {connection} wartet darauf, dass sich der Betreiber auf dem Server erneut anmeldet",
+	"dashboard.feed.connection.pending_operator": "Die Verbindung {connection} wartet darauf, dass der Betreiber ihren Client ändert",
+	"approvals.refusal.connection_not_connected": "Das Konto, von dem diese Antwort ausgehen würde, ist gerade nicht verbunden; es wurde nichts gesendet. Der Betreiber muss es auf dem Server neu verbinden; die Antwort bleibt hier."
 }

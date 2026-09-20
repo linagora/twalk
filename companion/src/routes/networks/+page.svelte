@@ -68,7 +68,8 @@
 		looksLikeIos,
 		manageRouteFor,
 		type BridgeRow,
-		type CardState
+		type CardState,
+		type CollectorState
 	} from '$lib/networks/catalogue';
 	import { connectionOf } from '$lib/networks/connection';
 
@@ -159,6 +160,8 @@
 				return $t('networks.card.iosBlocked');
 			case 'no-bridge':
 				return $t('networks.card.notConfigured');
+			case 'no-collector':
+				return $t('networks.card.noCollector');
 			case 'coming-soon':
 				return $t('network.comingSoon');
 			default:
@@ -177,6 +180,9 @@
 	 * reports — so it is the one that looks like a warning.
 	 */
 	function badgeFor(state: CardState): { key: MessageKey; tone: string; icon: 'check' | 'warning' | 'reload' } | null {
+		if (state.collector !== null) {
+			return collectorBadgeFor(state.collector.state);
+		}
 		switch (state.link.state) {
 			case 'connected':
 				return { key: 'networks.connected', tone: 'badge--ok', icon: 'check' };
@@ -190,6 +196,31 @@
 				// `disconnected` and `unknown` wear nothing. There is no link to
 				// describe, or no way to know — and an "unknown" badge on every
 				// card while a bridge restarts would be noise.
+				return null;
+		}
+	}
+
+	/**
+	 * A collector connection's badge (#275): the contract's four states as
+	 * four sentences, never one. `connected` is the tick; `unreachable` is a
+	 * service not answering, which the collector retries by itself;
+	 * `reconnect_required` and `pending_operator` are the operator's — the
+	 * grant to give again, the client to change — and look like warnings, with
+	 * the collector's own hint under the card.
+	 */
+	function collectorBadgeFor(
+		state: CollectorState
+	): { key: MessageKey; tone: string; icon: 'check' | 'warning' | 'reload' } | null {
+		switch (state) {
+			case 'connected':
+				return { key: 'networks.connected', tone: 'badge--ok', icon: 'check' };
+			case 'unreachable':
+				return { key: 'networks.collector.unreachable', tone: 'badge--neutral', icon: 'reload' };
+			case 'reconnect_required':
+				return { key: 'networks.collector.reconnectRequired', tone: 'badge--attention', icon: 'warning' };
+			case 'pending_operator':
+				return { key: 'networks.collector.pendingOperator', tone: 'badge--attention', icon: 'warning' };
+			default:
 				return null;
 		}
 	}
@@ -262,7 +293,7 @@
 					data-connection-id={state.connection?.id ?? ''}
 					data-blocked={state.blockedBy ?? ''}
 					data-connected={state.connected ? 'yes' : 'no'}
-					data-connection={state.link.state}
+					data-connection={state.collector === null ? state.link.state : state.collector.state}
 					data-linked={state.linked ? 'yes' : 'no'}
 					title={blocked ?? undefined}
 				>
@@ -290,6 +321,12 @@
 						{/if}
 					</p>
 					<p class="small muted">{$t(state.card.subtitleKey)}</p>
+					{#if state.collector !== null && state.collector.hint !== null && state.collector.state !== 'connected'}
+						<!-- The collector's own next step for the operator, as it
+						     said it on the bus (#275): the words the log has, on the
+						     card, so nobody reads a log to learn them. -->
+						<p class="small muted" data-testid={`hint-${state.key}`}>{state.collector.hint}</p>
+					{/if}
 					{#if state.linked && state.link.account?.name}
 						<!-- Which account, on the card itself: the user's own question
 						     is "is *my* number linked", and the answer is a fact the

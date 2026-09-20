@@ -181,7 +181,7 @@
 		},
 
 		"gateway": {
-			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, approvals, suggestions, settings, the portal register, whether a runtime is present, and the OpenAPI description against the routes it serves.",
+			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, the connections' registry and what each said about itself off the bus (#275), approvals — refused towards a connection that cannot send —, suggestions, settings, the portal register, whether a runtime is present, and the OpenAPI description against the routes it serves.",
 			"component": "companion-gateway",
 			"workdir": "companion-gateway",
 			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test hermes_answers --test openapi --test pending --test portals --test runtime --test service --test settings --test signin --test suggestions",

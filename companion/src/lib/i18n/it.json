@@ -862,5 +862,18 @@
 	"conversations.bridgeAskedNothing": "{bridge} ha risposto, e l'account con cui il tuo server Twalk ha chiesto ({account}) non è in alcuna conversazione. O questa rete non ne ha ancora costruita una, oppure il tuo server sta chiedendo con l'account sbagliato — il secondo caso è un problema di configurazione e i registri nominano l'impostazione.",
 	"api.trouble.unreachable": "Il tuo server Twalk non è raggiungibile: nulla ha risposto. Controlla che sia in esecuzione, e controlla la tua connessione.",
 	"api.trouble.sessionRefused": "Il tuo server Twalk ha risposto, e non ha accettato questa sessione. Accedi di nuovo per continuare — nient'altro non va.",
-	"api.trouble.refused": "Il tuo server Twalk ha risposto, ma non ha potuto farlo. Riprova, e apri la diagnostica se persiste."
+	"api.trouble.refused": "Il tuo server Twalk ha risposto, ma non ha potuto farlo. Riprova, e apri la diagnostica se persiste.",
+	"network.email.name": "Casella di posta",
+	"network.email.subtitle": "La tua casella, letta dal collector con l'accesso che hai concesso",
+	"network.calendar.name": "Calendario",
+	"network.calendar.subtitle": "I tuoi calendari, letti dal collector con lo stesso accesso",
+	"networks.card.noCollector": "Nessun collector per questo account è configurato sul tuo server Twalk.",
+	"networks.collector.unreachable": "Irraggiungibile — nuovo tentativo",
+	"networks.collector.reconnectRequired": "Accedi di nuovo sul server",
+	"networks.collector.pendingOperator": "Serve l'operatore",
+	"dashboard.feed.connection.connected": "La connessione {connection} è di nuovo connessa",
+	"dashboard.feed.connection.unreachable": "La connessione {connection} non raggiunge il suo servizio; il collector riprova",
+	"dashboard.feed.connection.reconnect_required": "La connessione {connection} attende che l'operatore acceda di nuovo sul server",
+	"dashboard.feed.connection.pending_operator": "La connessione {connection} attende che l'operatore modifichi il suo client",
+	"approvals.refusal.connection_not_connected": "L'account da cui partirebbe questa risposta non è connesso al momento, quindi non è stato inviato nulla. L'operatore deve riconnetterlo sul server; la risposta resta qui."
 }

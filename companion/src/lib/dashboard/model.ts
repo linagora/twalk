@@ -55,6 +55,7 @@ export type ConfiguredBridge = components['schemas']['ConfiguredBridge'];
 export type ConsentEntry = components['schemas']['ConsentStateEntry'];
 export type Device = components['schemas']['Device'];
 export type PortalMove = components['schemas']['PortalMove'];
+export type ConnectionTransition = components['schemas']['ConnectionTransition'];
 
 /**
  * What a bridge row says — the state of the **link** the bridge holds, in the
@@ -419,8 +420,25 @@ export function activityFeed(options: {
 	devices: readonly Device[];
 	/** The register's moves (#255); absent when the deployment keeps none. */
 	moves?: readonly PortalMove[];
+	/** The collector connections' state changes (#275); absent when none was recorded. */
+	transitions?: readonly ConnectionTransition[];
 }): ActivityEntry[] {
 	const entries: ActivityEntry[] = [];
+
+	// A collector connection changed state (#275): the owner's mailbox or
+	// calendar reachable again, or the grant to give again. The connection's
+	// id and the state — the hint is the card's, on the networks screen; the
+	// feed says that something moved.
+	for (const transition of options.transitions ?? []) {
+		entries.push({
+			id: `connection:${transition.connection}:${transition.occurred_at}:${transition.to_state}`,
+			icon: transition.kind === 'calendar' ? 'calendar' : 'email',
+			tone: transition.to_state === 'connected' ? 'ok' : 'warn',
+			at: transition.occurred_at,
+			messageKey: `dashboard.feed.connection.${transition.to_state}` as MessageKey,
+			values: { connection: transition.connection }
+		});
+	}
 
 	// A conversation's room was replaced while the user observed it (ADR
 	// 0029): the register either followed the decision into the new room or

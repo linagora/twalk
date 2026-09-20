@@ -192,6 +192,23 @@ async fn main() -> Result<()> {
                  network identifier"
             );
             tokio::spawn(project_until_shutdown(projection.clone()));
+            // What each connection says about itself (#275): a collector's
+            // `connection.status.changed` read off the bus into the store,
+            // so an approval towards a connection that cannot send is
+            // refused before it is published, and the Companion shows the
+            // state.
+            let connection_statuses = Arc::new(
+                twalk_companion_gateway::connection_status::ConnectionStatuses::new(
+                    store.clone(),
+                    consent.nats_url.clone(),
+                    &config.inbound_consumer,
+                ),
+            );
+            tokio::spawn(
+                twalk_companion_gateway::connection_status::consume_until_shutdown(
+                    connection_statuses,
+                ),
+            );
             // Reading suggestions (ticket #97): the read side of the same
             // act, on the same bus and the same window. Its own half, and
             // its own bus connection, because a screen that cannot draw and
@@ -539,6 +556,7 @@ async fn main() -> Result<()> {
             .with_settings(settings)
             .with_portals(portals.clone())
             .with_connections(connections.clone())
+            .with_connection_statuses(store.clone())
             .with_answers(answers),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after

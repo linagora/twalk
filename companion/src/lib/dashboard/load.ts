@@ -76,6 +76,8 @@ export type Snapshot = {
 	 * `null` when the deployment keeps no journal.
 	 */
 	moves: components['schemas']['PortalMove'][] | null;
+	/** The collector connections' recent state changes (#275), off `GET /api/connections`. */
+	transitions: components['schemas']['ConnectionTransition'][] | null;
 	/** `null` when the deployment does not project the inbound stream. */
 	pending: PendingSummary | null;
 	/**
@@ -102,6 +104,7 @@ export const EMPTY: Snapshot = {
 	consent: null,
 	devices: null,
 	moves: null,
+	transitions: null,
 	pending: null,
 	waiting: null,
 	runtime: { state: 'unknown', hosting: 0 },
@@ -127,6 +130,7 @@ export async function loadDashboard(): Promise<Snapshot> {
 	return {
 		session: session,
 		connections: connections?.connections ?? null,
+		transitions: connections?.transitions ?? null,
 		bridges: bridges?.bridges ?? null,
 		consent: consent?.entries ?? null,
 		devices: devices?.devices ?? null,

@@ -114,7 +114,15 @@ describe('the network grid', () => {
 		const active = NETWORK_CARDS.filter((entry) => entry.milestone === 'v0.1').map(
 			(entry) => entry.network
 		);
-		expect(active).toEqual(['whatsapp', 'signal', 'sms', 'matrix', 'telegram']);
+		expect(active).toEqual([
+			'whatsapp',
+			'signal',
+			'sms',
+			'matrix',
+			'telegram',
+			'email',
+			'calendar'
+		]);
 
 		const grid = gridFor(deployment(configured));
 		expect(grid.map((state) => state.card.network)).toContain('telegram');
@@ -385,6 +393,18 @@ describe('every route the catalogue can produce is served', () => {
  * contract knows, and a network the contract adds is not silently a network
  * this screen cannot name.
  */
+const KIND_DEFINITION = join(
+	__dirname,
+	'..',
+	'..',
+	'..',
+	'..',
+	'contracts',
+	'cloudevents',
+	'v1',
+	'definitions',
+	'kind.schema.json'
+);
 const NETWORK_DEFINITION = join(
 	dirname(fileURLToPath(import.meta.url)),
 	'..',
@@ -402,30 +422,86 @@ describe('the contract is the authority for the networks', () => {
 	const authority = (JSON.parse(readFileSync(NETWORK_DEFINITION, 'utf8')) as { enum: string[] })
 		.enum;
 
-	it('names on every card a network the contract knows', () => {
+	const kinds = (JSON.parse(readFileSync(KIND_DEFINITION, 'utf8')) as { enum: string[] }).enum;
+
+	it('names on every card a kind the contract knows', () => {
+		// A card is a connection (#272) and a connection has a kind (ADR
+		// 0033): every network, plus `calendar`, which is not one. The card's
+		// `network` member is its kind, and the kind definition is the
+		// authority it is held to.
 		for (const card of NETWORK_CARDS) {
-			expect(authority, `${card.network} is not a network the contract knows`).toContain(
-				card.network
-			);
+			expect(kinds, `${card.network} is not a kind the contract knows`).toContain(card.network);
 		}
 	});
 
-	it('has a card for every messaging network, and knows which it has not drawn yet', () => {
-		// `email` is a network (ADR 0033) with no card yet: its screen is a
-		// connection's, not a bridge's, and lands with the mail collector
-		// (#272, #276). Naming it here is what turns "forgot" into "not yet".
-		const notDrawnYet = ['email'];
+	it('has a card for every network and every kind, and knows which it has not drawn yet', () => {
+		// Nothing is undrawn since #275: `email` and `calendar` got their
+		// cards with the collector's state. Naming a kind here is what would
+		// turn "forgot" into "not yet" the next time one is added.
+		const notDrawnYet: string[] = [];
 		const drawn = new Set(NETWORK_CARDS.map((card) => card.network));
-		for (const network of authority) {
-			if (notDrawnYet.includes(network)) {
-				expect(drawn.has(network), `${network} has a card now: drop it from notDrawnYet`).toBe(
-					false
-				);
+		for (const kind of [...authority, ...kinds]) {
+			if (notDrawnYet.includes(kind)) {
+				expect(drawn.has(kind), `${kind} has a card now: drop it from notDrawnYet`).toBe(false);
 			} else {
-				expect(drawn.has(network), `the contract names ${network} and this screen has no card`).toBe(
+				expect(drawn.has(kind), `the contract names ${kind} and this screen has no card`).toBe(
 					true
 				);
 			}
 		}
+	});
+});
+
+describe("a collector connection's card (#275)", () => {
+	const mailbox: Connection = {
+		id: 'mail-linagora',
+		kind: 'email',
+		label: 'michel@linagora.com',
+		status: {
+			state: 'reconnect_required',
+			occurred_at: '2026-09-20T09:00:00Z',
+			service: 'sso',
+			hint: 'Run `twalk-collector authorize --renew` on the host.'
+		}
+	};
+	const agenda: Connection = {
+		id: 'agenda-linagora',
+		kind: 'calendar',
+		label: 'michel@linagora.com',
+		status: { state: 'connected', occurred_at: '2026-09-20T09:00:00Z', service: null, hint: null }
+	};
+
+	it('shows the state the collector said, as its own vocabulary, never a bridge link', () => {
+		const options = deployment(configured, {
+			connections: [...registryFor(configured), mailbox, agenda]
+		});
+		const mail = card('email', options);
+		expect(mail.collector).toEqual({
+			state: 'reconnect_required',
+			hint: 'Run `twalk-collector authorize --renew` on the host.',
+			occurredAt: '2026-09-20T09:00:00Z'
+		});
+		expect(mail.connected).toBe(false);
+		expect(mail.blockedBy).toBeNull();
+		expect(mail.link.state).toBe('unknown');
+		expect(mail.href).toBeNull();
+		const calendar = card('calendar', options);
+		expect(calendar.collector?.state).toBe('connected');
+		expect(calendar.connected).toBe(true);
+	});
+
+	it('is unknown, not disconnected, when the collector has not spoken, and blocked when the kind has no connection', () => {
+		const silent: Connection = { id: 'mail-linagora', kind: 'email', label: 'm' };
+		const spoken = card('email', deployment(configured, { connections: [...registryFor(configured), silent] }));
+		expect(spoken.collector?.state).toBe('unknown');
+		expect(spoken.connected).toBe(false);
+		expect(spoken.blockedBy).toBeNull();
+		const none = card('calendar', deployment(configured));
+		expect(none.blockedBy).toBe('no-collector');
+		expect(none.connection).toBeNull();
+		// A registry nobody could read blocks nothing: the honest card is a
+		// tappable one that says nothing.
+		const unread = card('calendar', deployment(configured, { connections: [], connectionsKnown: false }));
+		expect(unread.blockedBy).toBeNull();
 	});
 });

@@ -318,10 +318,7 @@ fn unfence(text: &str) -> &str {
         return text;
     };
     let rest = rest.split_once('\n').map(|(_tag, body)| body).unwrap_or("");
-    rest.trim_end()
-        .strip_suffix("```")
-        .unwrap_or(rest)
-        .trim()
+    rest.trim_end().strip_suffix("```").unwrap_or(rest).trim()
 }
 
 /// Whether a string is a language tag in the shape ADR 0016 needs: a
@@ -366,7 +363,9 @@ pub enum AnswerRefusal {
     /// The push's own timestamp is outside [`CLOCK_SKEW_SECONDS`]. Its own
     /// answer, because a well-formed and correctly signed push that is hours
     /// old is a replay and not a mistake.
-    Stale { timestamp: String },
+    Stale {
+        timestamp: String,
+    },
     /// The answer is not the JSON object the route asks Hermes to write.
     Unreadable(String),
     /// No `TWALK-REF:` token anywhere in the answer, so there is no telling
@@ -536,7 +535,8 @@ impl Answers {
     /// Whether this signature is one this Gateway's secret produces over these
     /// bytes. Constant-time, through the `hmac` crate's own verification.
     pub fn authenticates(&self, presented: Option<&str>, body: &[u8]) -> bool {
-        let Some(presented) = presented.and_then(|value| value.trim().strip_prefix(SIGNATURE_PREFIX))
+        let Some(presented) =
+            presented.and_then(|value| value.trim().strip_prefix(SIGNATURE_PREFIX))
         else {
             return false;
         };
@@ -765,8 +765,10 @@ fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let mut instant =
-        days_from_civil(year, month as u32, day as u32) * 86_400 + hour * 3600 + minute * 60 + second;
+    let mut instant = days_from_civil(year, month as u32, day as u32) * 86_400
+        + hour * 3600
+        + minute * 60
+        + second;
     // The offset, when there is one. `Z` and a missing offset are both UTC.
     let tail = &value[19..];
     let offset_at = tail.find(['+', '-']);
@@ -787,7 +789,8 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let year_of_era = year - era * 400;
     let month = month as i64;
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day as i64 - 1;
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day as i64 - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
 }
@@ -828,7 +831,11 @@ mod tests {
             format!("the reference is TWALK-REF:assistant:{TRIGGER}:1."),
             format!("  TWALK-REF:assistant:{TRIGGER}:1  "),
         ] {
-            assert_eq!(Reference::find(&haystack), Some(expected.clone()), "{haystack}");
+            assert_eq!(
+                Reference::find(&haystack),
+                Some(expected.clone()),
+                "{haystack}"
+            );
         }
     }
 
