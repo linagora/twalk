@@ -48,7 +48,7 @@
 // promise. The screen says so, once, rather than drawing it.
 
 import type { components } from '$lib/api/schema';
-import type { MessageKey } from '$lib/i18n';
+import { LOCALE_NAMES, type MessageKey } from '$lib/i18n';
 
 export type ModelConfiguration = components['schemas']['ModelConfiguration'];
 export type ModelRequest = components['schemas']['ModelConfigurationRequest'];
@@ -56,14 +56,8 @@ export type LanguagePreference = components['schemas']['LanguagePreference'];
 export type Language = NonNullable<LanguagePreference['language']>;
 export type Probe = components['schemas']['ModelProbe'];
 
-/** The five languages, in the Gateway's order, each named in itself. */
-export const LANGUAGE_NAMES: Record<Language, string> = {
-	en: 'English',
-	fr: 'Français',
-	it: 'Italiano',
-	es: 'Español',
-	de: 'Deutsch'
-};
+/** The five languages, each named in itself — the Companion's own list, so the two cannot drift. */
+export const LANGUAGE_NAMES: Record<Language, string> = LOCALE_NAMES;
 
 /** What the form holds while the user edits it. Strings, as inputs are. */
 export interface ModelForm {
