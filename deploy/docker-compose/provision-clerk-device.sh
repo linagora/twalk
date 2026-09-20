@@ -2,7 +2,8 @@
 # Sign the clerk in to the Companion Gateway as a device of the owner named
 # `Buzz`, and write the session where the clerk keeps it alive.
 #
-#   ./provision-clerk-device.sh [session-dir]   default: CLERK_GATEWAY_SESSION_DIR in ./.env
+#   ./provision-clerk-device.sh [--from-owner-device] [session-dir]
+#                                      default: CLERK_GATEWAY_SESSION_DIR in ./.env
 #
 # This is the **operator route** of ADR 0036 (ticket #284). The clerk carries
 # a ✅ the owner makes on Buzz to the Companion Gateway as an approval, and
@@ -36,11 +37,34 @@
 # python on stdin, never on an argv, and the Gateway's tokens go from the
 # response straight into the session file (mode 0600, written beside it and
 # renamed over).
+#
+# `--from-owner-device` takes the Matrix access token from the env file
+# instead — SENSOR_OWNER_DEVICE_ACCESS_TOKEN, the device Twalk already acts
+# as the owner through (ADR 0034, provision-owner-device.sh) — and makes no
+# login at all. The OpenID token the Gateway signs a device in with can be
+# minted with any access token of the owner's account, so this is for a
+# homeserver with no password login (SSO only, where that device was
+# provisioned out of band) and for an operator who is not at a terminal.
+# The default stays the password, because a credential you type is one you
+# did not have to store; this route stores nothing new either — the token
+# was already the deployment's — and it must **never log that device out**:
+# it is the Sensor's, and logging it out would silence every approved reply
+# until provision-owner-device.sh ran again.
 set -euo pipefail
 
 DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${TWALK_ENV_FILE:-$DEPLOY_DIR/.env}"
 DEVICE_NAME="Buzz"
+
+from_owner_device=
+session_dir_arg=
+for arg in "$@"; do
+  case "$arg" in
+  --from-owner-device) from_owner_device=1 ;;
+  --*) echo "unknown option: $arg" >&2; exit 1 ;;
+  *) session_dir_arg="$arg" ;;
+  esac
+done
 
 [ -f "$ENV_FILE" ] || { echo "env file not found: $ENV_FILE" >&2; exit 1; }
 umask 077
@@ -70,7 +94,7 @@ if [ -z "$gateway" ]; then
   gateway="http://127.0.0.1:$gateway_port"
 fi
 
-session_dir="${1:-$(env_value CLERK_GATEWAY_SESSION_DIR)}"
+session_dir="${session_dir_arg:-$(env_value CLERK_GATEWAY_SESSION_DIR)}"
 if [ -z "$session_dir" ]; then
   echo "no session directory: set CLERK_GATEWAY_SESSION_DIR in $ENV_FILE, or name one as" >&2
   echo "the argument. It is a directory rather than a file because the clerk rewrites the" >&2
@@ -254,19 +278,29 @@ def refresh(gateway, path, name):
     print(revoke_others(gateway, device, name))
 
 
-def signin(hs, gateway, owner, localpart, name, path):
-    password = sys.stdin.read().rstrip("\n")
-    status, _h, d = call(hs + "/_matrix/client/v3/login", "POST", {
-        "type": "m.login.password",
-        "identifier": {"type": "m.id.user", "user": localpart},
-        "password": password,
-        "initial_device_display_name": "Twalk clerk provisioning",
-    })
-    del password
-    if status != 200:
-        sys.exit("the homeserver refused the login: %s %s"
-                 % (d.get("errcode", status), d.get("error", "")))
-    matrix = {"Authorization": "Bearer " + d["access_token"]}
+def signin(hs, gateway, owner, localpart, name, path, source):
+    """`source` is `password` (stdin holds the owner's password; a Matrix
+    device is logged in for the OpenID token and out at the end) or
+    `owner-device` (stdin holds an access token of the owner's account that
+    is not this script's to log out: SENSOR_OWNER_DEVICE_ACCESS_TOKEN, the
+    Sensor's)."""
+    secret = sys.stdin.read().rstrip("\n")
+    if source == "password":
+        status, _h, d = call(hs + "/_matrix/client/v3/login", "POST", {
+            "type": "m.login.password",
+            "identifier": {"type": "m.id.user", "user": localpart},
+            "password": secret,
+            "initial_device_display_name": "Twalk clerk provisioning",
+        })
+        if status != 200:
+            sys.exit("the homeserver refused the login: %s %s"
+                     % (d.get("errcode", status), d.get("error", "")))
+        token, logout = d["access_token"], True
+    else:
+        token, logout = secret, False
+    del secret
+    matrix = {"Authorization": "Bearer " + token}
+    del token
     try:
         status, _h, openid = call(
             hs + "/_matrix/client/v3/user/%s/openid/request_token" % owner,
@@ -288,14 +322,18 @@ def signin(hs, gateway, owner, localpart, name, path):
         print(device_id)
         print(revoke_others(gateway, device, name))
     finally:
-        # The Matrix device existed for the OpenID token and for nothing else.
-        call(hs + "/_matrix/client/v3/logout", "POST", {}, matrix)
+        # A device this script logged in existed for the OpenID token and for
+        # nothing else. The owner device (--from-owner-device) is the Sensor's:
+        # logging it out would silence every approved reply, so it is never
+        # touched.
+        if logout:
+            call(hs + "/_matrix/client/v3/logout", "POST", {}, matrix)
 
 
 if sys.argv[1] == "refresh":
     refresh(*sys.argv[2:5])
 else:
-    signin(*sys.argv[2:8])
+    signin(*sys.argv[2:9])
 PY
 
 # An existing session that is still alive is refreshed and kept: the device
@@ -327,19 +365,37 @@ if [ -f "$session" ]; then
   esac
 fi
 
-if [ -n "${TWALK_OWNER_PASSWORD_FILE:-}" ]; then
+# What reaches python on stdin: the owner's password, and a device is logged
+# in and out for the OpenID token; or, with --from-owner-device, the access
+# token of the device Twalk already acts as the owner through, which is
+# never logged out (see the top of this file).
+if [ -n "$from_owner_device" ]; then
+  secret="$(env_value SENSOR_OWNER_DEVICE_ACCESS_TOKEN)"
+  if [ -z "$secret" ]; then
+    echo "--from-owner-device needs SENSOR_OWNER_DEVICE_ACCESS_TOKEN in $ENV_FILE, the device" >&2
+    echo "Twalk acts as the owner through (ADR 0034): run ./provision-owner-device.sh first," >&2
+    echo "or provision that device out of band on a homeserver without password login." >&2
+    exit 1
+  fi
+  source=owner-device
+  echo "signing a device named \"$DEVICE_NAME\" in to $gateway as $owner, with the owner device's token"
+elif [ -n "${TWALK_OWNER_PASSWORD_FILE:-}" ]; then
   [ -r "$TWALK_OWNER_PASSWORD_FILE" ] || { echo "cannot read $TWALK_OWNER_PASSWORD_FILE" >&2; exit 1; }
-  password="$(cat "$TWALK_OWNER_PASSWORD_FILE")"
+  secret="$(cat "$TWALK_OWNER_PASSWORD_FILE")"
+  source=password
 else
   printf 'Matrix password for %s: ' "$owner" >&2
-  read -rs password
+  read -rs secret
   printf '\n' >&2
+  source=password
 fi
-[ -n "$password" ] || { echo "no password given" >&2; exit 1; }
+[ -n "$secret" ] || { echo "no password given" >&2; exit 1; }
 
-echo "signing a device named \"$DEVICE_NAME\" in to $gateway as $owner"
-answer="$(printf '%s' "$password" | python3 "$prog" signin "$hs" "$gateway" "$owner" "$localpart" "$DEVICE_NAME" "$session")" || exit 1
-unset password
+if [ "$source" = password ]; then
+  echo "signing a device named \"$DEVICE_NAME\" in to $gateway as $owner"
+fi
+answer="$(printf '%s' "$secret" | python3 "$prog" signin "$hs" "$gateway" "$owner" "$localpart" "$DEVICE_NAME" "$session" "$source")" || exit 1
+unset secret
 
 device_id="$(printf '%s\n' "$answer" | sed -n 1p)"
 revoked="$(printf '%s\n' "$answer" | sed -n 2p)"
