@@ -237,6 +237,7 @@ pub fn ghost_network_identifier(network: Network, localpart: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// The contract is the one authority for the network values (ADR 0033,
     /// #268): this enum is a copy, and a copy is tested against what it
@@ -257,7 +258,6 @@ mod tests {
             );
         }
     }
-    use serde_json::json;
 
     #[test]
     fn bridge_ids_map_to_contract_networks() {
