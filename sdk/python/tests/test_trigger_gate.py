@@ -28,6 +28,7 @@ from fixtures import fixture, fixture_types, variant_fixture
 from twalk_sdk import (
     MESSAGE_RECEIVED_TYPE,
     OUTBOUND_MESSAGE_SENT_TYPE,
+    InboundMessage,
     OUTBOUND_REACTION_ADDED_TYPE,
     PERSONA_TRIGGER_TYPES,
     is_granted,
@@ -133,6 +134,30 @@ class TriggerGateTest(unittest.TestCase):
         withheld = variant_fixture("calendar.event.created", "withheld-participant")
         self.assertEqual(withheld["data"]["participants_withheld"], 1)
         self.assertFalse(triggers_a_persona(withheld))
+
+    def test_a_mail_from_a_granted_sender_reaches_the_persona_like_any_message(self) -> None:
+        # A mail is a message (ADR 0033, #276): the same type, a `mailto:`
+        # subject, `network=email`, and the two gates decide exactly as they
+        # do for a WhatsApp message — by type, then by consent. The two
+        # fields a mail adds are read when there, and are `None` on a
+        # bridged message and on a revoked sender's mail.
+        mail = variant_fixture("inbound.message.received", "email")
+        self.assertTrue(mail["subject"].startswith("mailto:"))
+        self.assertEqual(mail["network"], "email")
+        self.assertTrue(triggers_a_persona(mail))
+        self.assertTrue(is_granted(mail))
+        message = InboundMessage(mail)
+        self.assertEqual(message.title, "Re: Point hebdo")
+        self.assertEqual(message.audience, "direct")
+        self.assertTrue(message.is_reply)
+        self.assertEqual(message.connection, "mail-linagora")
+        reduced = InboundMessage(variant_fixture("inbound.message.received", "email-revoked-sender"))
+        self.assertIsNone(reduced.title)
+        self.assertIsNone(reduced.body)
+        self.assertFalse(is_granted(reduced.event))
+        bridged = InboundMessage(fixture("inbound.message.received"))
+        self.assertIsNone(bridged.title)
+        self.assertIsNone(bridged.audience)
 
     def test_a_type_the_contract_adds_later_does_not_trigger_a_persona(self) -> None:
         # The forward-compatible default is "no". A tenth type must not start

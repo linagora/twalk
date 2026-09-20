@@ -76,11 +76,11 @@
 		},
 
 		"collector-stack": {
-			"what": "The collector at its process boundary, against the fake SSO, the fake side service and the shared test stack's bus. #274: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1. #280: an event created, moved and removed in the owner's calendar is the three calendar types with the contract's ids, an unchanged CTag publishes nothing, a participant revoked on the mail connection — in the snapshot or over the stream — is withheld and counted, one never decided about is carried.",
+			"what": "The collector at its process boundary, against the fake SSO, the fake side service and the shared test stack's bus. #274: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1. #280: an event created, moved and removed in the owner's calendar is the three calendar types with the contract's ids, an unchanged CTag publishes nothing, a participant revoked on the mail connection — in the snapshot or over the stream — is withheld and counted, one never decided about is carried. #276: a mail delivered to the INBOX after the start is inbound.message.received on the mail connection, field by field; a newsletter, an iTIP mail and the owner's own are dropped and counted; a mail in Sent or Archive is never read; a granted sender's mail is granted, a revoked sender's carries no words; what the INBOX held before the start is not published.",
 			"component": "collector",
 			"workdir": "collector",
-			"run": "cargo test --test calendar --test status",
-			"targets": ["calendar", "status"],
+			"run": "cargo test --test calendar --test mail --test status",
+			"targets": ["calendar", "mail", "status"],
 			"needs": ["rust", "docker"],
 			"tier": "required",
 			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"]

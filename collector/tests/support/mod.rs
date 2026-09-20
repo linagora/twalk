@@ -75,7 +75,7 @@ impl Run {
     }
 
     /// The environment the binary runs with: both connections held, the
-    /// health and calendar polls every second.
+    /// health, calendar and mail polls every second.
     pub fn env(&self) -> Vec<(String, String)> {
         [
             (
@@ -105,6 +105,7 @@ impl Run {
             ("COLLECTOR_HOST", "collector.test".to_owned()),
             ("COLLECTOR_HEALTH_INTERVAL_SECONDS", "1".to_owned()),
             ("COLLECTOR_CALENDAR_POLL_SECONDS", "1".to_owned()),
+            ("COLLECTOR_MAIL_POLL_SECONDS", "1".to_owned()),
             (
                 "COLLECTOR_LOG_LEVEL",
                 "info,twalk_collector=debug".to_owned(),

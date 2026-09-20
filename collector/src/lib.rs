@@ -16,6 +16,8 @@ pub mod calendars;
 pub mod config;
 pub mod consent;
 pub mod fs;
+pub mod jmap;
+pub mod mails;
 pub mod metrics;
 pub mod oidc;
 pub mod status;

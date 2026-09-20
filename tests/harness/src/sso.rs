@@ -87,6 +87,8 @@ struct State {
     port: u16,
     /// The owner's calendars on the side service, by calendar id.
     calendars: std::collections::BTreeMap<String, FakeCalendar>,
+    /// The owner's mailbox on the fake JMAP server (#276).
+    mails: crate::jmap_fake::MailStore,
     /// A Companion Gateway's consent snapshot to answer at
     /// `/api/consent/snapshot`, when a test stands this fake in for the
     /// Gateway too; `None` answers 404 there, an unreadable registry.
@@ -313,6 +315,35 @@ impl FakeSso {
         self.lock().gateway_snapshot = Some(document);
     }
 
+    /// Delivers a mail into the owner's INBOX on the fake JMAP server:
+    /// the Email state moves, and `Email/changes` lists it. Returns the
+    /// Email id.
+    pub fn deliver(&self, mail: crate::jmap_fake::FakeMail) -> String {
+        self.deliver_to(crate::jmap_fake::INBOX_ID, mail)
+    }
+
+    /// Delivers a mail into one of the three mailboxes (`INBOX_ID`,
+    /// `SENT_ID`, `ARCHIVE_ID`).
+    pub fn deliver_to(&self, mailbox: &str, mail: crate::jmap_fake::FakeMail) -> String {
+        self.lock().mails.deliver(mailbox, mail)
+    }
+
+    /// Every Email id whose content the collector read, in order.
+    pub fn mails_read(&self) -> Vec<String> {
+        self.lock().mails.read_ids()
+    }
+
+    /// The current Email state, as `Email/changes` reports it.
+    pub fn mail_state(&self) -> String {
+        self.lock().mails.state()
+    }
+
+    /// Forgets every Email state before `state`: `Email/changes` from an
+    /// older one answers `cannotCalculateChanges` (#277).
+    pub fn forget_mail_states_before(&self, state: u64) {
+        self.lock().mails.forget_states_before(state);
+    }
+
     /// Every refresh token the collector presented, in order.
     pub fn refresh_tokens_presented(&self) -> Vec<String> {
         self.lock().refresh_tokens_presented.clone()
@@ -476,12 +507,20 @@ fn respond_json(
             ))
         }
         ("POST", "/token") => Some(token(&request.body, guard)),
-        ("GET", "/jmap/session") => service(
-            "jmap",
-            request,
-            guard,
-            |account| json!({ "username": account, "apiUrl": "http://jmap.invalid/api" }),
-        ),
+        // The JMAP session and API (#276): the same bearer rule as every
+        // route of the mail service.
+        ("GET", "/jmap/session") => {
+            let issuer = format!("http://127.0.0.1:{}", guard.port);
+            let state = guard.mails.state();
+            service("jmap", request, guard, |account| {
+                crate::jmap_fake::session(account, &issuer, &state)
+            })
+        }
+        ("POST", "/jmap/api") => match admit("jmap", request, guard) {
+            Admission::Silent => None,
+            Admission::Refused(status, body) => Some((status, body)),
+            Admission::Account(_) => Some(crate::jmap_fake::api(&request.body, &mut guard.mails)),
+        },
         // The OpenPaaS shape: the owner's id (what the calendar paths are
         // under) and `preferredEmail`.
         ("GET", "/api/consent/snapshot") => Some(match guard.gateway_snapshot.clone() {
