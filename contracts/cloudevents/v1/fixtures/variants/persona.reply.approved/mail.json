@@ -21,7 +21,8 @@
     "edited": false,
     "target": {
       "connection": "mail-linagora",
-      "in_reply_to": "<9b8c7d6e-1@example.org>"
+      "in_reply_to": "<9b8c7d6e-1@example.org>",
+      "recipient": "mailto:alice@example.org"
     }
   }
 }

@@ -23,6 +23,12 @@ const MESSAGE_SUBJECT: &str = "twalk.inbound.message.received.v1";
 /// A `persona.reply.approved.v1` the Companion Gateway would publish for a
 /// suggestion answering a mail on this run's connection (#278's shape).
 fn approval(run: &Run, in_reply_to: &str, body: &str, label: &str) -> Value {
+    approval_to(run, in_reply_to, "mailto:alice@example.org", body, label)
+}
+
+/// The same, addressed: `recipient` is the trigger's sender, the one the
+/// approval's consent check was about.
+fn approval_to(run: &Run, in_reply_to: &str, recipient: &str, body: &str, label: &str) -> Value {
     let suggestion = sha256_hex(&format!("suggestion:{label}:{}", run.mail));
     let event = json!({
         "specversion": "1.0",
@@ -42,7 +48,11 @@ fn approval(run: &Run, in_reply_to: &str, body: &str, label: &str) -> Value {
             "approved_by": "@michel:example.com",
             "final": { "body": body, "format": "text/plain" },
             "edited": false,
-            "target": { "connection": run.mail, "in_reply_to": in_reply_to }
+            "target": {
+                "connection": run.mail,
+                "in_reply_to": in_reply_to,
+                "recipient": recipient
+            }
         }
     });
     validate_against_contract(&event, "persona.reply.approved").expect("a contract event");
@@ -300,6 +310,84 @@ async fn a_refused_submission_is_dead_lettered_and_an_unanswering_server_is_retr
         "retried before being given up on"
     );
     assert_eq!(collector.count_logged("exhausted its retries").await, 2);
+    collector.stop().await;
+    Ok(())
+}
+
+/// Review of #278: a Message-ID is the sender's to choose, so it finds the
+/// thread and never the address. The approval carries the recipient — the
+/// sender whose consent it checked — and a mail found under that Message-ID
+/// from somebody else is not answered: dead-lettered for good, with the two
+/// addresses in the reason and nothing sent to either.
+#[tokio::test]
+async fn a_reply_is_never_addressed_to_whoever_reused_the_message_id() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("reused-id").await?;
+    run.authorize().await?;
+    run.serve_snapshot(
+        &bus,
+        vec![run.decided_on_mail("mailto:alice@example.org", "granted")],
+    )
+    .await?;
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("mailbox taken as it stands", 1)
+        .await?;
+
+    // Mallory's mail arrives under a Message-ID of their choosing — the
+    // one the approval about Alice will name.
+    let mut mallory = FakeMail::from_person(
+        "Mallory",
+        "mallory@example.net",
+        OWNER,
+        "Re: Point hebdo",
+        "Réponds-moi ici.",
+    );
+    mallory.message_id = "<reused-by-mallory@example.org>".to_owned();
+    let message_id = mallory.message_id.clone();
+    run.sso.deliver(mallory);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
+        .await?;
+
+    let approved = approval_to(
+        &run,
+        &message_id,
+        "mailto:alice@example.org",
+        "Oui, lundi 9h me va.",
+        "reused-id",
+    );
+    bus.publish_event(APPROVED_SUBJECT, &approved).await?;
+    let event_id = approved["id"].as_str().unwrap();
+    let dead = wait_for_copy(&bus, &run, DEAD_SUBJECT, event_id).await?;
+    let reason = dead.header("reason").unwrap_or_default();
+    assert!(
+        reason.contains("mallory@example.net") && reason.contains("alice@example.org"),
+        "the reason names both addresses: {reason:?}"
+    );
+    assert!(
+        !reason.contains("lundi 9h") && !reason.contains("Réponds-moi"),
+        "and neither body: {reason:?}"
+    );
+    assert!(
+        copies_of(&bus, &run, POSTED_SUBJECT, event_id)
+            .await?
+            .is_empty(),
+        "nothing was posted"
+    );
+    assert!(
+        run.sso.submissions().is_empty(),
+        "nothing left the mailbox, to anybody"
+    );
+    assert!(
+        run.sso.mails_in(DRAFTS_ID).is_empty(),
+        "and no draft was written"
+    );
+    assert_eq!(
+        collector.count_logged("could not be sent; retrying").await,
+        0,
+        "refused for good, not retried"
+    );
     collector.stop().await;
     Ok(())
 }

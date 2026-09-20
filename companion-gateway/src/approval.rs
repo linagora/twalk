@@ -408,6 +408,13 @@ pub enum Target {
     Mail {
         connection: String,
         in_reply_to: String,
+        /// The trigger's `subject` — the sender whose consent this approval
+        /// checked — carried as the one address the reply goes to. The
+        /// collector finds the original again by Message-ID, and a
+        /// Message-ID is the sender's to choose: without this, a stranger
+        /// mailing the owner under another mail's Message-ID is who the
+        /// owner's approved words would be sent to.
+        recipient: String,
     },
 }
 
@@ -419,7 +426,12 @@ impl Target {
             Target::Mail {
                 connection,
                 in_reply_to,
-            } => json!({ "connection": connection, "in_reply_to": in_reply_to }),
+                recipient,
+            } => json!({
+                "connection": connection,
+                "in_reply_to": in_reply_to,
+                "recipient": recipient,
+            }),
         }
     }
 
@@ -1470,6 +1482,17 @@ impl Approvals {
                             .to_owned(),
                     )
                 })?,
+                // The address is the sender the consent check is about, and
+                // nothing the collector could look up: a mail's subject on
+                // this source is its sender's `mailto:` by contract.
+                recipient: if document.subject.starts_with("mailto:") {
+                    document.subject.clone()
+                } else {
+                    return Err(Refusal::SuggestionUnreadable(format!(
+                        "the trigger is a mail whose subject {:?} is not a mailto: address",
+                        document.subject
+                    )));
+                },
             },
             None => {
                 return Err(Refusal::TriggerHasNoRoom {
@@ -1800,6 +1823,7 @@ mod tests {
                 target: Target::Mail {
                     connection: "mail-linagora".to_owned(),
                     in_reply_to: "<9b8c7d6e-1@example.org>".to_owned(),
+                    recipient: "mailto:alice@example.org".to_owned(),
                 },
             },
             approved_by: "@michel:example.com".to_owned(),

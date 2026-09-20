@@ -309,6 +309,10 @@ impl Mailbox {
             .ok_or_else(|| {
                 SendError::Permanent("the mail answered could not be read back".to_owned())
             })?;
+        // The Message-ID found the thread; the address is the approval's,
+        // and an original that is not from it is a mail somebody else sent
+        // under that Message-ID — refused for good, never answered.
+        outbound::original_is_from_recipient(reply, &original).map_err(SendError::Permanent)?;
         let sender = outbound::Sender {
             account_id: account.to_owned(),
             identity_id,

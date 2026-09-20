@@ -1064,9 +1064,11 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
         event["data"]["target"],
         json!({
             "connection": "mail-linagora",
-            "in_reply_to": trigger["data"]["message_id"]
+            "in_reply_to": trigger["data"]["message_id"],
+            "recipient": trigger["subject"]
         }),
-        "the reply goes to the mail connection, in the mail's thread: {event}"
+        "the reply goes to the mail connection, in the mail's thread, to the sender the \
+         consent check was about: {event}"
     );
     assert!(event["data"]["target"].get("room_id").is_none());
     Ok(())
