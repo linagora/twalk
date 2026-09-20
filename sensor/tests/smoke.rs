@@ -174,8 +174,8 @@ async fn every_contract_fixture_validates_against_its_schema() -> Result<()> {
     let types = contract_fixture_types()?;
     assert_eq!(
         types.len(),
-        11,
-        "the v1 contract defines exactly 11 fixture types; found {types:?}"
+        14,
+        "the v1 contract defines exactly 14 fixture types; found {types:?}"
     );
     // And every schema has one. The count above is a tripwire for a fixture
     // added or lost; this is the tripwire for a *schema* added without the
@@ -215,11 +215,13 @@ async fn every_contract_variant_fixture_validates_against_its_type() -> Result<(
 
 /// An event about a connection names it, and the contract refuses one that
 /// does not (ADR 0033, #269): the eight `inbound.*`, `outbound.*` and
-/// `persona.*` message-flow types require the extension, and so does
+/// `persona.*` message-flow types require the extension, and so do
 /// `connection.status.changed` (#274), whose subject is the connection
-/// itself; the two status types about a bridge and about a decision do not
-/// carry it. Both halves are asserted, so a type moved from one list to the
-/// other is a change somebody made on purpose.
+/// itself, and the three `calendar.*` types (#280), the owner's own
+/// calendar on the calendar connection; the two status types about a
+/// bridge and about a decision do not carry it. Both halves are asserted,
+/// so a type moved from one list to the other is a change somebody made on
+/// purpose.
 #[tokio::test]
 async fn an_event_about_a_connection_without_the_connection_is_invalid() -> Result<()> {
     ensure_stack().await?;
@@ -228,7 +230,8 @@ async fn an_event_about_a_connection_without_the_connection_is_invalid() -> Resu
         let names_a_connection = type_name.starts_with("inbound.")
             || type_name.starts_with("outbound.")
             || type_name.starts_with("persona.")
-            || type_name.starts_with("connection.");
+            || type_name.starts_with("connection.")
+            || type_name.starts_with("calendar.");
         if names_a_connection {
             let connection = fixture
                 .as_object_mut()
