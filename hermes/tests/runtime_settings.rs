@@ -401,6 +401,14 @@ async fn a_deployment_nobody_named_a_model_for_hosts_nothing_until_one_is_named(
     hermes.publish_inbound(&trigger).await?;
     let thinking = hermes.wait_for(THINKING_TYPE, &trigger_id).await?;
     validate_against_contract(&thinking.payload, "persona.thinking.emitted")?;
+    // The SDK publishes `thinking` *before* it calls the handler that calls
+    // the model (`persona.py`), so the stub's request log read right after
+    // `thinking` is a coin flip on a loaded host — that was #198, two runs
+    // in four. The suggestion is published after the model answered, so it
+    // is the barrier the request count can be read behind, as the first
+    // test in this file already does.
+    let suggest = hermes.wait_for(SUGGEST_TYPE, &trigger_id).await?;
+    validate_against_contract(&suggest.payload, "persona.suggest.produced")?;
 
     let requests = hermes.llm_requests_mentioning(&marker);
     assert_eq!(requests.len(), 1, "one message, one completion request");
