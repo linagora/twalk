@@ -32,23 +32,49 @@ import type { ConfiguredBridge } from '$lib/networks/connection';
 
 export type Connection = components['schemas']['Connection'];
 
-/** The registry as read, or the reason it could not be. */
-export interface Registry {
-	readonly connections: readonly Connection[];
-	/** Whether the Gateway answered. `false` leaves every screen honest about not knowing. */
-	readonly known: boolean;
-	readonly trouble: ApiTrouble | null;
-}
+/**
+ * The registry as read: the connections when the Gateway answered, or the
+ * reason it could not be read. `trouble === null` is "read"; a screen that
+ * has not asked yet holds [`NOT_READ_YET`].
+ */
+export type Registry =
+	| { readonly connections: readonly Connection[]; readonly trouble: null }
+	| { readonly connections: readonly []; readonly trouble: ApiTrouble };
 
-export const UNKNOWN_REGISTRY: Registry = { connections: [], known: false, trouble: null };
+/** What a screen holds before its first read: nothing, and no trouble either. */
+export const NOT_READ_YET: Registry = { connections: [], trouble: null };
 
 /** `GET /api/connections`, never thrown. */
 export async function loadRegistry(): Promise<Registry> {
 	const answer = await gateway.GET('/api/connections').catch(() => null);
 	if (answer === null || answer.error !== undefined || answer.data === undefined) {
-		return { connections: [], known: false, trouble: troubleOf(answer) };
+		return { connections: [], trouble: troubleOf(answer) };
 	}
-	return { connections: answer.data.connections, known: true, trouble: null };
+	return { connections: answer.data.connections, trouble: null };
+}
+
+/**
+ * The two reads a screen about connections makes, together, under one
+ * policy: the registry says which connections there are, `GET /api/bridges`
+ * what each one's transport reports. Either failing is the same kind of
+ * fact — the deployment could not be asked — and `trouble` names the first
+ * one that failed, so no screen composes a policy of its own (#272).
+ */
+export async function loadRegistryAndBridges(): Promise<
+	| { readonly registry: readonly Connection[]; readonly bridges: readonly ConfiguredBridge[]; readonly trouble: null }
+	| { readonly registry: readonly []; readonly bridges: readonly []; readonly trouble: ApiTrouble }
+> {
+	const [registry, listed] = await Promise.all([
+		loadRegistry(),
+		gateway.GET('/api/bridges').catch(() => null)
+	]);
+	if (registry.trouble !== null) {
+		return { registry: [], bridges: [], trouble: registry.trouble };
+	}
+	if (listed === null || listed.error !== undefined || listed.data === undefined) {
+		return { registry: [], bridges: [], trouble: troubleOf(listed) };
+	}
+	return { registry: registry.connections, bridges: listed.data.bridges, trouble: null };
 }
 
 /** The connections of one kind, in the registry's order. */
@@ -74,6 +100,19 @@ export function pick(
 	return candidates.length === 1 ? candidates[0]! : null;
 }
 
+/**
+ * Whether a kind has several connections and the screen was told none:
+ * the case `pick` answers `null` to that is not "nothing configured" but
+ * "which one?", and the screen says so.
+ */
+export function isAmbiguous(
+	connections: readonly Connection[],
+	kind: string,
+	named: string | null
+): boolean {
+	return named === null && ofKind(connections, kind).length > 1;
+}
+
 /** The bridge carrying a connection, by the id the connection names — never by network. */
 export function bridgeOf(
 	connection: Connection,
@@ -90,13 +129,33 @@ export function labelFor(connection: Connection, siblings: readonly Connection[]
 	return siblings.length > 1 ? connection.label : null;
 }
 
-/** The query string a link to one connection's screen carries. */
-export function connectionQuery(connection: Connection, siblings: readonly Connection[]): string {
-	return siblings.length > 1 ? `?connection=${encodeURIComponent(connection.id)}` : '';
+/**
+ * A link to one of a kind's screens: the route, and `?connection=` when the
+ * kind has several — so the reference deployment's links read as they always
+ * did. `extra` are further query members (`relink=…`), appended after the
+ * connection with the right separator: a caller that did `${route}?relink`
+ * on a route already carrying a query produced `?connection=x?relink=…`,
+ * which no screen could read.
+ */
+export function linkTo(
+	route: string,
+	connection: Connection | null,
+	siblings: readonly Connection[],
+	extra: Record<string, string> = {}
+): string {
+	const query = new URLSearchParams();
+	if (connection !== null && siblings.length > 1) {
+		query.set('connection', connection.id);
+	}
+	for (const [key, value] of Object.entries(extra)) {
+		query.set(key, value);
+	}
+	const text = query.toString();
+	return text === '' ? route : `${route}?${text}`;
 }
 
 /** The connection a URL names, or `null`. */
-export function namedIn(url: URL): string | null {
+export function connectionNamedBy(url: URL): string | null {
 	const named = url.searchParams.get('connection');
 	return named === null || named === '' ? null : named;
 }

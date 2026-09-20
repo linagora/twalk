@@ -47,7 +47,13 @@
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
-	import { bridgeOf, loadRegistry, namedIn, ofKind, pick } from '$lib/connections/registry';
+	import {
+		bridgeOf,
+		connectionNamedBy,
+		isAmbiguous,
+		loadRegistryAndBridges,
+		pick
+	} from '$lib/connections/registry';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import type { LoginScreenCopy } from '$lib/networks/copy';
@@ -158,22 +164,16 @@
 		unsubscribe = null;
 		session?.stop();
 		session = null;
-		const [registry, listed] = await Promise.all([
-			loadRegistry(),
-			gateway.GET('/api/bridges').catch(() => null)
-		]);
-		if (!registry.known) {
-			bridgesTrouble = registry.trouble;
-			return;
-		}
-		if (listed === null || listed.error !== undefined) {
-			bridgesTrouble = troubleOf(listed);
+		const deployment = await loadRegistryAndBridges();
+		if (deployment.trouble !== null) {
+			bridgesTrouble = deployment.trouble;
 			return;
 		}
 		bridgeKnown = true;
-		const connection = pick(registry.connections, copy.network, namedIn(page.url));
-		ambiguous = connection === null && ofKind(registry.connections, copy.network).length > 1;
-		const row = connection === null ? null : bridgeOf(connection, listed.data.bridges);
+		const named = connectionNamedBy(page.url);
+		const connection = pick(deployment.registry, copy.network, named);
+		ambiguous = isAmbiguous(deployment.registry, copy.network, named);
+		const row = connection === null ? null : bridgeOf(connection, deployment.bridges);
 		bridgeId = row?.bridge_id ?? null;
 		if (bridgeId !== null) {
 			session = new LoginSession(bridgeId);
@@ -278,7 +278,7 @@
 		<div class="card card--warning" data-testid="which-connection">
 			<p class="card__title">
 				<Icon name="warning" size="dense" />
-				{$t('networks.whichConnection.title')}
+				{$t('networks.whichConnection.title', { network: $t(copy.title) })}
 			</p>
 			<p>{$t('networks.whichConnection.body', { network: $t(copy.title) })}</p>
 			<p class="actions">

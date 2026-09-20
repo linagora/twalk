@@ -102,9 +102,8 @@ export function scopeOptions(
 			preselected: true
 		});
 	}
-	// The native connection is in every registry (#269); a registry that
-	// could not be read still offers it by name, because the row's reason
-	// is written on the screen either way.
+	// The native connection is in every registry (#269); it is offered
+	// unticked, with the reason written on the screen.
 	const matrix = registry.find((entry) => entry.kind === MATRIX_NETWORK);
 	options.push({
 		connection: matrix?.id ?? MATRIX_NETWORK,

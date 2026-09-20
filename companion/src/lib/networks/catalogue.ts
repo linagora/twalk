@@ -23,13 +23,7 @@
 
 import type { IconName } from '$lib/icons';
 import type { MessageKey } from '$lib/i18n';
-import {
-	bridgeOf,
-	connectionQuery,
-	labelFor,
-	ofKind,
-	type Connection
-} from '$lib/connections/registry';
+import { bridgeOf, labelFor, linkTo, ofKind, type Connection } from '$lib/connections/registry';
 import {
 	connectionOf,
 	isConnected,
@@ -231,36 +225,25 @@ export function gridFor(options: {
 }): CardState[] {
 	return NETWORK_CARDS.flatMap((card) => {
 		const siblings = ofKind(options.connections, card.network);
-		if (siblings.length === 0) {
-			// A kind with no connection: one card, blocked when the registry
-			// was read and says so; tappable when nobody could be asked.
-			return [
-				cardState(card, null, null, null, options, {
-					noConnection: options.connectionsKnown
-				})
-			];
-		}
-		return siblings.map((connection) =>
-			cardState(
-				card,
-				connection,
-				labelFor(connection, siblings),
-				card.route === null ? null : `${card.route}${connectionQuery(connection, siblings)}`,
-				options,
-				{ noConnection: false }
-			)
-		);
+		// A kind with no connection keeps one card: blocked when the registry
+		// was read and says so, tappable when nobody could be asked.
+		const each: (Connection | null)[] = siblings.length === 0 ? [null] : siblings;
+		return each.map((connection) => cardState(card, connection, siblings, options));
 	});
 }
 
 function cardState(
 	card: NetworkCard,
 	connection: Connection | null,
-	label: string | null,
-	href: string | null,
-	options: { bridges: readonly BridgeRow[]; bridgesKnown: boolean; ios: boolean },
-	facts: { noConnection: boolean }
+	siblings: readonly Connection[],
+	options: {
+		connectionsKnown: boolean;
+		bridges: readonly BridgeRow[];
+		bridgesKnown: boolean;
+		ios: boolean;
+	}
 ): CardState {
+	const noConnection = connection === null && options.connectionsKnown;
 	const bridge = connection === null ? null : bridgeOf(connection, options.bridges);
 	const link = connectionOf(bridge);
 	let blockedBy: CardBlock | null = null;
@@ -268,15 +251,15 @@ function cardState(
 		blockedBy = 'coming-soon';
 	} else if (card.androidOnly && options.ios) {
 		blockedBy = 'ios';
-	} else if (card.needsBridge && (facts.noConnection || (options.bridgesKnown && bridge === null))) {
+	} else if (card.needsBridge && (noConnection || (options.bridgesKnown && bridge === null))) {
 		blockedBy = 'no-bridge';
 	}
 	return {
 		card,
 		connection,
 		key: connection?.id ?? card.network,
-		label,
-		href: href ?? (connection === null && !facts.noConnection ? card.route : href),
+		label: connection === null ? null : labelFor(connection, siblings),
+		href: card.route === null || noConnection ? null : linkTo(card.route, connection, siblings),
 		bridgeId: bridge?.bridge_id ?? null,
 		link,
 		connected: isConnected(link),

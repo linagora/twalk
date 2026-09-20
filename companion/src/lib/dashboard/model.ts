@@ -45,13 +45,7 @@
 //     [`personaRows`] carries that as a fact about the row, not as a footnote.
 
 import type { components } from '$lib/api/schema';
-import {
-	bridgeOf,
-	connectionQuery,
-	labelFor,
-	ofKind,
-	type Connection
-} from '$lib/connections/registry';
+import { bridgeOf, labelFor, linkTo, ofKind, type Connection } from '$lib/connections/registry';
 import type { IconName } from '$lib/icons';
 import type { MessageKey } from '$lib/i18n';
 import { cardFor, manageRouteFor } from '$lib/networks/catalogue';
@@ -153,24 +147,22 @@ export interface ActivityEntry {
 export const FEED_LENGTH = 10;
 
 /**
- * One row per configured bridge, saying what the **bridge** says.
+ * One row per connection a bridge carries (#272), saying what the **bridge**
+ * says about it.
+ *
+ * The registry says which connections there are, and each one's bridge is
+ * found by the id it names — never by matching networks, which is how two
+ * accounts of one kind used to collapse into one row. A connection no
+ * bridge carries (Matrix) is not a bridge row; a bridge no connection names
+ * is not one either, and the Gateway says so at startup.
  *
  * `GET /api/bridges` carries a `connection` per bridge, read live from that
  * bridge's own `whoami`: the logins it holds and the state of each. That is
  * the link, it lives in the bridge, and neither a login in flight nor a
  * restart of the Gateway can change it. This row reads that and nothing else.
- *
  * What it used to read was `bridge.login` — the last login *process* in the
  * Gateway's memory — which is why this screen and the networks picker could
  * both report a live WhatsApp session as never connected (#108).
- */
-/**
- * One row per connection a bridge carries (#272): the registry says which
- * connections there are, and each one's bridge is found by the id it names
- * — never by matching networks, which is how two accounts of one kind used
- * to collapse into one row. A connection no bridge carries (Matrix) is not a
- * bridge row; a bridge no connection names is not one either, and the
- * Gateway says so at startup.
  */
 export function bridgeRows(
 	registry: readonly Connection[],
@@ -185,7 +177,7 @@ export function bridgeRows(
 		const state = bridgeStateOf(bridge);
 		const card = cardFor(entry.kind);
 		const siblings = ofKind(registry, entry.kind);
-		const href = card === undefined ? null : `${card.route}${connectionQuery(entry, siblings)}`;
+		const href = card?.route === undefined || card.route === null ? null : linkTo(card.route, entry, siblings);
 		const manage = card === undefined ? null : manageRouteFor({ card, href });
 		return [
 			{
@@ -356,6 +348,36 @@ export function personaRows(
  */
 export function pendingDecisions(pending: { total: number } | null): number | null {
 	return pending === null ? null : pending.total;
+}
+
+/** One connection with people waiting, as the chip breaks its number down (#272). */
+export interface PendingRow {
+	readonly connection: string;
+	readonly network: string;
+	/** Which account, when the kind has two; `null` when it is the only one. */
+	readonly label: string | null;
+	readonly count: number;
+}
+
+/**
+ * The pending count per connection, labelled from the registry: the same
+ * total the chip states, said per account on a deployment with two of one
+ * kind. A connection the registry no longer names keeps its count under its
+ * id — the people waiting on it are still waiting.
+ */
+export function pendingByConnection(
+	counts: readonly components['schemas']['PendingConnectionCount'][],
+	registry: readonly Connection[]
+): PendingRow[] {
+	return counts.map((count) => {
+		const entry = registry.find((candidate) => candidate.id === count.connection);
+		return {
+			connection: count.connection,
+			network: count.network,
+			label: entry === undefined ? count.connection : labelFor(entry, ofKind(registry, entry.kind)),
+			count: count.count
+		};
+	});
 }
 
 /**

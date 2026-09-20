@@ -109,6 +109,12 @@
 	 */
 	let connectionId = $state<string | null>(null);
 	let bridgeOfConnection = $state<string | null>(null);
+	/**
+	 * The URL named a connection the registry does not know, or the registry
+	 * could not be read: the screen says so and shows nothing, rather than
+	 * quietly widening to every conversation of every network (#272).
+	 */
+	let unknownConnection = $state(false);
 
 	onMount(async () => {
 		if (typeof window !== 'undefined') {
@@ -143,12 +149,13 @@
 		failure = null;
 		if (registry !== null) {
 			const connection = registry.connections.find((entry) => entry.id === connectionId) ?? null;
+			unknownConnection = connection === null;
 			bridgeOfConnection = connection?.bridge_id ?? null;
 			network = connection?.kind ?? network;
 		}
 		bridges = [...answer.register.bridges];
 		crowdThreshold = answer.register.crowdThreshold;
-		all = answer.register.rows.filter((row) => inScope(row));
+		all = unknownConnection ? [] : answer.register.rows.filter((row) => inScope(row));
 		// The selection starts from what is already true, so opening this
 		// screen and pressing the button changes nothing.
 		selected = observedNow(all);
@@ -296,6 +303,17 @@
 			<span class="spinner" aria-hidden="true"></span>
 			{$t('conversations.loading')}
 		</p>
+	{:else if unknownConnection}
+		<!-- The link named an account this server does not list, or the
+		     registry could not be read: nothing is shown rather than every
+		     conversation of every network (#272). -->
+		<div class="card card--warning" role="alert" data-testid="conversations-unknown-connection">
+			<p class="card__title">
+				<Icon name="warning" size="dense" />
+				{$t('conversations.unknownConnection.title')}
+			</p>
+			<p>{$t('conversations.unknownConnection.body')}</p>
+		</div>
 	{:else if failure !== null}
 		{#if failure.kind === 'not-configured'}
 			<!-- Not a failure of the network or the session: the operator has

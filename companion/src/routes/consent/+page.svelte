@@ -124,6 +124,8 @@
 	let problem = $state<Explained | null>(null);
 	let waitingProblem = $state<Explained | null>(null);
 	let namesProblem = $state<Explained | null>(null);
+	/** The registry could not be read: rows are still true, but no account is named (#272). */
+	let connectionsProblem = $state<Explained | null>(null);
 	let loaded = $state(false);
 	let refreshing = $state(false);
 	let query = $state('');
@@ -165,12 +167,14 @@
 			waiting = answer.loaded.waiting;
 			waitingProblem = answer.loaded.waitingProblem;
 			namesProblem = answer.loaded.namesProblem;
+			connectionsProblem = answer.loaded.connectionsProblem;
 			problem = null;
 		} else {
 			rows = [];
 			waiting = null;
 			waitingProblem = null;
 			namesProblem = null;
+			connectionsProblem = null;
 			problem = answer.problem;
 		}
 		armed = null;
@@ -189,6 +193,17 @@
 	function networkLabel(network: string): string {
 		const key = networkNameKey(network);
 		return key === null ? network : $t(key);
+	}
+
+	/**
+	 * What a row's perimeter is called in a sentence about its default: the
+	 * kind, and which account when the kind has two — "WhatsApp · Work as a
+	 * whole" is the account the default was set on (#272).
+	 */
+	function perimeterLabel(row: Row): string {
+		return row.connectionLabel === null
+			? networkLabel(row.network)
+			: `${networkLabel(row.network)} · ${row.connectionLabel}`;
 	}
 
 	/** A row's identity: a decision is about `(contact, connection)`, never a contact alone (#272). */
@@ -392,6 +407,15 @@
 		<p class="card card--info small" data-testid="names-problem" data-code={namesProblem.code}>
 			<Icon name="info" size="dense" />
 			{$t('consent.names.unreadable')}
+		</p>
+	{/if}
+	{#if connectionsProblem !== null}
+		<!-- The registry failed and the list did not: every row is still a
+		     true decision, but on a deployment with two accounts of one kind
+		     no row can say which — so the screen says why (#272). -->
+		<p class="card card--info small" data-testid="connections-problem" data-code={connectionsProblem.code}>
+			<Icon name="info" size="dense" />
+			{$t('consent.connections.unreadable')}
 		</p>
 	{/if}
 
@@ -611,16 +635,16 @@
 					{#if row.decidedBy === 'network'}
 						<p class="small muted" data-testid="from-network">
 							{$t('consent.row.fromNetwork', {
-								network: networkLabel(row.network),
+								network: perimeterLabel(row),
 								state: stateName(row.state)
 							})}
 						</p>
 					{:else if row.overridesNetwork && row.networkDefault !== null}
 						<!-- The precedence, where it matters: the user granted the
-						     network and this contact is still not granted. -->
+						     connection and this contact is still not granted. -->
 						<p class="small warn" data-testid="overrides-network">
 							{$t('consent.row.overrides', {
-								network: networkLabel(row.network),
+								network: perimeterLabel(row),
 								state: stateName(row.networkDefault)
 							})}
 						</p>

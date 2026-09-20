@@ -161,7 +161,7 @@ export async function load(): Promise<Load> {
 			entries,
 			names,
 			connections: registry.connections,
-			connectionsProblem: registry.known ? null : explain(registry.trouble ?? 'unreachable', null),
+			connectionsProblem: registry.trouble === null ? null : explain(registry.trouble, null),
 			waiting:
 				counted === undefined
 					? null

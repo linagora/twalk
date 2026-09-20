@@ -37,7 +37,7 @@
 	import { t } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
 	import { PERSONA_CARDS, ASSISTANT, type PersonaCard } from '$lib/personas/catalogue';
-	import { loadRegistry } from '$lib/connections/registry';
+	import { loadRegistryAndBridges } from '$lib/connections/registry';
 	import { activatePersona, type ActivationFailure } from '$lib/personas/activation';
 	import {
 		defaultSelection,
@@ -76,21 +76,13 @@
 		bridgesTrouble = null;
 		// The registry says which connections there are (#272); the bridge
 		// list says which of them is connected.
-		const [registry, listed] = await Promise.all([
-			loadRegistry(),
-			gateway.GET('/api/bridges').catch(() => null)
-		]);
-		if (!registry.known) {
-			bridgesTrouble = registry.trouble;
+		const deployment = await loadRegistryAndBridges();
+		if (deployment.trouble !== null) {
+			bridgesTrouble = deployment.trouble;
 			loaded = true;
 			return;
 		}
-		if (listed === null || listed.error !== undefined) {
-			bridgesTrouble = troubleOf(listed);
-			loaded = true;
-			return;
-		}
-		options = scopeOptions(registry.connections, listed.data.bridges as BridgeRow[]);
+		options = scopeOptions(deployment.registry, deployment.bridges as BridgeRow[]);
 		selected = defaultSelection(options);
 		loaded = true;
 	}

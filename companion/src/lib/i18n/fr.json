@@ -248,6 +248,8 @@
 	"networks.whichConnection.title": "Quel compte {network} ?",
 	"networks.whichConnection.body": "Votre serveur Twalk a plusieurs comptes {network}. Choisissez celui que vous voulez depuis sa carte.",
 	"networks.whichConnection.back": "Retour aux réseaux",
+	"conversations.unknownConnection.title": "Quel compte ?",
+	"conversations.unknownConnection.body": "Ce lien désigne un compte que votre serveur Twalk ne liste pas, ou la liste des comptes n’a pas pu être lue. Revenez aux réseaux et ouvrez les conversations depuis la carte du compte.",
 
 	"networks.starting": "Demande d'un code…",
 	"networks.expiresIn": "Ce code se renouvelle dans {seconds, plural, one {# seconde} other {# secondes}}.",
@@ -803,6 +805,7 @@
 
 	"consent.waiting.missing": "Tout ce sur quoi vous avez déjà décidé est ci-dessous et à jour. Ce qui manque, ce sont les personnes qui vous ont écrit et sur lesquelles vous n’avez jamais décidé : cette liste vient d’une autre lecture, et c’est celle qui a échoué.",
 	"consent.names.unreadable": "Votre serveur n’a pas pu relire comment ces contacts s’appellent : ils sont affichés avec l’identité que leur réseau leur a donnée. La liste, elle, est complète : les noms sont cherchés à part et ne sont jamais stockés.",
+	"consent.connections.unreadable": "Votre serveur Twalk n’a pas pu lister ses connexions. Chaque décision ci-dessous reste vraie, mais sur un serveur avec deux comptes d’un même réseau cet écran ne peut pas dire de quel compte parle une ligne.",
 
 	"consent.owner.title": "Vous figurez parmi vos propres contacts",
 	"consent.owner.body": "{id} est le compte de ce déploiement, et il ne devrait jamais apparaître ici : vous n’êtes pas quelqu’un sur qui vous décidez. C’est une trace d’avant que votre serveur n’apprenne à vous reconnaître, et un défaut connu plutôt qu’une erreur de votre part.",

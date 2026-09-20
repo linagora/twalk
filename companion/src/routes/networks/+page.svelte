@@ -59,7 +59,7 @@
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
-	import { loadRegistry, UNKNOWN_REGISTRY, type Registry } from '$lib/connections/registry';
+	import { loadRegistry, NOT_READ_YET, type Registry } from '$lib/connections/registry';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
 	import {
@@ -70,7 +70,8 @@
 		type CardState
 	} from '$lib/networks/catalogue';
 
-	let registry = $state<Registry>(UNKNOWN_REGISTRY);
+	let registry = $state<Registry>(NOT_READ_YET);
+	let registryRead = $state(false);
 	let bridges = $state<BridgeRow[]>([]);
 	let bridgesKnown = $state(false);
 	/** Why the list is unknown, when it is. */
@@ -87,6 +88,7 @@
 			gateway.GET('/api/bridges').catch(() => null)
 		]);
 		registry = connections;
+		registryRead = connections.trouble === null;
 		bridgesKnown = listed !== null && listed.error === undefined;
 		bridgesTrouble = bridgesKnown ? null : troubleOf(listed);
 		bridges = listed?.data?.bridges ?? [];
@@ -96,7 +98,7 @@
 	const grid = $derived<CardState[]>(
 		gridFor({
 			connections: registry.connections,
-			connectionsKnown: registry.known,
+			connectionsKnown: registryRead,
 			bridges,
 			bridgesKnown,
 			ios
@@ -276,7 +278,9 @@
 						<p class="tile__action">
 							<a
 								class="button button--secondary"
-								href={`/networks/conversations?connection=${encodeURIComponent(state.connection?.id ?? state.card.network)}`}
+								href={state.connection === null
+									? `/networks/conversations?network=${state.card.network}`
+									: `/networks/conversations?connection=${encodeURIComponent(state.connection.id)}`}
 								data-testid={`conversations-${state.key}`}
 							>
 								<Icon name="observing" size="dense" />

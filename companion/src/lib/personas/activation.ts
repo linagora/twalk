@@ -19,8 +19,13 @@ import { scopeFor } from './scope';
 export type Network = components['schemas']['Network'];
 export type RecordedDecision = components['schemas']['RecordedConsentDecision'];
 
-/** The shape of a connection id, as the contract spells it (`definitions/connection.schema.json`). */
-const CONNECTION_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
+/**
+ * The shape of a connection id, as the contract spells it
+ * (`contracts/cloudevents/v1/definitions/connection.schema.json`). A copy,
+ * held to the contract by `activation.test.ts`, so the two cannot drift.
+ */
+export const CONNECTION_ID_PATTERN = '^[a-z0-9][a-z0-9-]{0,63}$';
+const CONNECTION_ID = new RegExp(CONNECTION_ID_PATTERN);
 
 export function isConnectionId(value: string): boolean {
 	return CONNECTION_ID.test(value);
@@ -28,9 +33,9 @@ export function isConnectionId(value: string): boolean {
 
 /** Why an activation did not happen, in the codes a screen branches on. */
 export type ActivationFailure =
-	/** The perimeter was empty: there is nothing to activate the persona on. */
+	/** The perimeter was empty: there is nothing to activate the persona on. Named `no-networks` since before #272; the perimeter is connections. */
 	| { kind: 'no-networks' }
-	/** A connection id the contract's shape does not admit, which is a bug here. */
+	/** A connection id the contract's shape does not admit, which is a bug here. `network` carries the id; the code is the screen's, kept stable. */
 	| { kind: 'unknown-network'; network: string }
 	/** The Gateway refused, with its own stable `error` code. */
 	| { kind: 'refused'; error: string; status: number }

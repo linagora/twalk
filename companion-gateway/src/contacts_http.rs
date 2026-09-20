@@ -305,39 +305,23 @@ impl Filter {
 /// the one a screen that decides per connection reads (#272) — and per
 /// network, kept for a screen that has not learned connections yet.
 fn pending_document(pending: &[SeenContact], filter: Option<&Filter>) -> Value {
-    let mut by_connection: Vec<(&str, Network, u64)> = Vec::new();
-    let mut by_network: Vec<(Network, u64)> = Vec::new();
-    for seen in pending {
-        match by_connection
-            .iter_mut()
-            .find(|(connection, _, _)| *connection == seen.connection)
-        {
-            Some((_, _, count)) => *count += 1,
-            None => by_connection.push((seen.connection.as_str(), seen.network, 1)),
-        }
-        match by_network
-            .iter_mut()
-            .find(|(network, _)| *network == seen.network)
-        {
-            Some((_, count)) => *count += 1,
-            None => by_network.push((seen.network, 1)),
-        }
-    }
     // A stable order whatever order the rows arrived in: the contract's own
     // ordering of network values, then the connection's id.
-    by_connection.sort_by_key(|(connection, network, _)| (network.as_str(), *connection));
-    by_network.sort_by_key(|(network, _)| network.as_str());
+    let by_connection = tally(pending, |seen| {
+        (seen.network.as_str(), seen.connection.as_str())
+    });
+    let by_network = tally(pending, |seen| (seen.network.as_str(), ""));
     json!({
         "total": pending.len(),
         "connections": by_connection
             .iter()
-            .map(|(connection, network, count)| {
-                json!({ "connection": connection, "network": network.as_str(), "count": count })
+            .map(|((network, connection), count)| {
+                json!({ "connection": connection, "network": network, "count": count })
             })
             .collect::<Vec<_>>(),
         "networks": by_network
             .iter()
-            .map(|(network, count)| json!({ "network": network.as_str(), "count": count }))
+            .map(|((network, _), count)| json!({ "network": network, "count": count }))
             .collect::<Vec<_>>(),
         "contacts": pending
             .iter()
@@ -345,6 +329,18 @@ fn pending_document(pending: &[SeenContact], filter: Option<&Filter>) -> Value {
             .map(pending_json)
             .collect::<Vec<_>>(),
     })
+}
+
+/// How many rows share each key, in key order.
+fn tally<'a, K: Ord>(
+    pending: &'a [SeenContact],
+    key: impl Fn(&'a SeenContact) -> K,
+) -> std::collections::BTreeMap<K, u64> {
+    let mut counts = std::collections::BTreeMap::new();
+    for seen in pending {
+        *counts.entry(key(seen)).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// This deployment projects no inbound stream: a `503` that names the

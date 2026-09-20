@@ -37,11 +37,13 @@
 	import ActionProblem from '$lib/components/ActionProblem.svelte';
 	import {
 		bridgeOf,
-		connectionQuery,
-		loadRegistry,
-		namedIn,
+		connectionNamedBy,
+		isAmbiguous,
+		linkTo,
+		loadRegistryAndBridges,
 		ofKind,
-		pick
+		pick,
+		type Connection
 	} from '$lib/connections/registry';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
@@ -73,9 +75,17 @@
 
 	const card = $derived(cardFor(network));
 	const account = $derived(connection.account);
-	/** The login screen of this same connection: the query travels with it (#272). */
-	let query = $state('');
-	const loginRoute = $derived(card === undefined ? '/networks' : `${card.route}${query}`);
+	/** The connection this screen manages, and its siblings of the kind, once read (#272). */
+	let picked = $state<Connection | null>(null);
+	let siblings = $state<readonly Connection[]>([]);
+	/** Two of the kind and the URL named none: the screen asks rather than picks. */
+	let ambiguous = $state(false);
+	/** The login screen of this same connection, with `extra` query members. */
+	function loginRoute(extra: Record<string, string> = {}): string {
+		return card?.route === undefined || card.route === null
+			? '/networks'
+			: linkTo(card.route, picked, siblings, extra);
+	}
 
 	onMount(load);
 
@@ -84,17 +94,14 @@
 	 * — and the bridge carrying it, by the id the connection names (#272).
 	 */
 	async function load() {
-		const [registry, listed] = await Promise.all([
-			loadRegistry(),
-			gateway.GET('/api/bridges').catch(() => null)
-		]);
-		listKnown = registry.known && listed !== null && listed.error === undefined;
-		listTrouble = listKnown ? null : (registry.trouble ?? troubleOf(listed));
-		const picked = pick(registry.connections, network, namedIn(page.url));
-		query =
-			picked === null ? '' : connectionQuery(picked, ofKind(registry.connections, network));
-		const row =
-			picked === null || listed?.data === undefined ? null : bridgeOf(picked, listed.data.bridges);
+		const deployment = await loadRegistryAndBridges();
+		listKnown = deployment.trouble === null;
+		listTrouble = deployment.trouble;
+		const named = connectionNamedBy(page.url);
+		picked = pick(deployment.registry, network, named);
+		siblings = ofKind(deployment.registry, network);
+		ambiguous = isAmbiguous(deployment.registry, network, named);
+		const row = picked === null ? null : bridgeOf(picked, deployment.bridges);
 		bridgeId = row?.bridge_id ?? null;
 		connection = connectionOf(row);
 		loaded = true;
@@ -211,6 +218,19 @@
 				{$t('api.trouble.unreachable')}
 			{/if}
 		</p>
+	{:else if ambiguous}
+		<!-- Two accounts of this kind and no word which (#272): the cards say
+		     which is which, and this screen will not guess. -->
+		<div class="card card--warning" data-testid="which-connection">
+			<p class="card__title">
+				<Icon name="warning" size="dense" />
+				{$t('networks.whichConnection.title', { network: card === undefined ? network : $t(card.titleKey) })}
+			</p>
+			<p>{$t('networks.whichConnection.body', { network: card === undefined ? network : $t(card.titleKey) })}</p>
+			<p class="actions">
+				<a class="button button--secondary" href="/networks">{$t('networks.whichConnection.back')}</a>
+			</p>
+		</div>
 	{:else if bridgeId === null}
 		<div class="card card--warning" data-testid="no-bridge">
 			<p class="card__title">
@@ -247,7 +267,7 @@
 			</p>
 			<p>{$t(disconnected ? 'manage.disconnected.body' : 'manage.noLink.body')}</p>
 			<p>
-				<a class="button button--primary" href={loginRoute} data-testid="manage-connect">
+				<a class="button button--primary" href={loginRoute()} data-testid="manage-connect">
 					{$t('manage.connect')}
 					<Icon name="continue" size="dense" />
 				</a>
@@ -328,7 +348,7 @@
 				     login the bridge already holds, never a second one. -->
 				<a
 					class="button button--primary"
-					href={`${loginRoute}?relink=${encodeURIComponent(account.login_id)}`}
+					href={loginRoute({ relink: account.login_id })}
 					data-testid="relink"
 				>
 					<Icon name="reload" size="dense" />

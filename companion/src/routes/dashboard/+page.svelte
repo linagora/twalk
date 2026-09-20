@@ -62,6 +62,7 @@
 		expiredBridges,
 		messageCount,
 		overallHealth,
+		pendingByConnection,
 		pendingDecisions,
 		personaRows,
 		type BridgeRow,
@@ -116,6 +117,10 @@
 	);
 	const expired = $derived(expiredBridges(bridges));
 	const pending = $derived(pendingDecisions(snapshot.pending));
+	/** The same number per connection (#272): shown when it says more than the total does. */
+	const pendingRows = $derived(
+		pendingByConnection(snapshot.pending?.connections ?? [], snapshot.connections ?? [])
+	);
 	const messages = $derived(messageCount());
 	const feed = $derived(
 		activityFeed({
@@ -272,6 +277,16 @@
 			     written lives on the consent screen, opened deliberately, for
 			     the same reason the approval queue does. -->
 			<p class="small muted" data-testid="pending-inbox">{$t('dashboard.chip.inbox')}</p>
+			{#if pendingRows.some((row) => row.label !== null)}
+				<!-- Two accounts of one kind: which inbox is waiting (#272). -->
+				<ul class="small muted" data-testid="pending-by-connection">
+					{#each pendingRows as row (row.connection)}
+						<li data-connection={row.connection} data-count={row.count}>
+							{networkLabel(row.network)}{row.label === null ? '' : ` · ${row.label}`}: {row.count}
+						</li>
+					{/each}
+				</ul>
+			{/if}
 			<p>
 				<a class="button button--primary" href="/consent" data-testid="to-consent">
 					<Icon name="consent" size="dense" />

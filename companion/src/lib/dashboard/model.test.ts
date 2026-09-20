@@ -12,6 +12,7 @@ import {
 	FEED_LENGTH,
 	messageCount,
 	overallHealth,
+	pendingByConnection,
 	pendingDecisions,
 	personaRows,
 	type ConfiguredBridge,
@@ -276,6 +277,34 @@ describe('pendingDecisions', () => {
 		// nothing waiting, which is not what an unanswered read means — and a
 		// deployment that projects no inbound stream answers nothing at all.
 		expect(pendingDecisions(null)).toBeNull();
+	});
+});
+
+describe('pendingByConnection', () => {
+	it('names each connection with people waiting, labelled when its kind has two', () => {
+		// The dashboard counts per connection (#272): the same number, said
+		// per account when the deployment has two of one kind, so the user
+		// reads which inbox is waiting — and unlabelled on the reference shape.
+		const registry: Connection[] = [
+			{ id: 'wa-home', kind: 'whatsapp', label: 'Home', bridge_id: 'mautrix-whatsapp' },
+			{ id: 'wa-work', kind: 'whatsapp', label: 'Work', bridge_id: 'mautrix-whatsapp-work' },
+			{ id: 'signal', kind: 'signal', label: 'mautrix-signal', bridge_id: 'mautrix-signal' }
+		];
+		const rows = pendingByConnection(
+			[
+				{ connection: 'wa-home', network: 'whatsapp', count: 2 },
+				{ connection: 'signal', network: 'signal', count: 1 }
+			],
+			registry
+		);
+		expect(rows).toEqual([
+			{ connection: 'wa-home', network: 'whatsapp', label: 'Home', count: 2 },
+			{ connection: 'signal', network: 'signal', label: null, count: 1 }
+		]);
+		// A connection the registry does not name is still counted, by its id.
+		expect(
+			pendingByConnection([{ connection: 'gone', network: 'sms', count: 1 }], registry)
+		).toEqual([{ connection: 'gone', network: 'sms', label: 'gone', count: 1 }]);
 	});
 
 	it('draws nothing for an empty inbox, which the screen treats as no chip', () => {
