@@ -159,10 +159,19 @@ pub enum Renewal {
     /// A fresh access token, and the grant the SSO rotated to — already on
     /// disk when this is returned.
     Renewed { grant: Grant, access: AccessToken },
-    /// The SSO refused to renew: the grant is gone and only the operator can
-    /// give a new one. `detail` is the SSO's own error code and description,
-    /// never a token.
+    /// The SSO refused to renew because the **grant** is gone
+    /// (`invalid_grant`: revoked, expired, rotated away by another holder)
+    /// and only the owner signing in again can give a new one. `detail` is
+    /// the SSO's own error code and description, never a token.
     ReconnectRequired { detail: String },
+    /// The SSO refused to renew because of the **client**, not the grant
+    /// (`invalid_client`, `unauthorized_client`, `invalid_scope`: a wrong
+    /// secret, a client the SSO no longer allows this flow, a scope it does
+    /// not grant). The grant may well stand; authorizing again would not
+    /// help, and the operator changes the client's configuration. The third
+    /// refusal the two-refusals rule owes: sent to re-authorize for a wrong
+    /// secret, an operator re-authorizes for nothing.
+    PendingOperator { detail: String },
     /// The SSO did not answer, or answered something that is not a token
     /// response: nothing is wrong with the grant, and the next attempt may
     /// succeed.
@@ -358,11 +367,28 @@ impl Client {
         };
         if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED
         {
-            return Ok(Renewal::ReconnectRequired {
-                detail: format!(
-                    "the SSO refused to renew the grant ({status}): {}",
-                    refusal_words(&body)
-                ),
+            // RFC 6749 §5.2: the error code says whose fault it is. The
+            // grant's (`invalid_grant`) is the owner's to renew by signing
+            // in again; the client's is the operator's to fix at the SSO,
+            // and no sign-in changes it. An unknown code is read as the
+            // grant's: the remedy that costs the operator a minute rather
+            // than the one that costs a wrong diagnosis.
+            let words = refusal_words(&body);
+            let code = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            return Ok(match code {
+                "invalid_client" | "unauthorized_client" | "invalid_scope" => {
+                    Renewal::PendingOperator {
+                        detail: format!(
+                            "the SSO refused the client, not the grant ({status}): {words}. Check \
+                             COLLECTOR_OIDC_CLIENT_ID, the secret in \
+                             COLLECTOR_OIDC_CLIENT_SECRET_FILE and the client's configuration \
+                             at the SSO; signing in again would not change this"
+                        ),
+                    }
+                }
+                _ => Renewal::ReconnectRequired {
+                    detail: format!("the SSO refused to renew the grant ({status}): {words}"),
+                },
             });
         }
         if !status.is_success() {

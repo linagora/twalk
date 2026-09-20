@@ -183,24 +183,44 @@ impl Config {
         })
     }
 
-    /// Refuses a held connection the registry does not name (ADR 0033):
-    /// every event it published would be about a perimeter no decision
-    /// governs. Said in words, naming the variable and the kind to declare.
-    pub fn refuse_unknown_connections(&self, registry: &[String]) -> Result<()> {
+    /// Refuses a held connection the registry does not name (ADR 0033), or
+    /// names as another kind: every event it published would be about a
+    /// perimeter no decision governs — or about a calendar, under a
+    /// mailbox's id. Said in words, naming the variable and the kind to
+    /// declare. `registry` is `(id, kind)` as the Companion Gateway's
+    /// snapshot spells its `connections[]`.
+    pub fn refuse_unknown_connections(&self, registry: &[(String, String)]) -> Result<()> {
         for held in &self.connections {
-            anyhow::ensure!(
-                registry.iter().any(|id| id == &held.id),
-                "the connection {:?} ({}) is not in the Companion Gateway's registry ({}): \
-                 declare it in GATEWAY_CONNECTIONS with the kind {}",
-                held.id,
-                held.variable(),
+            let listed = || {
                 if registry.is_empty() {
                     "empty".to_owned()
                 } else {
-                    registry.join(", ")
-                },
-                held.kind
-            );
+                    registry
+                        .iter()
+                        .map(|(id, kind)| format!("{id} ({kind})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            };
+            match registry.iter().find(|(id, _)| id == &held.id) {
+                None => anyhow::bail!(
+                    "the connection {:?} ({}) is not in the Companion Gateway's registry ({}): \
+                     declare it in GATEWAY_CONNECTIONS with the kind {}",
+                    held.id,
+                    held.variable(),
+                    listed(),
+                    held.kind
+                ),
+                Some((_, kind)) if kind != held.kind => anyhow::bail!(
+                    "the connection {:?} ({}) is a {} here and a {kind} in the Companion \
+                     Gateway's registry ({}): one of the two is the wrong id",
+                    held.id,
+                    held.variable(),
+                    held.kind,
+                    listed()
+                ),
+                Some(_) => {}
+            }
         }
         Ok(())
     }
@@ -263,14 +283,18 @@ mod tests {
                 kind: "calendar",
             },
         ]);
+        let entry = |id: &str, kind: &str| (id.to_owned(), kind.to_owned());
         assert!(config
             .refuse_unknown_connections(&[
-                "mail-linagora".to_owned(),
-                "calendar-linagora".to_owned()
+                entry("mail-linagora", "email"),
+                entry("calendar-linagora", "calendar")
             ])
             .is_ok());
         let refused = config
-            .refuse_unknown_connections(&["mail-linagora".to_owned(), "whatsapp".to_owned()])
+            .refuse_unknown_connections(&[
+                entry("mail-linagora", "email"),
+                entry("whatsapp", "whatsapp"),
+            ])
             .unwrap_err()
             .to_string();
         assert!(refused.contains("calendar-linagora"), "{refused}");
@@ -280,6 +304,17 @@ mod tests {
         );
         assert!(refused.contains("kind calendar"), "{refused}");
         assert!(refused.contains("GATEWAY_CONNECTIONS"), "{refused}");
+        // The id is there and it is not a calendar: a mailbox's id given to
+        // the calendar variable, refused rather than published under.
+        let wrong_kind = config
+            .refuse_unknown_connections(&[
+                entry("mail-linagora", "email"),
+                entry("calendar-linagora", "email"),
+            ])
+            .unwrap_err()
+            .to_string();
+        assert!(wrong_kind.contains("calendar-linagora"), "{wrong_kind}");
+        assert!(wrong_kind.contains("wrong id"), "{wrong_kind}");
     }
 }
 
