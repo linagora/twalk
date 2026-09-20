@@ -11,14 +11,16 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { watchBus } from '../dashboard/bus';
+import { watchBus, type BusWatch } from '../dashboard/bus';
 import {
 	bridgeStack,
 	decideAbout,
+	FRENCH_DISCLOSURE,
 	journeyBudgetMs,
 	NO_STACK,
 	publishSuggestion,
 	signIn,
+	switchDisclosure,
 	waitForSuggestion
 } from './harness';
 
@@ -65,6 +67,18 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		await expect(row.getByTestId('proposed')).toContainText('MARKER-REPLY-approve');
 		await expect(row).toHaveAttribute('data-standing', 'approvable');
 
+		// #121, ADR 0031: the outgoing message, whole. The sentence the reply
+		// discloses itself with stands beside the body, fixed — in the
+		// suggestion's own language, which is the persona's choice and not this
+		// interface's — and it is not in the blockquote, which is the persona's
+		// words alone.
+		const disclosure = row.getByTestId('disclosure');
+		await expect(disclosure).toBeVisible();
+		await expect(disclosure).toHaveAttribute('data-switch', 'on');
+		await expect(disclosure.getByTestId('disclosure-sentence')).toHaveText(FRENCH_DISCLOSURE);
+		await expect(row.getByTestId('proposed')).not.toContainText(FRENCH_DISCLOSURE);
+		await expect(row.getByTestId('disclosure-off')).toHaveCount(0);
+
 		// #160, on the screen: the row says which network it answers and never
 		// who wrote. Nothing of the contact's message is anywhere on this page
 		// — not their words, not their name, not their number (#110, ADR 0012).
@@ -98,6 +112,11 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		await expect(row.getByTestId('approved-text')).toHaveCount(0);
 		await expect(row.getByTestId('delivered')).toBeVisible();
 		await expect(row.getByTestId('delivered')).toHaveAttribute('data-reach', 'pending');
+		// #121: once the reply is sealed, the screen stops speaking about the
+		// switch in the present tense — what went out is the Gateway's record,
+		// not the switch as it stands now.
+		await expect(row.getByTestId('disclosure')).toHaveCount(0);
+		await expect(row.getByTestId('disclosure-off')).toHaveCount(0);
 
 		// And it actually left the deployment.
 		const event = await bus.waitFor(
@@ -105,13 +124,23 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		);
 		const envelope = event.event as unknown as {
 			source: string;
-			data: { approved_by: string; target: { room_id: string } };
+			data: {
+				approved_by: string;
+				target: { room_id: string };
+				final: { body: string };
+				disclosure?: string;
+			};
 		};
 		// ADR 0022: the Gateway publishes it, and the `source` still names the
 		// persona whose suggestion it was.
 		expect(envelope.source).toContain('/personas/assistant');
 		expect(envelope.data.approved_by).toBe(it.ownerId);
 		expect(envelope.data.target.room_id).toBe(published.roomId);
+		// #121: what actually left is the body **and** the sentence after it, on
+		// a line of its own — appended by the Gateway, exactly as the screen
+		// showed it, and carried as a member of its own besides.
+		expect(envelope.data.final.body).toBe(`${published.body}\n${FRENCH_DISCLOSURE}`);
+		expect(envelope.data.disclosure).toBe(FRENCH_DISCLOSURE);
 	} finally {
 		bus.close();
 	}
@@ -172,6 +201,12 @@ test('nothing is approved by a keystroke, and nothing approves a list', async ({
 	await row.getByTestId('edit').click();
 	const editor = row.getByTestId('editor');
 	await expect(editor).toBeVisible();
+	// #121: the editor opens on the persona's words alone, and the sentence
+	// stands under it — the one line of the outgoing message the user does not
+	// write, and cannot remove from this reply.
+	await expect(editor).not.toHaveValue(new RegExp(FRENCH_DISCLOSURE));
+	await expect(row.getByTestId('disclosure')).toHaveCount(1);
+	await expect(row.getByTestId('disclosure-sentence')).toHaveText(FRENCH_DISCLOSURE);
 	await editor.fill('Une autre formulation');
 	await editor.press('Enter');
 	await editor.press('Escape');
@@ -388,4 +423,93 @@ test('the dashboard carries a count and a link, and not one word of the text', a
 	await expect(
 		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('proposed')
 	).toContainText('MARKER-REPLY-dashboard');
+});
+
+test('when the disclosure is off, the screen says so, and the reply goes out bare', async ({
+	page,
+	context,
+	request
+}) => {
+	const it = stack!;
+	const token = await signIn(context, request, 'the disclosure-off journey');
+	const published = await publishSuggestion({
+		serverName: it.serverName,
+		natsPort: it.natsPort,
+		body: 'MARKER-REPLY-undisclosed Oui, ça me va.'
+	});
+	await decideAbout(request, token, published.contact, 'granted');
+	await waitForSuggestion(request, token, published.suggestionId);
+
+	// ADR 0019: turning it off is a deliberate act with a timestamp, and it is
+	// global — so this journey is the one that must put it back, whatever
+	// happens in between, or every journey after it would run undisclosed.
+	// The flip is inside the `try` so that the `finally` covers it too.
+	let bus: BusWatch | null = null;
+	try {
+		const decided = await switchDisclosure(request, token, false, 'the disclosure-off journey');
+		expect(decided.enabled).toBe(false);
+		expect(decided.actor).toBe(it.ownerId);
+		bus = await watchBus(it.natsPort, REPLY_APPROVED_SUBJECT);
+		await page.goto('/approvals');
+		const row = page.getByTestId(`suggestion-${published.suggestionId}`);
+		await expect(row).toBeVisible();
+
+		// ADR 0031: "when the switch is off, the screen says so" — with the
+		// date, at the one moment the user is thinking about this message going
+		// to this person. The sentence is not drawn as though it would go out.
+		const off = row.getByTestId('disclosure-off');
+		await expect(off).toBeVisible();
+		await expect(off).toContainText(/turned off since|désactivée depuis/);
+		await expect(off).toContainText(String(new Date(decided.since!).getUTCFullYear()));
+		await expect(row.getByTestId('disclosure')).toHaveCount(0);
+
+		await row.getByTestId('approve').click();
+		await expect(row.getByTestId('sent')).toBeVisible();
+
+		// And what left is the body alone: no line after it, no member.
+		const event = await bus.waitFor(
+			(message) => message.event.subject === published.suggestionId
+		);
+		const data = (event.event as unknown as { data: { final: { body: string } } }).data;
+		expect(data.final.body).toBe(published.body);
+		expect('disclosure' in data).toBe(false);
+	} finally {
+		bus?.close();
+		const restored = await switchDisclosure(request, token, true);
+		expect(restored.enabled).toBe(true);
+	}
+
+	// Back on: the off line is gone from the screen on the next read.
+	await page.reload();
+	await expect(
+		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('disclosure-off')
+	).toHaveCount(0);
+});
+
+test('a suggestion that carries no sentence is said to go out without one', async ({
+	page,
+	context,
+	request
+}) => {
+	const it = stack!;
+	const token = await signIn(context, request, 'the no-disclosure journey');
+	// A persona from before the member existed, or one that set none: the
+	// Gateway appends nothing, and the screen must not invent a sentence the
+	// contact would not receive.
+	const published = await publishSuggestion({
+		serverName: it.serverName,
+		natsPort: it.natsPort,
+		body: 'MARKER-REPLY-nosentence Bien reçu.',
+		disclosure: null
+	});
+	await decideAbout(request, token, published.contact, 'granted');
+	await waitForSuggestion(request, token, published.suggestionId);
+
+	await page.goto('/approvals');
+	const row = page.getByTestId(`suggestion-${published.suggestionId}`);
+	await expect(row).toBeVisible();
+	await expect(row.getByTestId('disclosure-none')).toBeVisible();
+	await expect(row.getByTestId('disclosure')).toHaveCount(0);
+	await expect(row.getByTestId('disclosure-off')).toHaveCount(0);
+	expect(await row.innerText()).not.toContain(FRENCH_DISCLOSURE);
 });

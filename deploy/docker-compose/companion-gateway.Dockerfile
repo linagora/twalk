@@ -49,6 +49,9 @@ COPY tests/harness tests/harness
 # (`include_str!`): the kinds of connection have one authority (#268), and
 # the Gateway carries it rather than a copy.
 COPY contracts/cloudevents/v1/definitions contracts/cloudevents/v1/definitions
+# The disclosure's five sentences (#121, ADR 0031): `src/disclosure.rs` embeds the
+# contract file at build time, so the image has to see it.
+COPY contracts/disclosure/v1 contracts/disclosure/v1
 # The revision the health endpoint reports. The build context carries no
 # .git (see .dockerignore), so pass it in — e.g.
 # `docker compose build --build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)`

@@ -702,6 +702,31 @@ fn open_consent(
         }
         Err(error) => warn!(%error, "failed to read the consent rows held about the owner"),
     }
+    // The disclosure switch (ticket #121): the journal's last row, or on.
+    // Said at startup because a deployment whose replies go out undisclosed
+    // is a fact somebody decided, and the log is where a decision taken
+    // months ago is still visible.
+    match store.disclosure_state() {
+        Ok(state) if state.enabled => {
+            metrics.set_disclosure_enabled(true);
+            info!(
+                since = state.since.as_deref().unwrap_or("always"),
+                "the disclosure is on: every approved reply carries the sentence ADR 0019 \
+                 requires, in the language the reply was written in (ADR 0031)"
+            );
+        }
+        Ok(state) => {
+            metrics.set_disclosure_enabled(false);
+            warn!(
+                since = state.since.as_deref().unwrap_or_default(),
+                actor = state.actor.as_deref().unwrap_or_default(),
+                "the disclosure is OFF: approved replies go out without the sentence ADR 0019 \
+                 requires, by a decision recorded in the disclosure journal. \
+                 PUT /api/settings/disclosure turns it back on"
+            );
+        }
+        Err(error) => warn!(%error, "failed to read the disclosure journal"),
+    }
     let pending = store
         .unpublished_count()
         .context("failed to count the consent outbox")?;

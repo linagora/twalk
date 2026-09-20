@@ -24,6 +24,11 @@ of that which is the same for every persona:
 * the user's own language (:mod:`twalk_sdk.language`), which a persona falls
   back to only when it cannot tell what language it is answering
   (ADR 0016);
+* the **disclosure** (:mod:`twalk_sdk.disclosure`): the contract's sentence
+  telling the contact the reply was drafted with an AI assistant, selected
+  by the language the reply is in — which the SDK asks the model, once more,
+  after the handler returns — and refused, by name and with no retry, for a
+  language the contract has no sentence for (ADR 0019, ADR 0031);
 * the **seam to Hermes** — Nous Research's agent runtime, outside this
   deployment (ADR 0032): the narrow template of named fields that crosses
   it and the signature that authenticates the sender
@@ -57,6 +62,16 @@ from .completion import (
 )
 from .config import Config, ConfigError, LlmConfig
 from .consent import GRANTED, consent_of, is_granted
+from .disclosure import (
+    DISCLOSURE_MAX_CHARS,
+    LANGUAGE_ASK,
+    LANGUAGE_ASK_MAX_TOKENS,
+    SENTENCES,
+    DisclosureError,
+    LanguageAskFailed,
+    parse_language_answer,
+    sentence_for,
+)
 from .envelope import (
     FIRST_ATTEMPT,
     SUGGEST_TYPE,
@@ -104,6 +119,8 @@ __all__ = [
     "ConfigError",
     "Context",
     "DEFAULT_SUGGESTION_TTL_SECONDS",
+    "DISCLOSURE_MAX_CHARS",
+    "DisclosureError",
     "EnvelopeError",
     "FIRST_ATTEMPT",
     "GRANTED",
@@ -116,6 +133,9 @@ __all__ = [
     "HermesUnreachable",
     "InboundMessage",
     "LANGUAGES",
+    "LANGUAGE_ASK",
+    "LANGUAGE_ASK_MAX_TOKENS",
+    "LanguageAskFailed",
     "LANGUAGE_NAMES",
     "Llm",
     "LlmAnsweredNothing",
@@ -130,6 +150,7 @@ __all__ = [
     "OUTBOUND_REACTION_ADDED_TYPE",
     "PERSONA_TRIGGER_TYPES",
     "Persona",
+    "SENTENCES",
     "SUGGEST_TYPE",
     "SeamError",
     "Suggestion",
@@ -146,7 +167,9 @@ __all__ = [
     "is_granted",
     "language_name",
     "nats_headers",
+    "parse_language_answer",
     "reference",
+    "sentence_for",
     "signed_headers",
     "suggest_event",
     "suggest_id",

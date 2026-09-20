@@ -18,7 +18,11 @@
 //!    readable on `GET /api/suggestions` — which is what puts it on the
 //!    Companion's existing approval screen. The contract gains no type for
 //!    "a suggestion that came from outside", so this assertion is that the
-//!    event is indistinguishable from the SDK's own, id included;
+//!    event is indistinguishable from the SDK's own, id included — and,
+//!    since ticket #121, that the language Hermes declared became the
+//!    contract's own sentence as `data.disclosure`, with `fr-CA` read as
+//!    French and a language the contract has no sentence for refused,
+//!    counted, and never published;
 //! 2. the **same answer twice** is one suggestion, because the id is the
 //!    contract's deterministic key and the bus absorbs the second publish —
 //!    the property that makes a webhook's retry harmless;
@@ -68,6 +72,9 @@ const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-
 /// disclosure would be written in.
 const REPLY: &str = "D'accord, à 20h alors !";
 const LANGUAGE: &str = "fr";
+/// The contract's sentence for that language (`contracts/disclosure/v1/`),
+/// which is what the suggestion carries — never the tag (ticket #121).
+const DISCLOSURE: &str = "Rédigé avec mon assistant IA.";
 
 fn rfc3339(at: time::OffsetDateTime) -> String {
     at.replace_nanosecond(0)
@@ -302,19 +309,32 @@ async fn an_answer_from_hermes_becomes_a_suggestion_the_approval_screen_can_read
         Some(INBOUND_TYPE)
     );
 
-    // The headers a consumer filters on, and the one provisional carrier: the
-    // language has nowhere to live in the contract (`additionalProperties:
-    // false` at both levels), so it travels as a header and this assertion is
-    // what will fail when a field replaces it.
+    // The language became the sentence (#121): what the SDK publishes, in
+    // the contract's own member, so nothing downstream can tell this
+    // suggestion came from outside.
+    assert_eq!(
+        event["data"]["disclosure"].as_str(),
+        Some(DISCLOSURE),
+        "the tag Hermes declared is turned into the contract's sentence: {event}"
+    );
+    assert!(
+        !event["data"]["suggestion"]["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(DISCLOSURE),
+        "the sentence is a member of its own and never inside the body (ADR 0031)"
+    );
+
+    // The headers a consumer filters on. The `language` header #206 carried
+    // as a provisional stand-in is gone: the member it stood in for exists.
     assert_eq!(stored.header("Nats-Msg-Id"), Some(expected_id.as_str()));
     assert_eq!(stored.header("network"), Some("whatsapp"));
     assert_eq!(stored.header("connection"), Some("whatsapp"));
     assert_eq!(stored.header("consent"), Some("granted"));
     assert_eq!(
         stored.header("language"),
-        Some(LANGUAGE),
-        "the language the answer was written in reaches the bus; it has no contract \
-         field yet, which is ticket #206's stated gap"
+        None,
+        "the provisional header was #206's stated gap, and #121 closed it with a field"
     );
 
     // And the whole point: the Companion's existing approval screen draws from
@@ -325,6 +345,11 @@ async fn an_answer_from_hermes_becomes_a_suggestion_the_approval_screen_can_read
         .await?;
     assert_eq!(status, 200, "the suggestion is not readable: {listing}");
     assert_eq!(listing["suggestion"]["body"].as_str(), Some(REPLY));
+    assert_eq!(
+        listing["disclosure"].as_str(),
+        Some(DISCLOSURE),
+        "the approval screen shows the sentence fixed beside the editable body: {listing}"
+    );
     assert_eq!(listing["standing"].as_str(), Some("approvable"));
     assert_eq!(listing["persona_id"].as_str(), Some("assistant"));
     // #97's rule, unchanged by this path: the listing names the trigger and
@@ -337,6 +362,104 @@ async fn an_answer_from_hermes_becomes_a_suggestion_the_approval_screen_can_read
              quoted message (#110, ADR 0012)"
         );
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 1b. The language: a region does not change the sentence, and a language
+//     the contract has no sentence for is no suggestion at all (#121)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_refined_tag_is_read_by_its_primary_subtag() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-fr-ca").await?;
+    let (contact, room) = conversation("frca");
+
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    let reference = hermes_reference("assistant", &trigger_id, 1);
+    let (status, body) = running.answer(&reference, Some("fr-CA")).await?;
+    assert_eq!(status, 200, "Canadian French is French: {body}");
+    assert_eq!(
+        body["language"].as_str(),
+        Some("fr"),
+        "the primary subtag is what the sentence was selected by: {body}"
+    );
+    let sequence = body["stream_sequence"].as_u64().context("a sequence")?;
+    let stored = bus
+        .consume_from(STREAM, SUGGEST_SUBJECT, sequence, 1)
+        .await?
+        .into_iter()
+        .next()
+        .context("the suggestion the answer said it published")?;
+    validate_against_contract(&stored.payload, "persona.suggest.produced")?;
+    assert_eq!(
+        stored.payload["data"]["disclosure"].as_str(),
+        Some(DISCLOSURE),
+        "the French sentence, not a Canadian one nobody wrote: {}",
+        stored.payload
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_language_the_contract_has_no_sentence_for_is_refused_counted_and_never_published(
+) -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-unsupported").await?;
+    let (contact, room) = conversation("japanese");
+
+    // Everything else is in order: a granted contact, a message on the bus.
+    // The only thing wrong with this answer is that the contract has no
+    // sentence a Japanese reader could read.
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let reference = hermes_reference("assistant", &trigger_id, 1);
+    let (status, body) = running.answer(&reference, Some("ja")).await?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(
+        body["error"].as_str(),
+        Some("hermes_answer_language_unsupported"),
+        "a language with no sentence is its own refusal, not an unreadable tag: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("ADR 0031") && detail.contains("de, en, es, fr, it"),
+        "the refusal says which decision it keeps and names the five, so it reads as the \
+         one-line contribution it asks for: {body}"
+    );
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a suggestion that cannot be disclosed must not exist (ADR 0031), and one was published"
+    );
+    // Counted under the word the caller was given, so an operator reading
+    // `/metrics` after "my assistant stopped answering in Japanese" finds
+    // the contribution request rather than a silence.
+    let metrics = reqwest::get(format!("{}/metrics", running.base))
+        .await?
+        .text()
+        .await?;
+    let counted = harness::parse_exposition(&metrics)
+        .into_iter()
+        .find(|(name, _)| {
+            name == "twalk_companion_gateway_hermes_answers_total{outcome=\"hermes_answer_language_unsupported\"}"
+        })
+        .map(|(_, count)| count);
+    assert_eq!(
+        counted,
+        Some(1),
+        "the refusal is counted under its own code: {metrics}"
+    );
     Ok(())
 }
 

@@ -68,6 +68,17 @@ export interface Row {
 	/** The persona's own words: the thing being approved, and the only text here. */
 	body: string;
 	format: string;
+	/**
+	 * The sentence the reply will disclose itself with, after the body and on
+	 * a line of its own, in the language the persona wrote in (#121, ADR
+	 * 0019, ADR 0031) — or `null` when the suggestion carries none. It is
+	 * never part of `body`: the body is what the user edits, and this is the
+	 * one line on the outgoing message they cannot, because removing it from a
+	 * single reply is exactly what ADR 0019 rules out. Whether the Gateway
+	 * appends it at approval is the switch's business, which the screen reads
+	 * separately; a row does not know.
+	 */
+	disclosure: string | null;
 	/** The message being answered, by identity alone. No sender, no excerpt. */
 	trigger: components['schemas']['SuggestionTrigger'];
 	standing: Standing;
@@ -134,6 +145,7 @@ export function toRow(suggestion: Suggestion): Row {
 		attempt: suggestion.attempt,
 		body: suggestion.suggestion.body,
 		format: suggestion.suggestion.format,
+		disclosure: suggestion.disclosure,
 		trigger: suggestion.trigger,
 		standing: suggestion.standing,
 		approval: suggestion.approval,

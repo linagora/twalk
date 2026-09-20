@@ -17,14 +17,20 @@ construction:
    request, and no persona code runs on it;
 4. ``persona.thinking.emitted`` the moment processing starts, so oversight
    can show activity in real time;
-5. ``persona.suggest.produced`` from whatever the handler returns, with the
+5. the **disclosure** (:mod:`twalk_sdk.disclosure`, ADR 0031): once the
+   handler has returned a suggestion, the loop asks the model which
+   language the reply is in — unless the author said — and selects the
+   contract's sentence for it, *"Rédigé avec mon assistant IA."*, which
+   travels as a field of its own and which the Companion Gateway appends
+   to the reply at approval;
+6. ``persona.suggest.produced`` from whatever the handler returns, with the
    contract's deterministic id, ``Nats-Msg-Id`` set, the trigger's
    ``network``, ``consent`` and trace carried through, and the expiry the
    operator's suggestion policy gives it (:mod:`twalk_sdk.policy`) — so no
    persona can publish a draft that stays approvable for ever.
 
-Two things the loop refuses to do, both learned from a real model on a real
-deployment (issues #162 and #164):
+Three things the loop refuses to do, the first two learned from a real
+model on a real deployment (issues #162 and #164):
 
 * it does not **retry an answer that will not change**. A trigger whose
   completion failed is redelivered — an endpoint is briefly away often
@@ -36,7 +42,13 @@ deployment (issues #162 and #164):
   persona answer in the incoming message's language and fall back to the
   user's own only when it cannot tell, so the preference is configuration
   (``TWALK_USER_LANGUAGE``) — and when it is unset the log says what will
-  happen instead of the gap passing unmentioned.
+  happen instead of the gap passing unmentioned;
+* it does not **publish a reply it cannot disclose**. A reply in a language
+  the contract has no sentence for is no suggestion at all (ADR 0031): the
+  delivery is terminated with one ``ERROR`` line naming the language the
+  model answered, and never retried, because the model would answer the
+  same language again. A silent fallback into the wrong language is a
+  sentence nobody reads; a named refusal is one an operator can act on.
 
 The persona talks to the bus itself (ADR 0008): the Hermes runtime starts
 it as a process and supervises it, but never sits between it and the bus.
@@ -70,7 +82,7 @@ import asyncio
 import json
 import logging
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 import nats
@@ -82,6 +94,8 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 from .config import Config
 from .consent import GRANTED, consent_of, is_granted
+from .completion import LlmError
+from .disclosure import DisclosureError, LanguageAskFailed, sentence_for
 from .envelope import (
     FIRST_ATTEMPT,
     Suggestion,
@@ -456,7 +470,7 @@ class Persona:
                     outcome.ignored_by_route,
                 )
             else:
-                suggestion = outcome
+                suggestion = await self._disclosed(outcome, trigger)
                 # One reading of the clock for both: `time` says when the
                 # suggestion was produced and `expires_at` when it stops
                 # being approvable, and the operator's window is the
@@ -536,6 +550,48 @@ class Persona:
             return
         await message.ack()
 
+    async def _disclosed(self, suggestion: Suggestion, trigger: InboundMessage) -> Suggestion:
+        """The suggestion with the sentence its language selects (ADR 0031).
+
+        The language is the author's when they said, and the model's answer
+        otherwise (:meth:`twalk_sdk.llm.Llm.language_of`, ADR 0016) — one
+        more completion per suggestion, shaped for one token. The sentence
+        is always set *here*, from that language, whatever the handler put
+        in ``disclosure``: what a contact is told is the contract's own
+        sentence and not a persona's wording.
+
+        A language with no sentence raises :class:`DisclosureError`, which
+        is not transient: the loop terminates the delivery with one ERROR
+        line and no retry, the way it does for a model that spent its whole
+        budget reasoning. No suggestion is published, which is the point —
+        a reply that cannot be disclosed is one that should not exist.
+
+        The ask itself can fail the four ways any completion can, and the
+        failure is re-raised as :class:`LanguageAskFailed` with the cause's
+        own ``transient``: the ERROR line then says it was the *ask* and
+        not the reply that failed, and names the budget remedy — because on
+        a reasoning model the ask's five tokens are spent thinking, every
+        time, after a reply that was drafted fine (#162, one call later).
+        """
+        declared = suggestion.language is not None
+        language = suggestion.language
+        if language is None:
+            try:
+                language = await self.llm.language_of(suggestion.body)
+            except LlmError as error:
+                raise LanguageAskFailed(error) from error
+        sentence = sentence_for(language)
+        if sentence is None:
+            raise DisclosureError(language, declared_by_persona=declared)
+        logger.info(
+            "disclosure language=%s declared_by=%s event_id=%s network=%s",
+            language,
+            "persona" if declared else "model",
+            trigger.event_id,
+            trigger.network,
+        )
+        return replace(suggestion, disclosure=sentence)
+
     async def _publish(self, jetstream: JetStreamContext, event: Dict[str, Any]) -> Any:
         """Publishes one event and returns the bus's acknowledgement.
 
@@ -561,15 +617,17 @@ class Persona:
 def _will_not_change(error: BaseException) -> bool:
     """Whether redelivering this trigger would reproduce the same failure.
 
-    Read off the exception rather than off its class, because two different
-    outside things now answer the question and neither should have to know
-    about the other: a model that spent its whole budget reasoning
-    (:class:`twalk_sdk.completion.LlmError`, issue #162) and a Hermes route
+    Read off the exception rather than off its class, because three
+    different outside things now answer the question and none should have
+    to know about the others: a model that spent its whole budget reasoning
+    (:class:`twalk_sdk.completion.LlmError`, issue #162), a Hermes route
     that refused the signature or does not exist
-    (:class:`twalk_sdk.hermes.HermesError`, ADR 0032). Anything that does not
-    declare itself is retried, which is the safe default — a failure retried
-    once too often costs a redelivery, and one terminated too early loses a
-    message.
+    (:class:`twalk_sdk.hermes.HermesError`, ADR 0032), and a reply in a
+    language the contract has no disclosure for
+    (:class:`twalk_sdk.disclosure.DisclosureError`, ADR 0031). Anything
+    that does not declare itself is retried, which is the safe default — a
+    failure retried once too often costs a redelivery, and one terminated
+    too early loses a message.
     """
     return getattr(error, "transient", True) is False
 

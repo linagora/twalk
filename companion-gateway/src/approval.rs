@@ -60,6 +60,25 @@
 //! **never the text that was approved**. `GET /api/approvals/{id}` reads it
 //! back, which is how "did my reply actually go out?" has an answer that is
 //! not a spinner.
+//!
+//! # The disclosure is appended here, and composed nowhere
+//!
+//! Ticket #121 (ADR 0019, ADR 0031): a reply a persona drafted reaches the
+//! contact with one sentence after it, on a line of its own — *"Rédigé avec
+//! mon assistant IA."* The suggestion carries that sentence as
+//! `data.disclosure`, selected by whoever knew the language of the reply, and
+//! this module **appends** it at approval when the switch is on:
+//! `final.body` is the body, a newline and the sentence, and the approved
+//! event carries the sentence as `data.disclosure` as well. Three things
+//! follow, and each is a line of [`Approval::envelope`] or of
+//! [`Approvals::approve`]: `edited` compares the body alone, so a user who
+//! sent the suggestion untouched is not recorded as having edited it; the
+//! body's cap is the contract's less the line reserved for the sentence
+//! ([`MAX_BODY`]), so the sum never exceeds the schema; and when the switch
+//! is off — the journal's last row says so
+//! ([`crate::store::Store::disclosure_state`]) — neither the line nor the
+//! member is there, because a bus that recorded a disclosure nobody received
+//! would be lying about what the contact got.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -147,10 +166,18 @@ impl Format {
     }
 }
 
-/// The contract's cap on a reply body. Enforced here so an oversized body is
-/// a `400` naming the limit rather than an event the schema rejects after
-/// the Gateway has already tried to publish it.
-pub const MAX_BODY: usize = 65_536;
+/// The contract's cap on `final.body` (`maxLength: 65536` on the approved
+/// event and on the suggestion).
+pub const CONTRACT_MAX_BODY: usize = 65_536;
+
+/// The cap on the reply's **body**: the contract's, less the newline and the
+/// disclosure the Gateway appends after it (ticket #121, ADR 0031). Enforced
+/// here so an oversized body is a `400` naming the limit rather than an
+/// event the schema rejects after the Gateway has already tried to publish
+/// it — and reserved whether the switch is on or off, because a body that
+/// only fits while the disclosure is off is a body that stops fitting the
+/// day it is turned back on. The SDK's own cap is the same number.
+pub const MAX_BODY: usize = CONTRACT_MAX_BODY - 1 - crate::disclosure::MAX_CHARS;
 
 /// One approval, as a request states it.
 ///
@@ -321,9 +348,12 @@ impl Invalid {
                  never what was meant — refuse the suggestion instead"
                     .to_owned()
             }
-            Invalid::FinalBodyTooLong(length) => {
-                format!("final.body is {length} characters, and the contract's limit is {MAX_BODY}")
-            }
+            Invalid::FinalBodyTooLong(length) => format!(
+                "final.body is {length} characters, and the limit is {MAX_BODY}: the contract \
+                 allows {CONTRACT_MAX_BODY}, less the line the disclosure is appended on — a \
+                 newline and a sentence of up to {} characters (ADR 0031)",
+                crate::disclosure::MAX_CHARS
+            ),
             Invalid::UnknownFormat(value) => format!(
                 "final.format has the unknown value {value}: the contract's formats are \
                  text/plain, text/markdown and text/html"
@@ -367,6 +397,15 @@ pub struct Suggestion {
     /// the current state, which is checked separately.
     pub consent_label: State,
     pub suggestion: Content,
+    /// The sentence the reply discloses itself with, in the language the
+    /// reply was written in — selected by the persona (or, for an answer from
+    /// Hermes, by [`crate::hermes_answer`]) and carried as `data.disclosure`
+    /// (ticket #121, ADR 0031). `None` on a suggestion published before the
+    /// member existed or by a persona that set none; nothing is appended
+    /// then, because this Gateway composes no sentence of its own. When it
+    /// is set it is one of the contract's five, verbatim, or the suggestion
+    /// was refused at the read ([`contract_sentence`]).
+    pub disclosure: Option<String>,
     pub expires_at: Option<String>,
     pub traceparent: Option<String>,
     /// Where on the stream it was found: the anchor the trigger lookup walks
@@ -559,6 +598,8 @@ struct SuggestionData {
     persona_id: String,
     suggestion: SuggestionContent,
     #[serde(default)]
+    disclosure: Option<String>,
+    #[serde(default)]
     expires_at: Option<String>,
 }
 
@@ -648,8 +689,18 @@ pub struct Approval {
     pub suggestion: Suggestion,
     pub trigger: Trigger,
     pub approved_by: String,
+    /// The body as the human approved it — the persona's or their own edit
+    /// of it — and **without** the disclosure, which is not in the field
+    /// they edit.
     pub content: Content,
+    /// Whether `content` differs from what the persona wrote. The body
+    /// alone: the disclosure is appended after this comparison, so it can
+    /// neither make an untouched reply look edited nor hide an edit.
     pub edited: bool,
+    /// The sentence appended after the body, when the switch is on and the
+    /// suggestion carries one (ticket #121). `None` means neither the line
+    /// nor the `data.disclosure` member is on the event.
+    pub disclosure: Option<String>,
 }
 
 impl Approval {
@@ -684,7 +735,16 @@ impl Approval {
     /// id would be worse than the gap, and the gap is named in ADR 0022. A
     /// mail target (#278) has what a room does not: the mail's own
     /// Message-ID, so a reply to a mail *is* threaded.
+    ///
+    /// `final.body` is what the contact receives: the approved body, then —
+    /// when [`Self::disclosure`] is set — a newline and the sentence, which
+    /// the event carries again as `data.disclosure` so a consumer can tell
+    /// the reply from its disclosure without parsing the body (ADR 0031).
     pub fn envelope(&self, produced_at: &str) -> Value {
+        let body = match &self.disclosure {
+            Some(sentence) => crate::disclosure::append(&self.content.body, sentence),
+            None => self.content.body.clone(),
+        };
         let mut event = json!({
             "specversion": "1.0",
             "id": self.event_id(),
@@ -702,13 +762,16 @@ impl Approval {
                 "suggestion_event_id": self.suggestion.event_id,
                 "approved_by": self.approved_by,
                 "final": {
-                    "body": self.content.body,
+                    "body": body,
                     "format": self.content.format.as_str(),
                 },
                 "edited": self.edited,
                 "target": self.trigger.target.json(),
             }
         });
+        if let Some(sentence) = &self.disclosure {
+            event["data"]["disclosure"] = Value::String(sentence.clone());
+        }
         // Continued from the suggestion when it carries one, so a message's
         // trace links sensor → persona → approval → outbound.
         if let Some(traceparent) = &self.suggestion.traceparent {
@@ -1315,13 +1378,55 @@ impl Approvals {
             .edited
             .clone()
             .unwrap_or_else(|| suggestion.suggestion.clone());
+        // The body alone, before the disclosure is appended: an untouched
+        // reply is not an edit, and the sentence is not in the field the
+        // user edits (ADR 0031).
         let edited = content != suggestion.suggestion;
+        // The switch, read now (ticket #121): the journal's last row, or on.
+        // Failing closed the way the consent read does — an approval whose
+        // switch cannot be read is refused, since the row it would write
+        // next is in the same file and would fail the same way.
+        let switch = self.store.disclosure_state().map_err(|error| {
+            warn!(%error, "an approval could not read the disclosure switch");
+            Refusal::StoreUnavailable(format!(
+                "the disclosure switch could not be read: {error:#}"
+            ))
+        })?;
+        let disclosure = if switch.enabled {
+            suggestion.disclosure.clone()
+        } else {
+            None
+        };
+        if let Some(sentence) = &disclosure {
+            if !fits_with_disclosure(&content.body, sentence) {
+                return Err(Refusal::SuggestionUnreadable(format!(
+                    "its body is {} characters and, with the disclosure appended, the reply \
+                     would exceed the contract's {CONTRACT_MAX_BODY}. The SDK caps a body at \
+                     {MAX_BODY} for exactly this, so the persona that published it ignored the \
+                     cap; edit the reply shorter, or refuse it",
+                    content.body.chars().count()
+                )));
+            }
+        }
+        if switch.enabled && disclosure.is_none() {
+            // Not a refusal: the contract allows a suggestion without the
+            // member, and a persona that set none is one that predates
+            // #121 or is not the first-party SDK. But a reply going out
+            // undisclosed while the switch is on is worth one line.
+            warn!(
+                suggestion = %suggestion.event_id,
+                persona = %suggestion.persona_id,
+                "this suggestion carries no disclosure, so the reply goes out without one: the \
+                 Gateway composes no sentence of its own (ADR 0031)"
+            );
+        }
         let approval = Approval {
             suggestion,
             trigger,
             approved_by: self.owner.clone(),
             content,
             edited,
+            disclosure,
         };
         let event_id = approval.event_id();
 
@@ -1402,6 +1507,7 @@ impl Approvals {
             network = approval.trigger.network.as_str(),
             target = %approval.trigger.target.describe(),
             edited = approval.edited,
+            disclosed = approval.disclosure.is_some(),
             stream_sequence = sequence,
             "approved a suggestion: the reply is on the bus"
         );
@@ -1494,6 +1600,7 @@ impl Approvals {
                 body: document.data.suggestion.body,
                 format,
             },
+            disclosure: contract_sentence(document.data.disclosure)?,
             expires_at: document.data.expires_at,
             traceparent: document.traceparent,
             stream_sequence: sequence,
@@ -1777,6 +1884,63 @@ pub struct Approved {
     pub stream_sequence: u64,
 }
 
+/// Whether a body and the sentence appended after it fit the contract's
+/// `final.body` (ticket #121).
+///
+/// The edited path cannot get here over the limit — [`parse_content`] caps
+/// the body at [`MAX_BODY`] — but the **unedited** path sends the
+/// suggestion's own body, and the suggestion schema still allows 65 536:
+/// a third-party persona that ignored the SDK's cap can publish a body the
+/// sentence no longer fits after. That is refused rather than the sentence
+/// withheld, because a reply going out undisclosed is the one outcome ADR
+/// 0031 exists to prevent — a suggestion that cannot be disclosed is one
+/// that should not exist — and refused as `suggestion_unreadable` rather
+/// than `malformed_request`, because the request was fine: what this
+/// Gateway cannot turn into a contract event is the suggestion. The user's
+/// way out is the edited path, which caps the body so the line always fits.
+fn fits_with_disclosure(body: &str, sentence: &str) -> bool {
+    body.chars().count() + 1 + sentence.chars().count() <= CONTRACT_MAX_BODY
+}
+
+/// The suggestion's `data.disclosure` as this Gateway will append it: one
+/// of the contract's five sentences, verbatim, or none — never anything
+/// else (ticket #121, ADR 0031).
+///
+/// The schema says only `string, 1..200`, and the reference bus has no
+/// authentication, so without this check anything that can publish a
+/// suggestion — a third-party persona, or anything on the bus — could put
+/// two hundred characters of its own after the user's reply, in the block
+/// the approval screen draws as *fixed* and trains the user not to read,
+/// and this Gateway would send it. ADR 0031's guarantee is that the model
+/// never writes the sentence so it cannot be argued out of it; a sentence
+/// the contract does not hold is refused for the same reason and in the
+/// same shape as a body the line no longer fits after
+/// ([`fits_with_disclosure`]): `suggestion_unreadable`, because the request
+/// was fine and what cannot be turned into a contract event is the
+/// suggestion — and refused rather than sent without the line, since a reply
+/// going out undisclosed is the outcome the ADR exists to prevent. An empty
+/// string is refused with the rest: the schema does not allow one either.
+///
+/// The text itself is not echoed: the refusal names the contract file and
+/// the length, which is what an operator needs to find the persona that
+/// published it, and a forged sentence is not something to relay to a
+/// screen.
+fn contract_sentence(member: Option<String>) -> Result<Option<String>, Refusal> {
+    match member {
+        None => Ok(None),
+        Some(sentence) if crate::disclosure::is_contract_sentence(&sentence) => Ok(Some(sentence)),
+        Some(other) => Err(Refusal::SuggestionUnreadable(format!(
+            "its disclosure is not one of the contract's sentences: {} characters that \
+             contracts/disclosure/v1/sentences.json does not hold, verbatim, in any of its {} \
+             languages. What a contact is told is the contract's own sentence and never a \
+             persona's wording (ADR 0031), so this Gateway will not append it, and will not \
+             send the reply without it either",
+            other.chars().count(),
+            crate::disclosure::languages().len()
+        ))),
+    }
+}
+
 /// Whether an RFC 3339 instant is at or before another.
 ///
 /// Compared as instants rather than as strings: a suggestion's `expires_at`
@@ -1816,6 +1980,7 @@ mod tests {
                 body: "Pas de problème, à 20h !".to_owned(),
                 format: Format::Plain,
             },
+            disclosure: Some("Rédigé avec mon assistant IA.".to_owned()),
             expires_at: Some("2026-09-17T11:00:00Z".to_owned()),
             traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_owned()),
             stream_sequence: 42,
@@ -1841,6 +2006,7 @@ mod tests {
             approved_by: "@michel:example.com".to_owned(),
             content: suggestion().suggestion,
             edited: false,
+            disclosure: None,
         };
         let mut hasher = Sha256::new();
         hasher.update(format!("{}:@michel:example.com", "a".repeat(64)).as_bytes());
@@ -1926,6 +2092,7 @@ mod tests {
                 format: Format::Plain,
             },
             edited: true,
+            disclosure: Some("Rédigé avec mon assistant IA.".to_owned()),
         };
         let event = approval.envelope("2026-09-17T10:04:37.000Z");
         assert_eq!(event["type"], json!(REPLY_APPROVED_TYPE));
@@ -1950,6 +2117,122 @@ mod tests {
         assert_eq!(
             event["traceparent"],
             json!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
+        // The disclosure: after the body, on a line of its own, and named
+        // again as a member so a consumer need not parse the body (#121).
+        assert_eq!(
+            event["data"]["final"]["body"],
+            json!("Pas de problème, à 20h ! 👍\nRédigé avec mon assistant IA."),
+            "the contract's own fixture: body, newline, sentence"
+        );
+        assert_eq!(
+            event["data"]["disclosure"],
+            json!("Rédigé avec mon assistant IA.")
+        );
+    }
+
+    #[test]
+    fn with_the_switch_off_the_event_carries_neither_the_line_nor_the_member() {
+        let approval = Approval {
+            suggestion: suggestion(),
+            trigger: trigger(),
+            approved_by: "@michel:example.com".to_owned(),
+            content: suggestion().suggestion,
+            edited: false,
+            disclosure: None,
+        };
+        let event = approval.envelope("2026-09-17T10:04:37.000Z");
+        assert_eq!(
+            event["data"]["final"]["body"],
+            json!("Pas de problème, à 20h !"),
+            "the suggestion carried a sentence, and the switch being off means it is not sent"
+        );
+        assert!(
+            event["data"].get("disclosure").is_none(),
+            "an absent member, not a null: the schema closes `data` and a bus that recorded a \
+             disclosure nobody received would be lying about what the contact got"
+        );
+        assert_eq!(event["data"]["edited"], json!(false));
+    }
+
+    #[test]
+    fn the_body_cap_leaves_room_for_the_disclosure_line() {
+        assert_eq!(MAX_BODY, 65_335, "65536, less a newline and 200 characters");
+        let longest = "x".repeat(MAX_BODY);
+        assert!(parse_content(&json!({ "body": longest })).is_ok());
+        let refusal = parse_content(&json!({ "body": "x".repeat(MAX_BODY + 1) }))
+            .expect_err("one over is refused before the disclosure is appended");
+        assert_eq!(refusal.code(), "malformed_request");
+        assert!(
+            refusal.message().contains("disclosure"),
+            "{}",
+            refusal.message()
+        );
+        assert!(refusal.message().contains("65335"), "{}", refusal.message());
+        // And the sum never exceeds the schema, whatever the sentence.
+        let appended =
+            crate::disclosure::append(&longest, &"y".repeat(crate::disclosure::MAX_CHARS));
+        assert_eq!(appended.chars().count(), CONTRACT_MAX_BODY);
+    }
+
+    #[test]
+    fn an_unedited_body_the_sentence_no_longer_fits_after_is_refused_not_undisclosed() {
+        let sentence = "Rédigé avec mon assistant IA.";
+        // The SDK's cap, and every body under it: the line always fits.
+        assert!(fits_with_disclosure(&"x".repeat(MAX_BODY), sentence));
+        assert!(fits_with_disclosure(
+            &"x".repeat(MAX_BODY),
+            &"y".repeat(crate::disclosure::MAX_CHARS)
+        ));
+        // A contract-valid suggestion from a persona that ignored the cap.
+        assert!(!fits_with_disclosure(
+            &"x".repeat(CONTRACT_MAX_BODY),
+            sentence
+        ));
+        assert!(fits_with_disclosure(
+            &"x".repeat(CONTRACT_MAX_BODY - 1 - sentence.chars().count()),
+            sentence
+        ));
+        assert!(!fits_with_disclosure(
+            &"x".repeat(CONTRACT_MAX_BODY - sentence.chars().count()),
+            sentence
+        ));
+    }
+
+    #[test]
+    fn a_disclosure_the_contract_does_not_hold_is_refused_not_appended_and_not_withheld() {
+        // The contract's own, verbatim: read as it is. None: none.
+        assert_eq!(
+            contract_sentence(Some("Rédigé avec mon assistant IA.".to_owned())).unwrap(),
+            Some("Rédigé avec mon assistant IA.".to_owned())
+        );
+        assert_eq!(contract_sentence(None).unwrap(), None);
+        // A persona's own wording, the length of a real sentence and
+        // contract-valid on the bus (`string, 1..200`): what a rogue
+        // persona would put after the user's reply. Refused as
+        // `suggestion_unreadable` — the request was fine — with the contract
+        // file named and the text not echoed.
+        let forged = "Written by an assistant you can trust.";
+        assert_eq!(forged.chars().count(), 38);
+        let refusal = contract_sentence(Some(forged.to_owned()))
+            .expect_err("a sentence outside the contract is refused");
+        assert_eq!(refusal.code(), "suggestion_unreadable");
+        assert_eq!(refusal.status(), axum::http::StatusCode::CONFLICT);
+        let message = refusal.message();
+        assert!(
+            message.contains("contracts/disclosure/v1/sentences.json"),
+            "{message}"
+        );
+        assert!(message.contains("38 characters"), "{message}");
+        assert!(
+            !message.contains(forged),
+            "the forged text is not relayed: {message}"
+        );
+        assert!(message.contains("Nothing was sent"), "{message}");
+        // And the empty string the schema refuses is refused here too.
+        assert_eq!(
+            contract_sentence(Some(String::new())).unwrap_err().code(),
+            "suggestion_unreadable"
         );
     }
 
@@ -1976,6 +2259,9 @@ mod tests {
                 format: Format::Plain,
             },
             edited: false,
+            // The switch is not what this test is about; a mail reply
+            // carries the disclosure exactly as a room reply does (#121).
+            disclosure: None,
         };
         let event = approval.envelope("2026-09-21T08:20:11Z");
         let fixture: Value = serde_json::from_str(include_str!(

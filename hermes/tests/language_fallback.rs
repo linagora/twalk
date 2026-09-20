@@ -68,8 +68,16 @@ async fn the_users_language_is_the_fallback_and_never_the_rule() -> Result<()> {
     let suggest = run.wait_for(SUGGEST_TYPE, &trigger_id).await?;
     validate_against_contract(&suggest.payload, "persona.suggest.produced")?;
 
+    // The reply request: the one that mentions the message. The language
+    // ask that follows it (ADR 0031) is about the reply and carries no
+    // preference at all — the fallback governs what the persona writes, and
+    // the ask is about what it wrote.
     let requests = run.llm_requests_mentioning(&marker);
-    assert_eq!(requests.len(), 1, "one message, one completion request");
+    assert_eq!(
+        requests.len(),
+        1,
+        "one message, one completion request about it (the language ask is about the reply)"
+    );
     let prompt = requests[0].body["messages"][0]["content"]
         .as_str()
         .expect("the persona frames the request with a system prompt")
@@ -112,6 +120,36 @@ async fn the_users_language_is_the_fallback_and_never_the_rule() -> Result<()> {
         1,
         "the user's language is named once, in the fallback, and nowhere else: \
          {prompt}"
+    );
+
+    // 3. The language ask comes *after* the reply and is not told the
+    //    preference: the disclosure's language is what the model wrote in,
+    //    which the ask reads off the reply, and never the fallback — a
+    //    French sentence under an English reply is the failure ADR 0031
+    //    names.
+    let all = run.llm.requests();
+    assert_eq!(all.len(), 2, "the reply, then the language ask");
+    let ask = &all[1];
+    assert!(
+        ask.is_language_ask(),
+        "the second request is the ask: {}",
+        ask.body
+    );
+    assert_eq!(
+        ask.last_message_content(),
+        Some(REPLY),
+        "the ask is about the reply the persona wrote: {}",
+        ask.body
+    );
+    assert!(
+        !ask.body.to_string().contains("French") && !ask.body.to_string().contains(&marker),
+        "the ask carries neither the preference nor the message: {}",
+        ask.body
+    );
+    assert_eq!(
+        suggest.payload["data"]["disclosure"],
+        json!("Rédigé avec mon assistant IA."),
+        "and the sentence follows the language the model answered for the reply"
     );
 
     // And the persona said, at startup, what it would do with an ambiguous

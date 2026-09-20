@@ -44,6 +44,15 @@
 //! there — never from this file. See the migration's own comment and
 //! [`crate::approval`].
 //!
+//! Ticket #121 added `disclosure_decision`, and it is the one table here
+//! that is a journal *because* it is not a setting: ADR 0019 requires that
+//! turning off the sentence a persona's reply discloses itself with be a
+//! recorded deliberate act, so it is append-only by the consent journal's own
+//! triggers, carries the same `occurred_at`/`actor`/`reason`, and its current
+//! state is its last row — no row meaning **on**. It is deliberately neither
+//! the consent journal itself nor the settings table (ADR 0031); see
+//! [`crate::disclosure`].
+//!
 //! The schema migrations are embedded in the binary ([`MIGRATIONS`]) and
 //! applied at open, so an operator upgrades the image and nothing else.
 //!
@@ -62,6 +71,7 @@ use crate::bridge_status::ContractState;
 use crate::consent::{
     Decision, Effective, Network, OldState, Recorded, State, Subject, SubjectType,
 };
+use crate::disclosure::DisclosureState;
 use crate::owner::Owner;
 
 /// The store's file inside the Gateway's state directory. A companion `-wal`
@@ -73,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 9] = [
+pub const MIGRATIONS: [&str; 10] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -645,6 +655,42 @@ pub const MIGRATIONS: [&str; 9] = [
         FROM connection_status_change c
     )
     WHERE recency = 1;
+    "#,
+    // v10 — the disclosure switch (ticket #121, ADR 0019, ADR 0031).
+    //
+    // A journal, not a setting. ADR 0019 requires that removing the sentence
+    // a persona's reply discloses itself with be "a recorded deliberate act",
+    // and a single-row upsert with an `updated_at` — the settings table's
+    // shape — forgets who decided and what the state was before. So this is
+    // a sibling of `consent_decision`: append-only by the same triggers,
+    // the same `occurred_at`/`actor`/`reason` columns, and the current state
+    // is its last row. Deliberately **not** the consent journal itself: the
+    // disclosure is not a decision about a subject, has no scope and no
+    // envelope, and folding it in would give it a consent event it is not.
+    //
+    // No row means **on**. The disclosure ships on by default (ADR 0031), and
+    // what this table records is every decision to turn it off and back —
+    // so a deployment that never touched it has an empty table and a true
+    // answer, not a seeded row pretending somebody decided.
+    r#"
+    CREATE TABLE disclosure_decision (
+        sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+        new_state   TEXT NOT NULL CHECK (new_state IN ('on', 'off')),
+        occurred_at TEXT NOT NULL,
+        -- The deployment's owner, as a consent decision's actor is: the one
+        -- person who can take this decision (ADR 0011).
+        actor       TEXT NOT NULL,
+        reason      TEXT
+    );
+
+    CREATE TRIGGER disclosure_decision_no_delete BEFORE DELETE ON disclosure_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the disclosure decision journal is append-only');
+    END;
+    CREATE TRIGGER disclosure_decision_no_update BEFORE UPDATE ON disclosure_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the disclosure decision journal is append-only');
+    END;
     "#,
 ];
 
@@ -1954,6 +2000,68 @@ impl Store {
     }
 
     // -----------------------------------------------------------------
+    // The disclosure switch (ticket #121)
+    // -----------------------------------------------------------------
+
+    /// Appends one decision to the disclosure journal and answers the state
+    /// it leaves behind.
+    ///
+    /// Every call appends, including one that restates the current state:
+    /// "the user confirmed it is on, on this date" is a fact the journal may
+    /// hold, and collapsing it would make the journal a projection of itself.
+    pub fn record_disclosure_decision(
+        &self,
+        enabled: bool,
+        occurred_at: &str,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<DisclosureState> {
+        self.connection()
+            .execute(
+                "INSERT INTO disclosure_decision (new_state, occurred_at, actor, reason) \
+                 VALUES (?, ?, ?, ?)",
+                rusqlite::params![DisclosureState::word(enabled), occurred_at, actor, reason],
+            )
+            .context("failed to record the disclosure decision")?;
+        self.disclosure_state()
+    }
+
+    /// The switch as it stands: the journal's last row, or the default when
+    /// the journal is empty — **on**, since nobody decided otherwise
+    /// (ADR 0031).
+    pub fn disclosure_state(&self) -> Result<DisclosureState> {
+        let connection = self.connection();
+        let row = connection
+            .query_row(
+                "SELECT new_state, occurred_at, actor, reason FROM disclosure_decision \
+                 ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .context("failed to read the disclosure journal")?;
+        let Some((new_state, occurred_at, actor, reason)) = row else {
+            return Ok(DisclosureState::DEFAULT);
+        };
+        let enabled = DisclosureState::enabled_from(&new_state).ok_or_else(|| {
+            anyhow::anyhow!("the disclosure journal holds the state {new_state:?}")
+        })?;
+        Ok(DisclosureState {
+            enabled,
+            since: Some(occurred_at),
+            actor: Some(actor),
+            reason,
+        })
+    }
+
+    // -----------------------------------------------------------------
     // The pending-contact projection (ticket #54)
     // -----------------------------------------------------------------
 
@@ -2898,6 +3006,82 @@ mod tests {
                 [],
             )
             .expect("the outbox marks its own progress");
+    }
+
+    #[test]
+    fn the_disclosure_is_on_until_somebody_decides_and_the_journal_keeps_every_decision() {
+        let store = store("disclosure");
+        assert_eq!(
+            store.disclosure_state().unwrap(),
+            DisclosureState::DEFAULT,
+            "no row is on, and nobody decided (ADR 0031)"
+        );
+
+        let off = store
+            .record_disclosure_decision(
+                false,
+                "2026-09-20T10:00:00.000Z",
+                OWNER,
+                Some("a test of the switch"),
+            )
+            .unwrap();
+        assert_eq!(
+            off,
+            DisclosureState {
+                enabled: false,
+                since: Some("2026-09-20T10:00:00.000Z".to_owned()),
+                actor: Some(OWNER.to_owned()),
+                reason: Some("a test of the switch".to_owned()),
+            }
+        );
+        assert_eq!(store.disclosure_state().unwrap(), off);
+
+        // Back on: a new row, and the earlier one stays. The record answers
+        // "since when and who decided" for the current state, and the
+        // journal answers it for every state there ever was.
+        let on = store
+            .record_disclosure_decision(true, "2026-09-20T11:00:00.000Z", OWNER, None)
+            .unwrap();
+        assert!(on.enabled);
+        assert_eq!(on.since.as_deref(), Some("2026-09-20T11:00:00.000Z"));
+        assert_eq!(on.reason, None);
+        let rows: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM disclosure_decision", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn the_disclosure_journal_is_append_only() {
+        let store = store("disclosure-append-only");
+        store
+            .record_disclosure_decision(false, "2026-09-20T10:00:00.000Z", OWNER, None)
+            .unwrap();
+        let connection = store.connection();
+        assert!(
+            connection
+                .execute("DELETE FROM disclosure_decision", [])
+                .is_err(),
+            "a disclosure decision cannot be deleted"
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE disclosure_decision SET new_state = 'on' WHERE sequence = 1",
+                    []
+                )
+                .is_err(),
+            "a disclosure decision cannot be rewritten"
+        );
+        assert!(
+            connection
+                .execute("UPDATE disclosure_decision SET reason = 'edited'", [])
+                .is_err(),
+            "not even its reason: every column of this journal is the decision"
+        );
     }
 
     #[test]

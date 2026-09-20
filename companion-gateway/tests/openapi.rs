@@ -181,6 +181,20 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "500",
         "store_unavailable, as above",
     ),
+    // The disclosure journal (#121) is in the consent store: the same
+    // missing seam. `store::tests` and `settings_http::tests` cover the shapes.
+    (
+        "get",
+        "/api/settings/disclosure",
+        "500",
+        "store_unavailable needs the consent store to fail under a running process: the same fault-injection seam this suite does not have",
+    ),
+    (
+        "put",
+        "/api/settings/disclosure",
+        "500",
+        "store_unavailable, as above",
+    ),
     // Hermes's answer webhook (#206). What this suite reaches without bus
     // state is exercised above; the four below need a bus in a particular
     // state, and `tests/hermes_answers.rs` puts it there.
@@ -1587,6 +1601,16 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/language",
             "/api/settings/language",
         ),
+        (
+            Method::GET,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+        ),
         // As the snapshot above: a different reason — no service token
         // rather than no device token — and deliberately the same answer.
         (
@@ -2227,6 +2251,27 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     assert_eq!(runtime.body["language"], json!("fr"));
     drop(llm);
 
+    // The disclosure switch (#121) is not a setting: its journal is in the
+    // consent store, and this Gateway has no bus and therefore none — nor
+    // an approval path for the switch to govern. The consent routes' own
+    // word, so a client learns one fact under one code.
+    for (method, body) in [
+        (Method::GET, None),
+        (Method::PUT, Some(json!({ "enabled": false }))),
+    ] {
+        call.check(
+            method,
+            &base,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+            &settings_cookie,
+            body,
+            503,
+            Some("consent_not_configured"),
+        )
+        .await?;
+    }
+
     gateway.stop().await;
 
     // --- a Gateway an operator has not finished configuring: no owner, and
@@ -2326,6 +2371,16 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::GET,
             "/api/settings/runtime",
             "/api/settings/runtime",
+        ),
+        (
+            Method::GET,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
         ),
     ] {
         call.check(
@@ -2992,6 +3047,78 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("malformed_request"),
     )
     .await?;
+
+    // --- the disclosure switch (#121), on the same Gateway, because its
+    // journal is the consent store's. On by default with nobody having
+    // decided; off as a dated, attributed row; and a request that is not one
+    // decision refused with the member named. Its behaviour on an approval
+    // is `tests/disclosure.rs`'s.
+    let switch = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        switch.body,
+        json!({ "enabled": true, "since": null, "actor": null, "reason": null }),
+        "the default is on, and the nulls say nobody decided: {}",
+        switch.body
+    );
+    let off = call
+        .check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+            &deciding_cookie,
+            Some(json!({ "enabled": false, "reason": "the conformance suite" })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(off.body["enabled"], json!(false));
+    assert_eq!(
+        off.body["actor"].as_str(),
+        Some(owner.user_id.as_str()),
+        "the actor is the owner, stamped by the Gateway: {}",
+        off.body
+    );
+    assert!(off.body["since"].is_string(), "{}", off.body);
+    assert_eq!(off.body["reason"], json!("the conformance suite"));
+    call.check(
+        Method::PUT,
+        &consenting_base,
+        "/api/settings/disclosure",
+        "/api/settings/disclosure",
+        &deciding_cookie,
+        Some(json!({ "disclosure": false })),
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
+    // Back on, so that nothing this suite approves afterwards goes out
+    // undisclosed on the shared bus.
+    let on = call
+        .check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/disclosure",
+            "/api/settings/disclosure",
+            &deciding_cookie,
+            Some(json!({ "enabled": true })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(on.body["enabled"], json!(true));
+    assert_eq!(on.body["reason"], Value::Null);
 
     // --- reading suggestions (#97), on the same Gateway and the same bus:
     // the listing the approval screen draws from, and one suggestion by id.
@@ -4118,6 +4245,38 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             .contains("ADR 0031"),
         "the refusal says which decision it is keeping: {}",
         refused.body
+    );
+
+    // A language the contract holds no disclosure sentence for (#121).
+    // Refused before the bus is asked anything, and no suggestion at all: a
+    // reply that cannot be disclosed is one that should not exist (ADR
+    // 0031). The refusal names the five, so it reads as the one-line
+    // contribution it is asking for.
+    let japanese = harness::hermes_push(&harness::hermes_answer(
+        &good_reference,
+        "はい、20時に。",
+        Some("ja"),
+    ));
+    let unsupported = call
+        .check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/answers",
+            "/_twalk/hermes/answers",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&japanese).as_str(),
+            )],
+            &japanese,
+            422,
+            Some("hermes_answer_language_unsupported"),
+        )
+        .await?;
+    let detail = unsupported.body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("\"ja\"") && detail.contains("de, en, es, fr, it"),
+        "the refusal names the language and the five that have a sentence: {}",
+        unsupported.body
     );
 
     // A push over the endpoint's limit. Signed, so that what is being

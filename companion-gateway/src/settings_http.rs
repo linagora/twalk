@@ -1,11 +1,12 @@
 //! The settings' HTTP surface: the model configuration, the user's native
-//! language, the probe that says why an endpoint is not working, and the one
-//! read the Hermes runtime makes (ticket #98).
+//! language, the probe that says why an endpoint is not working, the one
+//! read the Hermes runtime makes (ticket #98) — and, since ticket #121, the
+//! disclosure switch.
 //!
 //! # Who is calling
 //!
-//! Six of the seven operations are the owner's browser and are behind #52's
-//! guard like everything else under `/api/`. The seventh,
+//! All but one of the operations are the owner's browser and are behind
+//! #52's guard like everything else under `/api/`. The exception,
 //! `GET /api/settings/runtime`, is the **Hermes runtime** — a service, not a
 //! device, with no Matrix OpenID token to sign in with — so it presents the
 //! same service token the consent snapshot takes (#50), which this module
@@ -44,6 +45,21 @@
 //! operator's money: it sends one completion of one token to the configured
 //! endpoint, and it does so only when a human asks. It sends `ping` and no
 //! message content ever reaches it.
+//!
+//! # The disclosure switch is not a setting
+//!
+//! `GET`/`PUT /api/settings/disclosure` (ticket #121) live on this surface
+//! because a settings screen is where a user looks for them, and they are
+//! deliberately **not** in the settings store: ADR 0019 requires that
+//! turning the disclosure off be a recorded deliberate act, so a `PUT`
+//! appends a dated, attributed row to an append-only journal beside the
+//! consent journal ([`crate::store`]) and the `GET` reads its last row — or
+//! answers **on** when there is none, which is the default and the state of
+//! every deployment that never touched it. The `actor` is the deployment's
+//! owner, stamped here from configuration exactly as a consent decision's
+//! is, never from the body. That journal is in the consent store, so on a
+//! deployment with no bus these two answer `503 consent_not_configured`:
+//! there is no approval path for the switch to govern.
 
 use std::time::Duration;
 
@@ -82,6 +98,10 @@ pub fn routes() -> Router<Gateway> {
         .route(
             "/api/settings/language",
             get(read_language).put(write_language),
+        )
+        .route(
+            "/api/settings/disclosure",
+            get(read_disclosure).put(write_disclosure),
         )
         .route("/api/settings/runtime", get(runtime_settings))
 }
@@ -451,6 +471,115 @@ async fn write_language(
     Json(language_json(language)).into_response()
 }
 
+/// `GET /api/settings/disclosure` — the switch as the journal answers it.
+///
+/// ```json
+/// {
+///   "enabled": false,
+///   "since": "2026-09-20T10:04:37.000Z",
+///   "actor": "@michel:example.com",
+///   "reason": "a test"
+/// }
+/// ```
+///
+/// `since`, `actor` and `reason` are `null` while nobody has decided, which
+/// is the default state — `enabled: true` — and not a gap: the record
+/// answers "since when and who" for a decision, and there was none.
+async fn read_disclosure(State(gateway): State<Gateway>) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return disclosure_not_configured();
+    };
+    match consent.store().disclosure_state() {
+        Ok(state) => Json(disclosure_json(&state)).into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the disclosure journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the disclosure journal could not be read",
+            )
+        }
+    }
+}
+
+/// `PUT /api/settings/disclosure` — `{"enabled": false, "reason": "…"}`.
+///
+/// Appends a row and answers the state it left behind. Every call appends,
+/// including one restating the current state: the journal is the record of
+/// what the user decided and when, not a projection to keep tidy.
+async fn write_disclosure(
+    State(gateway): State<Gateway>,
+    Extension(device): Extension<Device>,
+    body: String,
+) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return disclosure_not_configured();
+    };
+    let body: Value = match serde_json::from_str(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                &format!("the request body is not JSON: {error}"),
+            )
+        }
+    };
+    let update = match crate::disclosure::parse_update(&body) {
+        Ok(update) => update,
+        Err(invalid) => {
+            debug!(
+                code = invalid.code(),
+                device = %device.id,
+                "refused a disclosure decision"
+            );
+            return api_error(StatusCode::BAD_REQUEST, invalid.code(), invalid.message());
+        }
+    };
+    // The actor is the owner, from configuration: the one person who can
+    // take this decision (ADR 0011), and never a name the body supplies.
+    let actor = gateway.owner();
+    let occurred_at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    let state = match consent.store().record_disclosure_decision(
+        update.enabled,
+        &occurred_at,
+        &actor,
+        update.reason.as_deref(),
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            error!(%error, "failed to record the disclosure decision");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the disclosure decision could not be recorded; nothing was changed",
+            );
+        }
+    };
+    gateway.metrics().set_disclosure_enabled(state.enabled);
+    if state.enabled {
+        info!(
+            actor = %actor,
+            device = %device.id,
+            "the disclosure is on: every approved reply carries the sentence ADR 0019 \
+             requires, after the body, in the language the reply was written in"
+        );
+    } else {
+        // `warn`, not `info`: a reply going out undisclosed is a legitimate
+        // decision and a fact an operator reading the log should not have to
+        // look for.
+        warn!(
+            actor = %actor,
+            device = %device.id,
+            reason = update.reason.is_some(),
+            "the disclosure was turned OFF: approved replies go out without the sentence ADR \
+             0019 requires until it is turned on again. Recorded in the disclosure journal \
+             with who decided and when"
+        );
+    }
+    Json(disclosure_json(&state)).into_response()
+}
+
 /// `GET /api/settings/runtime` — everything the Hermes runtime injects into
 /// a persona's environment, in one read.
 ///
@@ -546,6 +675,16 @@ fn language_json(language: Option<Language>) -> Value {
     })
 }
 
+/// The switch, as both routes answer it: `openapi.yaml`'s `DisclosureState`.
+fn disclosure_json(state: &crate::disclosure::DisclosureState) -> Value {
+    json!({
+        "enabled": state.enabled,
+        "since": state.since,
+        "actor": state.actor,
+        "reason": state.reason,
+    })
+}
+
 /// The runtime's document: the one read on this origin that carries the
 /// credential, because its caller is what puts it in a persona's
 /// environment.
@@ -590,6 +729,19 @@ fn store_unavailable() -> Response {
         StatusCode::INTERNAL_SERVER_ERROR,
         "store_unavailable",
         "the settings could not be read",
+    )
+}
+
+/// The disclosure journal lives in the consent store, which exists exactly
+/// when the bus is configured — and with no bus there is no approval path
+/// for the switch to govern. The consent routes' own code, so a client
+/// learns one fact under one word.
+fn disclosure_not_configured() -> Response {
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "consent_not_configured",
+        "this Gateway has no consent store, so it keeps no disclosure journal and approves \
+         nothing the switch could govern: set GATEWAY_NATS_URL (and GATEWAY_OWNER)",
     )
 }
 
@@ -726,6 +878,30 @@ mod tests {
             .to_string()
             .contains("sk-the-operators-key"));
         let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn the_disclosure_document_says_on_with_nobody_deciding_and_off_with_who_and_when() {
+        use crate::disclosure::DisclosureState;
+        assert_eq!(
+            disclosure_json(&DisclosureState::DEFAULT),
+            json!({ "enabled": true, "since": null, "actor": null, "reason": null }),
+            "the default is on, and the nulls say nobody decided rather than that nothing is known"
+        );
+        assert_eq!(
+            disclosure_json(&DisclosureState {
+                enabled: false,
+                since: Some("2026-09-20T10:04:37.000Z".to_owned()),
+                actor: Some("@michel:example.com".to_owned()),
+                reason: None,
+            }),
+            json!({
+                "enabled": false,
+                "since": "2026-09-20T10:04:37.000Z",
+                "actor": "@michel:example.com",
+                "reason": null
+            })
+        );
     }
 
     #[test]

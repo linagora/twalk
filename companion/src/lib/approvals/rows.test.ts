@@ -41,6 +41,7 @@ function suggestion(over: Partial<Suggestion> = {}): Suggestion {
 			event_type: 'fr.linagora.twalk.inbound.message.received.v1'
 		},
 		suggestion: { body: 'Pas de problème, à 20h !', format: 'text/plain' },
+		disclosure: 'Rédigé avec mon assistant IA.',
 		stream_sequence: 42,
 		approval: null,
 		delivery: { reach: 'unknown', detail: 'not_a_known_portal' },
@@ -336,5 +337,29 @@ describe('published is not delivered (#216)', () => {
 			})
 		);
 		expect(postedCopy(nobody)).toBe('approvals.posted.nobody');
+	});
+});
+
+describe('the disclosure (#121)', () => {
+	it('is carried beside the body, and never inside it', () => {
+		// ADR 0031: a field of its own on the event, appended by the Gateway at
+		// approval. The body stays the persona's words alone — it is what the
+		// editor opens on — and the sentence is the one line the user cannot
+		// edit, so a row keeps them as two members and nothing here joins them.
+		const row = toRow(suggestion());
+		expect(row.disclosure).toBe('Rédigé avec mon assistant IA.');
+		expect(row.body).toBe('Pas de problème, à 20h !');
+		expect(row.body).not.toContain(row.disclosure);
+		expect(Object.keys(row)).not.toContain('final');
+		expect(Object.keys(row)).not.toContain('outgoing');
+	});
+
+	it('is null when the suggestion carries none, and the body is still the body', () => {
+		// One published before the member existed, or by a persona that set
+		// none: the reply then goes out undisclosed, and the screen says so
+		// rather than inventing a sentence the Gateway would not append.
+		const row = toRow(suggestion({ disclosure: null }));
+		expect(row.disclosure).toBeNull();
+		expect(row.body).toBe('Pas de problème, à 20h !');
 	});
 });

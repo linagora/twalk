@@ -89,6 +89,15 @@ async fn an_approved_reply_is_posted_as_a_threaded_reply_and_echoes_back() -> Re
         .as_str()
         .unwrap()
         .to_owned();
+    // The contract's fixture carries the disclosure the Companion Gateway
+    // appended at approval (ADR 0031, #121): the reply, a newline, the
+    // sentence. Stated here so that the equality below is knowingly about
+    // it — the Sensor posts the body as it is, line and all, and composes
+    // nothing of its own.
+    assert_eq!(
+        final_body, "Pas de problème, à 20h ! 👍\nRédigé avec mon assistant IA.",
+        "the fixture's final body is the approved draft with the disclosure on its own line"
+    );
     bus.publish_event(REPLY_APPROVED_SUBJECT, &approved).await?;
 
     // The Sensor posts the final content as a native reply to the original
