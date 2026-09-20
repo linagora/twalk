@@ -242,7 +242,31 @@ async fn run(config: Config) -> Result<()> {
                 consent.clone(),
             )
         })
-        .transpose()?;
+        .transpose()?
+        .map(Arc::new);
+    // The access token, shared with the reply consumer (#278): the run loop
+    // keeps it fresh, the consumer sends with whatever is current, and
+    // waits when there is none.
+    let shared_access: Arc<tokio::sync::RwLock<Option<twalk_collector::oidc::AccessToken>>> =
+        Arc::default();
+    if let Some(mailbox) = &mailbox {
+        tokio::spawn(consume_approvals(
+            jetstream.clone(),
+            mailbox.clone(),
+            config
+                .connections
+                .iter()
+                .map(|held| held.id.clone())
+                .collect(),
+            config.owner_email.clone(),
+            shared_access.clone(),
+            metrics.clone(),
+            RetryPolicy {
+                base: config.send_retry_base,
+                max_attempts: config.send_retry_max_attempts,
+            },
+        ));
+    }
 
     let client = Client::discover(config.oidc.clone()).await?;
     let mut trackers: Vec<Tracker> = config
@@ -352,6 +376,7 @@ async fn run(config: Config) -> Result<()> {
                 }
             }
         };
+        *shared_access.write().await = access.clone();
         // One observation of the grant, published per connection it holds:
         // a calendar connection whose service refused gets its own words.
         let occurred_at = twalk_collector::oidc::now_rfc3339();
@@ -616,6 +641,251 @@ fn registry_ids(document: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Consumes `persona.reply.approved` durably and sends the approvals whose
+/// target is a mail connection this process holds (#278), with the Sensor's
+/// retry policy: a transient failure is redelivered with a growing delay, a
+/// permanent one — or the last allowed attempt — is dead-lettered with the
+/// reason, and a sent reply is reported on the `.posted` subject with
+/// `reach=contact`. Never returns: a consumer that fails is rebuilt.
+#[derive(Clone, Copy)]
+struct RetryPolicy {
+    base: Duration,
+    max_attempts: i64,
+}
+
+async fn consume_approvals(
+    jetstream: async_nats::jetstream::Context,
+    mailbox: Arc<twalk_collector::mails::Mailbox>,
+    held: Vec<String>,
+    owner_email: String,
+    access: Arc<tokio::sync::RwLock<Option<twalk_collector::oidc::AccessToken>>>,
+    metrics: Arc<Metrics>,
+    retry: RetryPolicy,
+) {
+    loop {
+        match run_approval_consumer(
+            &jetstream,
+            &mailbox,
+            &held,
+            &owner_email,
+            &access,
+            &metrics,
+            retry,
+        )
+        .await
+        {
+            Ok(()) => error!("the approval stream ended; rebuilding the consumer"),
+            Err(error) => error!(%error, "the approval consumer failed; rebuilding it"),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+async fn run_approval_consumer(
+    jetstream: &async_nats::jetstream::Context,
+    mailbox: &twalk_collector::mails::Mailbox,
+    held: &[String],
+    owner_email: &str,
+    access: &tokio::sync::RwLock<Option<twalk_collector::oidc::AccessToken>>,
+    metrics: &Metrics,
+    retry: RetryPolicy,
+) -> Result<()> {
+    use futures::StreamExt;
+    use twalk_collector::outbound::{self, Parsed, SendError};
+    let stream = jetstream
+        .get_stream("twalk")
+        .await
+        .context("failed to get the twalk stream")?;
+    // Created at `New`: an approval published before this collector first
+    // ran cannot target a connection it publishes for, since the trigger it
+    // answers came from this collector. A durable created earlier resumes
+    // at its own ack floor.
+    let name = outbound::reply_consumer(&mailbox.connection);
+    let consumer = stream
+        .get_or_create_consumer(
+            &name,
+            async_nats::jetstream::consumer::pull::Config {
+                durable_name: Some(name.clone()),
+                filter_subject: status::bus_subject(outbound::REPLY_APPROVED_TYPE),
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::New,
+                ..Default::default()
+            },
+        )
+        .await
+        .context("failed to ensure the approval consumer")?;
+    info!(consumer = %name, "consuming approved replies");
+    let mut messages = consumer
+        .messages()
+        .await
+        .context("failed to open the approval stream")?;
+    while let Some(message) = messages.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(%error, "approval stream error, continuing");
+                continue;
+            }
+        };
+        let delivered = message.info().map(|info| info.delivered).unwrap_or(1);
+        let event: serde_json::Value = match serde_json::from_slice(&message.payload) {
+            Ok(event) => event,
+            Err(error) => {
+                error!(%error, "an approval that is not JSON; dead-lettering");
+                dead_letter(jetstream, &message, "not JSON", metrics).await;
+                continue;
+            }
+        };
+        let reply = match outbound::ApprovedReply::parse(&event, held) {
+            Ok(Parsed::Ours(reply)) => reply,
+            Ok(Parsed::NotOurs { why }) => {
+                debug!(%why, "an approval that is not this collector's");
+                if let Err(error) = message.ack().await {
+                    warn!(%error, "ack failed on another component's approval");
+                }
+                continue;
+            }
+            Err(error) => {
+                error!(%error, "an unusable approval; dead-lettering");
+                dead_letter(jetstream, &message, &format!("{error:#}"), metrics).await;
+                continue;
+            }
+        };
+        let Some(token) = access.read().await.clone() else {
+            let delay = outbound::retry_delay(retry.base, delivered);
+            warn!(id = %reply.event_id, ?delay, "no access token to send the reply with; retrying later");
+            if let Err(error) = message
+                .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
+                .await
+            {
+                warn!(%error, "nak failed");
+            }
+            continue;
+        };
+        match mailbox.send_reply(&reply, &token.token).await {
+            Ok(()) => {
+                metrics.record_published("persona.reply.approved.posted");
+                report_posted(jetstream, &message, &reply.event_id, owner_email).await;
+                if let Err(error) = message.ack().await {
+                    warn!(id = %reply.event_id, %error, "ack failed after a sent reply");
+                }
+                info!(
+                    id = %reply.event_id,
+                    connection = %reply.connection,
+                    in_reply_to = %reply.in_reply_to,
+                    traceparent = reply.traceparent.as_deref(),
+                    "sent an approved reply from the owner's mailbox"
+                );
+            }
+            Err(SendError::Permanent(why)) => {
+                error!(id = %reply.event_id, %why, "an approved reply can never be sent; dead-lettering");
+                dead_letter(jetstream, &message, &why, metrics).await;
+            }
+            Err(SendError::Transient(why)) if delivered >= retry.max_attempts => {
+                error!(id = %reply.event_id, %why, delivered, "an approved reply exhausted its retries; dead-lettering");
+                dead_letter(jetstream, &message, &why, metrics).await;
+            }
+            Err(SendError::Transient(why)) => {
+                let delay = outbound::retry_delay(retry.base, delivered);
+                warn!(id = %reply.event_id, %why, delivered, ?delay, "an approved reply could not be sent; retrying");
+                if let Err(error) = message
+                    .ack_with(async_nats::jetstream::AckKind::Nak(Some(delay)))
+                    .await
+                {
+                    warn!(%error, "nak failed");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The dead-letter copy of an approval, on `<subject>.dead`, the event
+/// unchanged and the reason in a header — then the original acked, since it
+/// will never be sent.
+async fn dead_letter(
+    jetstream: &async_nats::jetstream::Context,
+    message: &async_nats::jetstream::Message,
+    reason: &str,
+    metrics: &Metrics,
+) {
+    use twalk_collector::outbound;
+    let event_id = serde_json::from_slice::<serde_json::Value>(&message.payload)
+        .ok()
+        .and_then(|event| {
+            event
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let mut headers = async_nats::header::HeaderMap::new();
+    headers.insert(
+        async_nats::header::NATS_MESSAGE_ID,
+        outbound::dead_letter_msg_id(&event_id).as_str(),
+    );
+    headers.insert(outbound::EVENT_ID_HEADER, event_id.as_str());
+    headers.insert(
+        "reason",
+        reason.chars().take(512).collect::<String>().as_str(),
+    );
+    match jetstream
+        .publish_with_headers(
+            outbound::dead_letter_subject(),
+            headers,
+            message.payload.clone(),
+        )
+        .await
+    {
+        Ok(ack) => {
+            if let Err(error) = ack.await {
+                warn!(%event_id, %error, "dead-letter publish was not acked");
+            } else {
+                metrics.record_published("persona.reply.approved.dead");
+            }
+        }
+        Err(error) => warn!(%event_id, %error, "dead-letter publish failed"),
+    }
+    if let Err(error) = message.ack().await {
+        warn!(%event_id, %error, "ack failed after dead-lettering");
+    }
+}
+
+/// The reach report (#216): the approval republished unchanged on
+/// `<subject>.posted`, `reach=contact` and `posted-as` the owner's own
+/// address — a mail from the owner's mailbox reaches the contact by
+/// construction, which is the whole point of ADR 0037.
+async fn report_posted(
+    jetstream: &async_nats::jetstream::Context,
+    message: &async_nats::jetstream::Message,
+    event_id: &str,
+    owner_email: &str,
+) {
+    use twalk_collector::outbound;
+    let mut headers = async_nats::header::HeaderMap::new();
+    headers.insert(
+        async_nats::header::NATS_MESSAGE_ID,
+        outbound::posted_msg_id(event_id).as_str(),
+    );
+    headers.insert(outbound::EVENT_ID_HEADER, event_id);
+    headers.insert(outbound::POSTED_REACH_HEADER, "contact");
+    headers.insert(
+        outbound::POSTED_AS_HEADER,
+        twalk_collector::caldav::owner_mailto(owner_email).as_str(),
+    );
+    match jetstream
+        .publish_with_headers(outbound::posted_subject(), headers, message.payload.clone())
+        .await
+    {
+        Ok(ack) => {
+            if let Err(error) = ack.await {
+                warn!(%event_id, %error, "the reach report was not acked");
+            }
+        }
+        Err(error) => warn!(%event_id, %error, "the reach report could not be published"),
+    }
 }
 
 async fn serve_metrics(listener: tokio::net::TcpListener, metrics: Arc<Metrics>) {

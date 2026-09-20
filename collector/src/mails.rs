@@ -21,6 +21,7 @@ use tracing::{info, warn};
 use twalk_consent_cache::ConsentCache;
 
 use crate::jmap::{self, Changes, Dropped, Envelopes, Mail, Session};
+use crate::outbound::{ApprovedReply, SendError};
 use crate::side::{self, SideError};
 
 /// The mail connection this process holds, and what publishing about it
@@ -231,6 +232,113 @@ impl Mailbox {
             ..previous
         });
         Ok(poll)
+    }
+
+    /// Sends an approved reply from the owner's mailbox (#278): the mail
+    /// answered is found again by its Message-ID, the owner's identity and
+    /// the Sent and Drafts mailboxes looked up, then `Email/set` and
+    /// `EmailSubmission/set` in one request. What a retry may fix is
+    /// `Transient`; what it cannot — the original gone, the submission
+    /// refused, no identity of the owner's — is `Permanent`.
+    pub async fn send_reply(&self, reply: &ApprovedReply, token: &str) -> Result<(), SendError> {
+        let transient = |error: SideError| SendError::Transient(error.to_string());
+        let session = Session::parse(
+            &self
+                .get(&self.session_url, token)
+                .await
+                .map_err(transient)?,
+        )
+        .map_err(|error| {
+            SendError::Transient(format!("the JMAP session cannot be read: {error:#}"))
+        })?;
+        let account = session.account_id.as_str();
+        let response = self
+            .call(
+                &session.api_url,
+                token,
+                vec![
+                    jmap::mailbox_get(account),
+                    jmap::identity_get(account),
+                    jmap::email_by_message_id(account, &reply.in_reply_to),
+                ],
+            )
+            .await
+            .map_err(transient)?;
+        let mailboxes = method(&response, 0).map_err(transient)?;
+        let sent_id = jmap::mailbox_with_role(&mailboxes, "sent").ok_or_else(|| {
+            SendError::Permanent("the JMAP server lists no Sent mailbox".to_owned())
+        })?;
+        let drafts_id =
+            jmap::mailbox_with_role(&mailboxes, "drafts").unwrap_or_else(|| sent_id.clone());
+        let identity_id = jmap::identity_for(&method(&response, 1).map_err(transient)?, &self.owner_email)
+            .ok_or_else(|| {
+                SendError::Permanent(format!(
+                    "the JMAP server offers no sending identity for {}: the reply cannot leave as the owner",
+                    self.owner_email
+                ))
+            })?;
+        let found = method(&response, 2).map_err(transient)?;
+        let original_id = found
+            .get("ids")
+            .and_then(Value::as_array)
+            .and_then(|ids| ids.first())
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                SendError::Permanent(format!(
+                    "the mail {} the reply answers is no longer in the mailbox",
+                    reply.in_reply_to
+                ))
+            })?
+            .to_owned();
+        let response = self
+            .call(
+                &session.api_url,
+                token,
+                vec![jmap::email_get(account, &[original_id])],
+            )
+            .await
+            .map_err(transient)?;
+        let original = method(&response, 0)
+            .map_err(transient)?
+            .get("list")
+            .and_then(Value::as_array)
+            .and_then(|list| list.first())
+            .map(Mail::parse)
+            .transpose()
+            .map_err(|error| {
+                SendError::Permanent(format!("the mail answered cannot be read: {error:#}"))
+            })?
+            .ok_or_else(|| {
+                SendError::Permanent("the mail answered could not be read back".to_owned())
+            })?;
+        let calls = crate::outbound::reply_calls(
+            reply,
+            &original,
+            account,
+            &identity_id,
+            &self.owner_email,
+            &drafts_id,
+            &sent_id,
+        );
+        let response = self
+            .call(&session.api_url, token, calls)
+            .await
+            .map_err(transient)?;
+        let created = method(&response, 0).map_err(transient)?;
+        if created.pointer("/created/reply").is_none() {
+            return Err(SendError::Permanent(format!(
+                "the JMAP server did not create the reply: {}",
+                created.get("notCreated").cloned().unwrap_or(Value::Null)
+            )));
+        }
+        let submitted = method(&response, 1).map_err(transient)?;
+        if submitted.pointer("/created/submission").is_none() {
+            return Err(SendError::Permanent(format!(
+                "the JMAP server refused the submission: {}",
+                submitted.get("notCreated").cloned().unwrap_or(Value::Null)
+            )));
+        }
+        Ok(())
     }
 
     async fn get(&self, url: &str, token: &str) -> Result<Value, SideError> {

@@ -108,7 +108,7 @@ pub const EMAIL_PROPERTIES: &[&str] = &[
 /// One JMAP request, RFC 8620 §3.3: the `using` list and the calls.
 pub fn request(calls: Vec<(&str, Value)>) -> Value {
     json!({
-        "using": ["urn:ietf:params:jmap:core", MAIL_CAPABILITY],
+        "using": ["urn:ietf:params:jmap:core", MAIL_CAPABILITY, crate::outbound::SUBMISSION_CAPABILITY],
         "methodCalls": calls
             .into_iter()
             .enumerate()
@@ -161,6 +161,57 @@ pub fn email_get(account_id: &str, ids: &[String]) -> (&'static str, Value) {
             "maxBodyValueBytes": 262144
         }),
     )
+}
+
+/// `Identity/get`: the owner's sending identities (RFC 8621 §6).
+pub fn identity_get(account_id: &str) -> (&'static str, Value) {
+    (
+        "Identity/get",
+        json!({ "accountId": account_id, "ids": null }),
+    )
+}
+
+/// `Email/query` for the mail with a Message-ID (#278): the mail a reply
+/// answers, found again by the one identifier the approval carries.
+pub fn email_by_message_id(account_id: &str, message_id: &str) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "header": ["Message-ID", message_id] },
+            "limit": 1
+        }),
+    )
+}
+
+/// The id of the identity whose address is the owner's, off `Identity/get`.
+pub fn identity_for(identity_get: &Value, owner_email: &str) -> Option<String> {
+    let owner = owner_email.trim().to_ascii_lowercase();
+    identity_get
+        .get("list")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|identity| {
+            identity
+                .get("email")
+                .and_then(Value::as_str)
+                .is_some_and(|email| email.trim().eq_ignore_ascii_case(&owner))
+        })
+        .and_then(|identity| identity.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// A mailbox's id by role (`sent`, `drafts`), off `Mailbox/get`.
+pub fn mailbox_with_role(mailbox_get: &Value, role: &str) -> Option<String> {
+    mailbox_get
+        .get("list")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|mailbox| mailbox.get("role").and_then(Value::as_str) == Some(role))
+        .and_then(|mailbox| mailbox.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// The result of the `index`th call of a response, or the error the server
@@ -738,6 +789,11 @@ impl Envelopes {
         });
         if !mail.received_at.is_empty() {
             data["network_timestamp"] = json!(mail.received_at);
+        }
+        // The mail's own Message-ID (#278): an identifier the sending server
+        // minted, what a reply is threaded under — carried on both shapes.
+        if let Some(message_id) = &mail.message_id {
+            data["message_id"] = json!(message_id);
         }
         if let Some(root) = &mail.thread_root {
             data["thread_root"] = json!(root);

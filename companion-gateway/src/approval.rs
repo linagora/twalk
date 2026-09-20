@@ -374,23 +374,62 @@ pub struct Suggestion {
     pub stream_sequence: u64,
 }
 
-/// The half of the trigger event an approval needs: who wrote, and which
-/// room to answer in.
+/// The half of the trigger event an approval needs: who wrote, and where to
+/// answer.
 ///
 /// Four values, and the struct has no `data` member — so the trigger's body,
 /// its attachments and the contact's `network_identifier` never become values
-/// in this process, exactly as they do not on the pending-contact path.
+/// in this process, exactly as they do not on the pending-contact path. The
+/// one field read under `data` is a mail's `message_id` (#278): an
+/// identifier the sending server minted, not the sender's words, and the
+/// only thing a reply to a mail can be threaded under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trigger {
-    /// The sender's Matrix user ID: the contact whose consent is checked.
+    /// The sender: a Matrix user ID, or a `mailto:` on the mail connection
+    /// (#276) — the contact whose consent is checked.
     pub contact: String,
     /// The perimeter the message arrived on — what the consent is read
     /// against (#270).
     pub connection: String,
     pub network: Network,
-    /// The portal room the reply is posted into, from the event's
-    /// `matrix://<homeserver>/<room id>` source.
-    pub room_id: String,
+    /// Where the reply goes: the portal room, or the mail connection.
+    pub target: Target,
+}
+
+/// Where an approved reply is sent, by whom (ADR 0033: one shape per kind).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A portal room, from the event's `matrix://<homeserver>/<room id>`
+    /// source: the Sensor posts it as the owner's device.
+    Room { room_id: String },
+    /// A mail connection, from a `jmap://` source (#278): the collector
+    /// holding the connection sends it from the owner's own mailbox, in
+    /// reply to the trigger mail's Message-ID.
+    Mail {
+        connection: String,
+        in_reply_to: String,
+    },
+}
+
+impl Target {
+    /// The contract's `data.target`.
+    pub fn json(&self) -> Value {
+        match self {
+            Target::Room { room_id } => json!({ "room_id": room_id }),
+            Target::Mail {
+                connection,
+                in_reply_to,
+            } => json!({ "connection": connection, "in_reply_to": in_reply_to }),
+        }
+    }
+
+    /// One word for the log line.
+    pub fn describe(&self) -> String {
+        match self {
+            Target::Room { room_id } => format!("room {room_id}"),
+            Target::Mail { connection, .. } => format!("mail connection {connection}"),
+        }
+    }
 }
 
 /// The connection an event on the bus belongs to: the one it carries — which
@@ -488,6 +527,16 @@ struct TriggerDocument {
     /// The perimeter (#269); absent on an event older than it.
     #[serde(default)]
     connection: Option<String>,
+    /// The one member of `data` this path reads: a mail's own Message-ID
+    /// (#278). Every other member is left in the bytes.
+    #[serde(default)]
+    data: TriggerData,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct TriggerData {
+    #[serde(default)]
+    message_id: Option<String>,
 }
 
 /// The trigger event as a suggestion built **outside** a persona needs it
@@ -575,12 +624,14 @@ impl Approval {
     /// event carries the one the contract asks for: "consent state of the
     /// original sender, copied from the trigger event".
     ///
-    /// `target.reply_to_event_id` is deliberately absent. The contract's
-    /// inbound event does not carry its own Matrix event ID — only the id of
-    /// a message it was itself a reply to — so there is nothing here to
-    /// thread under, and the contract makes the field optional. The reply
-    /// lands in the room; it is not a native Matrix reply. Inventing an id
-    /// would be worse than the gap, and the gap is named in ADR 0022.
+    /// On a room target, `reply_to_event_id` is deliberately absent. The
+    /// contract's inbound event does not carry its own Matrix event ID — only
+    /// the id of a message it was itself a reply to — so there is nothing
+    /// there to thread under, and the contract makes the field optional. The
+    /// reply lands in the room; it is not a native Matrix reply. Inventing an
+    /// id would be worse than the gap, and the gap is named in ADR 0022. A
+    /// mail target (#278) has what a room does not: the mail's own
+    /// Message-ID, so a reply to a mail *is* threaded.
     pub fn envelope(&self, produced_at: &str) -> Value {
         let mut event = json!({
             "specversion": "1.0",
@@ -603,7 +654,7 @@ impl Approval {
                     "format": self.content.format.as_str(),
                 },
                 "edited": self.edited,
-                "target": { "room_id": self.trigger.room_id },
+                "target": self.trigger.target.json(),
             }
         });
         // Continued from the suggestion when it carries one, so a message's
@@ -645,8 +696,8 @@ pub enum Refusal {
         trigger_event_id: String,
         window: u64,
     },
-    /// The trigger event's `source` is not a portal room, so there is
-    /// nowhere to send the reply.
+    /// The trigger event's `source` is neither a portal room nor a mailbox,
+    /// so there is nowhere to send the reply.
     TriggerHasNoRoom { source: String },
     /// The suggestion is on the bus and this build cannot read it — an
     /// unknown network, an unknown consent state, a content type the
@@ -772,8 +823,9 @@ impl Refusal {
                  searched. GATEWAY_APPROVAL_LOOKUP_WINDOW widens the search"
             ),
             Refusal::TriggerHasNoRoom { source } => format!(
-                "the trigger event names the source {source:?}, which is not a portal room \
-                 (matrix://<homeserver>/<room id>): there is nowhere to send the reply"
+                "the trigger event names the source {source:?}, which is neither a portal room \
+                 (matrix://<homeserver>/<room id>) nor a mailbox (jmap://<host>/<account>/<inbox>): \
+                 there is nowhere to send the reply"
             ),
             Refusal::SuggestionUnreadable(detail) => format!(
                 "the suggestion is on the bus and this Gateway cannot read it: {detail}. Nothing \
@@ -896,7 +948,10 @@ impl Approvals {
     /// lookup an approval makes, which is anchored on the suggestion it
     /// already found. There is no suggestion to anchor on here: the answer is
     /// what will create one.
-    pub async fn trigger_envelope(&self, trigger_event_id: &str) -> Result<TriggerEnvelope, Refusal> {
+    pub async fn trigger_envelope(
+        &self,
+        trigger_event_id: &str,
+    ) -> Result<TriggerEnvelope, Refusal> {
         let jetstream = self.jetstream().await.map_err(|error| {
             warn!(%error, "the bus did not answer a trigger lookup");
             Refusal::BusUnreachable(format!("{error:#}"))
@@ -1260,7 +1315,7 @@ impl Approvals {
             suggestion = %approval.suggestion.event_id,
             persona = %approval.suggestion.persona_id,
             network = approval.trigger.network.as_str(),
-            room = %approval.trigger.room_id,
+            target = %approval.trigger.target.describe(),
             edited = approval.edited,
             stream_sequence = sequence,
             "approved a suggestion: the reply is on the bus"
@@ -1277,12 +1332,7 @@ impl Approvals {
     /// and the extensions duplicated as headers — the same shape the
     /// Sensor and the SDK publish with, so a consumer filtering on headers
     /// sees this event like any other.
-    async fn publish(
-        &self,
-        event_id: &str,
-        envelope: &Value,
-        approval: &Approval,
-    ) -> Result<u64> {
+    async fn publish(&self, event_id: &str, envelope: &Value, approval: &Approval) -> Result<u64> {
         let mut extensions = vec![
             ("network", approval.suggestion.network.as_str()),
             ("connection", approval.suggestion.connection.as_str()),
@@ -1404,15 +1454,34 @@ impl Approvals {
                 })
             }
         };
-        let room_id = room_from_source(&document.source).ok_or(Refusal::TriggerHasNoRoom {
-            source: document.source.clone(),
-        })?;
         let network = Network::parse(&document.network).unwrap_or(suggestion.network);
+        let connection = connection_of(&self.connections, document.connection.as_deref(), network)?;
+        // A room to post into, or a mail to reply to: the source says which
+        // (ADR 0033), and a mail without its Message-ID cannot be answered
+        // in its thread — refused rather than sent as a new conversation.
+        let target = match room_from_source(&document.source) {
+            Some(room_id) => Target::Room { room_id },
+            None if document.source.starts_with("jmap://") => Target::Mail {
+                connection: connection.clone(),
+                in_reply_to: document.data.message_id.clone().ok_or_else(|| {
+                    Refusal::SuggestionUnreadable(
+                        "the trigger is a mail without a Message-ID: the reply has nothing to \
+                         thread under"
+                            .to_owned(),
+                    )
+                })?,
+            },
+            None => {
+                return Err(Refusal::TriggerHasNoRoom {
+                    source: document.source.clone(),
+                })
+            }
+        };
         Ok(Trigger {
             contact: document.subject,
-            connection: connection_of(&self.connections, document.connection.as_deref(), network)?,
+            connection,
             network,
-            room_id,
+            target,
         })
     }
 
@@ -1656,7 +1725,9 @@ mod tests {
             contact: "@whatsapp_33612345678:example.com".to_owned(),
             connection: "whatsapp".to_owned(),
             network: Network::Whatsapp,
-            room_id: "!abcXYZ123:example.com".to_owned(),
+            target: Target::Room {
+                room_id: "!abcXYZ123:example.com".to_owned(),
+            },
         }
     }
 
@@ -1713,6 +1784,52 @@ mod tests {
             event["traceparent"],
             json!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
         );
+    }
+
+    #[test]
+    fn a_mail_triggers_approval_targets_the_mail_connection_in_its_thread() {
+        // #278: the contract's second target shape, which the collector
+        // sends and the Sensor leaves alone. The fixture's data is the
+        // Gateway's own.
+        let approval = Approval {
+            suggestion: suggestion(),
+            trigger: Trigger {
+                contact: "mailto:alice@example.org".to_owned(),
+                connection: "mail-linagora".to_owned(),
+                network: Network::Email,
+                target: Target::Mail {
+                    connection: "mail-linagora".to_owned(),
+                    in_reply_to: "<9b8c7d6e-1@example.org>".to_owned(),
+                },
+            },
+            approved_by: "@michel:example.com".to_owned(),
+            content: Content {
+                body: "Oui, lundi 9h me va.".to_owned(),
+                format: Format::Plain,
+            },
+            edited: false,
+        };
+        let event = approval.envelope("2026-09-21T08:20:11Z");
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../contracts/cloudevents/v1/fixtures/variants/persona.reply.approved/mail.json"
+        ))
+        .unwrap();
+        assert_eq!(event["data"]["target"], fixture["data"]["target"]);
+        assert!(event["data"]["target"].get("room_id").is_none());
+        // And the reader: a mailbox source with a Message-ID is a mail
+        // target; without one, refused rather than answered out of thread.
+        let with: TriggerDocument = serde_json::from_value(json!({
+            "id": "x", "source": "jmap://mail.example.com/u1/inbox-1",
+            "subject": "mailto:alice@example.org", "network": "email",
+            "connection": "mail-linagora",
+            "data": { "message_id": "<9b8c7d6e-1@example.org>", "body": "never a value here" }
+        }))
+        .unwrap();
+        assert_eq!(
+            with.data.message_id.as_deref(),
+            Some("<9b8c7d6e-1@example.org>")
+        );
+        assert!(room_from_source(&with.source).is_none());
     }
 
     #[test]
@@ -1830,7 +1947,10 @@ mod tests {
             "matrix",
             "the native connection every registry has"
         );
-        for (network, reason_names) in [(Network::Whatsapp, "2 connections"), (Network::Telegram, "no connection")] {
+        for (network, reason_names) in [
+            (Network::Whatsapp, "2 connections"),
+            (Network::Telegram, "no connection"),
+        ] {
             match connection_of(&registry, Some(""), network) {
                 Err(Refusal::SuggestionUnreadable(reason)) => {
                     assert!(reason.contains(reason_names), "{reason}");

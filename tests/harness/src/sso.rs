@@ -328,6 +328,16 @@ impl FakeSso {
         self.lock().mails.deliver(mailbox, mail)
     }
 
+    /// Every reply the collector submitted through the fake (#278).
+    pub fn submissions(&self) -> Vec<crate::jmap_fake::Submission> {
+        self.lock().mails.submissions()
+    }
+
+    /// Makes `EmailSubmission/set` refuse every submission — or stops.
+    pub fn refuse_submissions(&self, refuse: bool) {
+        self.lock().mails.refuse_submissions(refuse);
+    }
+
     /// Every Email id whose content the collector read, in order.
     pub fn mails_read(&self) -> Vec<String> {
         self.lock().mails.read_ids()
@@ -508,7 +518,11 @@ fn respond_json(
         ("POST", "/jmap/api") => match admit("jmap", request, guard) {
             Admission::Silent => None,
             Admission::Refused(status, body) => Some((status, body)),
-            Admission::Account(_) => Some(crate::jmap_fake::api(&request.body, &mut guard.mails)),
+            Admission::Account(account) => Some(crate::jmap_fake::api(
+                &request.body,
+                &mut guard.mails,
+                &account,
+            )),
         },
         // The OpenPaaS shape: the owner's id (what the calendar paths are
         // under) and `preferredEmail`.

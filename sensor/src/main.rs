@@ -2473,7 +2473,17 @@ async fn run_approved_reply_consumer(
             .context("payload is not valid JSON")
             .and_then(|event| outbound::ApprovedReply::parse(&event))
         {
-            Ok(job) => job,
+            Ok(outbound::Parsed::Ours(job)) => job,
+            Ok(outbound::Parsed::AnotherComponents { connection }) => {
+                // The collector's to send (#278): acknowledged untouched, so
+                // one subject serves two senders without either dead-
+                // lettering the other's work.
+                info!(%connection, "an approved reply for a mail connection: the collector's, not the Sensor's");
+                if let Err(error) = message.ack().await {
+                    warn!(%error, "ack failed on another component's approval");
+                }
+                continue;
+            }
             Err(error) => {
                 // A malformed event can never be delivered: dead-letter it
                 // on the spot instead of burning retries.

@@ -186,6 +186,22 @@ impl Bus {
     /// Every message stored on a subject after `after` (a sequence from
     /// `head`), in stream order.
     pub async fn fetch_since(&self, stream: &str, subject: &str, after: u64) -> Result<Vec<Value>> {
+        Ok(self
+            .fetch_since_with_headers(stream, subject, after)
+            .await?
+            .into_iter()
+            .map(|message| message.payload)
+            .collect())
+    }
+
+    /// Like `fetch_since`, keeping the NATS headers — the collector's reach
+    /// reports and dead letters say what happened in headers (#216, #278).
+    pub async fn fetch_since_with_headers(
+        &self,
+        stream: &str,
+        subject: &str,
+        after: u64,
+    ) -> Result<Vec<StoredMessage>> {
         use async_nats::jetstream::stream::LastRawMessageErrorKind;
         let stream = self
             .jetstream
@@ -200,9 +216,19 @@ impl Bus {
         let mut out = Vec::new();
         for sequence in (after + 1)..=last {
             match stream.get_raw_message(sequence).await {
-                Ok(message) if message.subject.as_str() == subject => {
-                    out.push(serde_json::from_slice(&message.payload)?)
-                }
+                Ok(message) if message.subject.as_str() == subject => out.push(StoredMessage {
+                    headers: message
+                        .headers
+                        .iter()
+                        .flat_map(|(name, values)| {
+                            values
+                                .iter()
+                                .map(move |value| (name.to_string(), value.to_string()))
+                        })
+                        .collect(),
+                    payload: serde_json::from_slice(&message.payload)?,
+                    sequence: message.sequence,
+                }),
                 Ok(_) => {}
                 Err(e) if e.kind() == LastRawMessageErrorKind::NoMessageFound => {}
                 Err(e) => return Err(e).context("failed to fetch message"),

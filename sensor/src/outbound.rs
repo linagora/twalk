@@ -107,10 +107,26 @@ pub struct ApprovedReply {
     pub traceparent: Option<String>,
 }
 
+/// Whose an approval on the bus is: the Sensor's, when its target is a
+/// portal room, or another component's — the collector's, when the target
+/// is a mail connection (#278). Two components consume one subject, and
+/// each acknowledges the other's approvals untouched: an approval is never
+/// dead-lettered for being the other's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Parsed {
+    Ours(ApprovedReply),
+    /// A target this Sensor does not send to, named by the connection it is
+    /// for.
+    AnotherComponents {
+        connection: String,
+    },
+}
+
 impl ApprovedReply {
     /// Extracts the job from a contract event. A malformed event can never be
-    /// delivered, so the caller dead-letters it instead of retrying.
-    pub fn parse(event: &Value) -> Result<Self> {
+    /// delivered, so the caller dead-letters it instead of retrying; an event
+    /// whose target is another component's is neither — see [`Parsed`].
+    pub fn parse(event: &Value) -> Result<Parsed> {
         let event_id = event
             .get("id")
             .and_then(Value::as_str)
@@ -119,7 +135,14 @@ impl ApprovedReply {
         let data = event
             .get("data")
             .context("persona.reply.approved event has no data")?;
-        Ok(Self {
+        if data.pointer("/target/room_id").is_none() {
+            if let Some(connection) = data.pointer("/target/connection").and_then(Value::as_str) {
+                return Ok(Parsed::AnotherComponents {
+                    connection: connection.to_owned(),
+                });
+            }
+        }
+        Ok(Parsed::Ours(Self {
             event_id,
             room_id: required_str(data, "/target/room_id")?,
             reply_to_event_id: data
@@ -132,7 +155,7 @@ impl ApprovedReply {
                 .get("traceparent")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
-        })
+        }))
     }
 }
 
@@ -213,7 +236,9 @@ mod tests {
 
     #[test]
     fn parses_an_approved_reply() {
-        let job = ApprovedReply::parse(&sample_event()).unwrap();
+        let Parsed::Ours(job) = ApprovedReply::parse(&sample_event()).unwrap() else {
+            panic!("a room target is the Sensor's")
+        };
         assert_eq!(
             job.event_id,
             "57f0e4d352d1ba5e6bf0e92223634253cd852e3d7d018ea91025dc098c1a564a"
@@ -231,17 +256,23 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("reply_to_event_id");
-        let job = ApprovedReply::parse(&event).unwrap();
+        let Parsed::Ours(job) = ApprovedReply::parse(&event).unwrap() else {
+            panic!("a room target is the Sensor's")
+        };
         assert_eq!(job.reply_to_event_id, None);
     }
 
     #[test]
     fn the_traceparent_is_carried_when_present() {
-        let job = ApprovedReply::parse(&sample_event()).unwrap();
+        let Parsed::Ours(job) = ApprovedReply::parse(&sample_event()).unwrap() else {
+            panic!("a room target is the Sensor's")
+        };
         assert_eq!(job.traceparent, None);
         let mut event = sample_event();
         event["traceparent"] = json!("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
-        let job = ApprovedReply::parse(&event).unwrap();
+        let Parsed::Ours(job) = ApprovedReply::parse(&event).unwrap() else {
+            panic!("a room target is the Sensor's")
+        };
         assert_eq!(
             job.traceparent.as_deref(),
             Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
@@ -256,6 +287,16 @@ mod tests {
             .unwrap()
             .remove("room_id");
         assert!(ApprovedReply::parse(&no_room).is_err());
+        // A mail target (#278) is not malformed: it is the collector's, and
+        // the Sensor leaves it alone.
+        let mut mail = sample_event();
+        mail["data"]["target"] = json!({ "connection": "mail-linagora", "in_reply_to": "<a@b>" });
+        assert_eq!(
+            ApprovedReply::parse(&mail).unwrap(),
+            Parsed::AnotherComponents {
+                connection: "mail-linagora".to_owned()
+            }
+        );
 
         let mut no_body = sample_event();
         no_body["data"]["final"]
