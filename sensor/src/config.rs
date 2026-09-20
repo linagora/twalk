@@ -139,6 +139,20 @@ pub struct Config {
     /// `Authorization: Bearer` credential: the Sensor has no Matrix OpenID
     /// token to sign in with and is never given a device token (ADR 0011).
     pub gateway_service_token: Option<String>,
+    /// The bus's retention policy (issue #174, ADR 0037): how many days the
+    /// `twalk` stream keeps an event (SENSOR_BUS_MAX_AGE_DAYS, default 90),
+    /// how many bytes it may hold before the oldest events are discarded
+    /// (SENSOR_BUS_MAX_BYTES, default 2147483648, two GiB) and how many
+    /// seconds it remembers a `Nats-Msg-Id` for (SENSOR_BUS_DUPLICATE_WINDOW_SECONDS,
+    /// default 86400, a day). The stream holds contacts' messages, so the
+    /// first is a personal-data decision before it is a disk one; the third
+    /// is a correctness fix, since a restart re-syncs from Matrix and
+    /// republishes past the two minutes NATS remembers an id by default. A
+    /// value NATS would read as "no limit" — zero, or a negative size — is
+    /// refused at startup by name; see [`crate::bus`].
+    pub bus_max_age_days: u64,
+    pub bus_max_bytes: i64,
+    pub bus_duplicate_window_seconds: u64,
 }
 
 impl Config {
@@ -180,13 +194,38 @@ impl Config {
             bridge_bots: optional_list("SENSOR_BRIDGE_BOTS"),
             owner_device_access_token: optional_string("SENSOR_OWNER_DEVICE_ACCESS_TOKEN"),
             owner_device_id: optional_string("SENSOR_OWNER_DEVICE_ID"),
+            bus_max_age_days: optional(
+                "SENSOR_BUS_MAX_AGE_DAYS",
+                crate::bus::StreamPolicy::DEFAULT_MAX_AGE_DAYS,
+            )?,
+            bus_max_bytes: optional(
+                "SENSOR_BUS_MAX_BYTES",
+                crate::bus::StreamPolicy::DEFAULT_MAX_BYTES,
+            )?,
+            bus_duplicate_window_seconds: optional(
+                "SENSOR_BUS_DUPLICATE_WINDOW_SECONDS",
+                crate::bus::StreamPolicy::DEFAULT_DUPLICATE_WINDOW_SECONDS,
+            )?,
         };
         config.validate_credentials()?;
         config.validate_gateway()?;
         config.validate_owner()?;
         config.validate_bridge_bots()?;
         config.validate_owner_device()?;
+        config.stream_policy()?;
         Ok(config)
+    }
+
+    /// The bus's retention policy, from the three values above. Validated
+    /// at startup — `from_env` calls this and refuses a deployment on a value
+    /// NATS would read as "no limit" — so the Sensor fails with the variable
+    /// to fix rather than silently keeping every event for ever.
+    pub fn stream_policy(&self) -> Result<crate::bus::StreamPolicy> {
+        crate::bus::StreamPolicy::new(
+            self.bus_max_age_days,
+            self.bus_max_bytes,
+            self.bus_duplicate_window_seconds,
+        )
     }
 
     /// The operator, when the deployment named one: their Matrix ID and every

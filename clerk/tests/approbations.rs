@@ -79,9 +79,10 @@ async fn a_suggestion_becomes_one_post_and_stays_one() -> Result<()> {
         .await?;
 
     // The same event again — the bus deduplicates on `Nats-Msg-Id` for
-    // two minutes, so this is the same CloudEvent id under a new message
-    // id, which is what a redelivery is to the clerk. Then a second
-    // suggestion: its post proves the consumer went past the redelivery.
+    // the bus's duplicate window (24 h since #174), so this is the same
+    // CloudEvent id under a new message id, which is what a redelivery is
+    // to the clerk. Then a second suggestion: its post proves the consumer
+    // went past the redelivery.
     run.publish_again("persona.suggest.produced", &first)
         .await?;
     let second = suggestion(&run.id, 2, 3600)?;

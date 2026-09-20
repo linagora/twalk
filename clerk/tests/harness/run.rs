@@ -307,9 +307,10 @@ impl Run {
     }
 
     /// The same event a second time, under a **different** `Nats-Msg-Id`
-    /// (`<id>:again`): the bus deduplicates on that header for two minutes,
-    /// so a plain republish would never reach a consumer, and what a
-    /// redelivery looks like to the clerk is the same CloudEvent id twice.
+    /// (`<id>:again`): the bus deduplicates on that header for the bus's
+    /// duplicate window (24 h since #174), so a plain republish would never
+    /// reach a consumer, and what a redelivery looks like to the clerk is
+    /// the same CloudEvent id twice.
     pub async fn publish_again(&self, type_name: &str, event: &Value) -> Result<()> {
         validate_against_contract(event, type_name)?;
         self.bus

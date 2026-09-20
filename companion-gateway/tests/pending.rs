@@ -569,7 +569,7 @@ async fn a_sighting_the_registry_cannot_place_is_counted_and_said_not_silently_s
     publish(&bus, &foreign).await?;
     // A second copy of the same cause, then a placeable sighting whose
     // arrival proves the projection has read past both.
-    foreign["id"] = json!(harness::sha256_hex("pending-unplaced-second"));
+    foreign["id"] = json!(harness::sha256_hex(&unique("pending-unplaced-second")));
     foreign["time"] = json!("2026-09-17T10:00:01Z");
     publish(&bus, &foreign).await?;
     publish(

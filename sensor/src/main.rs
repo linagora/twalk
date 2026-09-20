@@ -42,7 +42,7 @@ use twalk_sensor::config::Config;
 use twalk_sensor::consent::{Consent, ConsentCache, ConsentSnapshotSource};
 use twalk_sensor::metrics::{DropReason, Metrics, OwnerDeviceInvite};
 use twalk_sensor::owner_device::Reach;
-use twalk_sensor::{connection, consent, network, normalize, outbound, owner_device};
+use twalk_sensor::{bus, connection, consent, network, normalize, outbound, owner_device};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -241,15 +241,11 @@ async fn main() -> Result<()> {
         .await
         .context("failed to connect to NATS")?;
     let jetstream = async_nats::jetstream::new(nats);
-    jetstream
-        .get_or_create_stream(async_nats::jetstream::stream::Config {
-            name: normalize::STREAM_NAME.to_owned(),
-            subjects: normalize::STREAM_SUBJECTS
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-            ..Default::default()
-        })
+    // The stream's retention policy (issue #174, ADR 0037): created with it,
+    // or reconciled onto an existing stream in place, field by field. A
+    // refused update is logged and the Sensor runs on the stream's existing
+    // policy; only a bus that cannot be asked at all is fatal here.
+    bus::ensure_stream(&jetstream, &config.stream_policy()?)
         .await
         .context("failed to ensure the twalk stream")?;
     info!(stream = normalize::STREAM_NAME, "bus ready");
