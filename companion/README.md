@@ -509,6 +509,48 @@ is what gets unlocked on a train, and an approval queue shows proposed text. So
 nothing else. `summary.test.ts` asserts the property on the value; the journey
 asserts it on the rendered page.
 
+### The outgoing message is shown whole, and the disclosure is switched off only on the record (#121)
+
+A reply a persona drafted reaches the contact with one sentence after it, on a
+line of its own, in the language the reply was written in — *"Rédigé avec mon
+assistant IA."* (ADR 0019, ADR 0031). The persona selects it, the suggestion
+carries it as a member of its own (`Suggestion.disclosure`), and the Gateway
+appends it to `final.body` at approval. So what the blockquote on `/approvals`
+shows is not what the contact receives, and the screen says the rest: the
+sentence stands under the body — and under the editor while editing — drawn as
+fixed and labelled *not editable here*, because it is not in the field the user
+edits and cannot be removed from one reply. `rows.ts` keeps `body` and
+`disclosure` as two members and `rows.test.ts` pins that nothing joins them.
+
+**When the switch is off, the screen says so** — ADR 0031's exact requirement.
+`/approvals` reads `GET /api/settings/disclosure` beside the listing and, when
+it answers off, the row says *"the disclosure is not added: turned off since
+<date>"* in place of the sentence, at the one moment the user is thinking about
+a particular message going to a particular person. A suggestion that carries no
+sentence at all is said to go out without one rather than given one, and a
+switch that could not be read is said to be unread rather than guessed on.
+Nothing on this origin composes the sentence.
+
+The switch itself is a card on `/settings`, beside the language card, and three
+things about it are deliberate. It shows the sentence **as an example in the
+interface's language** — the catalogues' copy of the contract's
+(`contracts/disclosure/v1/sentences.json`), pinned to that file by
+`i18n.test.ts` the way the SDK pins its own, since the Gateway image's Node
+stage cannot read the contract — with a note that the contact reads it in the
+language of the reply. It is a `role="switch"` and **one press is one journal
+row**: `PUT /api/settings/disclosure` appends a dated, attributed decision to
+the Gateway's own append-only journal, never overwrites a preference, and the
+state drawn afterwards is the Gateway's answer. And the record line keeps three
+states apart rather than two (`disclosureRecord` in `settings/model.ts`): on
+because nobody ever decided — the default, said as such rather than dated — on
+since a decision, and off since one, with the date formatted in the interface's
+locale from the instant the journal holds. `tests/e2e/dashboard/settings.spec.ts`
+switches it off and back on against the real Gateway; `tests/e2e/approvals/`
+publishes its suggestions with the sentence, reads the approved event back off
+NATS with `final.body` ending in it, and turns the switch off for one journey to
+read the reply going out bare — restoring it in a `finally`, because the switch
+is global to the bridge Gateway every project after `networks` shares.
+
 ### The picker describes where the user is, and asks before it says
 
 Screen 3 read "Connect your first network — step 1 of 3" to an owner with

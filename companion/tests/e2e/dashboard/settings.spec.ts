@@ -158,3 +158,69 @@ test('forgetting the model is a named act, and takes the credential with it', as
 	expect(served.configured).toBe(false);
 	expect(served.credential.configured).toBe(false);
 });
+
+test('the disclosure is on until switched off on the record, and the record says who and when', async ({
+	page
+}) => {
+	const it = stack!;
+	await page.goto('/settings');
+	const card = page.getByTestId('settings-disclosure');
+	await expect(card).toBeVisible();
+
+	// What the contact reads, as an example in this interface's language —
+	// the contract's own sentence, not a paraphrase (#121, ADR 0031).
+	await expect(card.getByTestId('disclosure-example')).toHaveText(
+		/^(Drafted with my AI assistant\.|Rédigé avec mon assistant IA\.)$/
+	);
+
+	// On by default, and the record says nobody ever decided rather than
+	// dating a decision nobody took (ADR 0019).
+	const toggle = card.getByTestId('disclosure-switch');
+	await expect(toggle).toHaveRole('switch');
+	await expect(toggle).toHaveAttribute('aria-checked', 'true');
+	await expect(card.getByTestId('disclosure-record')).toHaveAttribute('data-enabled', 'yes');
+	await expect(card.getByTestId('disclosure-record')).not.toContainText(it.ownerId);
+
+	// Off: one press, one journal row — dated, attributed to the owner, with
+	// the note kept and read back.
+	await card.getByTestId('disclosure-reason').fill('a test of the record');
+	await toggle.click();
+	await expect(toggle).toHaveAttribute('aria-checked', 'false');
+	await expect(card.getByTestId('disclosure-outcome')).toHaveAttribute('data-kind', 'saved');
+	const record = card.getByTestId('disclosure-record');
+	await expect(record).toHaveAttribute('data-enabled', 'no');
+	await expect(record).toContainText(/Off since|Désactivée depuis/);
+	await expect(record).toContainText(it.ownerId);
+	await expect(card.getByTestId('disclosure-reason-given')).toContainText('a test of the record');
+	// The note field is for the next decision, not a display of the last.
+	await expect(card.getByTestId('disclosure-reason')).toHaveValue('');
+	const off = (await (await page.request.get('/api/settings/disclosure')).json()) as {
+		enabled: boolean;
+		since: string | null;
+		actor: string | null;
+		reason: string | null;
+	};
+	expect(off.enabled).toBe(false);
+	expect(off.actor).toBe(it.ownerId);
+	expect(off.reason).toBe('a test of the record');
+	expect(off.since).not.toBeNull();
+	// The date on screen is the journal's instant, in this interface's
+	// locale: the year is the one thing every locale spells the same.
+	await expect(record).toContainText(String(new Date(off.since!).getUTCFullYear()));
+
+	// Back on — a second row, not an erased first one: the record now says
+	// since when it is on again, which is a different sentence from "never
+	// turned off". And it stays on for every journey after this one, which
+	// share this Gateway.
+	await toggle.click();
+	await expect(toggle).toHaveAttribute('aria-checked', 'true');
+	await expect(record).toHaveAttribute('data-enabled', 'yes');
+	await expect(record).toContainText(/On since|Activée depuis/);
+	await expect(record).toContainText(it.ownerId);
+	const on = (await (await page.request.get('/api/settings/disclosure')).json()) as {
+		enabled: boolean;
+		since: string | null;
+	};
+	expect(on.enabled).toBe(true);
+	expect(on.since).not.toBe(off.since);
+});

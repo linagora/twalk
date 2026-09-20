@@ -48,6 +48,14 @@ const SUGGEST_TYPE = 'fr.linagora.twalk.persona.suggest.produced.v1';
 const INBOUND_SUBJECT = 'twalk.inbound.message.received.v1';
 const SUGGEST_SUBJECT = 'twalk.persona.suggest.produced.v1';
 
+/**
+ * The contract's French sentence (`contracts/disclosure/v1/sentences.json`),
+ * which is what a persona writing in French selects (#121, ADR 0031). The
+ * bodies these journeys publish are French, so this is the sentence they
+ * carry unless a spec says otherwise.
+ */
+export const FRENCH_DISCLOSURE = 'Rédigé avec mon assistant IA.';
+
 /** A contract event id: 64 lowercase hex characters, and unique per run. */
 export function eventId(): string {
 	return randomBytes(32).toString('hex');
@@ -60,6 +68,8 @@ export interface PublishedSuggestion {
 	roomId: string;
 	/** The persona's proposed reply — the text the screen draws. */
 	body: string;
+	/** The sentence the reply discloses itself with, or `null` when it carries none. */
+	disclosure: string | null;
 	/** What the *contact* wrote, which must appear nowhere on any screen. */
 	inboundBody: string;
 	displayName: string;
@@ -75,6 +85,12 @@ export interface SuggestionOptions {
 	expiresAt?: string;
 	/** The consent label the Sensor observed. Default `granted`. */
 	observedConsent?: 'granted' | 'pending' | 'revoked';
+	/**
+	 * The disclosure the suggestion carries as `data.disclosure` (#121).
+	 * Default [`FRENCH_DISCLOSURE`]; `null` publishes one without the member,
+	 * as a persona from before it existed would.
+	 */
+	disclosure?: string | null;
 }
 
 /**
@@ -97,6 +113,7 @@ export async function publishSuggestion(
 	const displayName = `MARKER-NAME-${tag}`;
 	const networkIdentifier = `+3361${tag}`;
 	const observed = options.observedConsent ?? 'granted';
+	const disclosure = options.disclosure === undefined ? FRENCH_DISCLOSURE : options.disclosure;
 	const now = new Date();
 
 	await publish(options.natsPort, INBOUND_SUBJECT, {
@@ -138,7 +155,10 @@ export async function publishSuggestion(
 			trigger: { event_id: triggerId, event_type: INBOUND_TYPE },
 			suggestion: { body: options.body, format: 'text/plain' },
 			attempt: 1,
-			expires_at: options.expiresAt ?? new Date(now.getTime() + 3_600_000).toISOString()
+			expires_at: options.expiresAt ?? new Date(now.getTime() + 3_600_000).toISOString(),
+			// A field of its own, never inside the body (ADR 0031); the schema
+			// has no `null` for it, so an absent member is an absent member.
+			...(disclosure === null ? {} : { disclosure })
 		}
 	});
 
@@ -148,6 +168,7 @@ export async function publishSuggestion(
 		contact,
 		roomId,
 		body: options.body,
+		disclosure,
 		inboundBody,
 		displayName,
 		networkIdentifier
@@ -170,6 +191,26 @@ export async function decideAbout(
 		}
 	});
 	expect(answer.ok(), await answer.text()).toBeTruthy();
+}
+
+/**
+ * Turns the disclosure off, or back on, as the owner — one row appended to
+ * the Gateway's journal (#121). The switch is global to the Gateway, and the
+ * bridge origin is shared by every project after `networks`, so a spec that
+ * turns it off turns it back on in a `finally`.
+ */
+export async function switchDisclosure(
+	request: APIRequestContext,
+	token: string,
+	enabled: boolean,
+	reason?: string
+): Promise<{ enabled: boolean; since: string | null; actor: string | null }> {
+	const answer = await request.put('/api/settings/disclosure', {
+		headers: { cookie: `twalk_device=${token}` },
+		data: reason === undefined ? { enabled } : { enabled, reason }
+	});
+	expect(answer.ok(), await answer.text()).toBeTruthy();
+	return (await answer.json()) as { enabled: boolean; since: string | null; actor: string | null };
 }
 
 /**

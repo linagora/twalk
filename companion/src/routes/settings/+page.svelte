@@ -27,6 +27,17 @@
 	answering an English contact in French has been handed something they
 	cannot send.
 
+	The disclosure card (#121, ADR 0019, ADR 0031) is the one control over the
+	sentence every reply a persona drafted goes out with — "Rédigé avec mon
+	assistant IA." — and it is global and recorded, which the card says before
+	the switch is pressed: off is for every reply and never for one, and turning
+	it off writes a dated, attributed row in the Gateway's own journal, read back
+	here as "off since <date> by <actor>". The sentence the card shows is an
+	example in the interface's language; the contact reads it in the language
+	of the reply, and the note under it says so, because a French user who saw
+	the French sentence and assumed an English contact reads French would be
+	misled by the screen.
+
 	Tracing is not here. #101 asks for the OTLP endpoint and the content switch,
 	and the Gateway has no settings surface for either until #99 lands; a
 	control this screen could not store would be a promise, so a card says
@@ -36,24 +47,28 @@
 	import { onMount } from 'svelte';
 
 	import Icon from '$lib/icons/Icon.svelte';
-	import { setLocale, t, LOCALES, type Locale } from '$lib/i18n';
+	import { locale, setLocale, t, LOCALES, type Locale } from '$lib/i18n';
 	import {
 		forgetModel,
+		loadDisclosure,
 		loadLanguage,
 		loadModel,
 		probeModel,
+		saveDisclosure,
 		saveLanguage,
 		saveModel,
 		type Refused
 	} from '$lib/settings/api';
 	import {
 		credentialState,
+		disclosureRecord,
 		formOf,
 		LANGUAGE_NAMES,
 		probeFailureCopy,
 		refusalCopy,
 		requestOf,
 		type CredentialState,
+		type DisclosureState,
 		type FormProblem,
 		type Language,
 		type ModelConfiguration,
@@ -75,16 +90,23 @@
 	let form = $state<ModelForm>({ baseUrl: '', model: '', credential: '', params: '' });
 	let advanced = $state(false);
 	let formProblems = $state<FormProblem[]>([]);
-	let busy = $state<'save' | 'forget' | 'probe' | 'language' | null>(null);
+	let busy = $state<'save' | 'forget' | 'probe' | 'language' | 'disclosure' | null>(null);
 	let outcome = $state<ModelOutcome | null>(null);
 
 	let language = $state<Language | null>(null);
 	let available = $state<Language[]>([]);
 	let languageOutcome = $state<'saved' | { refused: Refused } | null>(null);
 
+	let disclosure = $state<DisclosureState | null>(null);
+	let disclosureProblem = $state<Refused | null>(null);
+	/** The note the user may leave with a decision; sent with the next press and cleared. */
+	let disclosureReason = $state('');
+	let disclosureOutcome = $state<'saved' | { refused: Refused } | null>(null);
+
 	const credential = $derived<CredentialState | null>(
 		configuration === null ? null : credentialState(configuration)
 	);
+	const record = $derived(disclosure === null ? null : disclosureRecord(disclosure, $locale));
 	const problemOf = $derived(
 		(field: FormProblem['field']) => formProblems.find((problem) => problem.field === field) ?? null
 	);
@@ -94,7 +116,11 @@
 	});
 
 	async function load() {
-		const [model, preference] = await Promise.all([loadModel(), loadLanguage()]);
+		const [model, preference, switched] = await Promise.all([
+			loadModel(),
+			loadLanguage(),
+			loadDisclosure()
+		]);
 		if (model.ok) {
 			configuration = model.configuration;
 			form = formOf(model.configuration);
@@ -109,6 +135,12 @@
 			languageProblem = null;
 		} else {
 			languageProblem = preference;
+		}
+		if (switched.ok) {
+			disclosure = switched.state;
+			disclosureProblem = null;
+		} else {
+			disclosureProblem = switched;
 		}
 		loaded = true;
 	}
@@ -178,6 +210,28 @@
 			}
 		} else {
 			languageOutcome = { refused: answer };
+		}
+	}
+
+	/**
+	 * The one press that turns the disclosure off, or back on: a decision
+	 * appended to the Gateway's journal, never a preference overwritten. The
+	 * state drawn afterwards is the Gateway's answer, not the press.
+	 */
+	async function switchDisclosure() {
+		if (disclosure === null) {
+			return;
+		}
+		disclosureOutcome = null;
+		busy = 'disclosure';
+		const answer = await saveDisclosure(!disclosure.enabled, disclosureReason);
+		busy = null;
+		if (answer.ok) {
+			disclosure = answer.state;
+			disclosureReason = '';
+			disclosureOutcome = 'saved';
+		} else {
+			disclosureOutcome = { refused: answer };
 		}
 	}
 
@@ -446,6 +500,96 @@
 		{/if}
 	</section>
 
+	<!-- The disclosure (#121): global, on by default, and off only on the record. -->
+	<section class="card stack" data-testid="settings-disclosure" aria-busy={!loaded}>
+		<h2 class="card__title">
+			<Icon name="persona" size="dense" />
+			{$t('settings.disclosure.title')}
+		</h2>
+		<p class="small">{$t('settings.disclosure.intro')}</p>
+
+		<!-- What the contact reads: the contract's sentence, in the interface's
+		     language as an example. The contact reads it in the language of the
+		     reply, and the note says so. -->
+		<p class="small muted">{$t('settings.disclosure.exampleLabel')}</p>
+		<blockquote class="sentence" lang={$locale} data-testid="disclosure-example">
+			{$t('settings.disclosure.sentence')}
+		</blockquote>
+		<p class="small muted">{$t('settings.disclosure.exampleNote')}</p>
+
+		{#if disclosureProblem !== null}
+			<p class="card card--warning small" role="alert" data-testid="disclosure-problem" data-code={disclosureProblem.code}>
+				{refusalText(disclosureProblem)}
+			</p>
+		{:else if loaded && disclosure !== null && record !== null}
+			<div class="switch-row">
+				<button
+					id="disclosure-switch"
+					class="switch"
+					type="button"
+					role="switch"
+					aria-checked={disclosure.enabled}
+					aria-labelledby="disclosure-switch-label"
+					disabled={busy !== null}
+					onclick={switchDisclosure}
+					data-testid="disclosure-switch"
+				>
+					<span class="switch__knob" aria-hidden="true"></span>
+				</button>
+				<label class="label" id="disclosure-switch-label" for="disclosure-switch">
+					{$t('settings.disclosure.switch')}
+					<span class="small muted">
+						— {disclosure.enabled
+							? $t('settings.disclosure.switchOn')
+							: $t('settings.disclosure.switchOff')}
+					</span>
+				</label>
+			</div>
+
+			<!-- The record: who decided, and when. The default state is "nobody
+			     ever did", said as such rather than dated. -->
+			<p
+				class="small {record.kind === 'off' ? 'card card--warning' : 'muted'}"
+				data-testid="disclosure-record"
+				data-enabled={disclosure.enabled ? 'yes' : 'no'}
+			>
+				{#if record.kind === 'off'}<Icon name="warning" size="dense" />{/if}
+				{$t(record.key, record.values)}
+			</p>
+			{#if disclosure.reason !== null && disclosure.reason !== ''}
+				<p class="small muted" data-testid="disclosure-reason-given">
+					{$t('settings.disclosure.record.reason', { reason: disclosure.reason })}
+				</p>
+			{/if}
+
+			<label class="field">
+				<span class="small">{$t('settings.disclosure.reason.label')}</span>
+				<input
+					class="input"
+					type="text"
+					autocomplete="off"
+					maxlength="1024"
+					bind:value={disclosureReason}
+					disabled={busy !== null}
+					data-testid="disclosure-reason"
+				/>
+				<span class="small muted">{$t('settings.disclosure.reason.help')}</span>
+			</label>
+
+			<p class="small muted">{$t('settings.disclosure.notRetroactive')}</p>
+
+			{#if disclosureOutcome === 'saved'}
+				<p class="card card--info small" role="status" data-testid="disclosure-outcome" data-kind="saved">
+					{$t('settings.disclosure.saved')}
+				</p>
+			{:else if disclosureOutcome !== null}
+				<p class="card card--warning small" role="alert" data-testid="disclosure-outcome" data-kind="refused">
+					{refusalText(disclosureOutcome.refused)}
+				</p>
+			{/if}
+		{/if}
+	</section>
+
 	<!-- Tracing: decided (ADR 0017), and not yet storable (#99). -->
 	<section class="card stack" data-testid="settings-tracing">
 		<h2 class="card__title">
@@ -482,5 +626,65 @@
 
 	.mono {
 		font-family: var(--font-mono);
+	}
+
+	/* The contract's sentence, shown as the contact will read it. */
+	.sentence {
+		margin: 0;
+		padding: var(--space-2) var(--space-3);
+		border-left: 3px solid var(--color-primary);
+		background: var(--color-primary-surface);
+		border-radius: var(--radius-md);
+	}
+
+	.switch-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+	}
+
+	/* A switch, drawn as one: a track and a knob that sits left for off and
+	   right for on, with the colour carrying the same fact. */
+	.switch {
+		position: relative;
+		flex: 0 0 auto;
+		width: 48px;
+		height: 28px;
+		padding: 0;
+		border: 1px solid var(--color-border-strong);
+		border-radius: var(--radius-pill);
+		background: var(--color-gray-400);
+		cursor: pointer;
+		transition: background 120ms ease;
+	}
+
+	.switch[aria-checked='true'] {
+		background: var(--color-primary);
+		border-color: var(--color-primary-strong);
+	}
+
+	.switch:disabled {
+		cursor: default;
+		opacity: 0.6;
+	}
+
+	.switch:focus-visible {
+		outline: 2px solid var(--color-focus-ring);
+		outline-offset: 2px;
+	}
+
+	.switch__knob {
+		position: absolute;
+		top: 3px;
+		left: 3px;
+		width: 20px;
+		height: 20px;
+		border-radius: 50%;
+		background: var(--color-surface);
+		transition: transform 120ms ease;
+	}
+
+	.switch[aria-checked='true'] .switch__knob {
+		transform: translateX(20px);
 	}
 </style>
