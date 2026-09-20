@@ -120,12 +120,41 @@ guardPorts();
 /** Handed to every server this suite starts, so each can say what it serves. */
 const serverEnv = build === null ? {} : { TWALK_TEST_BUILD_ID: build };
 
+/**
+ * How long an `expect` waits before it calls an element absent (#148).
+ *
+ * Playwright's default is five seconds, and every failure this suite produced
+ * under load was that: `element(s) not found` after 5000 ms on a locator the
+ * page renders on boot — `screen-welcome`, `app`, `screen-tab-elsewhere` — in
+ * a run where the same test passed alone in under a second. Measured on the
+ * reference host (20 cores, memory- and I/O-bound, running the deployment
+ * beside the suite): three such failures in one full run at load 6, none in
+ * a `--project=chromium` run without the stack, none in four `networks`-only
+ * runs. So the five seconds were a tolerance calibrated for an idle machine,
+ * and the suite spent it on page loads it had made slow itself: ten
+ * browsers, three Gateways, a homeserver and a bus, all at once.
+ *
+ * Fifteen is a tolerance too, stated as such, the way #186 stated the session
+ * project's. It changes when a wrong answer is reported, never which answer
+ * is wrong: an assertion on a value that is *not there* still fails, three
+ * times later. The default is kept without the stack, where nothing is loaded
+ * but the browsers.
+ */
+const expectTimeoutMs = realStack ? 15_000 : 5_000;
+
 export default defineConfig({
 	testDir: 'tests/e2e',
 	fullyParallel: true,
 	forbidOnly: !!process.env.CI,
 	retries: process.env.CI ? 1 : 0,
-	reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
+	expect: { timeout: expectTimeoutMs },
+	// The list, plus a paragraph that says *why* tests did not run when the
+	// dependency chain below stopped them (#148): "42 did not run" on its own
+	// reads as forty-two failures, and it is neither a pass nor a fail about
+	// the code under change.
+	reporter: process.env.CI
+		? [['list'], ['./tests/did-not-run-reporter.mjs'], ['html', { open: 'never' }]]
+		: [['list'], ['./tests/did-not-run-reporter.mjs']],
 
 	use: {
 		baseURL: `http://127.0.0.1:${port}`,
@@ -143,6 +172,16 @@ export default defineConfig({
 				'portals/**',
 				'session/**'
 			],
+			// Half the cores is Playwright's default, which on the reference host
+			// is ten browsers beside three Gateways, a homeserver, a bus and the
+			// serial projects running at the same time. With the stack, four
+			// (#148): measured over two pairs of full runs, alternating, the
+			// default produced 0 and 3 boot-time failures in this project and four
+			// workers 0 and 1 — a small sample, so this is a cap on a known cost
+			// rather than a proof, and the tolerance above is what carries the
+			// rest. Without the stack the default stands: the run is the only
+			// load there is.
+			...(realStack ? { workers: 4 } : {}),
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',

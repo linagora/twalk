@@ -171,3 +171,63 @@ test('a Gateway that did not answer claims neither journey', async ({ browser })
 
 	await context.close();
 });
+
+test('a Gateway that did not answer *once* is asked again, and the grid does not stay unknown', async ({
+	page
+}) => {
+	// #148's third failure, read as the product defect it was: the grid read
+	// `/api/bridges` once on mount, so a Gateway that did not answer at that
+	// instant left every card *unknown* until the user reloaded. Now the read
+	// is repeated while the answer is transient — first after two seconds —
+	// and the user does nothing.
+	let calls = 0;
+	await page.route('**/api/bridges', async (route) => {
+		calls += 1;
+		if (calls === 1) {
+			await route.abort('connectionrefused');
+			return;
+		}
+		await route.continue();
+	});
+
+	await page.goto('/networks');
+	// The honest first rendering: unknown, said as such.
+	await expect(page.getByTestId('bridges-unknown')).toBeVisible();
+
+	// Then known, on its own. Ten seconds is the first two re-reads plus room.
+	await expect(page.getByTestId('bridges-unknown')).toHaveCount(0, { timeout: 10_000 });
+	await expect(page.getByTestId('screen-networks')).not.toHaveAttribute('data-mode', 'unknown');
+	expect(calls).toBeGreaterThanOrEqual(2);
+});
+
+test('a bridge the Gateway could not ask *once* is asked again, and the card does not stay unknown', async ({
+	page
+}) => {
+	// The other transient: the list answers, and one bridge's `whoami` did not.
+	// The Gateway says `unknown` for that bridge rather than "disconnected",
+	// which is right (#116); the card showing it for ever was not.
+	let calls = 0;
+	await page.route('**/api/bridges', async (route) => {
+		calls += 1;
+		if (calls > 1) {
+			await route.continue();
+			return;
+		}
+		const answer = await route.fetch();
+		const body = (await answer.json()) as {
+			bridges: { bridge_id: string; connection: Record<string, unknown> }[];
+		};
+		for (const bridge of body.bridges) {
+			if (bridge.bridge_id === WHATSAPP_BRIDGE) {
+				bridge.connection = { ...bridge.connection, reachable: false, state: null, logins: [] };
+			}
+		}
+		await route.fulfill({ response: answer, json: body });
+	});
+
+	await page.goto('/networks');
+	const card = page.getByTestId('card-whatsapp');
+	await expect(card).toHaveAttribute('data-connection', 'unknown');
+	await expect(card).not.toHaveAttribute('data-connection', 'unknown', { timeout: 10_000 });
+	expect(calls).toBeGreaterThanOrEqual(2);
+});
