@@ -1,9 +1,10 @@
 //! The fake JMAP server's push endpoint (issue #277, RFC 8887): a WebSocket
 //! on a listener of its own beside the fake SSO's, opened with the ticket
-//! TMail hands out (`com:linagora:params:jmap:ws:ticket`) rather than with
-//! the bearer — the shape a browser needs and the one the collector uses
-//! when the session offers it — and pushing one `StateChange` per delivery
-//! to every client that enabled push for `Email`.
+//! TMail hands out (`com:linagora:params:jmap:ws:ticket`) — the shape a
+//! browser needs and the one the collector uses when the session offers it
+//! — or with a live bearer on the handshake (RFC 8887 §3) when it does not,
+//! and pushing one `StateChange` per delivery to every client that enabled
+//! push for `Email`.
 //!
 //! A test can cut the socket ([`crate::FakeSso::cut_push`]): every client is
 //! closed and the listener refuses new connections until
@@ -24,8 +25,11 @@ use tokio_tungstenite::tungstenite::Message;
 /// What the fake's WebSocket half shares with the HTTP half.
 pub(crate) struct PushState {
     /// Tickets handed out at the ticket endpoint, each good for one
-    /// connection.
+    /// socket.
     pub(crate) tickets: HashSet<String>,
+    /// The SSO's live access tokens, mirrored: what a handshake without a
+    /// ticket is admitted on.
+    pub(crate) bearers: HashSet<String>,
     /// Whether the socket accepts connections and keeps them open.
     pub(crate) up: bool,
     /// How many `StateChange`s were pushed, for a test's assertion.
@@ -36,6 +40,7 @@ impl Default for PushState {
     fn default() -> Self {
         Self {
             tickets: HashSet::new(),
+            bearers: HashSet::new(),
             up: true,
             pushed: 0,
         }
@@ -80,7 +85,7 @@ impl Push {
     }
 }
 
-/// A ticket for one connection, as the ticket endpoint hands it out.
+/// A ticket for one socket, as the ticket endpoint hands it out.
 pub(crate) fn mint_ticket(state: &Arc<Mutex<PushState>>) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -109,9 +114,10 @@ async fn accept_loop(
     }
 }
 
-/// One client: the handshake checked for a live ticket and the `jmap`
-/// subprotocol, then `StateChange`s until the client leaves or the socket
-/// is cut.
+/// One client: the handshake checked for a live ticket in the query or a
+/// live bearer in the `Authorization` header, the `jmap` subprotocol
+/// echoed, then `StateChange`s until the client leaves or the socket is
+/// cut.
 async fn serve(
     stream: TcpStream,
     state: Arc<Mutex<PushState>>,
@@ -130,18 +136,27 @@ async fn serve(
                         .find_map(|pair| pair.strip_prefix("ticket="))
                 })
                 .map(str::to_owned);
+            let bearer = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::to_owned);
             let mut guard = checked_state
                 .lock()
                 .expect("the push state is not poisoned");
             let admitted = guard.up
-                && ticket
+                && (ticket
                     .as_deref()
-                    .is_some_and(|ticket| guard.tickets.remove(ticket));
+                    .is_some_and(|ticket| guard.tickets.remove(ticket))
+                    || bearer
+                        .as_deref()
+                        .is_some_and(|bearer| guard.bearers.contains(bearer)));
             drop(guard);
             if !admitted {
                 let mut refusal =
                     tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some(
-                        "no live ticket".to_owned(),
+                        "no live ticket and no live bearer".to_owned(),
                     ));
                 *refusal.status_mut() =
                     tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;

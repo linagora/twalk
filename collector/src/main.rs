@@ -273,7 +273,6 @@ async fn run(config: Config) -> Result<()> {
         // its interval. The poll stays as the fallback.
         tokio::spawn(twalk_collector::push::listen(
             config.services.jmap_session_url.clone(),
-            None,
             shared_access.clone(),
             mail_wake.clone(),
             metrics.clone(),

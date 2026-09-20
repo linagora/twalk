@@ -90,11 +90,15 @@ impl Session {
             .ok_or_else(|| {
                 anyhow::anyhow!("the session names no account with the mail capability")
             })?;
-        let push = document
-            .pointer(&format!(
-                "/capabilities/{}",
-                WEBSOCKET_CAPABILITY.replace('/', "~1")
-            ))
+        // RFC 8887 §2: the capability names the socket, and `supportsPush`
+        // says whether it carries state changes at all — a server that
+        // only takes requests over it offers no push, whatever the URL.
+        let websocket = document.pointer(&format!(
+            "/capabilities/{}",
+            WEBSOCKET_CAPABILITY.replace('/', "~1")
+        ));
+        let push = websocket
+            .filter(|capability| capability.get("supportsPush") != Some(&Value::Bool(false)))
             .and_then(|capability| capability.get("url"))
             .and_then(Value::as_str)
             .map(|url| PushEndpoint {
@@ -226,6 +230,7 @@ pub fn email_received_after(
     account_id: &str,
     inbox_id: &str,
     after: &str,
+    position: usize,
 ) -> (&'static str, Value) {
     (
         "Email/query",
@@ -233,10 +238,16 @@ pub fn email_received_after(
             "accountId": account_id,
             "filter": { "inMailbox": inbox_id, "after": after },
             "sort": [{ "property": "receivedAt", "isAscending": true }],
-            "limit": 500
+            "position": position,
+            "limit": QUERY_PAGE
         }),
     )
 }
+
+/// How many ids one `Email/query` page asks for: RFC 8621's servers cap a
+/// page at a few hundred; the recovery reads page after page until one
+/// comes back short.
+pub const QUERY_PAGE: usize = 200;
 
 /// `Identity/get`: the owner's sending identities (RFC 8621 §6).
 pub fn identity_get(account_id: &str) -> (&'static str, Value) {
@@ -1083,6 +1094,27 @@ mod tests {
                 ticket_url: Some("https://mail.example.com/jmap/ws/ticket".to_owned()),
             })
         );
+        // RFC 8887 §2: a socket that takes requests but pushes nothing is
+        // no push; a session naming no ticket endpoint opens it with the
+        // bearer.
+        let requests_only = Session::parse(&json!({
+            "apiUrl": "https://mail.example.com/jmap/api",
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": "u1" },
+            "capabilities": {
+                "urn:ietf:params:jmap:websocket": { "url": "wss://mail.example.com/jmap/ws", "supportsPush": false }
+            }
+        }))
+        .unwrap();
+        assert!(requests_only.push.is_none());
+        let without_ticket = Session::parse(&json!({
+            "apiUrl": "https://mail.example.com/jmap/api",
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": "u1" },
+            "capabilities": {
+                "urn:ietf:params:jmap:websocket": { "url": "wss://mail.example.com/jmap/ws", "supportsPush": true }
+            }
+        }))
+        .unwrap();
+        assert_eq!(without_ticket.push.map(|push| push.ticket_url), Some(None));
 
         assert_eq!(
             inbox_id(&json!({ "list": [

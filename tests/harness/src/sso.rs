@@ -89,10 +89,12 @@ struct State {
     calendars: std::collections::BTreeMap<String, FakeCalendar>,
     /// The owner's mailbox on the fake JMAP server (#276).
     mails: crate::jmap_fake::MailStore,
-    /// The push endpoint's URL, named by the session (#277); `None` on a
-    /// server that offers no push.
-    push_url: Option<String>,
-    /// The push half's state, for the ticket endpoint to mint tickets into.
+    /// What the session says about push (#277): the socket and the ticket
+    /// endpoint by default, no ticket after [`FakeSso::offer_no_ticket`],
+    /// nothing after [`FakeSso::offer_no_push`].
+    push_offer: Option<crate::jmap_fake::PushOffer>,
+    /// The push half's state: where the ticket endpoint mints tickets, and
+    /// where the live bearers are mirrored for a handshake without one.
     push_state: Option<Arc<Mutex<crate::jmap_push::PushState>>>,
     /// A Companion Gateway's consent snapshot to answer at
     /// `/api/consent/snapshot`, when a test stands this fake in for the
@@ -149,7 +151,10 @@ impl FakeSso {
             account: account.to_owned(),
             port: addr.port(),
             mails,
-            push_url: Some(push.url()),
+            push_offer: Some(crate::jmap_fake::PushOffer {
+                url: push.url(),
+                with_ticket: true,
+            }),
             push_state: Some(push.state.clone()),
             ..State::default()
         }));
@@ -240,6 +245,28 @@ impl FakeSso {
         guard.revoked = true;
         guard.refresh_token = None;
         guard.access_tokens.clear();
+        if let Some(push) = &guard.push_state {
+            push.lock()
+                .expect("the push state is not poisoned")
+                .bearers
+                .clear();
+        }
+    }
+
+    /// The session names no push at all (#277): what a JMAP server other
+    /// than TMail may answer, and what leaves the collector to its poll.
+    /// Set before the collector starts.
+    pub fn offer_no_push(&self) {
+        self.lock().push_offer = None;
+    }
+
+    /// The session names the socket but no ticket endpoint (#277): the
+    /// socket is opened with the bearer on the handshake, RFC 8887 §3. Set
+    /// before the collector starts.
+    pub fn offer_no_ticket(&self) {
+        if let Some(offer) = &mut self.lock().push_offer {
+            offer.with_ticket = false;
+        }
     }
 
     /// Makes one service (`"jmap"` or `"caldav"`) refuse every token with
@@ -343,7 +370,7 @@ impl FakeSso {
     }
 
     /// Stops the push endpoint (#277): every open socket is closed, every
-    /// new connection refused, until [`Self::restore_push`]. Deliveries keep
+    /// new handshake refused, until [`Self::restore_push`]. Deliveries keep
     /// moving the Email state; only the poll finds them.
     pub fn cut_push(&self) {
         self.push
@@ -571,18 +598,20 @@ fn respond_json(
         ("GET", "/jmap/session") => {
             let issuer = format!("http://127.0.0.1:{}", guard.port);
             let state = guard.mails.state();
-            let push_url = guard.push_url.clone();
+            let push = guard.push_offer.clone();
             service("jmap", request, guard, |account| {
-                crate::jmap_fake::session(account, &issuer, &state, push_url.as_deref())
+                crate::jmap_fake::session(account, &issuer, &state, push.as_ref())
             })
         }
-        // TMail's ticket endpoint (#277): one ticket, good for one socket.
+        // TMail's ticket endpoint (#277): one ticket, good for one socket —
+        // minted once the bearer is admitted, so a refused endpoint leaves
+        // no ticket behind.
         ("POST", "/jmap/ws/ticket") => {
-            let ticket = guard
-                .push_state
-                .as_ref()
-                .map(|push| crate::jmap_push::mint_ticket(push));
+            let push_state = guard.push_state.clone();
             service("jmap", request, guard, |account| {
+                let ticket = push_state
+                    .as_ref()
+                    .map(|push| crate::jmap_push::mint_ticket(push));
                 json!({
                     "value": ticket,
                     "generatedOn": "2026-09-21T08:00:00Z",
@@ -686,6 +715,12 @@ fn issue(guard: &mut State) -> (&'static str, Value) {
     guard.counter += 1;
     let refresh = format!("refresh-{}", guard.counter);
     guard.access_tokens.insert(access.clone(), ());
+    if let Some(push) = &guard.push_state {
+        push.lock()
+            .expect("the push state is not poisoned")
+            .bearers
+            .insert(access.clone());
+    }
     guard.refresh_token = Some(refresh.clone());
     (
         "200 OK",

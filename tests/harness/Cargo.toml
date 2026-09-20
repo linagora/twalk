@@ -24,3 +24,6 @@ tokio = { version = "1", features = ["full"] }
 # The fake JMAP server's push endpoint (#277): a WebSocket the collector
 # subscribes to, on a listener of its own beside the fake SSO's.
 tokio-tungstenite = "0.29"
+# A delivery's `receivedAt` is the instant it happened (#277): what the
+# collector's look-back window is measured against.
+time = { version = "0.3", features = ["formatting"] }

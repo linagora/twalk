@@ -5,16 +5,17 @@
 //! is what `COLLECTOR_MAIL_POLL_SECONDS` was for all along.
 //!
 //! The socket is opened the way a browser opens TMail's — with a ticket from
-//! `com:linagora:params:jmap:ws:ticket`, one per connection — when the
-//! session offers the endpoint, and with the bearer on the handshake
-//! otherwise (RFC 8887 §3). The client asks for `Email` state changes
+//! `com:linagora:params:jmap:ws:ticket`, one per socket — when the session
+//! offers the endpoint, and with the bearer on the handshake otherwise
+//! (RFC 8887 §3). The client asks for `Email` state changes
 //! (`WebSocketPushEnable`) and reads `StateChange`s; every one for the
 //! account wakes the run loop's mail poll, which does what it always does:
 //! `Email/changes` from the persisted state. The socket carries no mail and
 //! no request — it is a doorbell.
 //!
-//! A socket that closes is said once and reopened with a growing delay; a
-//! session that offers no push is said once and asked again later.
+//! A socket that closes is said and reopened with a growing delay, and the
+//! poll is rung once it is back, for what arrived meanwhile; a session that
+//! offers no push is said once and asked again later.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,7 +42,6 @@ const NO_PUSH_RECHECK: Duration = Duration::from_secs(300);
 /// account.
 pub async fn listen(
     session_url: String,
-    account_id_hint: Option<String>,
     access: SharedAccess,
     wake: Arc<Notify>,
     metrics: Arc<Metrics>,
@@ -55,8 +55,9 @@ pub async fn listen(
     };
     let mut failures: u32 = 0;
     let mut said_no_push = false;
+    let mut opened_before = false;
     loop {
-        let Some(token) = current_token(&access).await else {
+        let Some(token) = access.read().await.clone() else {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         };
@@ -78,12 +79,20 @@ pub async fn listen(
             tokio::time::sleep(NO_PUSH_RECHECK).await;
             continue;
         };
-        let account = account_id_hint
-            .clone()
-            .unwrap_or_else(|| session.account_id.clone());
-        match subscribe(&http, endpoint, &token, &account, &wake, &metrics).await {
+        match subscribe(
+            &http,
+            endpoint,
+            &token,
+            &session.account_id,
+            &wake,
+            &metrics,
+            opened_before,
+        )
+        .await
+        {
             Ok(()) => {
                 failures = 0;
+                opened_before = true;
                 warn!("the push socket closed; polling until it is back");
             }
             Err(error) => {
@@ -94,10 +103,6 @@ pub async fn listen(
         metrics.set_push_connected(false);
         tokio::time::sleep(backoff(failures)).await;
     }
-}
-
-async fn current_token(access: &SharedAccess) -> Option<AccessToken> {
-    access.read().await.clone()
 }
 
 fn backoff(failures: u32) -> Duration {
@@ -119,7 +124,10 @@ async fn session(http: &reqwest::Client, url: &str, token: &AccessToken) -> Resu
 }
 
 /// One socket: opened, push enabled, read until it closes. `Ok(())` is a
-/// socket that closed after opening; `Err` one that never opened.
+/// socket that closed after opening; `Err` one that never opened. A socket
+/// reopened after one closed rings the poll at once: no `pushState` is
+/// asked for on the handshake, so what the server would have said while
+/// the socket was down is read by the poll it rings instead.
 async fn subscribe(
     http: &reqwest::Client,
     endpoint: &PushEndpoint,
@@ -127,6 +135,7 @@ async fn subscribe(
     account: &str,
     wake: &Notify,
     metrics: &Metrics,
+    reopened: bool,
 ) -> Result<()> {
     let mut request =
         tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
@@ -182,6 +191,10 @@ async fn subscribe(
         .context("push could not be enabled")?;
     metrics.set_push_connected(true);
     info!(url = %endpoint.websocket_url, "push is on: a delivery wakes the mail poll");
+    if reopened {
+        debug!("the push socket is back; reading what arrived while it was down");
+        wake.notify_one();
+    }
     while let Some(message) = socket.next().await {
         match message {
             Ok(Message::Text(text)) => {

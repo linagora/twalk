@@ -87,9 +87,16 @@ impl FakeMail {
             references: Vec::new(),
             headers: Vec::new(),
             attachments: Vec::new(),
-            received_at: "2026-09-21T08:14:58Z".to_owned(),
+            received_at: now_rfc3339(),
             keywords: Vec::new(),
         }
+    }
+
+    /// A mail received at another instant than now (#277): what a
+    /// look-back window is proved against.
+    pub fn received(mut self, at: &str) -> Self {
+        self.received_at = at.to_owned();
+        self
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -230,9 +237,26 @@ impl MailStore {
     }
 }
 
+/// The instant, to the second, as a JMAP `receivedAt`.
+pub fn now_rfc3339() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    now.replace_nanosecond(0)
+        .unwrap_or(now)
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+/// What the session says about push (#277): where the socket is, and
+/// whether TMail's ticket endpoint is named beside it.
+#[derive(Debug, Clone)]
+pub(crate) struct PushOffer {
+    pub(crate) url: String,
+    pub(crate) with_ticket: bool,
+}
+
 /// The session document, as the collector reads it: the account, its mail
 /// capability, and where the API is.
-pub(crate) fn session(account: &str, issuer: &str, state: &str, push_url: Option<&str>) -> Value {
+pub(crate) fn session(account: &str, issuer: &str, state: &str, push: Option<&PushOffer>) -> Value {
     let mut capabilities = json!({
         "urn:ietf:params:jmap:core": {
             "maxSizeUpload": 50000000, "maxConcurrentUpload": 4, "maxSizeRequest": 10000000,
@@ -244,11 +268,13 @@ pub(crate) fn session(account: &str, issuer: &str, state: &str, push_url: Option
     });
     // Push (#277): RFC 8887's capability names the socket; TMail's names
     // the ticket endpoint a browser — and this collector — opens it with.
-    if let Some(url) = push_url {
+    if let Some(push) = push {
         capabilities["urn:ietf:params:jmap:websocket"] =
-            json!({ "url": url, "supportsPush": true });
-        capabilities["com:linagora:params:jmap:ws:ticket"] =
-            json!({ "generationEndpoint": format!("{issuer}/jmap/ws/ticket") });
+            json!({ "url": push.url, "supportsPush": true });
+        if push.with_ticket {
+            capabilities["com:linagora:params:jmap:ws:ticket"] =
+                json!({ "generationEndpoint": format!("{issuer}/jmap/ws/ticket") });
+        }
     }
     json!({
         "capabilities": capabilities,
@@ -618,8 +644,10 @@ fn identity_get(account: &str) -> Value {
     })
 }
 
-/// `Email/query` with the filters the collector uses: `inMailbox`, and
-/// `header: ["Message-ID", "<…>"]` to find the mail a reply answers (#278).
+/// `Email/query` with the filters the collector uses: `inMailbox`, `after`
+/// on `receivedAt` (#277's look-back, oldest first, `position` and `limit`
+/// honoured so a recovery pages), and `header: ["Message-ID", "<…>"]` to
+/// find the mail a reply answers (#278).
 fn email_query(args: &Value, store: &MailStore) -> Value {
     let filter = args.get("filter").cloned().unwrap_or(Value::Null);
     let in_mailbox = filter.get("inMailbox").and_then(Value::as_str);
@@ -650,15 +678,25 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
                     }
                 })
         })
-        .map(|(id, _)| id)
+        .map(|(id, (_, delivered, mail))| (mail.received_at.as_str(), *delivered, id))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|(_, _, id)| id)
         .collect();
+    let total = ids.len();
+    let position = args.get("position").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(total, |limit| limit as usize);
+    let page: Vec<&String> = ids.into_iter().skip(position).take(limit).collect();
     json!({
         "accountId": ACCOUNT_ID,
         "queryState": store.state(),
         "canCalculateChanges": false,
-        "position": 0,
-        "ids": ids,
-        "total": ids.len()
+        "position": position,
+        "ids": page,
+        "total": total
     })
 }
 

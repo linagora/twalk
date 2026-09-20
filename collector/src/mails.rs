@@ -239,7 +239,7 @@ impl Mailbox {
                         let state = email_state_of(&method(&response, 0)?);
                         warn!(
                             lost_state = %previous.state,
-                            "the JMAP server no longer serves changes from the persisted state and no last read is recorded: the mailbox is taken as it stands again"
+                            "the JMAP server no longer serves changes from the persisted state and no last read is recorded: mailbox taken as it stands again"
                         );
                         return Ok(MailPoll {
                             state: Some(MailState {
@@ -251,27 +251,43 @@ impl Mailbox {
                         });
                     }
                 };
+                // The state first, then the window page by page: a mail
+                // that arrives between the two is in the window and after
+                // the state, read now and not again.
                 let response = self
-                    .call(
-                        &session.api_url,
-                        token,
-                        vec![
-                            jmap::email_received_after(account, &previous.inbox_id, &since),
-                            jmap::email_state(account),
-                        ],
-                    )
+                    .call(&session.api_url, token, vec![jmap::email_state(account)])
                     .await?;
-                let ids: Vec<String> = method(&response, 0)?
-                    .get("ids")
-                    .and_then(Value::as_array)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let state = email_state_of(&method(&response, 1)?);
+                let state = email_state_of(&method(&response, 0)?);
+                let mut ids: Vec<String> = Vec::new();
+                loop {
+                    let response = self
+                        .call(
+                            &session.api_url,
+                            token,
+                            vec![jmap::email_received_after(
+                                account,
+                                &previous.inbox_id,
+                                &since,
+                                ids.len(),
+                            )],
+                        )
+                        .await?;
+                    let page: Vec<String> = method(&response, 0)?
+                        .get("ids")
+                        .and_then(Value::as_array)
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let short = page.len() < jmap::QUERY_PAGE;
+                    ids.extend(page);
+                    if short {
+                        break;
+                    }
+                }
                 let unseen: Vec<String> = ids
                     .into_iter()
                     .filter(|id| !previous.published.contains(id))
