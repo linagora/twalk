@@ -71,8 +71,7 @@
       "description": "Optional W3C Trace Context traceparent header, normally continued from the trigger event."
     },
     "network": {
-      "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Network the reply will be sent to, copied from the trigger event for server-side filtering on NATS."
     },
     "consent": {

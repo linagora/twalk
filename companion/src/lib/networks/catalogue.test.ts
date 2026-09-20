@@ -2,6 +2,10 @@
 // bridges, the platform — and every combination of them is a state a user can
 // land in. Pure, so they are covered here rather than in a browser.
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import { gridFor, looksLikeIos, manageRouteFor, NETWORK_CARDS, cardFor, type BridgeRow } from './catalogue';
@@ -299,4 +303,55 @@ describe('every route the catalogue can produce is served', () => {
 			}
 		}
 	);
+});
+
+/**
+ * The contract's own definition of the networks — the one authority (ADR
+ * 0033, #268). The catalogue is a copy: every card names a network the
+ * contract knows, and a network the contract adds is not silently a network
+ * this screen cannot name.
+ */
+const NETWORK_DEFINITION = join(
+	dirname(fileURLToPath(import.meta.url)),
+	'..',
+	'..',
+	'..',
+	'..',
+	'contracts',
+	'cloudevents',
+	'v1',
+	'definitions',
+	'network.schema.json'
+);
+
+describe('the contract is the authority for the networks', () => {
+	const authority = (JSON.parse(readFileSync(NETWORK_DEFINITION, 'utf8')) as { enum: string[] })
+		.enum;
+
+	it('names on every card a network the contract knows', () => {
+		for (const card of NETWORK_CARDS) {
+			expect(authority, `${card.network} is not a network the contract knows`).toContain(
+				card.network
+			);
+		}
+	});
+
+	it('has a card for every messaging network, and knows which it has not drawn yet', () => {
+		// `email` is a network (ADR 0033) with no card yet: its screen is a
+		// connection's, not a bridge's, and lands with the mail collector
+		// (#272, #276). Naming it here is what turns "forgot" into "not yet".
+		const notDrawnYet = ['email'];
+		const drawn = new Set(NETWORK_CARDS.map((card) => card.network));
+		for (const network of authority) {
+			if (notDrawnYet.includes(network)) {
+				expect(drawn.has(network), `${network} has a card now: drop it from notDrawnYet`).toBe(
+					false
+				);
+			} else {
+				expect(drawn.has(network), `the contract names ${network} and this screen has no card`).toBe(
+					true
+				);
+			}
+		}
+	});
 });

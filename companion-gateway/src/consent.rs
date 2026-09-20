@@ -52,16 +52,24 @@ pub enum Network {
     Discord,
     Sms,
     Matrix,
+    /// A mailbox (ADR 0033, #268). Parsed and served like any network; the
+    /// store's own `CHECK` constraints admit it from the migration #270
+    /// lands, and until then a decision about an `email` subject — of which
+    /// there is none, no collector existing yet — is refused by the store.
+    Email,
 }
 
 impl Network {
-    pub const ALL: [Network; 6] = [
+    /// Every value, in the contract's order (`definitions/network.schema.json`,
+    /// the one authority — a test below reads it).
+    pub const ALL: [Network; 7] = [
         Network::Whatsapp,
         Network::Telegram,
         Network::Signal,
         Network::Discord,
         Network::Sms,
         Network::Matrix,
+        Network::Email,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -72,6 +80,7 @@ impl Network {
             Network::Discord => "discord",
             Network::Sms => "sms",
             Network::Matrix => "matrix",
+            Network::Email => "email",
         }
     }
 
@@ -573,6 +582,30 @@ pub fn rfc3339_millis(at: std::time::SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The contract is the one authority for the network values (ADR 0033,
+    /// #268): this enum is a copy, tested against what it copies, order
+    /// included.
+    #[test]
+    fn the_contract_is_the_authority_for_the_network_values() {
+        let authority = twalk_test_harness::contract_definition_values("network")
+            .expect("the contract's network definition");
+        let copy: Vec<&str> = Network::ALL
+            .iter()
+            .map(|network| network.as_str())
+            .collect();
+        assert_eq!(
+            copy, authority,
+            "companion-gateway/src/consent.rs disagrees with the contract"
+        );
+        for value in &authority {
+            assert_eq!(
+                Network::parse(value).map(Network::as_str),
+                Some(value.as_str()),
+                "{value} is in the contract and not parsed here"
+            );
+        }
+    }
 
     fn request(body: Value) -> Result<Decision, Invalid> {
         Decision::parse(&body)

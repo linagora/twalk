@@ -33,6 +33,7 @@ import FileDown from '@lucide/svelte/icons/file-down';
 import Gamepad2 from '@lucide/svelte/icons/gamepad-2';
 import Globe from '@lucide/svelte/icons/globe';
 import Hash from '@lucide/svelte/icons/hash';
+import Mail from '@lucide/svelte/icons/mail';
 import Inbox from '@lucide/svelte/icons/inbox';
 import Info from '@lucide/svelte/icons/info';
 import KeyRound from '@lucide/svelte/icons/key-round';
@@ -118,6 +119,8 @@ export const icons = {
 	matrix: Hash,
 	telegram: Send,
 	discord: Gamepad2,
+	// A mailbox is a network (ADR 0033); its card lands with the collector.
+	email: Mail,
 	account: AtSign,
 
 	// The conversation chooser of #143, one per kind of conversation the

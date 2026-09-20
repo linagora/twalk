@@ -78,8 +78,7 @@
       ]
     },
     "network": {
-      "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Identifies the external network the message originated from, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic: a room with no m.bridge state event and no ghost-prefixed sender, reached through the user's own Matrix account instead of through a bridge (see ADR 0009). Enables server-side filtering on NATS without deserializing the data payload."
     },
     "consent": {

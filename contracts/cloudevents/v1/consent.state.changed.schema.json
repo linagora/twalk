@@ -72,8 +72,7 @@
       "description": "Optional W3C Trace Context traceparent header."
     },
     "network": {
-      "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Optional on this operational event: the Companion Gateway sets it only when data.scope.networks names exactly one network, and leaves it out otherwise. The authoritative scope is always data.scope.networks; this attribute exists so a single-network change can be filtered server-side on NATS."
     },
     "consent": {
@@ -124,8 +123,7 @@
               "minItems": 1,
               "uniqueItems": true,
               "items": {
-                "type": "string",
-                "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"]
+                "$ref": "definitions/network.schema.json"
               },
               "description": "Networks the decision applies to. A contact reachable on several networks gets one decision per scope."
             }

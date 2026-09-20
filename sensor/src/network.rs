@@ -14,9 +14,28 @@ pub enum Network {
     /// Native Matrix traffic: the user's own account, reached without a
     /// bridge in front of it (ADR 0009).
     Matrix,
+    /// A mailbox (ADR 0033): a mail is a message, whatever transport carries
+    /// it. Never attributed here — no bridge produces it and no ghost is
+    /// named after it — but a consent decision about a sender's address
+    /// arrives on the snapshot and the stream like any other, and a value
+    /// this enum could not parse would be a decision the Sensor silently
+    /// dropped (#268).
+    Email,
 }
 
 impl Network {
+    /// Every value, in the contract's order (`definitions/network.schema.json`,
+    /// the one authority — the conformance test below reads it).
+    pub const ALL: [Network; 7] = [
+        Network::Whatsapp,
+        Network::Telegram,
+        Network::Signal,
+        Network::Discord,
+        Network::Sms,
+        Network::Matrix,
+        Network::Email,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Whatsapp => "whatsapp",
@@ -25,6 +44,7 @@ impl Network {
             Self::Discord => "discord",
             Self::Sms => "sms",
             Self::Matrix => "matrix",
+            Self::Email => "email",
         }
     }
 
@@ -67,6 +87,7 @@ impl Network {
             "discord" => Some(Self::Discord),
             "sms" => Some(Self::Sms),
             "matrix" => Some(Self::Matrix),
+            "email" => Some(Self::Email),
             _ => None,
         }
     }
@@ -217,6 +238,26 @@ pub fn ghost_network_identifier(network: Network, localpart: &str) -> Option<Str
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The contract is the one authority for the network values (ADR 0033,
+    /// #268): this enum is a copy, and a copy is tested against what it
+    /// copies. A value added to `definitions/network.schema.json` fails here
+    /// until the enum knows it; a variant added here fails until the contract
+    /// does. Order included — `ALL` is the contract's order.
+    #[test]
+    fn the_contract_is_the_authority_for_the_network_values() {
+        let authority = twalk_test_harness::contract_definition_values("network")
+            .expect("the contract's network definition");
+        let copy: Vec<&str> = Network::ALL.iter().map(Network::as_str).collect();
+        assert_eq!(copy, authority, "sensor/src/network.rs disagrees with the contract");
+        for value in &authority {
+            assert_eq!(
+                Network::from_contract_value(value).map(|network| network.as_str()),
+                Some(value.as_str()),
+                "{value} is in the contract and not parsed here"
+            );
+        }
+    }
 
     #[test]
     fn bridge_ids_map_to_contract_networks() {

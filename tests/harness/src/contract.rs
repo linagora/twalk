@@ -25,7 +25,9 @@ pub fn validate_against_contract(event: &Value, type_name: &str) -> Result<()> {
         &std::fs::read(&schema_path)
             .with_context(|| format!("failed to read schema {}", schema_path.display()))?,
     )?;
-    let validator = jsonschema::validator_for(&schema)
+    let validator = jsonschema::options()
+        .with_retriever(ContractRetriever)
+        .build(&schema)
         .map_err(|e| anyhow!("invalid schema {type_name}: {e}"))?;
     let errors = validator
         .iter_errors(event)
@@ -38,6 +40,64 @@ pub fn validate_against_contract(event: &Value, type_name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The base every contract schema's `$id` starts with. A `$ref` inside a
+/// schema resolves against it — `definitions/network.schema.json` becomes
+/// `https://schemas.twalk.dev/cloudevents/v1/definitions/network.schema.json`
+/// — and this is where the retriever below maps it back to the file.
+const SCHEMA_BASE: &str = "https://schemas.twalk.dev/cloudevents/v1/";
+
+/// Resolves a `$ref` between contract schemas from the contract directory,
+/// never from the network: the schemas are published under their `$id`, but
+/// a test that reached for the published copy would test the copy and not
+/// the repository, and would need a network to run at all.
+struct ContractRetriever;
+
+impl jsonschema::Retrieve for ContractRetriever {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let uri = uri.as_str();
+        let Some(relative) = uri.strip_prefix(SCHEMA_BASE) else {
+            return Err(format!(
+                "a contract schema references {uri}, which is not under {SCHEMA_BASE}: \
+                 contract schemas refer only to one another"
+            )
+            .into());
+        };
+        let path = contract_dir().join(relative);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read {} for {uri}: {error}", path.display()))?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
+/// One of the contract's shared definitions (`definitions/<name>.schema.json`),
+/// the authority a component's own copy of an enumeration is tested against.
+pub fn contract_definition(name: &str) -> Result<Value> {
+    let path = contract_dir()
+        .join("definitions")
+        .join(format!("{name}.schema.json"));
+    Ok(serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
+    )?)
+}
+
+/// The values a shared definition enumerates, in the contract's order.
+pub fn contract_definition_values(name: &str) -> Result<Vec<String>> {
+    contract_definition(name)?["enum"]
+        .as_array()
+        .context("the definition has no enum")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .context("an enum value that is not a string")
+        })
+        .collect()
 }
 
 /// Loads one of the contract fixtures by type name.
@@ -192,4 +252,66 @@ pub fn contract_variant_fixture(type_name: &str, variant: &str) -> Result<Value>
         &std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
     )?;
     Ok(fixture)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `kind.schema.json` is the networks plus the kinds that are not
+    /// networks (ADR 0033): the two definitions are two files, and nothing
+    /// but this test says they agree. A network added to one and not the
+    /// other is a connection the Gateway would refuse at startup.
+    #[test]
+    fn the_kinds_are_the_networks_and_then_the_rest() {
+        let networks = contract_definition_values("network").expect("the network definition");
+        let kinds = contract_definition_values("kind").expect("the kind definition");
+        assert_eq!(
+            &kinds[..networks.len()],
+            &networks[..],
+            "kind.schema.json does not start with network.schema.json's values, in its order"
+        );
+        assert_eq!(
+            &kinds[networks.len()..],
+            ["calendar"],
+            "the kinds that are not networks"
+        );
+    }
+
+    /// The definitions are the one authority (#268): a schema that repeats
+    /// the list inline is a second one, and it is the copy that rots. Walked
+    /// rather than grepped, so a list under any key is found.
+    #[test]
+    fn no_schema_repeats_a_definitions_enum_inline() {
+        fn inline_copies(value: &Value, at: String, found: &mut Vec<String>) {
+            match value {
+                Value::Object(members) => {
+                    if let Some(Value::Array(values)) = members.get("enum") {
+                        if values.iter().any(|v| v == "whatsapp" || v == "calendar") {
+                            found.push(at.clone());
+                        }
+                    }
+                    for (key, member) in members {
+                        inline_copies(member, format!("{at}/{key}"), found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        inline_copies(item, format!("{at}/{index}"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for type_name in contract_schema_types().expect("the schemas") {
+            let schema = contract_schema(&type_name).expect("a schema");
+            let mut found = Vec::new();
+            inline_copies(&schema, String::new(), &mut found);
+            assert!(
+                found.is_empty(),
+                "{type_name}.schema.json repeats a definition's enum inline at {found:?}: \
+                 $ref definitions/<name>.schema.json instead"
+            );
+        }
+    }
 }

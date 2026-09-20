@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/definitions/kind.schema.json",
+  "title": "Kind",
+  "description": "The kind of a connection (ADR 0033): every network, plus the kinds that are not networks because nobody messages the user through them. `calendar` is the first: its events are the user's own, carry no consent extension, and are collected rather than bridged. The same rule as network.schema.json — add here first, the conformance tests name the copies.",
+  "type": "string",
+  "enum": [
+    "whatsapp",
+    "telegram",
+    "signal",
+    "discord",
+    "sms",
+    "matrix",
+    "email",
+    "calendar"
+  ]
+}

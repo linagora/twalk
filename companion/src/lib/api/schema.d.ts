@@ -1605,11 +1605,8 @@ export interface components {
              *     message the bus already holds instead of sending a second reply.
              */
             event_id: string;
-            /**
-             * @description The network the reply goes out on.
-             * @enum {string}
-             */
-            network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+            /** @description The network the reply goes out on. */
+            network: components["schemas"]["Network"];
             /** @description The persona that proposed the reply. */
             persona_id: string;
             /**
@@ -2681,10 +2678,12 @@ export interface components {
         /**
          * @description A messaging network as the user experiences it, and `matrix` for
          *     native rooms (ADR 0005, ADR 0009). The contract's own `network`
-         *     enum, exactly: a bridge id (`gmessages`) is never a network.
+         *     definition, exactly (`contracts/cloudevents/v1/definitions/network.schema.json`,
+         *     the one authority — `tests/openapi.rs` compares): a bridge id
+         *     (`gmessages`) is never a network; `email` is one (ADR 0033).
          * @enum {string}
          */
-        Network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+        Network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix" | "email";
         /**
          * @description One contact waiting for a decision, on one network. Four members, and
          *     deliberately no fifth: a body, a display name or a network identifier
@@ -3289,11 +3288,8 @@ export interface components {
              *     date.
              */
             expires_at: string | null;
-            /**
-             * @description The network the message it answers arrived on.
-             * @enum {string}
-             */
-            network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix";
+            /** @description The network the message it answers arrived on. */
+            network: components["schemas"]["Network"];
             /** @description The persona that proposed it. */
             persona_id: string;
             /**
