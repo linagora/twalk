@@ -26,6 +26,13 @@ ARG CARGO_BUILD_JOBS=4
 WORKDIR /src
 COPY clerk clerk
 COPY tests/harness tests/harness
+# The Companion's own catalogues, which `clerk/src/refusals.rs` embeds with
+# `include_str!` (#284): a Gateway refusal is answered in a post's thread
+# with the sentence the approval screen would show, so the clerk carries
+# the Companion's words and not a copy of them. The path is what the
+# source names, relative to the repository root; without this line the
+# build fails at that `include_str!`, which is the right failure.
+COPY companion/src/lib/i18n companion/src/lib/i18n
 WORKDIR /src/clerk
 # Cargo decides what to rebuild by comparing mtimes against the artifacts in
 # `target/`, and `target/` is a cache mount shared by every build of this
@@ -33,7 +40,13 @@ WORKDIR /src/clerk
 # sources to "now" after the COPY keeps the cache's value and removes the
 # trap an artefact from another tree would otherwise set
 # (companion-gateway.Dockerfile tells the story of the image that shipped).
-RUN find . -type f \( -name '*.rs' -o -name '*.toml' -o -name '*.lock' \) -exec touch {} +
+# The embedded catalogues are stamped with the sources for the same reason
+# that Dockerfile stamps its embedded `openapi.yaml`: an `include_str!` is
+# an ordinary mtime-tracked dependency, and a sentence changed in the
+# Companion must not ship as the sentence a previous build embedded.
+RUN find . ../companion/src/lib/i18n -type f \
+        \( -name '*.rs' -o -name '*.toml' -o -name '*.lock' -o -name '*.json' \) \
+        -exec touch {} +
 RUN --mount=type=cache,id=twalk-clerk-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=twalk-clerk-target,target=/src/clerk/target \
     cargo build --release --locked \

@@ -28,7 +28,16 @@
 //!   `["name", …]`, `["visibility", …]`, `["channel_type", …]`), and a
 //!   member is put into it by kind 9000 (`["h", uuid]`, `["p", hex]`,
 //!   `["role", …]`), NIP-29's put-user — exactly what `buzz-sdk`'s
-//!   `build_add_member` builds.
+//!   `build_add_member` builds;
+//! - an event is accepted only from the key that signed the request
+//!   (`event pubkey does not match authenticated identity` otherwise), so
+//!   the owner's gestures go up as the owner and a stranger's as the
+//!   stranger ([`RelayStack::submit_as`]); a reaction (kind 7) carries one
+//!   `["e", post]` tag and no `h`, a thread reply (kind 45003) carries
+//!   `["h", channel]` and `["e", post, "", "reply"]` — `buzz-sdk`'s
+//!   `build_reaction` and `build_forum_comment` ([`reaction`],
+//!   [`thread_reply`]) — and the same signed event a second time is a
+//!   duplicate, not a second event ([`RelayStack::submit_again_as`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -61,6 +70,29 @@ pub const TEST_OWNER_PUBKEY_HEX: &str =
 /// answers in milliseconds, and a request still open after ten seconds is
 /// a hung relay, which must fail a test rather than hang it for ever.
 pub const RELAY_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest one request waits, in all, for the relay's per-key quota to
+/// reset before it is a failure: a window and a half — one full window is
+/// the most any `retry in Ns` can ask for, and a second `429` right after
+/// it means the suite is over the quota on its own and should say so.
+pub const QUOTA_WAIT_BUDGET: Duration = Duration::from_secs(90);
+
+/// What a `429` that names no reset time is waited out for.
+const QUOTA_WAIT_DEFAULT: Duration = Duration::from_secs(5);
+
+/// The seconds a `rate-limited: quota exceeded; retry in Ns` body asks
+/// for, if it is that body.
+fn retry_in(body: &str) -> Option<Duration> {
+    let seconds: u64 = body
+        .split("retry in ")
+        .nth(1)?
+        .split('s')
+        .next()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds))
+}
 
 /// The sweep interval every clerk under test runs with
 /// (`CLERK_SWEEP_SECONDS` in [`relay_env`]): two seconds, so a test can
@@ -219,31 +251,76 @@ impl RelayStack {
     /// and the body, because "unauthorized" and "no such tenant" are the two
     /// mistakes this client can make and both are in the body.
     async fn signed_post(&self, path: &str, body: String) -> Result<Value> {
+        self.signed_post_as(&self.owner, path, body).await
+    }
+
+    /// [`signed_post`](Self::signed_post) as `keys` rather than the owner:
+    /// the relay refuses an event whose author is not the key that signed
+    /// the request (`event pubkey does not match authenticated identity`),
+    /// so a stranger's reaction must be posted as the stranger.
+    ///
+    /// A `429` is not a failure of the thing under test: the relay counts
+    /// every request of a key in a fixed sixty-second window
+    /// (`human_api_calls_per_min`, 300), the whole suite of a binary seeds,
+    /// reacts and reads as the one owner key, and two suites run back to
+    /// back land in one window. The answer names when the window resets
+    /// (`retry in Ns`), so the request waits **that long** — the relay's
+    /// number, not a chosen one — and is sent again, within
+    /// [`QUOTA_WAIT_BUDGET`] in all, and says so on stderr so a slow run
+    /// explains itself. A signed request is a fresh NIP-98 event each time.
+    async fn signed_post_as(&self, keys: &Keys, path: &str, body: String) -> Result<Value> {
         let url = format!("{}{path}", self.url);
-        let response = self
-            .http
-            .post(&url)
-            .header(
-                "Authorization",
-                authorization(&self.owner, &url, "POST", &body)?,
-            )
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-            .with_context(|| format!("POST {url}"))?;
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            bail!("POST {url} answered {status}: {text}");
+        let deadline = tokio::time::Instant::now() + QUOTA_WAIT_BUDGET;
+        loop {
+            let response = self
+                .http
+                .post(&url)
+                .header("Authorization", authorization(keys, &url, "POST", &body)?)
+                .header("Content-Type", "application/json")
+                .body(body.clone())
+                .send()
+                .await
+                .with_context(|| format!("POST {url}"))?;
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let wait = retry_in(&text).unwrap_or(QUOTA_WAIT_DEFAULT) + Duration::from_secs(1);
+                if tokio::time::Instant::now() + wait > deadline {
+                    bail!(
+                        "POST {url} answered {status} and the relay's quota did not reset within \
+                         {}s: {text}",
+                        QUOTA_WAIT_BUDGET.as_secs()
+                    );
+                }
+                eprintln!(
+                    "the relay rate-limited key {}…; waiting {}s as it asked ({text})",
+                    &keys.public_key().to_hex()[..8],
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+            if !status.is_success() {
+                bail!("POST {url} answered {status}: {text}");
+            }
+            return serde_json::from_str(&text)
+                .with_context(|| format!("POST {url} answered non-JSON: {text}"));
         }
-        serde_json::from_str(&text).with_context(|| format!("POST {url} answered non-JSON: {text}"))
     }
 
     /// Submits one signed event and requires the relay to accept it: a
     /// refusal is a failure carrying the relay's own reason.
     pub async fn submit(&self, event: &Event) -> Result<()> {
-        let answer = self.signed_post("/events", event.as_json()).await?;
+        self.submit_as(&self.owner, event).await
+    }
+
+    /// [`submit`](Self::submit) with the request signed by `keys`, which
+    /// must be the event's own author (a relay member): how a stranger's
+    /// gesture reaches the relay.
+    pub async fn submit_as(&self, keys: &Keys, event: &Event) -> Result<()> {
+        let answer = self
+            .signed_post_as(keys, "/events", event.as_json())
+            .await?;
         if answer["accepted"].as_bool() != Some(true) {
             bail!(
                 "the relay refused a kind {} event: {answer}",
@@ -253,12 +330,42 @@ impl RelayStack {
         Ok(())
     }
 
+    /// Submits an event the relay already holds, as `keys`, and requires the
+    /// relay to call it a **duplicate** — what a client that retried a
+    /// request looks like from the clerk's side: the same signed event, the
+    /// same id, once on the relay. A duplicate is `accepted: true,
+    /// message: "duplicate:"` for a comment and `accepted: false, message:
+    /// "duplicate: reaction already exists"` for a reaction (the relay's
+    /// `ingest.rs`), so both are read as the duplicate they are; an event the
+    /// relay did **not** already hold is a failure, because the test meant
+    /// to resubmit and did not. Returns the relay's message.
+    pub async fn submit_again_as(&self, keys: &Keys, event: &Event) -> Result<String> {
+        let answer = self
+            .signed_post_as(keys, "/events", event.as_json())
+            .await?;
+        let message = answer["message"].as_str().unwrap_or_default().to_owned();
+        if !message.starts_with("duplicate:") {
+            bail!(
+                "the relay did not call the resubmitted kind {} event a duplicate: {answer}",
+                event.kind.as_u16()
+            );
+        }
+        Ok(message)
+    }
+
     /// Adds `pubkey_hex` as a member of the relay (kind 9030, NIP-43),
     /// which is what lets it write at all: the relay requires membership
     /// and the clerk's key is nobody until this.
     pub async fn add_member(&self, pubkey_hex: &str) -> Result<()> {
+        self.add_member_as(pubkey_hex, "member").await
+    }
+
+    /// [`add_member`](Self::add_member) with `role` — `member` or `admin`,
+    /// the relay's own vocabulary — because a relay **admin** can react to
+    /// a post like anyone else and the clerk must decide by key, not role.
+    pub async fn add_member_as(&self, pubkey_hex: &str, role: &str) -> Result<()> {
         let event = EventBuilder::new(Kind::Custom(9030), "")
-            .tags([tag(["p", pubkey_hex])?, tag(["role", "member"])?])
+            .tags([tag(["p", pubkey_hex])?, tag(["role", role])?])
             .sign_with_keys(&self.owner)
             .context("signing the add-member command")?;
         self.submit(&event).await
@@ -281,23 +388,70 @@ impl RelayStack {
             .sign_with_keys(&self.owner)
             .context("signing the create-channel event")?;
         self.submit(&create).await?;
+        self.add_to_channel(&channel, member).await?;
+        Ok(channel)
+    }
+
+    /// Puts `pubkey_hex` — already a relay member — into `channel` (kind
+    /// 9000, NIP-29's put-user, as `buzz-sdk`'s `build_add_member` builds
+    /// it), signed by the owner: what lets a key read the channel and
+    /// react in it.
+    pub async fn add_to_channel(&self, channel: &str, pubkey_hex: &str) -> Result<()> {
+        self.add_to_channel_as(channel, pubkey_hex, "member").await
+    }
+
+    /// [`add_to_channel`](Self::add_to_channel) with `role` (`member` or
+    /// `admin`).
+    pub async fn add_to_channel_as(
+        &self,
+        channel: &str,
+        pubkey_hex: &str,
+        role: &str,
+    ) -> Result<()> {
         let put_user = EventBuilder::new(Kind::Custom(9000), "")
             .tags([
-                tag(["h", &channel])?,
-                tag(["p", member])?,
-                tag(["role", "member"])?,
+                tag(["h", channel])?,
+                tag(["p", pubkey_hex])?,
+                tag(["role", role])?,
             ])
             .sign_with_keys(&self.owner)
             .context("signing the put-user event")?;
-        self.submit(&put_user).await?;
-        Ok(channel)
+        self.submit(&put_user).await
+    }
+
+    /// A fresh key that is a `role` (`member` or `admin`) of the relay and
+    /// of `channel`, and nothing else — not the owner, not the clerk: a
+    /// **stranger** whose gesture on a post must decide nothing, whatever
+    /// their role, because the clerk decides by key.
+    pub async fn stranger_in(&self, channel: &str, role: &str) -> Result<Keys> {
+        let keys = Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        self.add_member_as(&pubkey, role).await?;
+        self.add_to_channel_as(channel, &pubkey, role).await?;
+        Ok(keys)
     }
 
     /// Every event of one of `kinds` in `channel`, newest first, as the
     /// owner reads them (the relay's cap of 1000, which no test approaches).
     pub async fn events_in(&self, channel: &str, kinds: &[u16]) -> Result<Vec<Event>> {
-        let filters = json!([{ "kinds": kinds, "#h": [channel], "limit": 1000 }]);
-        let answer = self.signed_post("/query", filters.to_string()).await?;
+        self.query(json!([{ "kinds": kinds, "#h": [channel], "limit": 1000 }]))
+            .await
+    }
+
+    /// One `POST /query` as the owner with `filters` — a JSON array of
+    /// NIP-01 filters — answered as events, newest first.
+    pub async fn query(&self, filters: Value) -> Result<Vec<Event>> {
+        self.query_as(&self.owner, filters).await
+    }
+
+    /// [`query`](Self::query) signed by `keys` — a member of the channels
+    /// the filters name — rather than the owner: a run reads as a key of
+    /// its own so that its reads draw on that key's quota and not on the
+    /// owner's, which every run's seed and every owner's gesture need.
+    pub async fn query_as(&self, keys: &Keys, filters: Value) -> Result<Vec<Event>> {
+        let answer = self
+            .signed_post_as(keys, "/query", filters.to_string())
+            .await?;
         serde_json::from_value(answer).context("the query answered something other than events")
     }
 
@@ -306,6 +460,30 @@ impl RelayStack {
     pub async fn all_events_in(&self, channel: &str) -> Result<Vec<Event>> {
         self.events_in(channel, &CLERK_KINDS).await
     }
+}
+
+/// A reaction (kind 7) on the post `post_id`, signed by `keys`: content
+/// the emoji, one `["e", post_id]` tag and nothing else — the shape
+/// `buzz-sdk`'s `build_reaction` writes and a Buzz client sends when the
+/// owner taps ✅ under a post. No `h` tag: the relay derives the channel
+/// from the target.
+pub fn reaction(keys: &Keys, post_id: &str, emoji: &str) -> Result<Event> {
+    EventBuilder::new(Kind::Custom(7), emoji)
+        .tags([tag(["e", post_id])?])
+        .sign_with_keys(keys)
+        .context("signing the reaction")
+}
+
+/// A **direct** reply (kind 45003) in the thread of the post `post_id` in
+/// `channel`, signed by `keys`: `["h", channel]` and the one
+/// `["e", post_id, "", "reply"]` tag `buzz-sdk`'s `build_forum_comment`
+/// writes when root and parent are the post itself — the owner answering
+/// the post with the text to send, or a stranger commenting on it.
+pub fn thread_reply(keys: &Keys, channel: &str, post_id: &str, text: &str) -> Result<Event> {
+    EventBuilder::new(Kind::Custom(45003), text)
+        .tags([tag(["h", channel])?, tag(["e", post_id, "", "reply"])?])
+        .sign_with_keys(keys)
+        .context("signing the thread reply")
 }
 
 /// The `Authorization` header of one NIP-98 request: a kind 27235 event

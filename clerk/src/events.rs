@@ -67,13 +67,14 @@ pub struct Content {
 }
 
 /// What `journal` needs about one posted reply: which network, what it
-/// reached and who posted it — never the reply's own words, which stay on
-/// the bus event this report is built from and never enter this struct.
+/// reached, who posted it and whether the owner edited it — never the
+/// reply's own words, which stay on the bus event this report is built
+/// from and never enter this struct.
 ///
 /// Built by [`posted_report`] from the `.posted` report's JSON payload (the
-/// approved reply's own `id`, `time` and `network`) and its two headers
-/// (`reach`, `posted-as`), rather than derived, so a report the clerk
-/// cannot fully read is a report it does not act on.
+/// approved reply's own `id`, `time` and `network`, and `data.edited`) and
+/// its two headers (`reach`, `posted-as`), rather than derived, so a report
+/// the clerk cannot fully read is a report it does not act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostedReport {
     pub approval_id: String,
@@ -81,6 +82,10 @@ pub struct PostedReport {
     pub reach: String,
     pub posted_as: String,
     pub time: String,
+    /// The approval's own `data.edited` (#284): whether what went out was
+    /// the owner's text rather than the persona's. The contract makes the
+    /// field optional, and a report that omits it went out as proposed.
+    pub edited: bool,
 }
 
 /// Reads a `.posted` report: the `persona.reply.approved` event republished
@@ -107,6 +112,11 @@ pub fn posted_report(
     let approval_id = value.get("id")?.as_str()?.to_owned();
     let time = value.get("time")?.as_str()?.to_owned();
     let network = value.get("network")?.as_str()?.to_owned();
+    let edited = value
+        .get("data")
+        .and_then(|data| data.get("edited"))
+        .and_then(|edited| edited.as_bool())
+        .unwrap_or(false);
 
     Some(PostedReport {
         approval_id,
@@ -114,6 +124,7 @@ pub fn posted_report(
         reach,
         posted_as,
         time,
+        edited,
     })
 }
 
@@ -281,6 +292,30 @@ mod tests {
         assert_eq!(report.network, "whatsapp");
         assert_eq!(report.reach, "contact");
         assert_eq!(report.posted_as, "@sensor:example.com");
+    }
+
+    #[test]
+    fn posted_report_reads_edited() {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("reach", "contact");
+        headers.insert("posted-as", "@sensor:example.com");
+
+        // The fixture's approval was edited.
+        let bytes = fixture("persona.reply.approved.json");
+        let report = posted_report(&bytes, Some(&headers)).expect("a full report");
+        assert!(report.edited);
+
+        // The same event with `edited: false`, and with the optional field
+        // left out, which the contract allows and which means "as proposed".
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["data"]["edited"] = serde_json::Value::Bool(false);
+        let report = posted_report(&serde_json::to_vec(&value).unwrap(), Some(&headers))
+            .expect("a full report");
+        assert!(!report.edited);
+        value["data"].as_object_mut().unwrap().remove("edited");
+        let report = posted_report(&serde_json::to_vec(&value).unwrap(), Some(&headers))
+            .expect("a full report");
+        assert!(!report.edited);
     }
 
     #[test]

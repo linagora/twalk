@@ -19,31 +19,72 @@
 //! persistent stack. The channels stay — the relay stack is `down -v`ed as
 //! a whole, and a channel named after its run says where it came from.
 //!
+//! A run **with the write half** (#284) is [`Run::start_with_write_half`]:
+//! the same, plus a session file in the run's directory holding the stub
+//! Companion Gateway's initial refresh token (mode 0600, the shape
+//! `provision-clerk-device.sh` writes), `CLERK_OWNER_PUBKEY` set to the
+//! harness owner's key — so the owner of the relay is the owner whose ✅
+//! decides — `CLERK_GATEWAY_URL` on the stub, and a decision tick of one
+//! second. The owner's gestures ([`Run::react_as_owner`],
+//! [`Run::reply_as_owner`]) go up signed by that key; a stranger's
+//! ([`Run::react_as_stranger`]) by a fresh member of the relay and of
+//! `approbations`, so a test can prove the difference is the key and not
+//! the room.
+//!
 //! [`shutdown`]: Run::shutdown
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use nostr::Event;
+use nostr::{Event, Keys};
 use serde_json::Value;
 use twalk_test_harness::{ensure_stack, nats_url, poll_until, validate_against_contract, Bus};
 
 use super::clerk::ClerkProc;
-use super::relay::{fresh_clerk_key, relay_env, Channels, RelayStack};
+use super::gateway::StubGateway;
+use super::relay::{
+    fresh_clerk_key, reaction, relay_env, thread_reply, Channels, RelayStack, TEST_OWNER_PUBKEY_HEX,
+};
 use super::run_id;
 
 /// How often the relay is asked again while a test waits for something to
 /// appear on it — once a second, deliberately slower than `poll_until`'s
 /// half-second: the relay rate-limits each key to 300 requests a minute,
-/// every test in a binary reads as the one owner key, and the tests of a
-/// binary run in parallel.
+/// a run reads as a key of its own ([`Run::reader`]) but seeds and reacts
+/// as the one owner key, and the tests of a binary run in parallel.
 pub const RELAY_POLL: Duration = Duration::from_secs(1);
 
 /// How long a test waits for the relay to show something before failing.
 /// The bus delivers in milliseconds and the clerk posts in one round trip,
 /// so half a minute is a clerk that will never post, not a slow one.
 pub const RELAY_WAIT: Duration = Duration::from_secs(30);
+
+/// The decision tick every clerk with a write half runs with
+/// (`CLERK_DECISION_SECONDS`): one second, so a test that waits for "two
+/// more ticks" waits two seconds and not ten.
+pub const DECISION_SECONDS: u64 = 1;
+
+/// The name of the session file in the run's directory.
+const SESSION_FILE: &str = "session.env";
+
+/// The variable the session file holds the refresh token under — the
+/// clerk's `gateway::SESSION_KEY`, spelled again here so a rename on the
+/// component's side fails this suite rather than being followed by it.
+pub const SESSION_KEY: &str = "TWALK_GATEWAY_REFRESH_TOKEN";
+
+/// The log line the decisions loop writes once per tick (`debug` when the
+/// tick did nothing, `info` when it did), which is why a run with a write
+/// half logs `twalk_clerk::consumers` at `debug`: a test that waits for a
+/// tick to have happened counts these.
+const TICK_LINE: &str = "decisions tick";
+
+/// What a run with a write half is configured with.
+struct WriteHalfSetup {
+    gateway_url: String,
+    refresh_token: String,
+}
 
 /// One run: the stack, the bus, the relay, the channels and the clerk.
 pub struct Run {
@@ -57,10 +98,21 @@ pub struct Run {
     pub clerk: ClerkProc,
     /// The clerk's public key: what its posts are signed with.
     pub clerk_pubkey: String,
+    /// The key this run **reads** the relay with: a member of the three
+    /// channels and nothing else, fresh per run, so that a run's reads —
+    /// every poll of every wait — draw on a quota of their own. The relay
+    /// counts a key's requests in a fixed window of a minute
+    /// (`human_api_calls_per_min`, 300), and the owner's quota is what
+    /// every run's seed and every owner's gesture need: a suite that read
+    /// as the owner too spent the whole window polling and then failed on
+    /// its own seed, or landed an owner's ✅ half a minute late.
+    pub reader: Keys,
     /// The environment the clerk was started with, without a listen
     /// address — [`ClerkProc::start`] picks a fresh one each time.
     env: Vec<(String, String)>,
     dir: PathBuf,
+    /// The session file, when this run has a write half.
+    session_file: Option<PathBuf>,
     stopped: bool,
 }
 
@@ -72,6 +124,43 @@ impl Run {
 
     /// A run whose clerk writes in `language` (`fr` or `en`).
     pub async fn start_in(test_name: &str, language: &str) -> Result<Self> {
+        Self::start_configured(test_name, language, None).await
+    }
+
+    /// A run in French **with the write half** (#284), pointed at `stub`:
+    /// the session file holds the stub's initial refresh token, the owner
+    /// is the harness's relay owner, the decision tick is
+    /// [`DECISION_SECONDS`]. The clerk refreshes its session at startup, so
+    /// by the time this returns the stub has issued one device token.
+    pub async fn start_with_write_half(test_name: &str, stub: &StubGateway) -> Result<Self> {
+        Self::start_with_write_half_at(test_name, &stub.base_url, &stub.initial_refresh_token())
+            .await
+    }
+
+    /// [`start_with_write_half`](Self::start_with_write_half) at any
+    /// origin — [`super::gateway::UNREACHABLE_GATEWAY_URL`] for a Gateway
+    /// that is not there — with `refresh_token` in the session file.
+    pub async fn start_with_write_half_at(
+        test_name: &str,
+        gateway_url: &str,
+        refresh_token: &str,
+    ) -> Result<Self> {
+        Self::start_configured(
+            test_name,
+            "fr",
+            Some(WriteHalfSetup {
+                gateway_url: gateway_url.to_owned(),
+                refresh_token: refresh_token.to_owned(),
+            }),
+        )
+        .await
+    }
+
+    async fn start_configured(
+        test_name: &str,
+        language: &str,
+        write: Option<WriteHalfSetup>,
+    ) -> Result<Self> {
         ensure_stack().await?;
         let stack = RelayStack::ensure().await?;
         let id = run_id(test_name);
@@ -83,18 +172,38 @@ impl Run {
             .await
             .with_context(|| format!("creating {}", dir.display()))?;
         let (key_file, clerk_pubkey, channels) = seed(&stack, &id, &dir).await?;
+        let reader = reader_in(&stack, &channels).await?;
 
         let mut env = relay_env(&stack, &key_file, &channels, &id);
-        let language_entry = env
-            .iter_mut()
-            .find(|(name, _)| name == "CLERK_USER_LANGUAGE");
-        anyhow::ensure!(
-            language_entry.is_some(),
-            "relay_env no longer sets CLERK_USER_LANGUAGE, so a run cannot choose its language"
-        );
-        if let Some((_, value)) = language_entry {
-            *value = language.to_owned();
-        }
+        set_env(&mut env, "CLERK_USER_LANGUAGE", language)?;
+        let session_file = match write {
+            Some(write) => {
+                let path = dir.join(SESSION_FILE);
+                write_session_file(&path, &write.refresh_token).await?;
+                env.push((
+                    "CLERK_OWNER_PUBKEY".to_owned(),
+                    TEST_OWNER_PUBKEY_HEX.to_owned(),
+                ));
+                env.push(("CLERK_GATEWAY_URL".to_owned(), write.gateway_url));
+                env.push((
+                    "CLERK_GATEWAY_SESSION_FILE".to_owned(),
+                    path.to_string_lossy().into_owned(),
+                ));
+                env.push((
+                    "CLERK_DECISION_SECONDS".to_owned(),
+                    DECISION_SECONDS.to_string(),
+                ));
+                // Every tick's line, so a test can wait for one to have
+                // happened; the rest of the clerk stays at `info`.
+                set_env(
+                    &mut env,
+                    "CLERK_LOG_LEVEL",
+                    "info,twalk_clerk::consumers=debug",
+                )?;
+                Some(path)
+            }
+            None => None,
+        };
         let clerk = start_clerk(&env).await?;
         Ok(Self {
             id,
@@ -103,10 +212,45 @@ impl Run {
             channels,
             clerk,
             clerk_pubkey,
+            reader,
             env,
             dir,
+            session_file,
             stopped: false,
         })
+    }
+
+    /// The harness owner's public key (hex): `CLERK_OWNER_PUBKEY` in a run
+    /// with a write half, and the key every owner's gesture is signed with.
+    pub fn owner_pubkey(&self) -> &'static str {
+        TEST_OWNER_PUBKEY_HEX
+    }
+
+    /// The clerk's session file, when this run has a write half.
+    pub fn session_file(&self) -> Option<&Path> {
+        self.session_file.as_deref()
+    }
+
+    /// Rewrites the session file with `token` — what
+    /// `provision-clerk-device.sh` does after signing the device in again.
+    /// Mode 0600, as the clerk requires.
+    pub async fn write_session_token(&self, token: &str) -> Result<()> {
+        let path = self
+            .session_file
+            .as_deref()
+            .context("this run has no write half, so no session file")?;
+        write_session_file(path, token).await
+    }
+
+    /// Signs the device in again on `stub` and writes the new refresh token
+    /// into the session file: the operator running
+    /// `provision-clerk-device.sh` after a revocation. The clerk reads the
+    /// file on its next refresh — at startup, so [`restart_clerk`](Self::restart_clerk)
+    /// is how a test applies it.
+    pub async fn provision_device(&self, stub: &StubGateway) -> Result<String> {
+        let token = stub.reissue();
+        self.write_session_token(&token).await?;
+        Ok(token)
     }
 
     /// The bus subject of one contract type in this run:
@@ -196,10 +340,7 @@ impl Run {
     /// names the suggestion `id` — the clerk's own way of recognising a
     /// post, read back from outside.
     pub async fn posts_about(&self, id: &str) -> Result<Vec<Event>> {
-        let posts = self
-            .stack
-            .events_in(&self.channels.approvals, &[45001])
-            .await?;
+        let posts = self.events_in(&self.channels.approvals, &[45001]).await?;
         Ok(posts
             .into_iter()
             .filter(|post| reference_names(&post.content, id))
@@ -221,10 +362,7 @@ impl Run {
         match posts {
             Ok(mut posts) => Ok(posts.remove(0)),
             Err(error) => {
-                let held = self
-                    .stack
-                    .events_in(&self.channels.approvals, &[45001])
-                    .await;
+                let held = self.events_in(&self.channels.approvals, &[45001]).await;
                 anyhow::bail!("{error}; approbations held {held:?}")
             }
         }
@@ -233,7 +371,27 @@ impl Run {
     /// The stream messages (kind 9) in `channel` — `activite` or `journal`
     /// — newest first.
     pub async fn lines_in(&self, channel: &str) -> Result<Vec<Event>> {
-        self.stack.events_in(channel, &[9]).await
+        self.events_in(channel, &[9]).await
+    }
+
+    /// Every event of one of `kinds` in `channel`, newest first, read as
+    /// this run's [`reader`](Self::reader) — `RelayStack::events_in` on
+    /// the run's own quota.
+    pub async fn events_in(&self, channel: &str, kinds: &[u16]) -> Result<Vec<Event>> {
+        self.read(serde_json::json!([{ "kinds": kinds, "#h": [channel], "limit": 1000 }]))
+            .await
+    }
+
+    /// Everything the clerk could have written in `channel`
+    /// ([`super::relay::CLERK_KINDS`]), read as this run's reader: for a
+    /// search that must find nothing of a contact.
+    pub async fn all_events_in(&self, channel: &str) -> Result<Vec<Event>> {
+        self.events_in(channel, &super::relay::CLERK_KINDS).await
+    }
+
+    /// One `POST /query` as this run's reader.
+    async fn read(&self, filters: Value) -> Result<Vec<Event>> {
+        self.stack.query_as(&self.reader, filters).await
     }
 
     /// Polls `channel` until a stream message containing `needle` is there
@@ -355,12 +513,240 @@ impl Run {
         }
     }
 
+    /// The owner reacts `emoji` to the post `post_id` — a kind 7 signed by
+    /// the harness owner's key, the one `CLERK_OWNER_PUBKEY` names. Returns
+    /// the event as it went up, for its id (the gesture the clerk's thread
+    /// answer is keyed on) and for [`resubmit_as_owner`](Self::resubmit_as_owner).
+    pub async fn react_as_owner(&self, post_id: &str, emoji: &str) -> Result<Event> {
+        let event = reaction(&self.stack.owner, post_id, emoji)?;
+        self.stack.submit(&event).await?;
+        Ok(event)
+    }
+
+    /// The owner replies `text` in the thread of the post `post_id` in
+    /// `approbations` — a direct reply (kind 45003) signed by the owner's
+    /// key: the reply to send in the persona's place.
+    pub async fn reply_as_owner(&self, post_id: &str, text: &str) -> Result<Event> {
+        let event = thread_reply(&self.stack.owner, &self.channels.approvals, post_id, text)?;
+        self.stack.submit(&event).await?;
+        Ok(event)
+    }
+
+    /// The same signed event a second time, as the owner: the relay calls
+    /// it a duplicate and holds it once, which is what a client that
+    /// retried looks like to the clerk. Fails if the relay did not already
+    /// hold it.
+    pub async fn resubmit_as_owner(&self, event: &Event) -> Result<String> {
+        self.stack.submit_again_as(&self.stack.owner, event).await
+    }
+
+    /// A fresh key, a member of the relay and of `approbations` and nothing
+    /// else — put there by the owner, the way a member is — for a test that
+    /// wants to hold the stranger's keys.
+    pub async fn stranger(&self) -> Result<Keys> {
+        self.stack
+            .stranger_in(&self.channels.approvals, "member")
+            .await
+    }
+
+    /// A fresh key that is an **admin** of the relay and of `approbations`:
+    /// a stranger with every right the relay grants short of ownership,
+    /// whose gesture must still decide nothing, because the clerk decides
+    /// by the owner's key and reads no role.
+    pub async fn admin(&self) -> Result<Keys> {
+        self.stack
+            .stranger_in(&self.channels.approvals, "admin")
+            .await
+    }
+
+    /// A stranger reacts `emoji` to the post `post_id`: a fresh member's
+    /// kind 7, signed and submitted as that member. Returns the event, whose
+    /// `pubkey` is the stranger's.
+    pub async fn react_as_stranger(&self, post_id: &str, emoji: &str) -> Result<Event> {
+        let stranger = self.stranger().await?;
+        self.react_as(&stranger, post_id, emoji).await
+    }
+
+    /// A relay admin reacts `emoji` to the post `post_id`, on the same terms
+    /// as [`react_as_stranger`](Self::react_as_stranger).
+    pub async fn react_as_admin(&self, post_id: &str, emoji: &str) -> Result<Event> {
+        let admin = self.admin().await?;
+        self.react_as(&admin, post_id, emoji).await
+    }
+
+    /// `keys` reacts `emoji` to the post `post_id`, signed and submitted as
+    /// that key (a relay member).
+    pub async fn react_as(&self, keys: &Keys, post_id: &str, emoji: &str) -> Result<Event> {
+        let event = reaction(keys, post_id, emoji)?;
+        self.stack.submit_as(keys, &event).await?;
+        Ok(event)
+    }
+
+    /// A stranger replies `text` in the thread of the post `post_id`, on the
+    /// same terms as [`react_as_stranger`](Self::react_as_stranger).
+    pub async fn reply_as_stranger(&self, post_id: &str, text: &str) -> Result<Event> {
+        let stranger = self.stranger().await?;
+        let event = thread_reply(&stranger, &self.channels.approvals, post_id, text)?;
+        self.stack.submit_as(&stranger, &event).await?;
+        Ok(event)
+    }
+
+    /// Every reaction (kind 7) and thread reply (kind 45003) that names the
+    /// post `post_id` in an `e` tag, by anyone, newest first — what the
+    /// clerk reads on a tick, as the owner reads it. A deleted post leaves
+    /// its gestures queryable, so this answers after the post is gone.
+    pub async fn gestures_on(&self, post_id: &str) -> Result<Vec<Event>> {
+        self.events_referencing(post_id, &[7, 45003]).await
+    }
+
+    /// The thread of the post `post_id`: every reply (kind 45003) that
+    /// names it in an `e` tag, by anyone — the owner's own reply and the
+    /// clerk's answers alike — newest first.
+    pub async fn thread_of(&self, post_id: &str) -> Result<Vec<Event>> {
+        self.events_referencing(post_id, &[45003]).await
+    }
+
+    /// The clerk's own replies in the thread of `post_id`, newest first:
+    /// what it answered the owner or a stranger with.
+    pub async fn clerk_thread_of(&self, post_id: &str) -> Result<Vec<Event>> {
+        Ok(self
+            .thread_of(post_id)
+            .await?
+            .into_iter()
+            .filter(|reply| reply.pubkey.to_hex() == self.clerk_pubkey)
+            .collect())
+    }
+
+    /// The clerk's own replies in the threads of every one of `post_ids`,
+    /// in **one** query — for a test over many posts at once, because
+    /// every read is a request of the owner's quota.
+    pub async fn clerk_threads_of(&self, post_ids: &[String]) -> Result<Vec<Event>> {
+        let filters = serde_json::json!([{ "kinds": [45003], "#e": post_ids, "limit": 1000 }]);
+        Ok(self
+            .read(filters)
+            .await?
+            .into_iter()
+            .filter(|reply| reply.pubkey.to_hex() == self.clerk_pubkey)
+            .collect())
+    }
+
+    /// Every forum post (kind 45001) standing in `approbations`, in one
+    /// query, for a test that then asks about many suggestions at once.
+    pub async fn standing_posts(&self) -> Result<Vec<Event>> {
+        self.events_in(&self.channels.approvals, &[45001]).await
+    }
+
+    async fn events_referencing(&self, post_id: &str, kinds: &[u16]) -> Result<Vec<Event>> {
+        let filters = serde_json::json!([{ "kinds": kinds, "#e": [post_id], "limit": 1000 }]);
+        self.read(filters).await
+    }
+
+    /// Polls the thread of `post_id` until a reply **by the clerk**
+    /// containing `needle` is there and returns it, oldest first among
+    /// those that match, for at most [`RELAY_WAIT`]. The failure names
+    /// what the thread held.
+    pub async fn wait_for_thread_line(&self, post_id: &str, needle: &str) -> Result<Event> {
+        self.wait_for_thread_line_within(post_id, needle, RELAY_WAIT)
+            .await
+    }
+
+    /// [`wait_for_thread_line`](Self::wait_for_thread_line) with a bound of
+    /// the test's own: for a line the clerk writes at a time the test can
+    /// derive — one it writes only as a suggestion nears its expiry — so
+    /// that the bound is that arithmetic and not a constant that happens
+    /// to exceed it by a few seconds on an idle host (#186).
+    pub async fn wait_for_thread_line_within(
+        &self,
+        post_id: &str,
+        needle: &str,
+        within: Duration,
+    ) -> Result<Event> {
+        let line = wait_on_relay_for(
+            || async {
+                self.clerk_thread_of(post_id)
+                    .await
+                    .ok()?
+                    .into_iter()
+                    .rev()
+                    .find(|reply| reply.content.contains(needle))
+            },
+            &format!("a reply by the clerk containing {needle:?} in the thread of {post_id}"),
+            within,
+        )
+        .await;
+        match line {
+            Ok(line) => Ok(line),
+            Err(error) => {
+                let held = self.thread_of(post_id).await;
+                anyhow::bail!("{error}; the thread held {held:?}")
+            }
+        }
+    }
+
+    /// How many decision ticks the current clerk process has logged.
+    pub async fn ticks(&self) -> usize {
+        self.clerk
+            .logs()
+            .await
+            .lines()
+            .filter(|line| line.contains(TICK_LINE))
+            .count()
+    }
+
+    /// Waits until the current clerk process has logged `more` decision
+    /// ticks beyond those already logged — "two ticks later, still…" —
+    /// bounded at [`DECISION_SECONDS`] per tick plus [`RELAY_WAIT`], so a
+    /// loop that stopped ticking fails the test rather than hanging it.
+    ///
+    /// What is guaranteed is `more − 1` **complete** ticks after the call:
+    /// a tick already in flight when the count is read logs its line and
+    /// counts as one of the `more`, so `wait_for_ticks(2)` is "at least
+    /// one whole tick has run since here", and `wait_for_ticks(1)` only
+    /// "the tick under way has ended" — enough after a deletion the test
+    /// has already seen, since the loop writes its lines before it logs
+    /// the tick, and not enough for "one full tick later".
+    pub async fn wait_for_ticks(&self, more: usize) -> Result<()> {
+        let wanted = self.ticks().await + more;
+        let within = RELAY_WAIT + Duration::from_secs(DECISION_SECONDS * more as u64);
+        let reached = wait_on_relay_for(
+            || async { (self.ticks().await >= wanted).then_some(()) },
+            &format!("{more} more decision ticks ({wanted} in all)"),
+            within,
+        )
+        .await;
+        match reached {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                anyhow::bail!(
+                    "{error}; the clerk's logs were:\n{}",
+                    self.clerk.logs().await
+                )
+            }
+        }
+    }
+
     /// Stops the clerk with SIGTERM and starts a fresh process on the same
     /// key, channels, stream and subject prefix — a warm restart, as an
     /// operator's process manager does one — and waits for `clerk running`.
     pub async fn restart_clerk(&mut self) -> Result<()> {
+        self.stop_clerk().await?;
+        self.start_clerk().await
+    }
+
+    /// Stops the clerk with SIGTERM and requires a clean exit, leaving the
+    /// run's stream, key and channels in place — for a test that acts on
+    /// the relay **while the clerk is away** and then
+    /// [`start_clerk`](Self::start_clerk)s it to see what it does with what
+    /// it finds.
+    pub async fn stop_clerk(&mut self) -> Result<()> {
         let status = self.clerk.stop().await?;
         anyhow::ensure!(status.success(), "the clerk did not exit cleanly: {status}");
+        Ok(())
+    }
+
+    /// Starts a fresh clerk process on the run's environment, after
+    /// [`stop_clerk`](Self::stop_clerk), and waits for `clerk running`.
+    pub async fn start_clerk(&mut self) -> Result<()> {
         self.clerk = start_clerk(&self.env).await?;
         Ok(())
     }
@@ -443,6 +829,65 @@ pub async fn seed(
             .await?,
     };
     Ok((key_file, clerk_pubkey, channels))
+}
+
+/// A fresh key made a member of the relay and of the run's three channels,
+/// by the owner: the run's [`Run::reader`], four requests of the owner's
+/// quota that spare it every read the run makes afterwards. Public for the
+/// deployment suite, which seeds the same channels for a clerk it does not
+/// start itself and reads them on the same terms.
+pub async fn reader_in(stack: &RelayStack, channels: &Channels) -> Result<Keys> {
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+    stack.add_member(&pubkey).await?;
+    for channel in [&channels.approvals, &channels.activity, &channels.journal] {
+        stack.add_to_channel(channel, &pubkey).await?;
+    }
+    Ok(keys)
+}
+
+/// Sets `name` to `value` in an environment `relay_env` built, and fails if
+/// `relay_env` no longer sets it — a variable this harness thought it was
+/// overriding and was not is a run configured other than the test believes.
+fn set_env(env: &mut [(String, String)], name: &str, value: &str) -> Result<()> {
+    let entry = env
+        .iter_mut()
+        .find(|(key, _)| key == name)
+        .with_context(|| format!("relay_env no longer sets {name}, so a run cannot override it"))?;
+    entry.1 = value.to_owned();
+    Ok(())
+}
+
+/// Writes the session file at `path` with `token` on its
+/// `TWALK_GATEWAY_REFRESH_TOKEN=` line and a comment above it — the shape
+/// `provision-clerk-device.sh` writes — with mode 0600 from the moment it
+/// exists, because the clerk refuses a file group or others can read. A
+/// file already there (a re-provisioning) is replaced whole.
+async fn write_session_file(path: &Path, token: &str) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await
+        .with_context(|| format!("creating {} with mode 0600", path.display()))?;
+    file.write_all(
+        format!("# the clerk's session, written by the test harness\n{SESSION_KEY}={token}\n")
+            .as_bytes(),
+    )
+    .await
+    .with_context(|| format!("writing {}", path.display()))?;
+    file.flush().await?;
+    // `mode` applies at creation only: a file rewritten keeps whatever mode
+    // it had, so say it again.
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("setting the mode of {}", path.display()))?;
+    Ok(())
 }
 
 /// Starts the clerk on `env` and waits for `clerk running`.

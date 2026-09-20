@@ -38,7 +38,11 @@
 #
 # TWALK_CLERK_TEST_* is the clerk's own test stack: a real Buzz relay (relay,
 # Postgres, Redis) beside the shared Synapse/NATS one, seeded fresh per run
-# under a bus prefix of its own, at 18370.
+# under a bus prefix of its own, at 18370. TWALK_CLERK_DEPLOY_TEST_* is the
+# reference deployment from the clerk's side (#284): the deployed Gateway and
+# the deployed clerk container against that same relay, plus the clerk's own
+# /health port, which is a host port because the clerk runs in the host's
+# network namespace and 8084 is the reference deployment's own.
 #
 # The `_TEARDOWN` flags are deliberately **not** set, and since #199 that is a
 # choice rather than a workaround. It used to be a workaround:
@@ -92,6 +96,11 @@ TWALK_LOOP_TEST_NATS_PORT=18351
 TWALK_LOOP_TEST_GATEWAY_PORT=18352
 TWALK_CLERK_TEST_STACK=twalk-ci-clerk
 TWALK_CLERK_TEST_RELAY_PORT=18370
+TWALK_CLERK_DEPLOY_TEST_STACK=twalk-ci-clerk-deploy
+TWALK_CLERK_DEPLOY_TEST_SYNAPSE_PORT=18380
+TWALK_CLERK_DEPLOY_TEST_NATS_PORT=18381
+TWALK_CLERK_DEPLOY_TEST_GATEWAY_PORT=18382
+TWALK_CLERK_DEPLOY_TEST_CLERK_PORT=18383
 TWALK_TEST_PORT=18360
 TWALK_TEST_BRIDGE_PORT=18361
 TWALK_TEST_SESSION_PORT=18362

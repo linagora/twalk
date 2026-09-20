@@ -11,10 +11,21 @@
 //! *kind* of subject and the state and networks, never the subject's Matrix
 //! ID (`companion/src/lib/dashboard/model.ts` is the rule; ticket #265).
 //!
-//! Two lines this lot deliberately does not write are named in the post
-//! itself: the delivery line and the gesture that decides are #284's, and
-//! the post says so rather than leaving a blank the owner would read as a
-//! defect.
+//! One line this component deliberately does not write is named in the
+//! post itself: delivery — where the owner's own account stands in the
+//! conversation (#216) — is a Companion Gateway read the clerk does not
+//! make, and the post says so plainly and says where it is read (the
+//! Approvals screen) rather than leaving a blank the owner would read as
+//! a defect, or citing a ticket as "to come". The gesture line is what it
+//! says: since #284 a ✅, a ❌ or a reply on the post is the decision.
+//!
+//! What the clerk answers in a post's **thread** (`thread_*`) is about the
+//! owner's gesture and never about the contact: a refusal is the Companion
+//! Gateway's code turned into the Companion's own sentence for it
+//! ([`crate::refusals`]), so an owner deciding from Buzz reads exactly what
+//! the approval screen would have shown them. A `code` is the Gateway's
+//! vocabulary, not a contact's words, and the one sentence that embeds it
+//! is the one for a code this build has never met.
 //!
 //! The sentences exist in [`Lang::Fr`] and [`Lang::En`]. The Companion's
 //! other three languages fall back to English, which [`lang`] says so the
@@ -70,7 +81,9 @@ pub fn network_name(network: &str) -> &str {
 /// body says. `expires_at` is shown as `HH:MM UTC` when it reads as RFC
 /// 3339 and as the event spelled it otherwise — it is the event's own
 /// field, never a contact's words, and a time the owner can see is better
-/// than one the clerk could not format.
+/// than one the clerk could not format. The gesture line names the three
+/// decisions `crate::decision` reads off the post (#284): the two emoji it
+/// takes as approve and refuse, and a reply as the edited text to send.
 pub fn approval_post(
     l: Lang,
     body: &str,
@@ -90,20 +103,148 @@ pub fn approval_post(
         Lang::Fr => format!(
             "Réponse proposée · {network}{expiry}\n\
              « {body} »\n\
-             Livraison : pas encore connue — ce sera dit ici quand le greffier saura lire l’état \
-             de la conversation (#284).\n\
-             ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte (à venir : \
-             #284)\n\
+             Livraison : non lue par le greffier (#300) — l’écran Approbations la connaît.\n\
+             ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
              {reference}"
         ),
         Lang::En => format!(
             "Proposed reply · {network}{expiry}\n\
              “{body}”\n\
-             Delivery: not yet known — it will be said here once the clerk can read the state of \
-             the conversation (#284).\n\
-             ✅ send as is · ❌ decline · reply here to send a different text (coming: #284)\n\
+             Delivery: not read by the clerk (#300) — the Approvals screen knows it.\n\
+             ✅ send as is · ❌ decline · reply here to send a different text\n\
              {reference}"
         ),
+    }
+}
+
+/// The thread answer to a gesture by a key that is not the owner's (#284):
+/// the relay let a member react, and the clerk did nothing with it, and
+/// says so once rather than silently ignoring a person who thinks they
+/// approved.
+pub fn thread_not_the_owner(l: Lang) -> String {
+    match l {
+        Lang::Fr => "Seul le propriétaire approuve.".to_owned(),
+        Lang::En => "Only the owner approves.".to_owned(),
+    }
+}
+
+/// The thread answer to a refusal by the Companion Gateway: "not sent",
+/// then the Companion's own sentence for the code ([`crate::refusals`]) —
+/// cause and next step, exactly as the approval screen would show them.
+///
+/// One refusal is not a failure ([`crate::refusals::sent`]): the reply went
+/// out and the Companion Gateway could not record it. That one begins
+/// "sent but not recorded", because "not sent" before the Companion's own
+/// "Your reply was sent" would be a false first word — and the word the
+/// owner acts on, by sending it again.
+pub fn thread_refused(l: Lang, code: &str) -> String {
+    let sentence = crate::refusals::sentence(l, code);
+    match (l, crate::refusals::sent(code)) {
+        (Lang::Fr, true) => format!("Envoyée mais non enregistrée — {sentence}"),
+        (Lang::Fr, false) => format!("Non envoyée — {sentence}"),
+        (Lang::En, true) => format!("Sent but not recorded — {sentence}"),
+        (Lang::En, false) => format!("Not sent — {sentence}"),
+    }
+}
+
+/// The thread answer when the owner's gesture could not be carried before
+/// the suggestion expired, because the Companion Gateway never answered:
+/// the post is about to be swept, and this line is what the owner finds
+/// in its place — with the one thing they can do, which is to decide
+/// again on the next one.
+pub fn thread_not_recorded(l: Lang) -> String {
+    match l {
+        Lang::Fr => "Non enregistrée — le Companion Gateway n’a pas répondu avant l’expiration ; \
+                     réagis de nouveau."
+            .to_owned(),
+        Lang::En => "Not recorded — the Companion Gateway did not answer before the expiry; react \
+                     again."
+            .to_owned(),
+    }
+}
+
+/// The thread answer when the Companion Gateway refused the clerk's own
+/// session: the owner revoked the `Buzz` device on the dashboard — a
+/// legitimate act, and this names the script that issues a new one rather
+/// than leaving "unauthenticated" to be read as a defect.
+pub fn thread_revoked(l: Lang) -> String {
+    match l {
+        Lang::Fr => "Non enregistrée — l’appareil « Buzz » a été révoqué sur le tableau de bord ; \
+                     relance provision-clerk-device.sh."
+            .to_owned(),
+        Lang::En => "Not recorded — the “Buzz” device was revoked on the dashboard; run \
+                     provision-clerk-device.sh again."
+            .to_owned(),
+    }
+}
+
+/// The thread answer to an owner's ✅ or edited reply on a post whose
+/// suggestion had already expired when the clerk read the gesture: the
+/// decision came in the suggestion's last seconds, the Companion Gateway
+/// would refuse it as `suggestion_expired`, and the sweep is about to
+/// delete the post — so the owner is told, once, rather than left to read
+/// "expired undecided" in `activite` about a suggestion they decided.
+pub fn thread_expired(l: Lang) -> String {
+    match l {
+        Lang::Fr => "Non envoyée — la suggestion avait expiré.".to_owned(),
+        Lang::En => "Not sent — the suggestion had expired.".to_owned(),
+    }
+}
+
+/// The network named on one of the clerk's own `approbations` posts, read
+/// back off its first line — the inverse of [`approval_post`]'s
+/// `Réponse proposée · WhatsApp · expire à …`, kept beside it so the
+/// layout and its reader are one edit. As the owner reads it (`WhatsApp`,
+/// not `whatsapp`), which [`network_name`] passes through unchanged, for
+/// the `activite` line the decisions loop writes when a suggestion is
+/// approved or declined from Buzz (#284). `None` for a post not in that
+/// shape. Read off the post rather than kept, because the relay is the
+/// clerk's only memory (ADR 0035), and off the first line rather than the
+/// reference line, which names the suggestion and its expiry and nothing
+/// else.
+pub fn network_off_post(post_content: &str) -> Option<&str> {
+    let first = post_content.lines().next()?;
+    let mut parts = first.split(" · ");
+    parts.next()?;
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|network| !network.is_empty())
+}
+
+/// ` · WhatsApp` for a line that names a network, nothing for one that
+/// names none — a post the loop could not read a network off must not
+/// leave a dangling separator.
+fn network_suffix(network: &str) -> String {
+    if network.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", network_name(network))
+    }
+}
+
+/// An `activite` line: a suggestion was approved from Buzz, edited or as
+/// proposed, on which network — and never what it said.
+pub fn activity_approved(l: Lang, network: &str, edited: bool) -> String {
+    let network = network_suffix(network);
+    match (l, edited) {
+        (Lang::Fr, true) => format!("Suggestion approuvée depuis Buzz (modifiée){network}"),
+        (Lang::Fr, false) => format!("Suggestion approuvée depuis Buzz{network}"),
+        (Lang::En, true) => format!("Suggestion approved from Buzz (edited){network}"),
+        (Lang::En, false) => format!("Suggestion approved from Buzz{network}"),
+    }
+}
+
+/// An `activite` line: the owner refused a suggestion from Buzz with ❌.
+/// The line says the refusal went nowhere, because it did not: no route on
+/// the Companion Gateway refuses a suggestion, so the clerk deleted the post
+/// and told nobody else (the approval screen's own `dismissed.ts` is the
+/// same decision, with the same disclosure).
+pub fn activity_refused_locally(l: Lang, network: &str) -> String {
+    let network = network_suffix(network);
+    match l {
+        Lang::Fr => format!("Suggestion refusée depuis Buzz (❌, non transmise){network}"),
+        Lang::En => format!("Suggestion declined from Buzz (❌, not forwarded){network}"),
     }
 }
 
@@ -116,7 +257,9 @@ pub fn approval_post(
 /// shown by its first twelve characters: enough to find it in
 /// `GET /api/approvals/{id}`, short enough to read. `at` is the report's
 /// time, `HH:MM UTC` when it reads as RFC 3339, as given otherwise, and
-/// left out when empty.
+/// left out when empty. `edited` is the approval's own flag — the reply
+/// went out with a text the owner wrote rather than the persona's (#284) —
+/// and it ends the line when true; it still says nothing of the text.
 pub fn journal_line(
     l: Lang,
     network: &str,
@@ -124,6 +267,7 @@ pub fn journal_line(
     posted_as: &str,
     approval_id: &str,
     at: &str,
+    edited: bool,
 ) -> String {
     let network = network_name(network);
     let approval = short_id(approval_id);
@@ -132,29 +276,35 @@ pub fn journal_line(
     } else {
         format!(" · {}", clock_utc(at).unwrap_or_else(|| at.to_owned()))
     };
+    let edited = match (l, edited) {
+        (_, false) => "",
+        (Lang::Fr, true) => " · modifiée",
+        (Lang::En, true) => " · edited",
+    };
     match (l, reach) {
         (Lang::Fr, "contact") => format!(
             "Partie · {network} · postée en tant que {posted_as} · a atteint le contact · \
-             approbation {approval}{when}"
+             approbation {approval}{when}{edited}"
         ),
         (Lang::Fr, "nobody") => format!(
             "Personne ne l’a reçue · {network} · postée en tant que {posted_as} — un compte que le \
-             bridge ignore (#123) · approbation {approval}{when}"
+             bridge ignore (#123) · approbation {approval}{when}{edited}"
         ),
         (Lang::Fr, other) => format!(
             "Partie · {network} · postée en tant que {posted_as} · portée : {other} · approbation \
-             {approval}{when}"
+             {approval}{when}{edited}"
         ),
         (Lang::En, "contact") => format!(
             "Sent · {network} · posted as {posted_as} · reached the contact · approval \
-             {approval}{when}"
+             {approval}{when}{edited}"
         ),
         (Lang::En, "nobody") => format!(
             "Nobody received it · {network} · posted as {posted_as} — an account the bridge \
-             ignores (#123) · approval {approval}{when}"
+             ignores (#123) · approval {approval}{when}{edited}"
         ),
         (Lang::En, other) => format!(
-            "Sent · {network} · posted as {posted_as} · reach: {other} · approval {approval}{when}"
+            "Sent · {network} · posted as {posted_as} · reach: {other} · approval \
+             {approval}{when}{edited}"
         ),
     }
 }
@@ -300,7 +450,6 @@ mod tests {
             assert_eq!(post.lines().last(), Some(REFERENCE), "{post}");
             assert!(post.contains("WhatsApp"), "{post}");
             assert!(post.contains("11:00 UTC"), "{post}");
-            assert!(post.contains("#284"), "{post}");
             for marker in markers {
                 assert!(!post.contains(marker), "{marker} in {post}");
             }
@@ -319,8 +468,8 @@ mod tests {
         let expected = format!(
             "Réponse proposée · WhatsApp · expire à 21:41 UTC (heure locale non connue)\n\
              « Pas de problème, à 20h ! »\n\
-             Livraison : pas encore connue — ce sera dit ici quand le greffier saura lire l’état de la conversation (#284).\n\
-             ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte (à venir : #284)\n\
+             Livraison : non lue par le greffier (#300) — l’écran Approbations la connaît.\n\
+             ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
              {REFERENCE}"
         );
         assert_eq!(post, expected);
@@ -338,8 +487,8 @@ mod tests {
         let expected = format!(
             "Proposed reply · Signal · expires at 21:41 UTC (local time not known)\n\
              “No problem, see you at 8!”\n\
-             Delivery: not yet known — it will be said here once the clerk can read the state of the conversation (#284).\n\
-             ✅ send as is · ❌ decline · reply here to send a different text (coming: #284)\n\
+             Delivery: not read by the clerk (#300) — the Approvals screen knows it.\n\
+             ✅ send as is · ❌ decline · reply here to send a different text\n\
              {REFERENCE}"
         );
         assert_eq!(post, expected);
@@ -381,6 +530,7 @@ mod tests {
             "@sensor:example.com",
             APPROVAL_ID,
             "2026-09-17T21:41:00Z",
+            false,
         );
         assert_eq!(
             fr,
@@ -394,6 +544,7 @@ mod tests {
             "@sensor:example.com",
             APPROVAL_ID,
             "2026-09-17T21:41:00Z",
+            false,
         );
         assert!(en.starts_with("Nobody received it · WhatsApp"), "{en}");
         assert!(en.contains("#123"), "{en}");
@@ -410,6 +561,7 @@ mod tests {
             "@michel:example.com",
             APPROVAL_ID,
             "2026-09-17T21:41:00Z",
+            false,
         );
         assert_eq!(
             fr,
@@ -424,6 +576,7 @@ mod tests {
             "@michel:example.com",
             APPROVAL_ID,
             "2026-09-17T21:41:00Z",
+            false,
         );
         assert_eq!(
             en,
@@ -433,9 +586,9 @@ mod tests {
 
     #[test]
     fn a_short_approval_id_is_shown_whole_and_an_unreadable_time_raw() {
-        let fr = journal_line(Lang::Fr, "sms", "contact", "@m:x", "abc", "now-ish");
+        let fr = journal_line(Lang::Fr, "sms", "contact", "@m:x", "abc", "now-ish", false);
         assert!(fr.ends_with("approbation abc · now-ish"), "{fr}");
-        let fr = journal_line(Lang::Fr, "sms", "contact", "@m:x", "abc", "");
+        let fr = journal_line(Lang::Fr, "sms", "contact", "@m:x", "abc", "", false);
         assert!(fr.ends_with("approbation abc"), "{fr}");
     }
 
@@ -515,5 +668,220 @@ mod tests {
             activity_expired(Lang::En),
             "A proposal expired undecided · removed from approbations"
         );
+    }
+
+    #[test]
+    fn the_gesture_line_no_longer_says_coming() {
+        for l in [Lang::Fr, Lang::En] {
+            let post = approval_post(l, "Oui", "sms", None, REFERENCE);
+            assert!(!post.contains("à venir"), "{post}");
+            assert!(!post.contains("coming"), "{post}");
+            // The delivery line says plainly that the clerk does not read
+            // delivery and where it is read, and names the ticket that will
+            // make it read it — #300, open — never #284, which shipped: a
+            // post that names the ticket that shipped it as a future one is
+            // wrong on every read.
+            assert!(!post.contains("#284"), "{post}");
+            assert!(post.contains("(#300)"), "{post}");
+        }
+    }
+
+    #[test]
+    fn journal_line_says_edited_only_when_the_reply_was() {
+        let fr = journal_line(
+            Lang::Fr,
+            "signal",
+            "contact",
+            "@michel:example.com",
+            APPROVAL_ID,
+            "2026-09-17T21:41:00Z",
+            true,
+        );
+        assert_eq!(
+            fr,
+            "Partie · Signal · postée en tant que @michel:example.com · a atteint le contact · approbation 8d3fb3fe9d2d… · 21:41 UTC · modifiée"
+        );
+        let en = journal_line(
+            Lang::En,
+            "signal",
+            "contact",
+            "@michel:example.com",
+            APPROVAL_ID,
+            "2026-09-17T21:41:00Z",
+            true,
+        );
+        assert_eq!(
+            en,
+            "Sent · Signal · posted as @michel:example.com · reached the contact · approval 8d3fb3fe9d2d… · 21:41 UTC · edited"
+        );
+        // Without a time, the flag still ends the line; and a line that was
+        // not edited does not say so.
+        let fr = journal_line(Lang::Fr, "sms", "nobody", "@m:x", "abc", "", true);
+        assert!(fr.ends_with("approbation abc · modifiée"), "{fr}");
+        let en = journal_line(Lang::En, "sms", "contact", "@m:x", "abc", "", false);
+        assert!(!en.contains("edited"), "{en}");
+    }
+
+    #[test]
+    fn thread_lines_are_exactly_these() {
+        assert_eq!(
+            thread_not_the_owner(Lang::Fr),
+            "Seul le propriétaire approuve."
+        );
+        assert_eq!(thread_not_the_owner(Lang::En), "Only the owner approves.");
+        assert_eq!(
+            thread_not_recorded(Lang::Fr),
+            "Non enregistrée — le Companion Gateway n’a pas répondu avant l’expiration ; réagis de nouveau."
+        );
+        assert_eq!(
+            thread_not_recorded(Lang::En),
+            "Not recorded — the Companion Gateway did not answer before the expiry; react again."
+        );
+        assert_eq!(
+            thread_revoked(Lang::Fr),
+            "Non enregistrée — l’appareil « Buzz » a été révoqué sur le tableau de bord ; relance provision-clerk-device.sh."
+        );
+        assert_eq!(
+            thread_revoked(Lang::En),
+            "Not recorded — the “Buzz” device was revoked on the dashboard; run provision-clerk-device.sh again."
+        );
+        assert_eq!(
+            thread_expired(Lang::Fr),
+            "Non envoyée — la suggestion avait expiré."
+        );
+        assert_eq!(
+            thread_expired(Lang::En),
+            "Not sent — the suggestion had expired."
+        );
+    }
+
+    #[test]
+    fn thread_refused_is_not_sent_then_the_companions_sentence() {
+        let fr = thread_refused(Lang::Fr, "consent_revoked");
+        assert_eq!(
+            fr,
+            format!(
+                "Non envoyée — {}",
+                crate::refusals::sentence(Lang::Fr, "consent_revoked")
+            )
+        );
+        assert!(
+            fr.starts_with("Non envoyée — Vous avez révoqué votre consentement"),
+            "{fr}"
+        );
+        let en = thread_refused(Lang::En, "consent_revoked");
+        assert!(
+            en.starts_with("Not sent — You have revoked your consent for this contact"),
+            "{en}"
+        );
+        assert!(
+            en.ends_with("There is nothing to do here, and nothing was half-done."),
+            "{en}"
+        );
+        // A code this build has never met is still a sentence, and names
+        // the code.
+        let en = thread_refused(Lang::En, "a_code_from_the_future");
+        assert!(en.starts_with("Not sent — "), "{en}");
+        assert!(en.contains("(a_code_from_the_future)"), "{en}");
+    }
+
+    #[test]
+    fn the_refusal_that_went_out_never_begins_with_not_sent() {
+        // `approval_published_but_not_recorded`: the reply reached the bus
+        // and the Companion Gateway could not write that down. The
+        // Companion's sentence opens with "Your reply was sent", and a "Not
+        // sent" in front of it would be the first word the owner reads and
+        // the one they act on — by sending it twice.
+        let fr = thread_refused(Lang::Fr, "approval_published_but_not_recorded");
+        assert!(
+            fr.starts_with("Envoyée mais non enregistrée — Votre réponse est partie."),
+            "{fr}"
+        );
+        assert!(!fr.contains("Non envoyée"), "{fr}");
+        let en = thread_refused(Lang::En, "approval_published_but_not_recorded");
+        assert!(
+            en.starts_with("Sent but not recorded — Your reply was sent."),
+            "{en}"
+        );
+        assert!(!en.contains("Not sent"), "{en}");
+        // And it is the only one that opens that way.
+        for code in crate::refusals::known_codes() {
+            if code == "approval_published_but_not_recorded" {
+                continue;
+            }
+            assert!(
+                thread_refused(Lang::Fr, code).starts_with("Non envoyée — "),
+                "{code}"
+            );
+            assert!(
+                thread_refused(Lang::En, code).starts_with("Not sent — "),
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_approved_and_refused_locally_name_buzz_and_the_network() {
+        assert_eq!(
+            activity_approved(Lang::Fr, "whatsapp", true),
+            "Suggestion approuvée depuis Buzz (modifiée) · WhatsApp"
+        );
+        assert_eq!(
+            activity_approved(Lang::Fr, "whatsapp", false),
+            "Suggestion approuvée depuis Buzz · WhatsApp"
+        );
+        assert_eq!(
+            activity_approved(Lang::En, "signal", true),
+            "Suggestion approved from Buzz (edited) · Signal"
+        );
+        assert_eq!(
+            activity_approved(Lang::En, "signal", false),
+            "Suggestion approved from Buzz · Signal"
+        );
+        assert_eq!(
+            activity_refused_locally(Lang::Fr, "whatsapp"),
+            "Suggestion refusée depuis Buzz (❌, non transmise) · WhatsApp"
+        );
+        assert_eq!(
+            activity_refused_locally(Lang::En, "sms"),
+            "Suggestion declined from Buzz (❌, not forwarded) · SMS"
+        );
+        // A post the loop could not read a network off: no dangling
+        // separator.
+        assert_eq!(
+            activity_approved(Lang::Fr, "", false),
+            "Suggestion approuvée depuis Buzz"
+        );
+        assert_eq!(
+            activity_approved(Lang::En, "", true),
+            "Suggestion approved from Buzz (edited)"
+        );
+        assert_eq!(
+            activity_refused_locally(Lang::En, ""),
+            "Suggestion declined from Buzz (❌, not forwarded)"
+        );
+    }
+
+    #[test]
+    fn the_network_is_read_back_off_the_posts_first_line() {
+        let reference = format!("twalk:suggestion:{}", "1".repeat(64));
+        for lang in [Lang::Fr, Lang::En] {
+            for expires in [Some("2026-09-17T11:00:00Z"), Some("tomorrow"), None] {
+                // A body with the separator in it does not confuse the
+                // reader: only the first line is read.
+                let post = approval_post(lang, "Oui · à 20h", "whatsapp", expires, &reference);
+                assert_eq!(network_off_post(&post), Some("WhatsApp"), "{post}");
+                // …and what is read back is what the activity line names.
+                assert_eq!(
+                    activity_approved(lang, network_off_post(&post).unwrap(), false),
+                    activity_approved(lang, "whatsapp", false)
+                );
+                let post = approval_post(lang, "Oui", "irc", expires, &reference);
+                assert_eq!(network_off_post(&post), Some("irc"), "{post}");
+            }
+        }
+        assert_eq!(network_off_post(""), None);
+        assert_eq!(network_off_post("Just prose\nand a second line"), None);
+        assert_eq!(network_off_post("Proposed reply ·  \n« … »"), None);
     }
 }

@@ -9,9 +9,13 @@
 //! What is the clerk's own is the seam's other side: a **real Buzz relay**
 //! ([`RelayStack`], from `clerk/tests/compose.relay.yaml`), seeded by signed
 //! events the way an operator seeds the owner's relay, and the clerk binary
-//! itself at its process boundary ([`ClerkProc`]). Nothing here reaches
-//! inside the clerk: a test publishes on the bus, reads the relay back as
-//! the owner, and reads the clerk's own `/metrics` and logs.
+//! itself at its process boundary ([`ClerkProc`]) — and, for the write
+//! half (#284), a **stub Companion Gateway** ([`StubGateway`]) on the
+//! other side of the seam the owner's ✅ crosses, on the same terms as the
+//! Hermes suite's stub of the runtime settings. Nothing here reaches
+//! inside the clerk: a test publishes on the bus, reacts on the relay as
+//! the owner, reads the relay back, reads what the stub Gateway was asked,
+//! and reads the clerk's own `/metrics` and logs.
 //!
 //! Isolation: the relay stack persists across runs, so every channel a
 //! test creates is fresh (a new UUID), every clerk key is fresh, and every
@@ -29,8 +33,13 @@ mod clerk;
 /// The events a test publishes, built from the contract's fixtures.
 mod events;
 
+/// The stub Companion Gateway the write half (#284) is pointed at:
+/// [`StubGateway`], its [`State`] and the scripted [`Answer`]s.
+mod gateway;
+
 /// The real Buzz relay and the signed client that seeds and reads it:
-/// [`RelayStack`], [`Channels`], [`relay_env`], [`fresh_clerk_key`].
+/// [`RelayStack`], [`Channels`], [`relay_env`], [`fresh_clerk_key`], and
+/// the owner's and a stranger's gestures ([`reaction`], [`thread_reply`]).
 mod relay;
 
 /// One run of the clerk under test, claimed and given back as a whole:
@@ -39,6 +48,7 @@ mod run;
 
 pub use clerk::*;
 pub use events::*;
+pub use gateway::*;
 pub use relay::*;
 pub use run::*;
 pub use twalk_test_harness::*;

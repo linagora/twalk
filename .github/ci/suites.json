@@ -53,20 +53,40 @@
 		},
 
 		"clerk": {
-			"what": "The clerk at its process boundary, against the shared test stack for the bus and a real Buzz relay the suite brings up itself: one post per suggestion across a redelivery and a restart, nothing of a contact on the relay, the journal with its reach, the activity feed and what it leaves out, and the sweep that deletes an expired suggestion's post.",
+			"what": "The clerk at its process boundary, against the shared test stack for the bus and a real Buzz relay the suite brings up itself: one post per suggestion across a redelivery and a restart, nothing of a contact on the relay, the journal with its reach, the activity feed and what it leaves out, the sweep that deletes an expired suggestion's post, and the write half against a stub Companion Gateway — a ✅ by the owner is one approval, a stranger's is none, every refusal is the Companion's sentence.",
 			"component": "clerk",
 			"workdir": "clerk",
-			"run": "cargo test --lib --test activite --test approbations --test journal --test smoke --test sweep",
+			"run": "cargo test --lib --test activite --test approbations --test decisions --test journal --test smoke --test sweep",
 			"targets": [
 				"activite",
 				"approbations",
+				"decisions",
 				"journal",
 				"smoke",
 				"sweep"
 			],
 			"needs": ["rust", "docker"],
 			"tier": "required",
-			"triggers": ["clerk/", "contracts/", "tests/harness/", "deploy/docker-compose/"]
+			"triggers": [
+				"clerk/",
+				"contracts/",
+				"tests/harness/",
+				"deploy/docker-compose/",
+				"companion/src/lib/i18n/",
+				"companion-gateway/openapi.yaml"
+			],
+			"triggers_note": "The Companion's catalogues are in here because `clerk/src/refusals.rs` embeds `companion/src/lib/i18n/{fr,en}.json` with `include_str!` — a Gateway refusal is answered on Buzz with the sentence the approval screen would show — and its unit test checks those sentences against `companion-gateway/openapi.yaml`'s refusal codes in both directions, the way `companion/src/lib/approvals/refusal.test.ts` does. `test_selection.py` derives both dependencies from the repository, so removing either line fails the routing check rather than going unnoticed."
+		},
+
+		"clerk-deployment": {
+			"what": "The clerk inside the reference deployment (#284): the deployed Companion Gateway, the clerk's own compose service really started, and the operator's own provision-clerk-device.sh — a ✅ on the owner's relay is one row in the deployed Gateway's approval table through the device named Buzz, the container's environment holds no credential, and a device revoked from the dashboard is answered in the thread and restored by the script.",
+			"component": "clerk",
+			"workdir": "clerk",
+			"run": "cargo test --test deployment",
+			"targets": ["deployment"],
+			"needs": ["rust", "docker", "deployment"],
+			"tier": "advisory",
+			"triggers": ["clerk/", "deploy/docker-compose/"]
 		},
 
 		"sdk-python": {
@@ -232,7 +252,8 @@
 	"shared_paths": {
 		"contracts/": "The versioned CloudEvents contract. Read by the harness's validator, by the Sensor, by the Python SDK's tests, and quoted by the Companion's generated client.",
 		"tests/harness/": "The shared integration-test harness: a dev dependency of sensor/, hermes/, companion-gateway/ and clerk/, and the compose stack the Companion's real-stack e2e brings up.",
-		"companion-gateway/openapi.yaml": "The Gateway's own HTTP description, and the source the Companion's API client is generated from."
+		"companion-gateway/openapi.yaml": "The Gateway's own HTTP description, and the source the Companion's API client is generated from. The Sensor's stub Gateway transcribes one of its endpoints, and the clerk's refusal table is checked against its codes.",
+		"companion/src/lib/i18n/": "The Companion's message catalogues. Read by the Companion, and embedded by the clerk, which answers a Gateway refusal on Buzz with the Companion's own sentence for it."
 	},
 	"shared_paths_note": "These are the paths whose consumers `test_selection.py` derives from the repository rather than taking this file's word for. A change to one of them must run the consumers' suites — that rule is what the two red-`main` incidents cost, and the test is what keeps it true when a fourth consumer appears."
 }
