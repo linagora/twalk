@@ -564,6 +564,13 @@ pub struct HermesAnswers {
     /// suggestion that came through Hermes must not age differently from one a
     /// persona drafted itself (ticket #22).
     pub suggestion_ttl_seconds: u64,
+    /// GATEWAY_COLLECTOR_URL — the collector's internal endpoint the
+    /// free/busy read is relayed to (ticket #281), e.g.
+    /// `http://collector:8090`; the bearer is `GATEWAY_SERVICE_TOKEN`, the
+    /// one the collector reads the registry with. `None` leaves the seam's
+    /// other route answering `503 collector_not_configured`, since a
+    /// deployment can have a Hermes and no collector.
+    pub collector_url: Option<String>,
 }
 
 impl HermesAnswers {
@@ -596,10 +603,22 @@ impl HermesAnswers {
             suggestion_ttl_seconds > 0,
             "environment variable GATEWAY_SUGGESTION_TTL_SECONDS must be at least 1: a window of              zero would publish a suggestion that has already expired"
         );
+        let collector_url = env("GATEWAY_COLLECTOR_URL")
+            .map(|value| value.trim().trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty());
+        if let Some(url) = &collector_url {
+            anyhow::ensure!(
+                url.starts_with("http://") || url.starts_with("https://"),
+                "environment variable GATEWAY_COLLECTOR_URL must be the collector's internal \
+                 endpoint as a URL (http://collector:8090), the one COLLECTOR_HTTP_LISTEN \
+                 serves; got {url:?}"
+            );
+        }
         Ok(Some(Self {
             secret,
             domain,
             suggestion_ttl_seconds,
+            collector_url,
         }))
     }
 }

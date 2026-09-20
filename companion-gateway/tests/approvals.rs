@@ -1032,7 +1032,28 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
             *value = format!("{value},mail-linagora=email");
         }
     }
+    // The collector spoke for the mail connection (#275): a collector's
+    // connection nobody spoke for takes no reply.
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &connection_status_event("mail-linagora", "email", "unknown", "connected", ""),
+    )
+    .await?;
     let running = Running::start_with(static_dir, env).await?;
+    poll_until(
+        || async {
+            let (_, body) = running.get("/api/connections").await.ok()?;
+            body["connections"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"] == "mail-linagora")?
+                .get("status")
+                .is_some()
+                .then_some(())
+        },
+        "the mail connection's status to be read off the bus",
+    )
+    .await?;
     let sender = format!("{}@example.org", unique("alice"));
     let (status, body) = running
         .post(
@@ -1078,9 +1099,15 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
 /// One `connection.status.changed.v1` as a collector publishes it (#274)
 /// about a connection this deployment declares — the state a connection
 /// last said it was in is what #275 refuses an approval on.
-fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -> Value {
+fn connection_status_event(
+    connection: &str,
+    kind: &str,
+    from: &str,
+    to: &str,
+    hint: &str,
+) -> Value {
     let at = in_seconds(-30);
-    let event = json!({
+    let mut event = json!({
         "specversion": "1.0",
         "id": harness::sha256_hex(&format!("{connection}:{to}:{at}")),
         "source": format!("collector://collector.test/connections/{connection}"),
@@ -1091,7 +1118,7 @@ fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -
         "connection": connection,
         "data": {
             "connection": connection,
-            "kind": "whatsapp",
+            "kind": kind,
             "from_state": from,
             "to_state": to,
             "occurred_at": at,
@@ -1099,6 +1126,13 @@ fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -
             "hint": hint
         }
     });
+    // A connected state carries no hint: the operator has nothing to do.
+    if hint.is_empty() {
+        event["data"]
+            .as_object_mut()
+            .expect("data is an object")
+            .remove("hint");
+    }
     validate_against_contract(&event, "connection.status.changed")
         .expect("the fixture is an event the contract allows");
     event
@@ -1134,7 +1168,13 @@ async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_c
     let hint = "Run `twalk-collector authorize --renew` on the host.";
     bus.publish_event(
         CONNECTION_STATUS_SUBJECT,
-        &connection_status_event(&connection, "connected", "reconnect_required", hint),
+        &connection_status_event(
+            &connection,
+            "whatsapp",
+            "connected",
+            "reconnect_required",
+            hint,
+        ),
     )
     .await?;
     let running = Running::start_with(static_dir, env).await?;
@@ -1217,7 +1257,13 @@ async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_c
     // The collector says `connected` again: the same approval proceeds.
     bus.publish_event(
         CONNECTION_STATUS_SUBJECT,
-        &connection_status_event(&connection, "reconnect_required", "connected", ""),
+        &connection_status_event(
+            &connection,
+            "whatsapp",
+            "reconnect_required",
+            "connected",
+            "",
+        ),
     )
     .await?;
     poll_until(

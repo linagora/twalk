@@ -157,6 +157,8 @@ pub mod contacts;
 pub mod contacts_http;
 pub mod hermes_answer;
 pub mod hermes_answer_http;
+pub mod hermes_freebusy;
+pub mod hermes_freebusy_http;
 pub mod http;
 pub mod matrix_openid;
 pub mod metrics;

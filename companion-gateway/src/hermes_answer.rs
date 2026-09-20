@@ -727,7 +727,7 @@ fn hex_bytes(value: &str) -> Result<Vec<u8>, ()> {
 
 /// The contract's `date-time`, to the second, in UTC — the same precision the
 /// SDK writes a suggestion's `time` and `expires_at` with.
-fn rfc3339_seconds(at: SystemTime) -> String {
+pub(crate) fn rfc3339_seconds(at: SystemTime) -> String {
     let seconds = at
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -750,7 +750,7 @@ fn rfc3339_seconds(at: SystemTime) -> String {
 /// and needs exactly one thing here — whether a push is minutes old or hours.
 /// A fractional part and an offset are both accepted, because the sender's
 /// formatting is not this endpoint's contract.
-fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 20 {
         return None;

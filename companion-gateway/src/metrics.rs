@@ -72,6 +72,9 @@ pub struct Metrics {
     /// because the question an operator asks is "is the seam working, and if
     /// not which way is it failing?".
     hermes_answers: Mutex<BTreeMap<&'static str, u64>>,
+    /// Free/busy reads Hermes made (ticket #281), by outcome: `served` or
+    /// the refusal code. Every read, since the record is the point.
+    hermes_reads: Mutex<BTreeMap<&'static str, u64>>,
     /// Bridge transitions the outbox published, and how many are still
     /// waiting — the same pair as consent's, for the same question.
     bridge_status_published: Mutex<u64>,
@@ -190,6 +193,7 @@ impl Metrics {
             bridge_statuses: Mutex::new(BTreeMap::new()),
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             hermes_answers: Mutex::new(BTreeMap::new()),
+            hermes_reads: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
             bridge_status_outbox_pending: Mutex::new(None),
             approvals_published: Mutex::new(0),
@@ -273,6 +277,15 @@ impl Metrics {
     /// (ticket #206): `published`, the reason an ignored push was ignored, or
     /// the refusal code. One counter for the whole seam, because the question
     /// is which way it is failing and not how many times it worked.
+    pub fn record_hermes_read(&self, outcome: &'static str) {
+        *self
+            .hermes_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
     pub fn record_hermes_answer(&self, outcome: &'static str) {
         *self
             .hermes_answers
@@ -547,6 +560,18 @@ impl Metrics {
             {
                 out.push_str(&format!(
                     "twalk_companion_gateway_hermes_answers_total{{outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_hermes_reads_total Free/busy reads Hermes made through this Gateway, by outcome: served, or the refusal code (ticket #281).\n");
+            out.push_str("# TYPE twalk_companion_gateway_hermes_reads_total counter\n");
+            for (outcome, count) in self
+                .hermes_reads
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_hermes_reads_total{{outcome=\"{outcome}\"}} {count}\n"
                 ));
             }
             out.push_str("# HELP twalk_companion_gateway_approval_refusals_total Approvals refused, by the code the caller was given.\n");

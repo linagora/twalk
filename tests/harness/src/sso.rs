@@ -408,6 +408,14 @@ impl Response {
             body: body.into_bytes(),
         }
     }
+
+    fn calendar(status: &'static str, body: String) -> Self {
+        Self {
+            status,
+            content_type: "text/calendar; charset=utf-8",
+            body: body.into_bytes(),
+        }
+    }
 }
 
 async fn serve_connection(mut stream: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
@@ -752,6 +760,37 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
             body.push_str("</d:multistatus>\n");
             Some(Response::xml("207 Multi-Status", body))
         }
+        "REPORT" if request.body.contains("free-busy-query") => {
+            // free-busy-query (RFC 4791 §7.10, #281): a VFREEBUSY of the
+            // periods the collection's events occupy inside the range —
+            // an event `STATUS:CANCELLED` or `TRANSP:TRANSPARENT` occupies
+            // none, as the specification says — and not one word of the
+            // events, since the answer is periods by construction.
+            let attribute = |name: &str| -> String {
+                request
+                    .body
+                    .split(&format!("{name}=\""))
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let (start, end) = (attribute("start"), attribute("end"));
+            let mut periods: Vec<String> = Vec::new();
+            for (_, ics) in calendar.resources.values() {
+                if let Some(period) = free_busy_period(ics, &start, &end) {
+                    periods.push(period);
+                }
+            }
+            let mut body = format!(
+                "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//twalk test harness//free-busy//EN\r\nBEGIN:VFREEBUSY\r\nDTSTART:{start}\r\nDTEND:{end}\r\nDTSTAMP:{start}\r\n"
+            );
+            for period in periods {
+                body.push_str(&format!("FREEBUSY;FBTYPE=BUSY:{period}\r\n"));
+            }
+            body.push_str("END:VFREEBUSY\r\nEND:VCALENDAR\r\n");
+            Some(Response::calendar("200 OK", body))
+        }
         "REPORT" => {
             // calendar-multiget: every <d:href> asked for, answered with its
             // ETag and its iCalendar text; one not there answers 404 in its
@@ -789,6 +828,47 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
             json!({ "error": "method_not_allowed", "detail": format!("{} on a calendar collection", request.method) }),
         )),
     }
+}
+
+/// One event's busy period inside `[start, end)`, as `start/end` in UTC,
+/// read from the `DTSTART`/`DTEND` lines of its iCalendar text — UTC
+/// instants (`…Z`) and whole dates only, which is what the tests write. A
+/// cancelled or transparent event, or one outside the range, is none.
+fn free_busy_period(ics: &str, range_start: &str, range_end: &str) -> Option<String> {
+    let mut dtstart = None;
+    let mut dtend = None;
+    let mut busy = true;
+    for line in ics.lines() {
+        let line = line.trim_end();
+        if let Some(value) = line.strip_prefix("DTSTART") {
+            dtstart = value.split(':').next_back().map(str::to_owned);
+        } else if let Some(value) = line.strip_prefix("DTEND") {
+            dtend = value.split(':').next_back().map(str::to_owned);
+        } else if line == "STATUS:CANCELLED" || line == "TRANSP:TRANSPARENT" {
+            busy = false;
+        }
+    }
+    if !busy {
+        return None;
+    }
+    let instant = |value: String| -> String {
+        if value.len() == 8 {
+            format!("{value}T000000Z")
+        } else {
+            value
+        }
+    };
+    let start = instant(dtstart?);
+    let end = instant(dtend?);
+    // Lexicographic on the fixed-width UTC form.
+    if end.as_str() <= range_start || start.as_str() >= range_end {
+        return None;
+    }
+    Some(format!(
+        "{}/{}",
+        start.as_str().max(range_start),
+        end.as_str().min(range_end)
+    ))
 }
 
 fn xml_escape(text: &str) -> String {

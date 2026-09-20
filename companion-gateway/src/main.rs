@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
     // the Sensor stamps events from, the approvals that resolve an old event
     // against it, and the store that keeps it for the migrations to come.
     let connections = Arc::new(config.connections.clone());
-    let (consent, contacts, approvals, suggestions, answers, store) = match &config.consent {
+    let (consent, contacts, approvals, suggestions, answers, store, reads) = match &config.consent {
         Some(consent) => {
             let (store, outbox, owner) = open_consent(consent, &metrics, &connections)?;
             tokio::spawn(publish_until_shutdown(
@@ -249,6 +249,38 @@ async fn main() -> Result<()> {
                 }
                 None => None,
             };
+            // Hermes's free/busy reads (ticket #281): the one governed pull,
+            // on the same secret, relayed to the collector when one is
+            // named, recorded in the store whatever the outcome.
+            let reads = config.hermes_answers.as_ref().map(|seam| {
+                match &seam.collector_url {
+                    Some(url) => info!(
+                        collector_url = %url,
+                        "free/busy reads are on: GET {} relays a signed read to the collector \
+                         and records it",
+                        twalk_companion_gateway::hermes_freebusy::FREEBUSY_PATH
+                    ),
+                    None => warn!(
+                        "GATEWAY_COLLECTOR_URL is not set: GET {} answers 503 \
+                         collector_not_configured, since a free/busy read has no agenda to \
+                         read without a collector",
+                        twalk_companion_gateway::hermes_freebusy::FREEBUSY_PATH
+                    ),
+                }
+                Arc::new(twalk_companion_gateway::hermes_freebusy::Reads::new(
+                    seam.secret.clone(),
+                    store.clone(),
+                    connections.clone(),
+                    seam.collector_url.clone().zip(
+                        config
+                            .snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.service_token.clone()),
+                    ),
+                    metrics.clone(),
+                    std::time::SystemTime::now,
+                ))
+            });
             (
                 Some(outbox),
                 Some(projection),
@@ -256,6 +288,7 @@ async fn main() -> Result<()> {
                 Some(suggestions),
                 answers,
                 Some(store),
+                reads,
             )
         }
         None => {
@@ -268,7 +301,7 @@ async fn main() -> Result<()> {
                      is read from the bus and the reply is published on it"
                 );
             }
-            (None, None, None, None, None, None)
+            (None, None, None, None, None, None, None)
         }
     };
 
@@ -557,7 +590,8 @@ async fn main() -> Result<()> {
             .with_portals(portals.clone())
             .with_connections(connections.clone())
             .with_connection_statuses(store.clone())
-            .with_answers(answers),
+            .with_answers(answers)
+            .with_reads(reads),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming

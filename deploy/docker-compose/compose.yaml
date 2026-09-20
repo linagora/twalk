@@ -451,6 +451,11 @@ services:
       # the same default (an hour) — a suggestion that came through Hermes
       # must not age differently from one a persona drafted itself (#22).
       GATEWAY_SUGGESTION_TTL_SECONDS: ${GATEWAY_SUGGESTION_TTL_SECONDS:-${HERMES_SUGGESTION_TTL_SECONDS:-}}
+      # The collector's internal endpoint a free/busy read is relayed to
+      # (#281): the one governed pull, on the same secret as the answers,
+      # with the service token as the bearer. Empty when the collector
+      # profile is not up, and GET /_twalk/hermes/freebusy says so.
+      GATEWAY_COLLECTOR_URL: ${GATEWAY_COLLECTOR_URL:-}
       # The model and the language (ticket #98): the LLM endpoint credential
       # as a FILE, which wins over anything the Companion writes, so a
       # production stack can lock the credential down while the model name
@@ -907,6 +912,10 @@ services:
       COLLECTOR_SEND_RETRY_BASE_MS: ${COLLECTOR_SEND_RETRY_BASE_MS:-}
       COLLECTOR_SEND_RETRY_MAX_ATTEMPTS: ${COLLECTOR_SEND_RETRY_MAX_ATTEMPTS:-}
       COLLECTOR_METRICS_LISTEN: ${COLLECTOR_METRICS_LISTEN:-}
+      # The internal endpoint the Companion Gateway relays a free/busy read
+      # to (#281), on the compose network only; its bearer is the service
+      # token above. The Gateway finds it at GATEWAY_COLLECTOR_URL.
+      COLLECTOR_HTTP_LISTEN: ${COLLECTOR_HTTP_LISTEN:-${GATEWAY_SERVICE_TOKEN:+0.0.0.0:8090}}
       COLLECTOR_LOG_LEVEL: ${COLLECTOR_LOG_LEVEL:-info}
     # The collector exits on configuration it refuses — a connection the
     # registry does not know, a secret file it will not accept — and compose

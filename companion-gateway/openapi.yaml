@@ -3468,6 +3468,205 @@ paths:
                         enum:
                           [sign_in_not_configured, hermes_answers_not_configured]
 
+  /_twalk/hermes/freebusy:
+    get:
+      operationId: readHermesFreeBusy
+      tags: [connections]
+      summary: Hermes reads the owner's free/busy — the one governed pull.
+      description: |
+        ADR 0032's founding example (ticket #281, lot 4 of #251): a message
+        that needs a calendar looked at before three times are proposed.
+        Everything else Hermes knows was pushed to it through a persona's
+        wake, after the consent gate; this is the one thing it **asks** for,
+        and the route is shaped by the reasons it may.
+
+        **Authentication.** The same secret as the answers
+        (`GATEWAY_HERMES_ANSWER_SECRET`), so the operator holds one fact
+        about the seam. A `GET` has no body to sign, so the signature is
+        HMAC-SHA256 over the canonical line
+        `GET\n/_twalk/hermes/freebusy\n<query string as sent>\n<timestamp>`,
+        carried as `X-Hermes-Signature-256: sha256=<hex>` beside
+        `X-Hermes-Timestamp` (RFC 3339, within five minutes of this clock —
+        the answers' window, in the other direction). The query string is
+        signed **exactly as sent**, not re-encoded. An optional
+        `X-Hermes-Delivery` names the attempt, for the record.
+
+        **The window.** `from` and `to`, RFC 3339, at most **fourteen days**
+        apart (`window_too_wide` otherwise): a persona proposing times needs
+        the next few days, and a reader that could ask for a year would be
+        reading the owner's life one call at a time.
+
+        **The connection.** A calendar connection this Gateway's registry
+        names. One that is not `connected` — or that no collector has spoken
+        for yet — is refused with its state, the same `409
+        connection_not_connected` an approval towards it gets.
+
+        **The answer.** Busy intervals and nothing else: `[{start, end}]`,
+        clipped to the window and merged. No title, no participant, no
+        location: the collector runs a CalDAV `free-busy-query`, which
+        carries none, and this Gateway relays its answer without adding to
+        it. The relay is over internal HTTP to the collector
+        (`GATEWAY_COLLECTOR_URL`, this Gateway's `GATEWAY_SERVICE_TOKEN` as
+        the bearer — the snapshot seam, in the other direction), so the one
+        process that holds the owner's grant is the one that reads their
+        agenda.
+
+        **The record.** Every read is recorded, served or refused: the
+        connection, the window, when, which delivery, the outcome
+        (`hermes_read` in the Gateway's store,
+        `twalk_companion_gateway_hermes_reads_total{outcome}` on
+        `/metrics`). A pull that left no trace would be the one thing here
+        the owner could not audit.
+
+        How Hermes calls this — the canonical line, the headers, what to do
+        with the answer — is the skill Twalk ships,
+        `skills/twalk-calendar/SKILL.md`: a document that teaches Twalk to
+        Hermes, not a coupling.
+      security:
+        - hermesSignature: []
+      parameters:
+        - name: connection
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The calendar connection to read, as the registry names it.
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: The window's start, RFC 3339.
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: The window's end, RFC 3339, at most fourteen days after `from`.
+        - name: X-Hermes-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: When the read was signed, RFC 3339; inside the signed line.
+        - name: X-Hermes-Delivery
+          in: header
+          required: false
+          schema:
+            type: string
+          description: One attempt's name, for the record; a retry keeps it.
+      responses:
+        "200":
+          description: The owner's busy intervals in the window, and nothing else.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HermesFreeBusy"
+        "400":
+          description: |
+            - `invalid_request` — no `connection`.
+            - `invalid_window` — `from` or `to` is missing, is not an RFC
+              3339 instant, or `to` is not after `from`.
+            - `window_too_wide` — wider than fourteen days.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [invalid_request, invalid_window, window_too_wide]
+        "401":
+          description: |
+            - `unsigned` — no `X-Hermes-Signature-256` or no
+              `X-Hermes-Timestamp`.
+            - `bad_signature` — the signature is not this Gateway's secret
+              over the canonical line, with the query string as sent.
+            - `stale_timestamp` — the timestamp is more than five minutes
+              from this clock, or is not an instant.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [unsigned, bad_signature, stale_timestamp]
+        "404":
+          description: |
+            `connection_unknown` — `connection` names no calendar connection
+            of this deployment (`GATEWAY_CONNECTIONS`, kind `calendar`). An
+            agenda is read on a calendar connection and on nothing else.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [connection_unknown]
+        "409":
+          description: |
+            `connection_not_connected` — the connection is not `connected`,
+            or no collector has reported it yet; `state` says which, and
+            `detail` carries the collector's hint when it gave one. The same
+            refusal an approval towards that connection gets.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    required: [state]
+                    properties:
+                      error:
+                        enum: [connection_not_connected]
+                      state:
+                        type: string
+                        enum: [unknown, unreachable, reconnect_required, pending_operator]
+        "502":
+          description: |
+            - `collector_unreachable` — the collector did not answer, or
+              answered something that is not a free/busy answer.
+            - `collector_refused` — the collector refused the read with a
+              code of its own; `detail` carries it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [collector_unreachable, collector_refused]
+        "503":
+          description: |
+            - `sign_in_not_configured` — this deployment has no owner, so it
+              has no store either.
+            - `hermes_answers_not_configured` —
+              `GATEWAY_HERMES_ANSWER_SECRET` is unset: there is no seam to
+              Hermes, so nothing to verify a read with.
+            - `collector_not_configured` — `GATEWAY_COLLECTOR_URL` or
+              `GATEWAY_SERVICE_TOKEN` is unset: there is no collector to read
+              the agenda from.
+            - `store_unavailable` — the connection's state could not be read.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [
+                            sign_in_not_configured,
+                            hermes_answers_not_configured,
+                            collector_not_configured,
+                            store_unavailable,
+                          ]
+
   /{companionPath}:
     get:
       operationId: getCompanionFile
@@ -3573,17 +3772,19 @@ components:
       in: header
       name: X-Hermes-Signature-256
       description: |
-        An HMAC-SHA256 signature over the raw request body, `sha256=<hex>`,
-        for the one endpoint **Hermes** calls: the answer webhook (ticket
-        #206, ADR 0032). Hermes is Nous Research's agent runtime and is
+        An HMAC-SHA256 signature, `sha256=<hex>`, for the two endpoints
+        **Hermes** calls: over the raw request body on the answer webhook
+        (ticket #206, ADR 0032), and over the canonical request line
+        (`GET\n<path>\n<query as sent>\n<X-Hermes-Timestamp>`) on the
+        free/busy read (ticket #281), since a `GET` has no body. Hermes is Nous Research's agent runtime and is
         outside this deployment, so its credential is a signature over the
         bytes rather than a bearer token: the wire format its own outbound
         hook sends signs the body, which is also what lets this Gateway refuse
         a replay. The secret is Twalk's own configuration
         (`GATEWAY_HERMES_ANSWER_SECRET`, and the hook's `secret_env` on the
         Hermes side) and it opens nothing else here — a device token and the
-        service token both open nothing on that route, and this signature
-        opens nothing on theirs.
+        service token both open nothing on those two routes, and this
+        signature opens nothing on theirs.
 
         It authenticates the sender and not the content. Every fact the body
         states is checked against this Gateway's own journal and against the
@@ -3979,6 +4180,39 @@ components:
               description: |
                 Why this push was not a Twalk wake. Counted on `/metrics`
                 under the same word.
+    HermesFreeBusy:
+      description: |
+        The owner's busy intervals in the window asked for (ticket #281):
+        clipped to it, merged where they touch, and nothing else — no
+        title, no participant, no location, because the report they come
+        from carries none.
+      type: object
+      required: [connection, from, to, busy]
+      additionalProperties: false
+      properties:
+        connection:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        busy:
+          type: array
+          items:
+            type: object
+            required: [start, end]
+            additionalProperties: false
+            properties:
+              start:
+                type: string
+                format: date-time
+                description: RFC 3339, UTC.
+              end:
+                type: string
+                format: date-time
+                description: RFC 3339, UTC; exclusive.
     Error:
       type: object
       description: |
@@ -4011,6 +4245,15 @@ components:
             `null` there when nothing answered at all — which is the whole
             distinction between `endpoint_refused` and
             `endpoint_unreachable`.
+        state:
+          type: string
+          enum: [unknown, unreachable, reconnect_required, pending_operator]
+          description: |
+            The connection's state, on `GET /_twalk/hermes/freebusy`'s
+            `409 connection_not_connected` alone (ticket #281): what a
+            reader outside the deployment is told instead of a sentence to
+            parse, so it can say "the calendar is not reachable right now"
+            and not guess.
 
     ModelConfiguration:
       type: object

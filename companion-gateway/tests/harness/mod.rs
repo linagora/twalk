@@ -1184,6 +1184,9 @@ pub const HERMES_DOMAIN: &str = "twalk.test";
 /// adds. Everything else it needs — the store, the bus, the owner — it takes
 /// from the consent configuration, because it reuses the approval half.
 pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String, String)> {
+    // A calendar connection no collector ever speaks for (#281): what a
+    // free/busy read on it is refused with, without any bus state.
+    let connections = format!("{TEST_CONNECTIONS},{UNSPOKEN_CALENDAR_CONNECTION}=calendar");
     gateway_env_with(
         static_dir,
         &[
@@ -1192,9 +1195,14 @@ pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String
             ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
             // See `gateway_env_with_consent`.
             ("GATEWAY_APPROVAL_LOOKUP_WINDOW", "100000000"),
+            ("GATEWAY_CONNECTIONS", connections.as_str()),
         ],
     )
 }
+
+/// A calendar connection the Hermes Gateway declares and no collector has
+/// reported (#281).
+pub const UNSPOKEN_CALENDAR_CONNECTION: &str = "calendar-unspoken";
 
 /// The signature Hermes's outbound hook puts on a push: hex HMAC-SHA256 over
 /// the raw body, prefixed `sha256=`.

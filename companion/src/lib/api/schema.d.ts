@@ -122,6 +122,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/_twalk/hermes/freebusy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Hermes reads the owner's free/busy — the one governed pull.
+         * @description ADR 0032's founding example (ticket #281, lot 4 of #251): a message
+         *     that needs a calendar looked at before three times are proposed.
+         *     Everything else Hermes knows was pushed to it through a persona's
+         *     wake, after the consent gate; this is the one thing it **asks** for,
+         *     and the route is shaped by the reasons it may.
+         *
+         *     **Authentication.** The same secret as the answers
+         *     (`GATEWAY_HERMES_ANSWER_SECRET`), so the operator holds one fact
+         *     about the seam. A `GET` has no body to sign, so the signature is
+         *     HMAC-SHA256 over the canonical line
+         *     `GET\n/_twalk/hermes/freebusy\n<query string as sent>\n<timestamp>`,
+         *     carried as `X-Hermes-Signature-256: sha256=<hex>` beside
+         *     `X-Hermes-Timestamp` (RFC 3339, within five minutes of this clock —
+         *     the answers' window, in the other direction). The query string is
+         *     signed **exactly as sent**, not re-encoded. An optional
+         *     `X-Hermes-Delivery` names the attempt, for the record.
+         *
+         *     **The window.** `from` and `to`, RFC 3339, at most **fourteen days**
+         *     apart (`window_too_wide` otherwise): a persona proposing times needs
+         *     the next few days, and a reader that could ask for a year would be
+         *     reading the owner's life one call at a time.
+         *
+         *     **The connection.** A calendar connection this Gateway's registry
+         *     names. One that is not `connected` — or that no collector has spoken
+         *     for yet — is refused with its state, the same `409
+         *     connection_not_connected` an approval towards it gets.
+         *
+         *     **The answer.** Busy intervals and nothing else: `[{start, end}]`,
+         *     clipped to the window and merged. No title, no participant, no
+         *     location: the collector runs a CalDAV `free-busy-query`, which
+         *     carries none, and this Gateway relays its answer without adding to
+         *     it. The relay is over internal HTTP to the collector
+         *     (`GATEWAY_COLLECTOR_URL`, this Gateway's `GATEWAY_SERVICE_TOKEN` as
+         *     the bearer — the snapshot seam, in the other direction), so the one
+         *     process that holds the owner's grant is the one that reads their
+         *     agenda.
+         *
+         *     **The record.** Every read is recorded, served or refused: the
+         *     connection, the window, when, which delivery, the outcome
+         *     (`hermes_read` in the Gateway's store,
+         *     `twalk_companion_gateway_hermes_reads_total{outcome}` on
+         *     `/metrics`). A pull that left no trace would be the one thing here
+         *     the owner could not audit.
+         *
+         *     How Hermes calls this — the canonical line, the headers, what to do
+         *     with the answer — is the skill Twalk ships,
+         *     `skills/twalk-calendar/SKILL.md`: a document that teaches Twalk to
+         *     Hermes, not a coupling.
+         */
+        get: operations["readHermesFreeBusy"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/{companionPath}": {
         parameters: {
             query?: never;
@@ -2538,6 +2605,15 @@ export interface components {
              *     `404` alone.
              */
             path?: string;
+            /**
+             * @description The connection's state, on `GET /_twalk/hermes/freebusy`'s
+             *     `409 connection_not_connected` alone (ticket #281): what a
+             *     reader outside the deployment is told instead of a sentence to
+             *     parse, so it can say "the calendar is not reachable right now"
+             *     and not guess.
+             * @enum {string}
+             */
+            state?: "unknown" | "unreachable" | "reconnect_required" | "pending_operator";
         };
         Health: {
             /**
@@ -2636,6 +2712,31 @@ export interface components {
              *     protection.
              */
             timestamp?: string;
+        };
+        /**
+         * @description The owner's busy intervals in the window asked for (ticket #281):
+         *     clipped to it, merged where they touch, and nothing else — no
+         *     title, no participant, no location, because the report they come
+         *     from carries none.
+         */
+        HermesFreeBusy: {
+            busy: {
+                /**
+                 * Format: date-time
+                 * @description RFC 3339, UTC; exclusive.
+                 */
+                end: string;
+                /**
+                 * Format: date-time
+                 * @description RFC 3339, UTC.
+                 */
+                start: string;
+            }[];
+            connection: string;
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
         };
         /**
          * @description The homeserver would not do what the Gateway relayed, or could not
@@ -4276,6 +4377,148 @@ export interface operations {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
                         error?: "sign_in_not_configured" | "hermes_answers_not_configured";
+                    };
+                };
+            };
+        };
+    };
+    readHermesFreeBusy: {
+        parameters: {
+            query: {
+                /** @description The calendar connection to read, as the registry names it. */
+                connection: string;
+                /** @description The window's start, RFC 3339. */
+                from: string;
+                /** @description The window's end, RFC 3339, at most fourteen days after `from`. */
+                to: string;
+            };
+            header: {
+                /** @description One attempt's name, for the record; a retry keeps it. */
+                "X-Hermes-Delivery"?: string;
+                /** @description When the read was signed, RFC 3339; inside the signed line. */
+                "X-Hermes-Timestamp": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The owner's busy intervals in the window, and nothing else. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HermesFreeBusy"];
+                };
+            };
+            /**
+             * @description - `invalid_request` — no `connection`.
+             *     - `invalid_window` — `from` or `to` is missing, is not an RFC
+             *       3339 instant, or `to` is not after `from`.
+             *     - `window_too_wide` — wider than fourteen days.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_request" | "invalid_window" | "window_too_wide";
+                    };
+                };
+            };
+            /**
+             * @description - `unsigned` — no `X-Hermes-Signature-256` or no
+             *       `X-Hermes-Timestamp`.
+             *     - `bad_signature` — the signature is not this Gateway's secret
+             *       over the canonical line, with the query string as sent.
+             *     - `stale_timestamp` — the timestamp is more than five minutes
+             *       from this clock, or is not an instant.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unsigned" | "bad_signature" | "stale_timestamp";
+                    };
+                };
+            };
+            /**
+             * @description `connection_unknown` — `connection` names no calendar connection
+             *     of this deployment (`GATEWAY_CONNECTIONS`, kind `calendar`). An
+             *     agenda is read on a calendar connection and on nothing else.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "connection_unknown";
+                    };
+                };
+            };
+            /**
+             * @description `connection_not_connected` — the connection is not `connected`,
+             *     or no collector has reported it yet; `state` says which, and
+             *     `detail` carries the collector's hint when it gave one. The same
+             *     refusal an approval towards that connection gets.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "connection_not_connected";
+                        /** @enum {string} */
+                        state: "unknown" | "unreachable" | "reconnect_required" | "pending_operator";
+                    };
+                };
+            };
+            /**
+             * @description - `collector_unreachable` — the collector did not answer, or
+             *       answered something that is not a free/busy answer.
+             *     - `collector_refused` — the collector refused the read with a
+             *       code of its own; `detail` carries it.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "collector_unreachable" | "collector_refused";
+                    };
+                };
+            };
+            /**
+             * @description - `sign_in_not_configured` — this deployment has no owner, so it
+             *       has no store either.
+             *     - `hermes_answers_not_configured` —
+             *       `GATEWAY_HERMES_ANSWER_SECRET` is unset: there is no seam to
+             *       Hermes, so nothing to verify a read with.
+             *     - `collector_not_configured` — `GATEWAY_COLLECTOR_URL` or
+             *       `GATEWAY_SERVICE_TOKEN` is unset: there is no collector to read
+             *       the agenda from.
+             *     - `store_unavailable` — the connection's state could not be read.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "sign_in_not_configured" | "hermes_answers_not_configured" | "collector_not_configured" | "store_unavailable";
                     };
                 };
             };

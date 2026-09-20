@@ -113,6 +113,7 @@ twalk/
 ├── examples/            Runnable end-to-end scenarios
 ├── tools/               Operational scripts (replay, validation, schema generation)
 ├── tests/               Shared test harness crate (tests/harness/) and end-to-end tests
+├── skills/              What Twalk teaches Hermes, as documents: how to read the owner's free/busy (ADR 0032)
 └── docs/                Architecture docs, ADRs, deployment and authoring guides
 ```
 

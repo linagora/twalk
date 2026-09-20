@@ -134,6 +134,12 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
     if path == crate::hermes_answer::ANSWER_PATH && method == Method::POST {
         return Requirement::HermesSignature;
     }
+    // Hermes's free/busy read (ticket #281): the one pull, signed with the
+    // same secret as the answers, over the request line since a GET has no
+    // body. In the table for the same reason as the answers.
+    if path == crate::hermes_freebusy::FREEBUSY_PATH && method == Method::GET {
+        return Requirement::HermesSignature;
+    }
     match (method, path) {
         (&Method::POST, "/api/session") => Requirement::Open,
         // What this deployment is, asked before anyone can sign in (ticket
