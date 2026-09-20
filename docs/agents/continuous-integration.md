@@ -50,7 +50,7 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 | `harness` | required | 38.9 s cold, 1.9 s warm | +1 334 MB target | 934 MB | 8 tests |
 | `companion` | required | 26.8 s, 26.7 s (two runs) | +212 MB `node_modules` | 3 128 MB | warm npm cache; `npm ci` alone 2.4 s |
 | `sensor` | required | **383 s**, 62 tests | +6.0 GB target | 425 MB | warm stack. **67 s and red on a stack just created** — see below |
-| `gateway` | required | **163 s**, 125 tests | +3.0 GB target | 184 MB | warm stack |
+| `gateway` | required | **163 s**, 125 tests (+5 since #275: one integration, four unit, on the connection statuses) | +3.0 GB target | 184 MB | warm stack |
 | `hermes` | required | **132 s** | +2.0 GB target | 87 MB | warm stack |
 | `clerk` | required | **not measured yet** (#265) | — | — | warm stack plus a Buzz relay, Postgres and Redis of its own; measure it before trusting the "full required run" figure below |
 | `collector` | required | 8 unit + 4 + 3 tests, under a second warm after the build; the build shares nothing with the other crates' targets | +1.5 GB target | — | no Docker: the fake SSO runs in-process |

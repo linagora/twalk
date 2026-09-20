@@ -1021,7 +1021,10 @@ async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_c
     ensure_stack().await?;
     let bus = bus().await?;
     // The whatsapp connection of this run: its own id, so another run's
-    // status on the shared bus is not this connection's.
+    // status on the shared bus is not this connection's. A bridged kind,
+    // because the rule is per connection whatever its kind and a mail
+    // trigger has no room to answer in until #278 gives the approval a mail
+    // target — the mechanism is what this test proves.
     let connection = format!(
         "whatsapp-{}",
         unique("c").replace(['.', '_'], "-").to_lowercase()

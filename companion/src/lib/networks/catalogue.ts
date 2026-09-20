@@ -217,7 +217,8 @@ export type CardBlock = 'coming-soon' | 'no-bridge' | 'no-collector' | 'ios';
 /**
  * What a collector connection said about itself (#275): the contract's four
  * states, plus `unknown` for one nobody has spoken for yet — the same
- * honesty as `ConnectionState`'s `unknown`, for the same reason.
+ * honesty as the bridge link's `unknown` in `connection.ts`, for the same
+ * reason: it is the state of our knowledge, not of the connection.
  */
 export type CollectorState =
 	| 'connected'
@@ -226,11 +227,10 @@ export type CollectorState =
 	| 'pending_operator'
 	| 'unknown';
 
-/** A collector connection's state and the operator's hint, or `null` on a bridge's card. */
+/** A collector connection's state and the operator's hint. */
 export interface CollectorStatus {
 	readonly state: CollectorState;
 	readonly hint: string | null;
-	readonly occurredAt: string | null;
 }
 
 /**
@@ -240,9 +240,9 @@ export interface CollectorStatus {
 export function collectorStatusOf(connection: Connection | null): CollectorStatus {
 	const status = connection?.status;
 	if (status === undefined || status === null) {
-		return { state: 'unknown', hint: null, occurredAt: null };
+		return { state: 'unknown', hint: null };
 	}
-	return { state: status.state, hint: status.hint ?? null, occurredAt: status.occurred_at };
+	return { state: status.state, hint: status.hint ?? null };
 }
 
 /** A card joined with what this deployment and this browser allow. */

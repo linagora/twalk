@@ -79,7 +79,7 @@ The line a persona-drafted reply carries to the contact receiving it, saying the
 _Avoid_: "watermark", "notice"; and the word is also used in this repository for warnings shown to the **user** about a network's own risks, which is a different thing
 
 **Approval**:
-The human act that turns a suggestion into an outbound reply, carrying the identity of whoever approved it. Deliberate by construction — an explicit call, never a default, never a batch — and refused if the sender's consent is no longer `granted` at that moment. Served and published by the Companion Gateway, because that last clause is a read of the consent state and the Gateway is its single writer (ADR 0022); the event's `source` names the persona whose suggestion was approved, not the publisher. Contract type: `persona.reply.approved`.
+The human act that turns a suggestion into an outbound reply, carrying the identity of whoever approved it. Deliberate by construction — an explicit call, never a default, never a batch — and refused if the sender's consent is no longer `granted` at that moment. Refused too, since #275, when the connection the reply would leave by last said it cannot send (`connection_not_connected`): a reply published for a collector that will not take it is a reply into the void. Served and published by the Companion Gateway, because that last clause is a read of the consent state and the Gateway is its single writer (ADR 0022); the event's `source` names the persona whose suggestion was approved, not the publisher. Contract type: `persona.reply.approved`.
 
 ### Contract
 

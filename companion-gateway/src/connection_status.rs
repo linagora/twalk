@@ -17,8 +17,10 @@
 //! A connection that never said anything has **no** status here: a bridge's
 //! connection, whose state is the bridge's (`bridge_status.rs`), or a
 //! collector that has not run yet. An approval towards such a connection is
-//! not refused on this ground — nothing said it could not send — which is
-//! also why `unknown` is not stored as a state: it is the absence of a row.
+//! not refused on this ground when it is a bridge's — nothing said it could
+//! not send — and refused when it is a collector's kind, since nothing is
+//! holding it. `unknown` is never stored: it is the absence of a row, and
+//! the word the refusal uses for it.
 //!
 //! The consumer is durable and reads from the beginning on its first run:
 //! the subject carries a handful of transitions per connection per day, and
@@ -79,19 +81,41 @@ impl Change {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         };
+        // Every enumerated value checked here, against the lists the store's
+        // CHECKs copy: a value this build does not know is refused as
+        // unreadable — acked and skipped by the consumer — rather than
+        // refused by SQLite on the way in, where it would stall every
+        // transition behind it.
         let to_state = string("/data/to_state")?;
         anyhow::ensure!(
             STATES.contains(&to_state.as_str()),
             "the event names the unknown state {to_state:?}"
         );
+        let from_state = string("/data/from_state")?;
+        anyhow::ensure!(
+            from_state == "unknown" || STATES.contains(&from_state.as_str()),
+            "the event comes from the unknown state {from_state:?}"
+        );
+        let kind = string("/data/kind")?;
+        anyhow::ensure!(
+            KINDS.contains(&kind.as_str()),
+            "the event names the unknown kind {kind:?}"
+        );
+        let service = optional("/data/service");
+        anyhow::ensure!(
+            service
+                .as_deref()
+                .is_none_or(|service| SERVICES.contains(&service)),
+            "the event names the unknown service {service:?}"
+        );
         Ok(Self {
             event_id: string("/id")?,
             connection: string("/data/connection")?,
-            kind: string("/data/kind")?,
-            from_state: string("/data/from_state")?,
+            kind,
+            from_state,
             to_state,
             occurred_at: string("/data/occurred_at")?,
-            service: optional("/data/service"),
+            service,
             hint: optional("/data/hint").map(|hint| hint.chars().take(1024).collect()),
         })
     }
@@ -110,13 +134,21 @@ impl Change {
     }
 }
 
-/// The four states a connection can be in, the contract's.
+/// The four states a connection can be in, the contract's
+/// (`connection.status.changed.schema.json`, `data.to_state`).
 pub const STATES: [&str; 4] = [
     "connected",
     "unreachable",
     "reconnect_required",
     "pending_operator",
 ];
+/// The kinds a connection has (`definitions/kind.schema.json`), and the
+/// services a state is about — the contract's lists, copied here and into
+/// the store's CHECKs, both held to the contract by the tests below.
+pub const KINDS: [&str; 8] = [
+    "whatsapp", "telegram", "signal", "discord", "sms", "matrix", "email", "calendar",
+];
+pub const SERVICES: [&str; 3] = ["sso", "jmap", "caldav"];
 
 /// A connection's current state, as the store's view answers it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +351,41 @@ mod tests {
         );
     }
 
+    /// The store's CHECKs are copies of the contract's lists; a value the
+    /// contract adds fails here until the migration that admits it exists.
+    #[test]
+    fn the_stores_checks_are_the_contracts_lists() {
+        let migration = crate::store::MIGRATIONS[8];
+        let list = |column: &str| -> Vec<String> {
+            let start = migration
+                .find(&format!("{column} IN ("))
+                .unwrap_or_else(|| panic!("v9 has a CHECK on {column}"));
+            let rest = &migration[start..];
+            let inner = &rest[rest.find('(').unwrap() + 1..rest.find(')').unwrap()];
+            inner
+                .split(',')
+                .map(|value| value.trim().trim_matches('\'').to_owned())
+                .collect()
+        };
+        assert_eq!(list("kind"), KINDS.to_vec());
+        assert_eq!(list("to_state"), STATES.to_vec());
+        let mut from = vec!["unknown".to_owned()];
+        from.extend(STATES.iter().map(|state| state.to_string()));
+        assert_eq!(list("from_state"), from);
+        assert_eq!(list("service"), SERVICES.to_vec());
+        let kinds: serde_json::Value = serde_json::from_str(include_str!(
+            "../../contracts/cloudevents/v1/definitions/kind.schema.json"
+        ))
+        .unwrap();
+        let contract: Vec<&str> = kinds["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(contract, KINDS.to_vec());
+    }
+
     #[test]
     fn the_four_states_are_the_contracts() {
         let schema: Value = serde_json::from_str(include_str!(
@@ -332,5 +399,20 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(contract, STATES.to_vec());
+        let from: Vec<&str> = schema["properties"]["data"]["properties"]["from_state"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(from[0], "unknown");
+        assert_eq!(&from[1..], STATES);
+        let services: Vec<&str> = schema["properties"]["data"]["properties"]["service"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(services, SERVICES.to_vec());
     }
 }

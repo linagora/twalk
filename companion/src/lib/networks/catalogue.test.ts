@@ -468,18 +468,22 @@ describe("a collector connection's card (#275)", () => {
 		id: 'agenda-linagora',
 		kind: 'calendar',
 		label: 'michel@linagora.com',
-		status: { state: 'connected', occurred_at: '2026-09-20T09:00:00Z', service: null, hint: null }
+		status: {
+			state: 'connected',
+			occurred_at: '2026-09-20T09:00:00Z',
+			service: null,
+			hint: null
+		}
 	};
 
-	it('shows the state the collector said, as its own vocabulary, never a bridge link', () => {
+	it('shows the state the collector said, in its own vocabulary, never a bridge link', () => {
 		const options = deployment(configured, {
 			connections: [...registryFor(configured), mailbox, agenda]
 		});
 		const mail = card('email', options);
 		expect(mail.collector).toEqual({
 			state: 'reconnect_required',
-			hint: 'Run `twalk-collector authorize --renew` on the host.',
-			occurredAt: '2026-09-20T09:00:00Z'
+			hint: 'Run `twalk-collector authorize --renew` on the host.'
 		});
 		expect(mail.connected).toBe(false);
 		expect(mail.blockedBy).toBeNull();
@@ -490,9 +494,12 @@ describe("a collector connection's card (#275)", () => {
 		expect(calendar.connected).toBe(true);
 	});
 
-	it('is unknown, not disconnected, when the collector has not spoken, and blocked when the kind has no connection', () => {
+	it('is unknown when the collector has not spoken, and blocked when the kind has none', () => {
 		const silent: Connection = { id: 'mail-linagora', kind: 'email', label: 'm' };
-		const spoken = card('email', deployment(configured, { connections: [...registryFor(configured), silent] }));
+		const spoken = card(
+			'email',
+			deployment(configured, { connections: [...registryFor(configured), silent] })
+		);
 		expect(spoken.collector?.state).toBe('unknown');
 		expect(spoken.connected).toBe(false);
 		expect(spoken.blockedBy).toBeNull();
@@ -501,7 +508,10 @@ describe("a collector connection's card (#275)", () => {
 		expect(none.connection).toBeNull();
 		// A registry nobody could read blocks nothing: the honest card is a
 		// tappable one that says nothing.
-		const unread = card('calendar', deployment(configured, { connections: [], connectionsKnown: false }));
+		const unread = card(
+			'calendar',
+			deployment(configured, { connections: [], connectionsKnown: false })
+		);
 		expect(unread.blockedBy).toBeNull();
 	});
 });

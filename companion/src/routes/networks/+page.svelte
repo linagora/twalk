@@ -179,7 +179,10 @@
 	 * has to act on — it is what a session revoked from their own phone
 	 * reports — so it is the one that looks like a warning.
 	 */
-	function badgeFor(state: CardState): { key: MessageKey; tone: string; icon: 'check' | 'warning' | 'reload' } | null {
+	/** The badge a card wears: its sentence, its tone, its icon. */
+	type Badge = { key: MessageKey; tone: string; icon: 'check' | 'warning' | 'reload' };
+
+	function badgeFor(state: CardState): Badge | null {
 		if (state.collector !== null) {
 			return collectorBadgeFor(state.collector.state);
 		}
@@ -208,18 +211,28 @@
 	 * grant to give again, the client to change — and look like warnings, with
 	 * the collector's own hint under the card.
 	 */
-	function collectorBadgeFor(
-		state: CollectorState
-	): { key: MessageKey; tone: string; icon: 'check' | 'warning' | 'reload' } | null {
+	function collectorBadgeFor(state: CollectorState): Badge | null {
 		switch (state) {
 			case 'connected':
 				return { key: 'networks.connected', tone: 'badge--ok', icon: 'check' };
 			case 'unreachable':
-				return { key: 'networks.collector.unreachable', tone: 'badge--neutral', icon: 'reload' };
+				return {
+					key: 'networks.collector.unreachable',
+					tone: 'badge--neutral',
+					icon: 'reload'
+				};
 			case 'reconnect_required':
-				return { key: 'networks.collector.reconnectRequired', tone: 'badge--attention', icon: 'warning' };
+				return {
+					key: 'networks.collector.reconnectRequired',
+					tone: 'badge--attention',
+					icon: 'warning'
+				};
 			case 'pending_operator':
-				return { key: 'networks.collector.pendingOperator', tone: 'badge--attention', icon: 'warning' };
+				return {
+					key: 'networks.collector.pendingOperator',
+					tone: 'badge--attention',
+					icon: 'warning'
+				};
 			default:
 				return null;
 		}
@@ -321,7 +334,7 @@
 						{/if}
 					</p>
 					<p class="small muted">{$t(state.card.subtitleKey)}</p>
-					{#if state.collector !== null && state.collector.hint !== null && state.collector.state !== 'connected'}
+					{#if state.collector?.hint && state.collector.state !== 'connected'}
 						<!-- The collector's own next step for the operator, as it
 						     said it on the bus (#275): the words the log has, on the
 						     card, so nobody reads a log to learn them. -->

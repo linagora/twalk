@@ -1536,16 +1536,7 @@ impl Store {
                 "SELECT connection, kind, state, occurred_at, service, hint
                  FROM connection_status_current WHERE connection = ?",
                 [connection_id],
-                |row| {
-                    Ok(crate::connection_status::Current {
-                        connection: row.get(0)?,
-                        kind: row.get(1)?,
-                        state: row.get(2)?,
-                        occurred_at: row.get(3)?,
-                        service: row.get(4)?,
-                        hint: row.get(5)?,
-                    })
-                },
+                current_status_row,
             )
             .optional()
             .context("failed to read the connection's current status")
@@ -1561,16 +1552,7 @@ impl Store {
             )
             .context("failed to prepare the connection statuses read")?;
         let rows = statement
-            .query_map([], |row| {
-                Ok(crate::connection_status::Current {
-                    connection: row.get(0)?,
-                    kind: row.get(1)?,
-                    state: row.get(2)?,
-                    occurred_at: row.get(3)?,
-                    service: row.get(4)?,
-                    hint: row.get(5)?,
-                })
-            })
+            .query_map([], current_status_row)
             .context("failed to read the connection statuses")?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to read a connection status row")
@@ -2189,6 +2171,21 @@ mod test_support {
             })
             .collect()
     }
+}
+
+/// One row of `connection_status_current`, in the order its columns are
+/// selected everywhere it is read.
+fn current_status_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<crate::connection_status::Current> {
+    Ok(crate::connection_status::Current {
+        connection: row.get(0)?,
+        kind: row.get(1)?,
+        state: row.get(2)?,
+        occurred_at: row.get(3)?,
+        service: row.get(4)?,
+        hint: row.get(5)?,
+    })
 }
 
 #[cfg(test)]
@@ -3897,5 +3894,53 @@ mod bridge_status_tests {
             reopened.bridge_status("bridge-whatsapp").unwrap(),
             Some(ContractState::Connected)
         );
+    }
+
+    /// #275: a transition recorded once whatever the redeliveries, the
+    /// current view the latest, the changes newest first.
+    #[test]
+    fn a_connections_transitions_are_recorded_once_and_the_latest_is_its_state() {
+        let store = store("connection-status");
+        let change = |id: &str, from: &str, to: &str, at: &str| crate::connection_status::Change {
+            event_id: id.to_owned(),
+            connection: "mail-linagora".to_owned(),
+            kind: "email".to_owned(),
+            from_state: from.to_owned(),
+            to_state: to.to_owned(),
+            occurred_at: at.to_owned(),
+            service: Some("sso".to_owned()),
+            hint: Some("Run `twalk-collector authorize --renew`.".to_owned()),
+        };
+        let first = change("e1", "unknown", "connected", "2026-09-20T09:00:00Z");
+        assert!(store
+            .record_connection_status_change(&first, "now")
+            .unwrap());
+        assert!(
+            !store
+                .record_connection_status_change(&first, "now")
+                .unwrap(),
+            "a redelivered transition records nothing twice"
+        );
+        let second = change(
+            "e2",
+            "connected",
+            "reconnect_required",
+            "2026-09-20T10:00:00Z",
+        );
+        assert!(store
+            .record_connection_status_change(&second, "now")
+            .unwrap());
+        let current = store.connection_status("mail-linagora").unwrap().unwrap();
+        assert_eq!(current.state, "reconnect_required");
+        assert_eq!(current.kind, "email");
+        assert!(store
+            .connection_status("agenda-linagora")
+            .unwrap()
+            .is_none());
+        assert_eq!(store.connection_statuses().unwrap().len(), 1);
+        let changes = store.connection_status_changes(10).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[0].event_id, "e2", "newest first");
+        assert_eq!(store.connection_status_changes(1).unwrap().len(), 1);
     }
 }

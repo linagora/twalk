@@ -431,7 +431,12 @@ export function activityFeed(options: {
 	// feed says that something moved.
 	for (const transition of options.transitions ?? []) {
 		entries.push({
-			id: `connection:${transition.connection}:${transition.occurred_at}:${transition.to_state}`,
+			id: [
+				'connection',
+				transition.connection,
+				transition.occurred_at,
+				transition.to_state
+			].join(':'),
 			icon: transition.kind === 'calendar' ? 'calendar' : 'email',
 			tone: transition.to_state === 'connected' ? 'ok' : 'warn',
 			at: transition.occurred_at,

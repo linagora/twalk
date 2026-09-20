@@ -54,12 +54,24 @@ async fn connections(State(gateway): State<Gateway>) -> Response {
                 entry["status"] = status.json();
             }
         }
-        transitions = store
-            .connection_status_changes(crate::connection_status::RECENT_TRANSITIONS)
-            .unwrap_or_default()
-            .iter()
-            .map(crate::connection_status::Change::json)
-            .collect();
+        transitions =
+            match store.connection_status_changes(crate::connection_status::RECENT_TRANSITIONS) {
+                Ok(changes) => changes
+                    .iter()
+                    .map(crate::connection_status::Change::json)
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!(%error, "the connection transitions could not be read");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "error": "store_unavailable",
+                            "detail": "the Gateway's store could not be read"
+                        })),
+                    )
+                        .into_response();
+                }
+            };
     }
     (
         StatusCode::OK,
