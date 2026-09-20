@@ -20,7 +20,7 @@ const capabilities = reportCapabilities({
 const input = {
 	appBuild: '1789600000000',
 	expectedGatewayVersion: '0.1.0',
-	health: { version: '0.2.0', revision: 'abc1234' },
+	health: { version: '0.2.0', revision: 'abc1234', companionBuild: '1789839442194' },
 	handshake: { kind: 'mismatch', expected: '0.1.0', actual: '0.2.0' } as const,
 	capabilities,
 	locale: 'fr',

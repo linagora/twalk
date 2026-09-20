@@ -69,6 +69,13 @@
 			<dd class="mono" data-testid="gateway-revision">
 				{bootState.health?.revision ?? $t('diagnostics.unknown')}
 			</dd>
+			<!-- Beside the build this page runs (#222): the two agreeing is what
+			     "current" means, and the two differing is the fact that was
+			     invisible while an owner reloaded a fixed screen five times. -->
+			<dt>{$t('diagnostics.shippedBuild')}</dt>
+			<dd class="mono" data-testid="shipped-build">
+				{bootState.health?.companionBuild ?? $t('diagnostics.unknown')}
+			</dd>
 		</dl>
 		<p class="small muted" data-testid="handshake-kind" data-kind={bootState.handshake.kind}>
 			{bootState.handshake.kind}
