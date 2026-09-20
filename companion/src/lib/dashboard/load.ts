@@ -58,11 +58,15 @@ import { runtimeOf, type Runtime } from '$lib/runtime/presence';
  */
 export interface PendingSummary {
 	total: number;
+	/** Per connection (#272): what a screen that decides per connection reads. */
+	connections: components['schemas']['PendingConnectionCount'][];
 	networks: components['schemas']['PendingContactCount'][];
 }
 
 export type Snapshot = {
 	session: components['schemas']['Session'] | null;
+	/** The registry of connections (ADR 0033), `null` when the Gateway did not answer. */
+	connections: components['schemas']['Connection'][] | null;
 	bridges: components['schemas']['ConfiguredBridge'][] | null;
 	consent: components['schemas']['ConsentStateEntry'][] | null;
 	devices: components['schemas']['Device'][] | null;
@@ -93,6 +97,7 @@ export type Snapshot = {
 
 export const EMPTY: Snapshot = {
 	session: null,
+	connections: null,
 	bridges: null,
 	consent: null,
 	devices: null,
@@ -104,9 +109,10 @@ export const EMPTY: Snapshot = {
 };
 
 export async function loadDashboard(): Promise<Snapshot> {
-	const [session, bridges, consent, devices, pending, suggestions, moves, runtime] =
+	const [session, connections, bridges, consent, devices, pending, suggestions, moves, runtime] =
 		await Promise.all([
 			ask(() => gateway.GET('/api/session')),
+			ask(() => gateway.GET('/api/connections')),
 			ask(() => gateway.GET('/api/bridges')),
 			ask(() => gateway.GET('/api/consent/state')),
 			ask(() => gateway.GET('/api/devices')),
@@ -120,19 +126,24 @@ export async function loadDashboard(): Promise<Snapshot> {
 		]);
 	return {
 		session: session,
+		connections: connections?.connections ?? null,
 		bridges: bridges?.bridges ?? null,
 		consent: consent?.entries ?? null,
 		devices: devices?.devices ?? null,
 		moves: moves?.moves ?? null,
 		// `pending.contacts` is deliberately not carried past this line. See
 		// the module note: the counts are the dashboard's, the list is not.
-		pending: pending === null ? null : { total: pending.total, networks: pending.networks },
+		pending:
+			pending === null
+				? null
+				: { total: pending.total, connections: pending.connections, networks: pending.networks },
 		// Same line, same reason: what a persona wrote does not travel past
 		// here. `summarise` returns two numbers and has nowhere to put a text.
 		waiting: suggestions === null ? null : summarise(suggestions, dismissed()),
 		runtime: runtimeOf(runtime),
 		reachable:
 			session !== null ||
+			connections !== null ||
 			bridges !== null ||
 			consent !== null ||
 			devices !== null ||

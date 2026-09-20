@@ -1260,19 +1260,31 @@ paths:
         this list is read, so an upgraded deployment stops offering the user a
         decision about their own ghost (ticket #149, ADR 0018, ADR 0021).
 
-        **The numbers.** `total` and `networks` always count the whole list,
-        whatever `?network=` narrows `contacts` to, so a badge and the list
-        beside it can never disagree.
+        **The numbers.** `total`, `connections` and `networks` always count
+        the whole list, whatever `?connection=` or `?network=` narrows
+        `contacts` to, so a badge and the list beside it can never disagree.
+        A screen that decides per connection (#272) reads `connections`;
+        `networks` adds the connections of one kind up.
 
         Not paginated and not capped, like `GET /api/consent/state`.
       security:
         - deviceToken: []
       parameters:
+        - name: connection
+          in: query
+          required: false
+          description: |
+            Narrows `contacts` to one connection, by its id in
+            `GET /api/connections`. The counts are unaffected. Wins over
+            `network` when both are sent.
+          schema:
+            $ref: "#/components/schemas/ConnectionId"
         - name: network
           in: query
           required: false
           description: |
-            Narrows `contacts` to one network. The counts are unaffected.
+            Narrows `contacts` to one network — every connection of that
+            kind. The counts are unaffected.
           schema:
             $ref: "#/components/schemas/Network"
       responses:
@@ -1284,7 +1296,8 @@ paths:
                 $ref: "#/components/schemas/PendingContacts"
         "400":
           description: |
-            `unknown_value` - `network` is not one of the contract's.
+            `unknown_value` - `network` is not one of the contract's, or
+            `connection` is not one of the registry's.
           content:
             application/json:
               schema:
@@ -5824,9 +5837,25 @@ components:
           minimum: 1
           description: How many contacts are waiting on that network.
 
+    PendingConnectionCount:
+      type: object
+      required: [connection, network, count]
+      additionalProperties: false
+      properties:
+        connection:
+          allOf:
+            - $ref: "#/components/schemas/ConnectionId"
+        network:
+          $ref: "#/components/schemas/Network"
+          description: The connection's kind.
+        count:
+          type: integer
+          minimum: 1
+          description: How many contacts are waiting on that connection.
+
     PendingContacts:
       type: object
-      required: [total, networks, contacts]
+      required: [total, connections, networks, contacts]
       additionalProperties: false
       properties:
         total:
@@ -5835,13 +5864,23 @@ components:
           description: |
             How many contacts are waiting for a decision in all - the
             dashboard's number. Counts the whole list, never only what a
-            `?network=` filter left in `contacts`.
+            `?connection=` or `?network=` filter left in `contacts`.
+        connections:
+          type: array
+          description: |
+            The same total, broken down per connection (#272): the numbers a
+            screen that decides per connection reads. In the contract's
+            order of network values, then by connection id. A connection
+            with nothing waiting is absent rather than present at zero.
+          items:
+            $ref: "#/components/schemas/PendingConnectionCount"
         networks:
           type: array
           description: |
             The same total, broken down per network, in the contract's own
-            order of network values. A network with nothing waiting is absent
-            rather than present at zero.
+            order of network values — kept for a screen that has not learned
+            connections yet. A network with nothing waiting is absent rather
+            than present at zero.
           items:
             $ref: "#/components/schemas/PendingContactCount"
         contacts:

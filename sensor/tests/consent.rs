@@ -52,10 +52,12 @@ fn unique_event_id() -> String {
 /// A contact-scoped `consent.state.changed` event patched from the contract
 /// fixture — what the Companion Gateway, the single writer of consent state
 /// (ADR 0006), will publish; the test bus stands in for it. The patched
-/// event is re-validated so the test stays a contract citizen.
+/// event is re-validated so the test stays a contract citizen. `connections`
+/// is the scope (#270); on the reference deployment a connection is named
+/// after its network, and the `networks` member is their kinds.
 fn consent_change(
     subject_id: &str,
-    networks: &[&str],
+    connections: &[&str],
     old_state: &str,
     new_state: &str,
 ) -> Result<Value> {
@@ -65,9 +67,15 @@ fn consent_change(
     event["time"] = json!(now);
     event["subject"] = json!(subject_id);
     event["consent"] = json!(new_state);
+    let networks: Vec<&str> = connections
+        .iter()
+        .map(|connection| network_of(connection))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     // The top-level network extension is only set when the change targets
     // exactly one network, per the schema.
-    if let [network] = networks {
+    if let [network] = networks.as_slice() {
         event["network"] = json!(network);
     } else {
         event.as_object_mut().unwrap().remove("network");
@@ -75,10 +83,21 @@ fn consent_change(
     event["data"]["subject"] = json!({ "type": "contact", "id": subject_id });
     event["data"]["old_state"] = json!(old_state);
     event["data"]["new_state"] = json!(new_state);
+    event["data"]["scope"]["connections"] = json!(connections);
     event["data"]["scope"]["networks"] = json!(networks);
     event["data"]["occurred_at"] = json!(now);
     validate_against_contract(&event, "consent.state.changed")?;
     Ok(event)
+}
+
+/// The kind of a connection this suite names: the reference deployment's
+/// connections are named after their network, and the two-accounts journey
+/// prefixes its ids with the network's name.
+fn network_of(connection: &str) -> &str {
+    match connection {
+        "wa-home" | "wa-work" => "whatsapp",
+        other => other,
+    }
 }
 
 /// Polls until the bus holds the event produced from one Matrix event,
@@ -502,6 +521,7 @@ async fn publish_network_default(
     event["data"]["subject"] = json!({ "type": "network", "id": network });
     event["data"]["old_state"] = json!(old_state);
     event["data"]["new_state"] = json!(new_state);
+    event["data"]["scope"]["connections"] = json!([network]);
     event["data"]["scope"]["networks"] = json!([network]);
     event["data"]["occurred_at"] = json!(now);
     validate_against_contract(&event, "consent.state.changed")?;
@@ -996,6 +1016,154 @@ async fn every_event_is_stamped_with_the_connection_the_registry_names_for_its_r
             .map(|(_, value)| value.as_str()),
         Some("wa-work"),
         "and the bus header duplicates it for server-side filtering"
+    );
+
+    sensor.stop().await;
+    Ok(())
+}
+
+/// A portal built by `bot`, with the Sensor and `guest` in it.
+async fn portal_with(bot: &Bot, name: &str, guest: &Bot) -> Result<String> {
+    let room_id = make_whatsapp_portal(bot, name).await?;
+    bot.invite(&room_id, SENSOR_USER_ID).await?;
+    bot.wait_for_membership(&room_id, SENSOR_USER_ID, "join")
+        .await?;
+    bot.invite(&room_id, guest.user_id()).await?;
+    guest.join_room(&room_id).await?;
+    Ok(room_id)
+}
+
+/// Two bridges of one network, one contact in a portal of each, one
+/// decision per connection (ADR 0033, #271): the events carry `granted` on
+/// the connection the user granted and `pending` on the other. This is the
+/// whole reason the perimeter exists — a decision about the work account
+/// says nothing about the home one — and the case a cache keyed on the
+/// network would get wrong in both directions.
+#[tokio::test]
+async fn one_contact_on_two_connections_of_one_network_holds_one_decision_per_connection(
+) -> Result<()> {
+    const METRICS_LISTEN: &str = "127.0.0.1:19014";
+    const METRICS_URL: &str = "http://127.0.0.1:19014/metrics";
+
+    ensure_stack().await?;
+    let _guard = harness::SENSOR_LOCK.lock().await;
+    let bus = Bus::connect().await?;
+    let work_bot = Bot::login("bot_alpha").await?;
+    let home_bot = Bot::login("bot_beta").await?;
+    let puppet = Bot::login("whatsapp_33612345678").await?;
+
+    let gateway = StubGateway::start(SERVICE_TOKEN).await?;
+    // The snapshot: the contact granted on the work account only, each
+    // entry keyed on its connection — served at the stream's head, so the
+    // decisions earlier runs of this journey left on the shared bus are
+    // the snapshot's business and not replayed.
+    gateway.serve(
+        vec![json!({
+            "subject": { "type": "contact", "id": puppet.user_id() },
+            "connection": "wa-work",
+            "network": "whatsapp",
+            "state": "granted",
+            "decided_at": "2026-09-17T10:00:00.000Z",
+            "decision_sequence": 1,
+        })],
+        consent_head(&bus).await?,
+    );
+    gateway.serve_connections(vec![
+        json!({ "id": "wa-work", "kind": "whatsapp", "bridge_bot": work_bot.user_id() }),
+        json!({ "id": "wa-home", "kind": "whatsapp", "bridge_bot": home_bot.user_id() }),
+        json!({ "id": "matrix", "kind": "matrix" }),
+    ]);
+    bus.delete_consumer(STREAM, CONSENT_CONSUMER).await?;
+    let sensor = SensorProc::start(&harness::sensor_env_with(&[
+        ("SENSOR_GATEWAY_URL", &gateway.url()),
+        ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
+        ("SENSOR_METRICS_LISTEN", METRICS_LISTEN),
+        (
+            "SENSOR_ALLOWED_INVITERS",
+            &format!("{},{}", work_bot.user_id(), home_bot.user_id()),
+        ),
+    ]))?;
+
+    let work_room = portal_with(&work_bot, "two-accounts-work", &puppet).await?;
+    let home_room = portal_with(&home_bot, "two-accounts-home", &puppet).await?;
+
+    for (room_id, connection, consent) in [
+        (&work_room, "wa-work", "granted"),
+        (&home_room, "wa-home", "pending"),
+    ] {
+        let event_id = puppet
+            .send_message(room_id, &format!("hello on {connection}"))
+            .await?;
+        let stored = wait_for_matrix_event(&bus, room_id, &event_id).await?;
+        validate_against_contract(&stored.payload, "inbound.message.received")?;
+        assert_eq!(stored.payload["connection"].as_str(), Some(connection));
+        assert_eq!(
+            stored.payload["consent"].as_str(),
+            Some(consent),
+            "{connection}: the same contact, the decision of *this* perimeter: {}",
+            stored.payload
+        );
+    }
+
+    // A decision on the stream, scoped to the home account: it lands there
+    // and nowhere else.
+    publish_event(
+        &bus,
+        &consent_change(puppet.user_id(), &["wa-home"], "unset", "revoked")?,
+    )
+    .await?;
+    wait_for_label(
+        &bus,
+        &puppet,
+        &home_room,
+        "after the revocation at home",
+        "revoked",
+    )
+    .await?;
+    let event_id = puppet
+        .send_message(&work_room, "still granted at work")
+        .await?;
+    let stored = wait_for_matrix_event(&bus, &work_room, &event_id).await?;
+    assert_eq!(
+        stored.payload["consent"].as_str(),
+        Some("granted"),
+        "the revocation at home is not a revocation at work: {}",
+        stored.payload
+    );
+
+    // And a decision scoped by network alone — a producer older than #270 —
+    // is refused, counted, and changes nothing: work stays granted.
+    let mut by_network = consent_change(puppet.user_id(), &["wa-work"], "granted", "revoked")?;
+    by_network["data"]["scope"]
+        .as_object_mut()
+        .unwrap()
+        .remove("connections");
+    // No longer a contract citizen — that is the point — so published raw.
+    publish_event(&bus, &by_network).await?;
+    poll_until(
+        || async {
+            let body = reqwest::get(METRICS_URL).await.ok()?.text().await.ok()?;
+            body.lines()
+                .find_map(|line| {
+                    line.strip_prefix(
+                        "twalk_sensor_consent_refused_total{reason=\"no_connection\"} ",
+                    )
+                })
+                .and_then(|rest| rest.trim().parse::<u64>().ok())
+                .filter(|count| *count >= 1)
+        },
+        "the network-scoped decision to be counted as refused",
+    )
+    .await?;
+    let event_id = puppet
+        .send_message(&work_room, "still granted at work, whatever a network says")
+        .await?;
+    let stored = wait_for_matrix_event(&bus, &work_room, &event_id).await?;
+    assert_eq!(
+        stored.payload["consent"].as_str(),
+        Some("granted"),
+        "{}",
+        stored.payload
     );
 
     sensor.stop().await;

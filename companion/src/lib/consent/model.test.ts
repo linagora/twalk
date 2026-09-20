@@ -14,9 +14,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	awaiting,
 	bulkDecisions,
+	connectionDefaults,
 	counts,
 	matchesQuery,
-	networkDefaults,
 	ownerRows,
 	toRows,
 	withholds,
@@ -24,17 +24,23 @@ import {
 	type PendingContact,
 	type Row
 } from './model';
+import type { Connection } from '$lib/connections/registry';
 
 const OWNER = '@owner:test.twalk';
 
+/**
+ * A sighting on one connection. On the reference deployment a connection is
+ * named after its network (#270), which is the default here; the
+ * two-accounts tests name theirs.
+ */
 function sighting(
 	contact: string,
-	network: PendingContact['network'] = 'whatsapp'
+	network: PendingContact['network'] = 'whatsapp',
+	connection: string = network
 ): PendingContact {
 	return {
 		contact,
-		// One connection per network, named after it (#270).
-		connection: network,
+		connection,
 		network,
 		first_seen: '2026-09-18T07:00:00.000Z',
 		last_seen: '2026-09-18T09:00:00.000Z'
@@ -45,11 +51,12 @@ function entry(
 	type: Entry['subject']['type'],
 	id: string,
 	network: Entry['network'],
-	state: Entry['state']
+	state: Entry['state'],
+	connection: string = network
 ): Entry {
 	return {
 		subject: { type, id },
-		connection: network,
+		connection,
 		network,
 		state,
 		decided_at: '2026-09-18T08:00:00.000Z',
@@ -57,12 +64,27 @@ function entry(
 	};
 }
 
+/** The reference registry: one connection per network, named after it. */
+const REFERENCE: Connection[] = ['whatsapp', 'signal', 'sms', 'telegram', 'matrix'].map((kind) => ({
+	id: kind,
+	kind: kind as Connection['kind'],
+	label: kind
+}));
+
+/** Two WhatsApp accounts, and everything else as on the reference deployment. */
+const TWO_ACCOUNTS: Connection[] = [
+	{ id: 'wa-home', kind: 'whatsapp', label: 'Home' },
+	{ id: 'wa-work', kind: 'whatsapp', label: 'Work' },
+	...REFERENCE.filter((connection) => connection.kind !== 'whatsapp')
+];
+
 function rows(
 	pending: PendingContact[],
 	entries: Entry[],
-	names: { contact: string; display_name: string | null }[] = []
+	names: { contact: string; display_name: string | null }[] = [],
+	connections: readonly Connection[] = REFERENCE
 ): Row[] {
-	return toRows({ pending, entries, names, owner: OWNER });
+	return toRows({ pending, entries, names, owner: OWNER, connections });
 }
 
 describe('the three states', () => {
@@ -156,25 +178,59 @@ describe('the precedence', () => {
 		expect(list[0].overridesNetwork).toBe(false);
 	});
 
-	it('keeps a decision per network rather than per contact', () => {
-		// One person on two networks is two decisions: consent is looked up by
-		// `(subject, network)` and a grant on WhatsApp says nothing about SMS.
+	it('keeps a decision per connection rather than per contact', () => {
+		// One person on two connections is two decisions: consent is looked
+		// up by `(subject, connection)` and a grant on WhatsApp says nothing
+		// about SMS.
 		const list = rows(
 			[sighting('@person:test.twalk', 'sms')],
 			[entry('contact', '@person:test.twalk', 'whatsapp', 'granted')]
 		);
 		expect(list).toHaveLength(2);
-		expect(list.find((row) => row.network === 'whatsapp')?.state).toBe('granted');
-		expect(list.find((row) => row.network === 'sms')?.decidedBy).toBe('nothing');
+		expect(list.find((row) => row.connection === 'whatsapp')?.state).toBe('granted');
+		expect(list.find((row) => row.connection === 'sms')?.decidedBy).toBe('nothing');
 	});
 
-	it('reads the defaults off the network subjects alone', () => {
-		const defaults = networkDefaults([
+	it('keeps two accounts of one network apart: a grant on one leaves the other waiting', () => {
+		// The shape the perimeter exists for (ADR 0033, #272): the same
+		// person writes on the work WhatsApp and on the home one, is granted
+		// at work, and stays waiting at home — two rows, each saying which
+		// account it is, and a default set on one account is that account's.
+		const list = rows(
+			[
+				sighting('@person:test.twalk', 'whatsapp', 'wa-home'),
+				sighting('@person:test.twalk', 'whatsapp', 'wa-work'),
+				sighting('@other:test.twalk', 'whatsapp', 'wa-home')
+			],
+			[
+				entry('contact', '@person:test.twalk', 'whatsapp', 'granted', 'wa-work'),
+				entry('network', 'whatsapp', 'whatsapp', 'revoked', 'wa-home')
+			],
+			[],
+			TWO_ACCOUNTS
+		);
+		const person = list.filter((row) => row.contact === '@person:test.twalk');
+		expect(person.map((row) => [row.connection, row.state, row.decidedBy])).toEqual([
+			['wa-home', 'revoked', 'network'],
+			['wa-work', 'granted', 'contact']
+		]);
+		expect(person.map((row) => row.connectionLabel)).toEqual(['Home', 'Work']);
+		expect(list.find((row) => row.contact === '@other:test.twalk')?.state).toBe('revoked');
+		// On the reference shape nothing is labelled: one WhatsApp is "WhatsApp".
+		expect(rows([sighting('@a:test.twalk')], [])[0]!.connectionLabel).toBeNull();
+	});
+
+	it('reads the defaults off the network subjects alone, per connection', () => {
+		const defaults = connectionDefaults([
 			entry('network', 'whatsapp', 'whatsapp', 'granted'),
+			entry('network', 'whatsapp', 'whatsapp', 'revoked', 'wa-work'),
 			entry('contact', '@a:test.twalk', 'signal', 'revoked'),
 			entry('persona', 'assistant', 'whatsapp', 'granted')
 		]);
-		expect([...defaults.entries()]).toEqual([['whatsapp', 'granted']]);
+		expect([...defaults.entries()]).toEqual([
+			['whatsapp', 'granted'],
+			['wa-work', 'revoked']
+		]);
 	});
 });
 
@@ -276,6 +332,8 @@ describe('the bulk control', () => {
 		const decisions = bulkDecisions(shown, 'granted');
 		expect(decisions).toHaveLength(2);
 		expect(decisions.map((decision) => decision.contact)).not.toContain('@signal_3:test.twalk');
+		// What it writes is a decision per connection, not per network.
+		expect(decisions.map((decision) => decision.connection)).toEqual(['whatsapp', 'whatsapp']);
 	});
 
 	it('counts exactly what it will write', () => {
@@ -325,7 +383,7 @@ describe('the owner, who is not a contact', () => {
 	});
 
 	it('flags nothing when this browser does not know who the owner is', () => {
-		const list = toRows({ pending: [sighting(OWNER)], entries: [], names: [], owner: null });
+		const list = toRows({ pending: [sighting(OWNER)], entries: [], names: [], owner: null, connections: [] });
 		expect(ownerRows(list)).toEqual([]);
 	});
 });

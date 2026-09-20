@@ -189,6 +189,8 @@ pub fn network_entry(network: &str, state: &str) -> Value {
 fn entry(subject: Value, network: &str, state: &str) -> Value {
     json!({
         "subject": subject,
+        // One connection per network, named after it (#270).
+        "connection": network,
         "network": network,
         "state": state,
         "decided_at": "2026-09-17T10:00:00.000Z",

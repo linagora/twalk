@@ -16,6 +16,8 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY sensor sensor
 COPY tests/harness tests/harness
+# The shared consent cache (#273): a path dependency of the Sensor.
+COPY consent-cache consent-cache
 WORKDIR /src/sensor
 RUN --mount=type=cache,id=twalk-sensor-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=twalk-sensor-target,target=/src/sensor/target \

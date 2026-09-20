@@ -62,7 +62,7 @@
 // acceptance criterion.
 
 import type { components } from '$lib/api/schema';
-import { isNetwork } from '$lib/networks/contract';
+import { labelFor, ofKind, type Connection } from '$lib/connections/registry';
 
 export type Network = components['schemas']['Network'];
 export type State = components['schemas']['ConsentState_State'];
@@ -85,6 +85,11 @@ export type LabelSource = 'display-name' | 'matrix-id';
 export interface Row {
 	/** The contact's Matrix user ID: what a decision about them names as its subject. */
 	contact: string;
+	/** The connection this row is about (ADR 0033, #272): the perimeter a decision is scoped to. */
+	connection: string;
+	/** Which account, when the connection's kind has more than one; `null` when it is the only one. */
+	connectionLabel: string | null;
+	/** The connection's kind. */
 	network: Network;
 	/** What applies, after the precedence. */
 	state: State;
@@ -97,14 +102,15 @@ export interface Row {
 	firstSeen: string | null;
 	lastSeen: string | null;
 	/**
-	 * Whether this contact's own decision differs from their network's default.
+	 * Whether this contact's own decision differs from their connection's
+	 * default.
 	 *
-	 * The precedence, made visible: a user who granted a whole network and sees
-	 * one contact still producing nothing needs to be told that the contact's
-	 * own decision won, not left to guess (#170).
+	 * The precedence, made visible: a user who granted a whole connection and
+	 * sees one contact still producing nothing needs to be told that the
+	 * contact's own decision won, not left to guess (#170).
 	 */
 	overridesNetwork: boolean;
-	/** The network's default, when there is one, so the screen can name it. */
+	/** The connection's default, when there is one, so the screen can name it. */
 	networkDefault: State | null;
 	/** This deployment's owner, wrongly present as a contact. See ADR 0021, #149. */
 	isOwner: boolean;
@@ -134,15 +140,16 @@ export function withholds(state: State): 'content' | 'processing' | 'nothing' {
 	}
 }
 
-/** The recorded default of each network, from the `network` subjects of the state. */
-export function networkDefaults(entries: readonly Entry[]): Map<Network, State> {
-	const defaults = new Map<Network, State>();
+/**
+ * The recorded default of each connection, from the `network` subjects of
+ * the state — a network default is held per connection since #270, and the
+ * entry's `connection` is the one being defaulted.
+ */
+export function connectionDefaults(entries: readonly Entry[]): Map<string, State> {
+	const defaults = new Map<string, State>();
 	for (const entry of entries) {
 		if (entry.subject.type === 'network') {
-			// A network subject's scope is exactly its own network, which the
-			// Gateway enforces (`scope_contradicts_subject`), so the entry's
-			// `network` is the one being defaulted.
-			defaults.set(entry.network, entry.state);
+			defaults.set(entry.connection, entry.state);
 		}
 	}
 	return defaults;
@@ -157,6 +164,8 @@ export interface Inputs {
 	names: readonly DisplayName[];
 	/** This deployment's owner, from the session, or `null` when unknown. */
 	owner: string | null;
+	/** `GET /api/connections`, or `[]` when it was not read: what names an account when a kind has two. */
+	connections: readonly Connection[];
 }
 
 /**
@@ -175,7 +184,7 @@ export interface Inputs {
  * a network is not somebody.
  */
 export function toRows(inputs: Inputs): Row[] {
-	const defaults = networkDefaults(inputs.entries);
+	const defaults = connectionDefaults(inputs.entries);
 	const named = new Map<string, string>();
 	for (const entry of inputs.names) {
 		if (entry.display_name !== null && entry.display_name.trim() !== '') {
@@ -183,35 +192,44 @@ export function toRows(inputs: Inputs): Row[] {
 		}
 	}
 
-	/** The contact's own decision, by `(contact, network)`. */
-	const decided = new Map<string, State>();
+	/** The contact's own decision, by `(contact, connection)`. */
+	const decided = new Map<string, { state: State; network: Network }>();
 	for (const entry of inputs.entries) {
 		if (entry.subject.type === 'contact') {
-			decided.set(key(entry.subject.id, entry.network), entry.state);
+			decided.set(key(entry.subject.id, entry.connection), {
+				state: entry.state,
+				network: entry.network
+			});
 		}
 	}
 
 	const sighted = new Map<string, PendingContact>();
 	for (const contact of inputs.pending) {
-		sighted.set(key(contact.contact, contact.network), contact);
+		sighted.set(key(contact.contact, contact.connection), contact);
 	}
 
 	const seen = new Set<string>([...decided.keys(), ...sighted.keys()]);
 	const rows: Row[] = [];
 	for (const at of seen) {
-		const { contact, network } = unkey(at);
-		if (network === null) {
+		const { contact, connection } = unkey(at);
+		const own = decided.get(at);
+		const sighting = sighted.get(at) ?? null;
+		// The kind, as the record that put the row here spelled it.
+		const network = own?.network ?? sighting?.network;
+		if (network === undefined) {
 			continue;
 		}
-		const own = decided.get(at);
-		const networkDefault = defaults.get(network) ?? null;
-		const state = own ?? networkDefault ?? 'pending';
+		const networkDefault = defaults.get(connection) ?? null;
+		const state = own?.state ?? networkDefault ?? 'pending';
 		const decidedBy: DecidedBy =
 			own !== undefined ? 'contact' : networkDefault !== null ? 'network' : 'nothing';
 		const name = named.get(contact);
-		const sighting = sighted.get(at) ?? null;
+		const siblings = ofKind(inputs.connections, network);
+		const registered = siblings.find((candidate) => candidate.id === connection);
 		rows.push({
 			contact,
+			connection,
+			connectionLabel: registered === undefined ? null : labelFor(registered, siblings),
 			network,
 			state,
 			decidedBy,
@@ -220,7 +238,7 @@ export function toRows(inputs: Inputs): Row[] {
 			firstSeen: sighting?.first_seen ?? null,
 			lastSeen: sighting?.last_seen ?? null,
 			overridesNetwork:
-				own !== undefined && networkDefault !== null && own !== networkDefault,
+				own !== undefined && networkDefault !== null && own.state !== networkDefault,
 			networkDefault,
 			isOwner: inputs.owner !== null && contact === inputs.owner
 		});
@@ -239,20 +257,19 @@ function order(left: Row, right: Row): number {
 		return awaiting(left) ? -1 : 1;
 	}
 	const byLabel = left.label.localeCompare(right.label);
-	return byLabel !== 0 ? byLabel : left.network.localeCompare(right.network);
+	return byLabel !== 0 ? byLabel : left.connection.localeCompare(right.connection);
 }
 
-const SEPARATOR = ' ';
+// A NUL, which no Matrix ID and no connection id contains.
+const SEPARATOR = '\u0000';
 
-function key(contact: string, network: string): string {
-	return `${contact}${SEPARATOR}${network}`;
+function key(contact: string, connection: string): string {
+	return `${contact}${SEPARATOR}${connection}`;
 }
 
-function unkey(at: string): { contact: string; network: Network | null } {
+function unkey(at: string): { contact: string; connection: string } {
 	const cut = at.lastIndexOf(SEPARATOR);
-	const contact = at.slice(0, cut);
-	const network = at.slice(cut + 1);
-	return { contact, network: isNetwork(network) ? network : null };
+	return { contact: at.slice(0, cut), connection: at.slice(cut + 1) };
 }
 
 /**
@@ -269,9 +286,13 @@ export function matchesQuery(row: Row, query: string): boolean {
 	if (needle === '') {
 		return true;
 	}
-	return [row.label, row.contact, localpart(row.contact), row.network].some((straw) =>
-		fold(straw).includes(needle)
-	);
+	return [
+		row.label,
+		row.contact,
+		localpart(row.contact),
+		row.network,
+		row.connectionLabel ?? ''
+	].some((straw) => fold(straw).includes(needle));
 }
 
 function localpart(matrixId: string): string {
@@ -341,11 +362,11 @@ export function counts(rows: readonly Row[]): Counts {
 export function bulkDecisions(
 	shown: readonly Row[],
 	state: State
-): { contact: string; network: Network }[] {
+): { contact: string; connection: string }[] {
 	return shown
 		.filter((row) => !row.isOwner)
 		.filter((row) => !(row.decidedBy === 'contact' && row.state === state))
-		.map((row) => ({ contact: row.contact, network: row.network }));
+		.map((row) => ({ contact: row.contact, connection: row.connection }));
 }
 
 /**

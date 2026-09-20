@@ -553,6 +553,7 @@ async fn main() -> Result<()> {
                                 Some(owner),
                                 &bridge_bots,
                                 &consent_cache,
+                                &connection,
                             )
                             .await,
                         }),
@@ -593,7 +594,7 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| sender.localpart().to_owned());
-                let consent = consent_cache.state(sender.as_str(), network);
+                let consent = consent_cache.state(sender.as_str(), &connection);
                 // The native network identifier is contact PII: derived
                 // here, but published only for a granted contact (the
                 // builders enforce the gate).
@@ -615,7 +616,7 @@ async fn main() -> Result<()> {
                         quoted: if consent.reduces_publication() {
                             None
                         } else {
-                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache).await
+                            quoted_message(&room, &parent_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache, &connection).await
                         },
                     }),
                     None => None,
@@ -760,6 +761,7 @@ async fn main() -> Result<()> {
                         Some(owner),
                         &bridge_bots,
                         &consent_cache,
+                        &connection,
                     )
                     .await;
                     let input = normalize::OutboundReaction {
@@ -798,7 +800,7 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| reactor.localpart().to_owned());
-                let consent = consent_cache.state(reactor.as_str(), network);
+                let consent = consent_cache.state(reactor.as_str(), &connection);
                 let network_identifier =
                     network::ghost_network_identifier(network, reactor.localpart());
                 let target_event_id = event.content.relates_to.event_id.clone();
@@ -810,7 +812,7 @@ async fn main() -> Result<()> {
                 let excerpt = if consent.reduces_publication() {
                     None
                 } else {
-                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache).await
+                    quoted_message(&room, &target_event_id, &own_user, owner.as_ref(), &bridge_bots, &consent_cache, &connection).await
                 };
                 let input = normalize::InboundReaction {
                     matrix_event_id: event.event_id.to_string(),
@@ -1064,7 +1066,21 @@ async fn main() -> Result<()> {
                 }
                 // The connection is the source room's (ADR 0033): presence is
                 // not room-scoped, and the room chosen above is the one whose
-                // perimeter this event is attributed to.
+                // perimeter this event is attributed to. With two
+                // connections of one network holding the same subject, that
+                // is the first shared room's connection, in room-id order —
+                // the tie ADR 0027 lets an ordering break — and the consent
+                // label is that perimeter's. A subject present through two
+                // accounts is one presence event under one of them, not
+                // two; a consumer that needs the other perimeter's answer
+                // reads it off the messages, which are room-scoped. With two
+                // connections of one network holding the same subject, that
+                // is the first shared room's connection, in room-id order —
+                // the tie ADR 0027 lets an ordering break — and the consent
+                // label is that perimeter's. A subject present through two
+                // accounts is one presence event under one of them, not
+                // two; a consumer that needs the other perimeter's answer
+                // reads it off the messages, which are room-scoped.
                 let Some(connection) =
                     connection_of(&room, network, &registry, &unresolved_rooms, &metrics).await
                 else {
@@ -1077,7 +1093,7 @@ async fn main() -> Result<()> {
                     .flatten()
                     .and_then(|member| member.display_name().map(str::to_owned))
                     .unwrap_or_else(|| sender.localpart().to_owned());
-                let consent = consent_cache.state(sender.as_str(), network);
+                let consent = consent_cache.state(sender.as_str(), &connection);
                 let network_identifier =
                     network::ghost_network_identifier(network, sender.localpart());
                 let last_active_at = event
@@ -2251,6 +2267,7 @@ async fn quoted_message(
     owner: Option<&twalk_sensor::owner::Owner>,
     bridge_bots: &twalk_sensor::bridge_bot::BridgeBots,
     consent_cache: &ConsentCache,
+    connection: &str,
 ) -> Option<normalize::QuotedExcerpt> {
     let timeline_event = room.event(event_id, None).await.ok()?;
     let AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
@@ -2273,9 +2290,11 @@ async fn quoted_message(
         // costs a line of service output, not a person's visibility.
         normalize::QuotedAuthor::Unknown
     } else {
+        // The quoted author's decision on this room's connection (#271):
+        // the room is the perimeter, and the quoted message travelled in it.
         match resolve_network(room, &message.sender).await {
-            Some(network) => normalize::QuotedAuthor::Contact(
-                consent_cache.state(message.sender.as_str(), network),
+            Some(_) => normalize::QuotedAuthor::Contact(
+                consent_cache.state(message.sender.as_str(), connection),
             ),
             None => normalize::QuotedAuthor::Unknown,
         }
@@ -2594,7 +2613,12 @@ where
              of connections is the implicit one — one connection per network, named after it \
              — which is correct while such a deployment has one bridge per network (ADR 0033)"
         );
-        tokio::spawn(consume_consent_changes(jetstream, consent_cache, None));
+        tokio::spawn(consume_consent_changes(
+            jetstream,
+            consent_cache,
+            None,
+            metrics,
+        ));
         return true;
     };
     let snapshot = match source.fetch_snapshot().await {
@@ -2625,6 +2649,7 @@ where
         jetstream,
         consent_cache,
         Some(start),
+        metrics,
     ));
     true
 }
@@ -2636,7 +2661,7 @@ fn apply_consent_snapshot(
     registry: &std::sync::RwLock<connection::Registry>,
     metrics: &Metrics,
 ) -> u64 {
-    consent_cache.apply_snapshot(snapshot);
+    consent_cache.apply_snapshot(&snapshot.state);
     if let Some(handed) = &snapshot.connections {
         *registry
             .write()
@@ -2647,13 +2672,33 @@ fn apply_consent_snapshot(
             "the registry of connections is the Gateway's: every event is stamped from it"
         );
     }
-    metrics.record_consent_snapshot(snapshot.entries.len());
+    metrics.record_consent_snapshot(snapshot.state.entries.len());
+    // Each refusal counted, and each reason said once with its number: a
+    // persona entry is not a refusal and gets no line.
+    let mut refused: Vec<(consent::Unusable, usize)> = Vec::new();
+    for why in &snapshot.state.unusable {
+        if metrics.record_consent_refused(*why).is_some() {
+            match refused.iter_mut().find(|(known, _)| known == why) {
+                Some((_, count)) => *count += 1,
+                None => refused.push((*why, 1)),
+            }
+        }
+    }
+    for (why, count) in &refused {
+        warn!(
+            reason = ?why,
+            count,
+            "the consent snapshot holds entries this Sensor refused: {}; their subjects stay \
+             pending here rather than labelled by a guessed perimeter (#271)",
+            why.explained()
+        );
+    }
     info!(
-        entries = snapshot.entries.len(),
-        next_stream_sequence = snapshot.next_stream_sequence,
+        entries = snapshot.state.entries.len(),
+        next_stream_sequence = snapshot.state.next_stream_sequence,
         "applied the Companion Gateway's consent snapshot"
     );
-    snapshot.next_stream_sequence
+    snapshot.state.next_stream_sequence
 }
 
 /// Retries the snapshot until it answers, doubling the delay up to a ceiling.
@@ -2709,9 +2754,10 @@ async fn consume_consent_changes(
     jetstream: async_nats::jetstream::Context,
     consent_cache: ConsentCache,
     start_sequence: Option<u64>,
+    metrics: Arc<Metrics>,
 ) {
     loop {
-        match run_consent_consumer(&jetstream, &consent_cache, start_sequence).await {
+        match run_consent_consumer(&jetstream, &consent_cache, start_sequence, &metrics).await {
             Ok(()) => error!("the consent-change message stream ended; rebuilding the consumer"),
             Err(error) => error!(%error, "the consent-change consumer failed; rebuilding it"),
         }
@@ -2732,6 +2778,7 @@ async fn run_consent_consumer(
     jetstream: &async_nats::jetstream::Context,
     consent_cache: &ConsentCache,
     start_sequence: Option<u64>,
+    metrics: &Metrics,
 ) -> Result<()> {
     let stream = jetstream
         .get_stream(normalize::STREAM_NAME)
@@ -2794,31 +2841,35 @@ async fn run_consent_consumer(
         }
         match serde_json::from_slice::<serde_json::Value>(&message.message.payload) {
             Ok(event) => match consent::ConsentChange::parse(&event) {
-                Some(change) => {
+                Ok(change) => {
                     consent_cache.apply(&change);
                     info!(
                         subject = change.subject_label(),
                         state = change.new_state.as_str(),
-                        networks = ?change.networks,
+                        connections = ?change.connections,
                         "applied a consent change"
                     );
                 }
                 // A persona-scoped decision is well-formed traffic that
-                // simply never labels a sender (ADR 0013); a malformed
-                // contact or network change is worth a warning.
-                None => match event
-                    .pointer("/data/subject/type")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    Some("contact") | Some("network") | None => warn!(
-                        id = event
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("<none>"),
-                        "unusable consent.state.changed event, skipping"
-                    ),
-                    Some(_) => {}
-                },
+                // simply never labels a sender (ADR 0013) and is not
+                // counted; a change that names no connection, or is
+                // malformed, is counted and said (#271): the decision it
+                // carries is one this Sensor will not guess the perimeter
+                // of, and its sender stays labelled as before.
+                Err(why) => {
+                    if let Some(total) = metrics.record_consent_refused(why) {
+                        warn!(
+                            id = event
+                                .get("id")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("<none>"),
+                            reason = ?why,
+                            total,
+                            "refused a consent.state.changed event: {}",
+                            why.explained()
+                        );
+                    }
+                }
             },
             Err(error) => {
                 warn!(%error, "consent.state.changed payload is not valid JSON, skipping")

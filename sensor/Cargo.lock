@@ -4406,6 +4406,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "twalk-consent-cache"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "twalk-sensor"
 version = "0.1.0"
 dependencies = [
@@ -4421,6 +4430,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "twalk-consent-cache",
  "twalk-test-harness",
 ]
 

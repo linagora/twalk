@@ -45,6 +45,7 @@
 //     [`personaRows`] carries that as a fact about the row, not as a footnote.
 
 import type { components } from '$lib/api/schema';
+import { bridgeOf, labelFor, linkTo, ofKind, type Connection } from '$lib/connections/registry';
 import type { IconName } from '$lib/icons';
 import type { MessageKey } from '$lib/i18n';
 import { cardFor, manageRouteFor } from '$lib/networks/catalogue';
@@ -88,6 +89,10 @@ export type BridgeState =
 	| 'unknown';
 
 export interface BridgeRow {
+	/** The connection this row is (#272): the perimeter, keyed and linked by its id. */
+	readonly connectionId: string;
+	/** Which account, when the kind has more than one; `null` when it is the only one. */
+	readonly label: string | null;
 	readonly bridgeId: string;
 	readonly network: string;
 	readonly state: BridgeState;
@@ -112,6 +117,10 @@ export interface PersonaRow {
 	readonly networks: readonly string[];
 	/** Every network the user has ever decided on for this persona, sorted. */
 	readonly decidedNetworks: readonly string[];
+	/** The connections the persona is active on (#272): what a pause revokes. */
+	readonly connections: readonly string[];
+	/** Every connection ever decided about for this persona: what a re-activation grants. */
+	readonly decidedConnections: readonly string[];
 	readonly active: boolean;
 	/** True once any decision has been recorded about it. */
 	readonly decided: boolean;
@@ -138,37 +147,56 @@ export interface ActivityEntry {
 export const FEED_LENGTH = 10;
 
 /**
- * One row per configured bridge, saying what the **bridge** says.
+ * One row per connection a bridge carries (#272), saying what the **bridge**
+ * says about it.
+ *
+ * The registry says which connections there are, and each one's bridge is
+ * found by the id it names — never by matching networks, which is how two
+ * accounts of one kind used to collapse into one row. A connection no
+ * bridge carries (Matrix) is not a bridge row; a bridge no connection names
+ * is not one either, and the Gateway says so at startup.
  *
  * `GET /api/bridges` carries a `connection` per bridge, read live from that
  * bridge's own `whoami`: the logins it holds and the state of each. That is
  * the link, it lives in the bridge, and neither a login in flight nor a
  * restart of the Gateway can change it. This row reads that and nothing else.
- *
  * What it used to read was `bridge.login` — the last login *process* in the
  * Gateway's memory — which is why this screen and the networks picker could
  * both report a live WhatsApp session as never connected (#108).
  */
-export function bridgeRows(bridges: readonly ConfiguredBridge[]): BridgeRow[] {
-	return bridges.map((bridge) => {
+export function bridgeRows(
+	registry: readonly Connection[],
+	bridges: readonly ConfiguredBridge[]
+): BridgeRow[] {
+	return registry.flatMap((entry) => {
+		const bridge = bridgeOf(entry, bridges);
+		if (bridge === null) {
+			return [];
+		}
 		const connection = connectionOf(bridge);
 		const state = bridgeStateOf(bridge);
-		const card = cardFor(bridge.network);
-		const manage = card === undefined ? null : manageRouteFor(card);
-		return {
-			bridgeId: bridge.bridge_id,
-			network: bridge.network,
-			state,
-			tone: bridgeTone(state),
-			lastMessageAt: null,
-			// When the link last changed state, as the bridge timestamped it.
-			// For a connected login that is when it connected.
-			since: connection.account?.since ?? null,
-			// A link the user has is managed, not re-established: *Manage*
-			// opens the management screen rather than starting a QR flow
-			// against a working connection (#108).
-			route: connection.linked && manage !== null ? manage : `/networks/${bridge.network}`
-		};
+		const card = cardFor(entry.kind);
+		const siblings = ofKind(registry, entry.kind);
+		const href = card?.route === undefined || card.route === null ? null : linkTo(card.route, entry, siblings);
+		const manage = card === undefined ? null : manageRouteFor({ card, href });
+		return [
+			{
+				connectionId: entry.id,
+				label: labelFor(entry, siblings),
+				bridgeId: bridge.bridge_id,
+				network: entry.kind,
+				state,
+				tone: bridgeTone(state),
+				lastMessageAt: null,
+				// When the link last changed state, as the bridge timestamped it.
+				// For a connected login that is when it connected.
+				since: connection.account?.since ?? null,
+				// A link the user has is managed, not re-established: *Manage*
+				// opens the management screen rather than starting a QR flow
+				// against a working connection (#108).
+				route: connection.linked && manage !== null ? manage : (href ?? `/networks/${entry.kind}`)
+			}
+		];
 	});
 }
 
@@ -280,11 +308,11 @@ export function personaRows(
 	}
 	return [...byPersona.entries()]
 		.map(([persona, rows]) => {
-			const granted = rows
-				.filter((row) => row.state === 'granted')
-				.map((row) => row.network)
-				.sort();
+			const active = rows.filter((row) => row.state === 'granted');
+			const granted = [...new Set(active.map((row) => row.network))].sort();
 			const decidedNetworks = [...new Set(rows.map((row) => row.network))].sort();
+			const connections = [...new Set(active.map((row) => row.connection))].sort();
+			const decidedConnections = [...new Set(rows.map((row) => row.connection))].sort();
 			const lastDecisionAt = rows
 				.map((row) => row.decided_at)
 				.sort()
@@ -293,6 +321,8 @@ export function personaRows(
 				persona,
 				networks: granted,
 				decidedNetworks,
+				connections,
+				decidedConnections,
 				active: granted.length > 0,
 				decided: rows.length > 0,
 				lastDecisionAt: lastDecisionAt ?? null
@@ -318,6 +348,36 @@ export function personaRows(
  */
 export function pendingDecisions(pending: { total: number } | null): number | null {
 	return pending === null ? null : pending.total;
+}
+
+/** One connection with people waiting, as the chip breaks its number down (#272). */
+export interface PendingRow {
+	readonly connection: string;
+	readonly network: string;
+	/** Which account, when the kind has two; `null` when it is the only one. */
+	readonly label: string | null;
+	readonly count: number;
+}
+
+/**
+ * The pending count per connection, labelled from the registry: the same
+ * total the chip states, said per account on a deployment with two of one
+ * kind. A connection the registry no longer names keeps its count under its
+ * id — the people waiting on it are still waiting.
+ */
+export function pendingByConnection(
+	counts: readonly components['schemas']['PendingConnectionCount'][],
+	registry: readonly Connection[]
+): PendingRow[] {
+	return counts.map((count) => {
+		const entry = registry.find((candidate) => candidate.id === count.connection);
+		return {
+			connection: count.connection,
+			network: count.network,
+			label: entry === undefined ? count.connection : labelFor(entry, ofKind(registry, entry.kind)),
+			count: count.count
+		};
+	});
 }
 
 /**

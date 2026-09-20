@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 import { gridFor, looksLikeIos, manageRouteFor, NETWORK_CARDS, cardFor, type BridgeRow } from './catalogue';
 import type { BridgeConnection } from './connection';
+import type { Connection } from '$lib/connections/registry';
 
 /** A bridge that answered, holding no login: the not-connected state. */
 function noLogins(): BridgeConnection {
@@ -71,6 +72,37 @@ const configured: BridgeRow[] = [
 	bridge('mautrix-gmessages', 'sms')
 ];
 
+/**
+ * The registry a Gateway derives from those bridges (#269): one connection
+ * per bridge, named after its network, plus the native Matrix one.
+ */
+function registryFor(bridges: readonly BridgeRow[]): Connection[] {
+	return [
+		...bridges.map((row) => ({
+			id: row.network,
+			kind: row.network as Connection['kind'],
+			label: row.bridge_id,
+			bridge_id: row.bridge_id
+		})),
+		{ id: 'matrix', kind: 'matrix' as const, label: 'example.com' }
+	];
+}
+
+/** `gridFor`'s options for a deployment whose registry is derived from its bridges. */
+function deployment(
+	bridges: readonly BridgeRow[],
+	overrides: Partial<Parameters<typeof gridFor>[0]> = {}
+): Parameters<typeof gridFor>[0] {
+	return {
+		connections: registryFor(bridges),
+		connectionsKnown: true,
+		bridges,
+		bridgesKnown: true,
+		ios: false,
+		...overrides
+	};
+}
+
 function card(network: string, options: Parameters<typeof gridFor>[0]) {
 	const found = gridFor(options).find((state) => state.card.network === network);
 	expect(found, `no card for ${network}`).toBeDefined();
@@ -84,9 +116,9 @@ describe('the network grid', () => {
 		);
 		expect(active).toEqual(['whatsapp', 'signal', 'sms', 'matrix', 'telegram']);
 
-		const grid = gridFor({ bridges: configured, bridgesKnown: true, ios: false });
+		const grid = gridFor(deployment(configured));
 		expect(grid.map((state) => state.card.network)).toContain('telegram');
-		expect(card('discord', { bridges: configured, bridgesKnown: true, ios: false }).blockedBy).toBe(
+		expect(card('discord', deployment(configured)).blockedBy).toBe(
 			'coming-soon'
 		);
 	});
@@ -98,32 +130,32 @@ describe('the network grid', () => {
 		// card said the first while the bridge was up and serving four login
 		// flows.
 		const withTelegram = [...configured, bridge('mautrix-telegram', 'telegram')];
-		expect(card('telegram', { bridges: withTelegram, bridgesKnown: true, ios: false }).blockedBy).toBeNull();
-		expect(card('telegram', { bridges: configured, bridgesKnown: true, ios: false }).blockedBy).toBe(
+		expect(card('telegram', deployment(withTelegram)).blockedBy).toBeNull();
+		expect(card('telegram', deployment(configured)).blockedBy).toBe(
 			'no-bridge'
 		);
 	});
 
 	it('names the bridge instance serving each network', () => {
-		expect(card('whatsapp', { bridges: configured, bridgesKnown: true, ios: false }).bridgeId).toBe(
+		expect(card('whatsapp', deployment(configured)).bridgeId).toBe(
 			'mautrix-whatsapp'
 		);
 		// The network is what the user experiences; the bridge is the
 		// implementation, and `mautrix-gmessages` is the `sms` network.
-		expect(card('sms', { bridges: configured, bridgesKnown: true, ios: false }).bridgeId).toBe(
+		expect(card('sms', deployment(configured)).bridgeId).toBe(
 			'mautrix-gmessages'
 		);
 	});
 
 	it('greys the SMS preview on an iOS user agent, and only that card', () => {
-		const state = { bridges: configured, bridgesKnown: true, ios: true };
+		const state = deployment(configured, { ios: true });
 		expect(card('sms', state).blockedBy).toBe('ios');
 		expect(card('whatsapp', state).blockedBy).toBeNull();
 		expect(card('signal', state).blockedBy).toBeNull();
 	});
 
 	it('greys a network this deployment configured no bridge for', () => {
-		const state = { bridges: [configured[0]!], bridgesKnown: true, ios: false };
+		const state = deployment([configured[0]!]);
 		expect(card('signal', state).blockedBy).toBe('no-bridge');
 		expect(card('whatsapp', state).blockedBy).toBeNull();
 		// Matrix needs no bridge: the bring-your-own-account path is always open.
@@ -133,9 +165,55 @@ describe('the network grid', () => {
 	it('leaves every card tappable when the Gateway could not be asked', () => {
 		// The honest state: "unknown", not "nothing is configured". The screen
 		// says so, and each network's own screen handles a missing bridge.
-		const state = { bridges: [], bridgesKnown: false, ios: false };
+		const state = {
+			connections: [],
+			connectionsKnown: false,
+			bridges: [],
+			bridgesKnown: false,
+			ios: false
+		};
 		expect(card('whatsapp', state).blockedBy).toBeNull();
 		expect(card('signal', state).blockedBy).toBeNull();
+	});
+
+	it('draws one card per connection, and names each only when its kind has two', () => {
+		// The shape ADR 0033 exists for: two WhatsApp accounts, two bridges.
+		// Two cards, each its own connection and its own bridge — found by the
+		// id the connection names, never by network — and the label says
+		// which account. Signal, with one, reads as it always did.
+		const bridges = [
+			bridge('mautrix-whatsapp', 'whatsapp'),
+			bridge('mautrix-whatsapp-work', 'whatsapp', holding('connected', '2026-09-18T07:27:59.000Z')),
+			bridge('mautrix-signal', 'signal')
+		];
+		const connections: Connection[] = [
+			{ id: 'wa-home', kind: 'whatsapp', label: 'Home', bridge_id: 'mautrix-whatsapp' },
+			{ id: 'wa-work', kind: 'whatsapp', label: 'Work', bridge_id: 'mautrix-whatsapp-work' },
+			{ id: 'signal', kind: 'signal', label: 'mautrix-signal', bridge_id: 'mautrix-signal' },
+			{ id: 'matrix', kind: 'matrix', label: 'example.com' }
+		];
+		const grid = gridFor({ connections, connectionsKnown: true, bridges, bridgesKnown: true, ios: false });
+		const whatsapp = grid.filter((state) => state.card.network === 'whatsapp');
+		expect(whatsapp.map((state) => state.connection?.id)).toEqual(['wa-home', 'wa-work']);
+		expect(whatsapp.map((state) => state.bridgeId)).toEqual(['mautrix-whatsapp', 'mautrix-whatsapp-work']);
+		expect(whatsapp.map((state) => state.label)).toEqual(['Home', 'Work']);
+		expect(whatsapp.map((state) => state.connected)).toEqual([false, true]);
+		expect(whatsapp.map((state) => state.href)).toEqual([
+			'/networks/whatsapp?connection=wa-home',
+			'/networks/whatsapp?connection=wa-work'
+		]);
+		const signal = card('signal', { connections, connectionsKnown: true, bridges, bridgesKnown: true, ios: false });
+		expect(signal.label).toBeNull();
+		expect(signal.href).toBe('/networks/signal');
+		// A kind with no connection keeps its one card, blocked as before.
+		expect(card('telegram', { connections, connectionsKnown: true, bridges, bridgesKnown: true, ios: false }).blockedBy).toBe('no-bridge');
+	});
+
+	it('keys every card so two of one kind are two rows and not one', () => {
+		const grid = gridFor(deployment(configured));
+		const keys = grid.map((state) => state.key);
+		expect(new Set(keys).size).toBe(keys.length);
+		expect(card('whatsapp', deployment(configured)).key).toBe('whatsapp');
 	});
 });
 
@@ -145,13 +223,9 @@ describe('the network grid', () => {
 // process and the link disagreed, which is most of the time.
 describe('the connected state of a network', () => {
 	it('comes from the bridge, never from the login process', () => {
-		const state = {
-			bridges: [bridge('mautrix-whatsapp', 'whatsapp', holding('connected', 'CONNECTED'))],
-			bridgesKnown: true,
-			ios: false
-		};
+		const state = deployment([bridge('mautrix-whatsapp', 'whatsapp', holding('connected', 'CONNECTED'))]);
 		expect(card('whatsapp', state).connected).toBe(true);
-		expect(card('whatsapp', state).connection.account?.name).toBe('+33660469852');
+		expect(card('whatsapp', state).link.account?.name).toBe('+33660469852');
 	});
 
 	it('survives a login being started on a connected bridge', () => {
@@ -176,7 +250,7 @@ describe('the connected state of a network', () => {
 				error: null
 			}
 		};
-		const state = { bridges: [row], bridgesKnown: true, ios: false };
+		const state = deployment([row]);
 		expect(card('whatsapp', state).connected).toBe(true);
 	});
 
@@ -189,13 +263,13 @@ describe('the connected state of a network', () => {
 				...bridge('mautrix-whatsapp', 'whatsapp', holding('connected', 'CONNECTED')),
 				login: login === null ? null : ({ ...login } as unknown as BridgeRow['login'])
 			};
-			const state = { bridges: [row], bridgesKnown: true, ios: false };
+			const state = deployment([row]);
 			expect(card('whatsapp', state).connected).toBe(true);
 		}
 	});
 
 	it('is not claimed for a bridge that answered "no login"', () => {
-		const state = { bridges: configured, bridgesKnown: true, ios: false };
+		const state = deployment(configured);
 		expect(card('whatsapp', state).connected).toBe(false);
 		expect(card('whatsapp', state).linked).toBe(false);
 	});
@@ -203,12 +277,8 @@ describe('the connected state of a network', () => {
 	it('is unknown, not disconnected, when the bridge could not be asked', () => {
 		// Guessing `disconnected` here is the same lie in a new place: it tells
 		// a user with a working link that it is broken.
-		const state = {
-			bridges: [bridge('mautrix-whatsapp', 'whatsapp', unreachable())],
-			bridgesKnown: true,
-			ios: false
-		};
-		expect(card('whatsapp', state).connection.state).toBe('unknown');
+		const state = deployment([bridge('mautrix-whatsapp', 'whatsapp', unreachable())]);
+		expect(card('whatsapp', state).link.state).toBe('unknown');
 		expect(card('whatsapp', state).connected).toBe(false);
 		expect(card('whatsapp', state).linked).toBe(false);
 	});
@@ -222,12 +292,8 @@ describe('the connected state of a network', () => {
 			// says so; no mautrix bridge emits `LOGGED_OUT`.
 			['BAD_CREDENTIALS', 'session_expired']
 		] as const) {
-			const state = {
-				bridges: [bridge('mautrix-whatsapp', 'whatsapp', holding(expected, reported))],
-				bridgesKnown: true,
-				ios: false
-			};
-			expect(card('whatsapp', state).connection.state).toBe(expected);
+			const state = deployment([bridge('mautrix-whatsapp', 'whatsapp', holding(expected, reported))]);
+			expect(card('whatsapp', state).link.state).toBe(expected);
 			expect(card('whatsapp', state).connected).toBe(false);
 			// …but the link exists, so the card offers Manage and not Connect.
 			expect(card('whatsapp', state).linked).toBe(true);
@@ -237,16 +303,24 @@ describe('the connected state of a network', () => {
 
 describe('where Manage leads', () => {
 	it('is the management screen of that network', () => {
-		expect(manageRouteFor(cardFor('whatsapp')!)).toBe('/networks/whatsapp/manage');
-		expect(manageRouteFor(cardFor('signal')!)).toBe('/networks/signal/manage');
-		expect(manageRouteFor(cardFor('sms')!)).toBe('/networks/sms/manage');
+		expect(manageRouteFor(card('whatsapp', deployment(configured)))).toBe('/networks/whatsapp/manage');
+		expect(manageRouteFor(card('signal', deployment(configured)))).toBe('/networks/signal/manage');
+		expect(manageRouteFor(card('sms', deployment(configured)))).toBe('/networks/sms/manage');
+	});
+
+	it('names the connection when its kind has two, as the card does', () => {
+		const state = {
+			card: cardFor('whatsapp')!,
+			href: '/networks/whatsapp?connection=wa-work'
+		};
+		expect(manageRouteFor(state)).toBe('/networks/whatsapp/manage?connection=wa-work');
 	});
 
 	it('is nowhere for Matrix, which has no login to manage', () => {
 		// The bring-your-own-account path reaches Twalk by the Sensor being
 		// invited into the user's rooms (ADR 0009): no bridge, no login, no
 		// disconnect.
-		expect(manageRouteFor(cardFor('matrix')!)).toBeNull();
+		expect(manageRouteFor(card('matrix', deployment(configured)))).toBeNull();
 	});
 });
 
@@ -297,7 +371,7 @@ describe('every route the catalogue can produce is served', () => {
 		'serves $network',
 		(card) => {
 			expect(served, `no page for ${card.route}`).toContain(card.route!);
-			const manage = manageRouteFor(card);
+			const manage = manageRouteFor({ card, href: card.route });
 			if (manage !== null) {
 				expect(served, `no page for ${manage}`).toContain(manage);
 			}

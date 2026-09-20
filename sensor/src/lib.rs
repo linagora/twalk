@@ -5,13 +5,14 @@
 //! The pure, seam-independent logic lives in these modules; the binary in
 //! `main.rs` only wires them to matrix-sdk and NATS.
 
-pub mod bridge_bot;
 pub mod config;
 pub mod connection;
 pub mod consent;
+// The owner's identities and the bridges' bots are the shared consent
+// cache's (#273), re-exported under the paths the Sensor always used.
+pub use twalk_consent_cache::{bridge_bot, owner};
 pub mod metrics;
 pub mod network;
 pub mod normalize;
 pub mod outbound;
-pub mod owner;
 pub mod owner_device;
