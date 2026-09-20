@@ -88,17 +88,24 @@ test('a whole cookie login: the cookies, the emoji, the connection', async ({ pa
 	// origin, so the five it did not ask for are not relayed anywhere (ADR 0011).
 	// The paste is still checked against the same list, so nothing is silently
 	// dropped: a name the bridge wants and the paste lacks is named on screen.
+	//
+	// On the wire the jar is **one string**, the JSON of the map: bridgev2
+	// declares a cookies answer as a string and parses it itself, and a map
+	// sent as a map is refused by its decoder before any connector runs (#224,
+	// #267). The stub refuses the same way, so this is the shape asserted.
 	const stats = await bridge.stats();
 	const relayed = stats.submits?.find((submit) => submit.step_type === 'cookies');
 	expect(relayed, JSON.stringify(stats.submits)).toBeDefined();
-	expect(relayed?.body?.cookies?.['SID']).toBe('value-for-SID');
-	expect(relayed?.body?.cookies).toEqual({
+	expect(typeof relayed?.body?.cookies).toBe('string');
+	const jar = JSON.parse(relayed?.body?.cookies ?? 'null') as Record<string, string>;
+	expect(jar['SID']).toBe('value-for-SID');
+	expect(jar).toEqual({
 		SID: 'value-for-SID',
 		SAPISID: 'value-for-SAPISID'
 	});
 	// By key, not by substring: `APISID` is inside `SAPISID`, and an absence
 	// test that can be satisfied by a coincidence is not an absence test.
-	const sent = Object.keys(relayed?.body?.cookies ?? {});
+	const sent = Object.keys(jar);
 	const unasked = NAMES.filter((name) => name !== 'SID' && name !== 'SAPISID');
 	for (const name of unasked) {
 		expect(sent, `${name} was not asked for`).not.toContain(name);

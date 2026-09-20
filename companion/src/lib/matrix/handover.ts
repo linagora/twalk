@@ -67,10 +67,11 @@
 //
 // Re-running onboarding must not create a second room, and the fact that one
 // exists is not written down anywhere: it is asked of the homeserver, through
-// a canonical alias ([`handoverAlias`]). One request answers it, the Companion
-// never lists the user's rooms to find it, and the race is safe — Synapse
-// refuses a second `createRoom` with the same alias (`M_ROOM_IN_USE`), which
-// is read here as "it already exists" and resolved.
+// a canonical alias ([`handoverAlias`], the owner's own localpart in it). One
+// request answers it, the Companion never lists the user's rooms to find it,
+// and the race is safe — Synapse refuses a second `createRoom` with the same
+// alias (`M_ROOM_IN_USE`), which is read here as "it already exists" and
+// resolved.
 //
 // # The sync loop, which this module needs and the rest of the app refuses
 //
@@ -105,12 +106,45 @@ export const HANDOVER_ROOM_TYPE = 'fr.linagora.twalk.handover';
  */
 export const SEND_LEVEL_NOBODY_HAS = 101;
 
-/** The alias localpart. One per homeserver, which is one per deployment. */
-export const HANDOVER_ALIAS_LOCALPART = 'twalk-handover';
+/** The alias localpart's prefix; the owner's own localpart follows it. */
+export const HANDOVER_ALIAS_PREFIX = 'twalk-handover';
 
-/** The full alias on a server, e.g. `#twalk-handover:example.com`. */
-export function handoverAlias(serverName: string): string {
-	return `#${HANDOVER_ALIAS_LOCALPART}:${serverName}`;
+/**
+ * The alias localpart for one owner, e.g. `twalk-handover-you`.
+ *
+ * Per owner and not per homeserver, although a deployment has one owner:
+ * the homeserver is not always a deployment's own. The test stack is shared
+ * by every run and every worktree, so a per-homeserver alias was taken by the
+ * first owner ever onboarded there and every later one resolved it to a room
+ * they were not in — and reported "Twalk cannot reach its Sensor" over a
+ * `403`, which is a true sentence about the wrong room (#267). An owner's
+ * own localpart is what makes the alias theirs.
+ */
+export function handoverAliasLocalpart(ownerLocalpart: string): string {
+	return `${HANDOVER_ALIAS_PREFIX}-${ownerLocalpart}`;
+}
+
+/** The full alias for an owner, e.g. `#twalk-handover-you:example.com`. */
+export function handoverAlias(ownerUserId: string): string | null {
+	const localpart = localpartOf(ownerUserId);
+	const serverName = serverNameOf(ownerUserId);
+	if (localpart === null || serverName === null) {
+		return null;
+	}
+	return `#${handoverAliasLocalpart(localpart)}:${serverName}`;
+}
+
+/** The localpart of a Matrix ID, or `null` when it is not one. */
+export function localpartOf(matrixId: string): string | null {
+	const at = matrixId.startsWith('@') ? matrixId.slice(1) : null;
+	if (at === null) {
+		return null;
+	}
+	const colon = at.indexOf(':');
+	if (colon <= 0 || colon === at.length - 1) {
+		return null;
+	}
+	return at.slice(0, colon);
 }
 
 /** The server name a Matrix ID belongs to, or `null` when it is not one. */
@@ -133,13 +167,15 @@ export function serverNameOf(matrixId: string): string | null {
  */
 export function handoverRoomCreation(options: {
 	sensorUserId: string;
+	/** The owner's own localpart, which the alias carries. */
+	ownerLocalpart: string;
 	/** What the user will see this room called in their own Matrix client. */
 	name: string;
 }): Record<string, unknown> {
 	return {
 		preset: 'private_chat',
 		visibility: 'private',
-		room_alias_name: HANDOVER_ALIAS_LOCALPART,
+		room_alias_name: handoverAliasLocalpart(options.ownerLocalpart),
 		name: options.name,
 		invite: [options.sensorUserId],
 		// Not a direct message: `m.direct` would put it in the user's client
@@ -260,8 +296,9 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 		// credential to, and saying so beats an error nobody can act on.
 		return { kind: 'no-sensor' };
 	}
-	const serverName = serverNameOf(userId);
-	if (serverName === null) {
+	const alias = handoverAlias(userId);
+	const ownerLocalpart = localpartOf(userId);
+	if (alias === null || ownerLocalpart === null) {
 		return { kind: 'failed', detail: `${userId} is not a Matrix user ID` };
 	}
 
@@ -300,7 +337,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 	let roomId: string;
 	let created: boolean;
 	try {
-		const found = await resolveAlias(call, serverName);
+		const found = await resolveAlias(call, alias);
 		if (found !== null) {
 			roomId = found;
 			created = false;
@@ -308,7 +345,7 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 			const creation = await call(
 				'POST',
 				'/_matrix/client/v3/createRoom',
-				handoverRoomCreation({ sensorUserId, name: roomName })
+				handoverRoomCreation({ sensorUserId, ownerLocalpart, name: roomName })
 			);
 			if (creation.status === 200 && typeof creation.document['room_id'] === 'string') {
 				roomId = creation.document['room_id'];
@@ -317,11 +354,11 @@ export async function ensureHandoverRoom(options: HandoverOptions): Promise<Hand
 				// Another tab, or this browser a moment ago. The alias is the
 				// room's identity, so the answer is to read it, not to make a
 				// second room with a different one.
-				const raced = await resolveAlias(call, serverName);
+				const raced = await resolveAlias(call, alias);
 				if (raced === null) {
 					return {
 						kind: 'failed',
-						detail: `the alias ${handoverAlias(serverName)} is taken by a room the homeserver will not name`
+						detail: `the alias ${alias} is taken by a room the homeserver will not name`
 					};
 				}
 				roomId = raced;
@@ -394,12 +431,9 @@ type Call = (
 	body?: unknown
 ) => Promise<{ status: number; document: Record<string, unknown> }>;
 
-/** The room the handover alias points at on this server, or `null`. */
-async function resolveAlias(call: Call, serverName: string): Promise<string | null> {
-	const answer = await call(
-		'GET',
-		`/_matrix/client/v3/directory/room/${encodeURIComponent(handoverAlias(serverName))}`
-	);
+/** The room the handover alias points at, or `null`. */
+async function resolveAlias(call: Call, alias: string): Promise<string | null> {
+	const answer = await call('GET', `/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`);
 	const roomId = answer.document['room_id'];
 	return answer.status === 200 && typeof roomId === 'string' ? roomId : null;
 }
