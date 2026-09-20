@@ -816,58 +816,84 @@ async fn a_decision_taken_while_the_sensor_was_down_is_applied_after_it() -> Res
 /// inbound events, which is worse than a degraded label. It starts, publishes
 /// everything, labels `pending`, says so loudly, counts it — and recovers on
 /// its own when the Gateway comes back.
+/// The Sensor **waits** for the Gateway's snapshot before it reads Matrix
+/// (#269 review): the snapshot carries every granted contact and the registry
+/// of connections every event is stamped with, and an event published without
+/// them is mislabelled or misattributed for ever on the bus. Nothing is lost
+/// meanwhile, because the sync token is not advanced while nothing syncs — the
+/// homeserver holds what arrives and delivers it once the sync starts. This
+/// test is that property in the shape it matters most: a Sensor that already
+/// observes a conversation restarts while its Gateway is down, messages arrive
+/// during the wait, and every one of them reaches the bus after the Gateway is
+/// back — labelled with the decision taken while the Sensor was down, and none
+/// of them `pending`.
 #[tokio::test]
-async fn an_unreachable_gateway_labels_pending_without_losing_an_event() -> Result<()> {
+async fn an_unreachable_gateway_holds_the_sensor_back_and_loses_no_event() -> Result<()> {
     ensure_stack().await?;
     let _guard = harness::SENSOR_LOCK.lock().await;
     let bus = Bus::connect().await?;
     let alpha = Bot::login("bot_alpha").await?;
 
-    // An address nothing answers on — and the one the Gateway will later
-    // appear at, which is how the retry is observed rather than assumed.
+    // The Gateway's address, chosen in advance: it answers in the Sensor's
+    // first life, is gone for the start of the second, and comes back at the
+    // same address — which is how the wait is observed rather than assumed.
     let gateway_addr = harness::free_loopback_addr()?;
     let metrics_listen = harness::free_loopback_addr()?;
-    let sensor = SensorProc::start(&harness::sensor_env_with(&[
+    let state_dir = std::env::temp_dir().join(format!(
+        "twalk-sensor-state-gateway-outage-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let env = harness::sensor_env_with(&[
         ("SENSOR_GATEWAY_URL", &format!("http://{gateway_addr}")),
         ("SENSOR_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN),
         ("SENSOR_METRICS_LISTEN", &metrics_listen),
-    ]))?;
+        ("SENSOR_STATE_DIR", &state_dir.to_string_lossy()),
+    ]);
 
+    // First life: the Gateway answers, the Sensor joins the conversation.
+    let gateway = StubGateway::start_on(&gateway_addr, SERVICE_TOKEN).await?;
+    let sensor = SensorProc::start(&env)?;
     let room_id = make_whatsapp_portal(&alpha, "consent-snapshot-outage-portal").await?;
     alpha.invite(&room_id, SENSOR_USER_ID).await?;
     alpha
         .wait_for_membership(&room_id, SENSOR_USER_ID, "join")
         .await?;
+    let before = alpha.send_message(&room_id, "before the outage").await?;
+    let event = wait_for_matrix_event(&bus, &room_id, &before).await?;
+    assert_eq!(event.payload["consent"].as_str(), Some("pending"));
+    sensor.stop().await;
+    drop(gateway);
 
-    // Every event still reaches the bus, and every one of them is labelled
-    // pending — the safe default, never a guess at what was granted.
+    // Second life, Gateway down. The Sensor starts — its metrics answer — and
+    // reads nothing from Matrix: the messages sent now reach the bus later,
+    // not never and not now.
+    let sensor = SensorProc::start(&env)?;
+    let mut published = bus.subscribe_raw(MESSAGE_SUBJECT).await?;
     let mut sent = Vec::new();
     for index in 0..3 {
         sent.push(
             alpha
-                .send_message(&room_id, &format!("message {index}"))
+                .send_message(&room_id, &format!("during the outage {index}"))
                 .await?,
         );
     }
-    for matrix_event_id in &sent {
-        let event = wait_for_matrix_event(&bus, &room_id, matrix_event_id).await?;
-        validate_against_contract(&event.payload, "inbound.message.received")?;
-        assert_eq!(
-            event.payload["consent"].as_str(),
-            Some("pending"),
-            "an unreachable Gateway degrades the label and loses no event"
-        );
-    }
-
-    // Loudly, and counted: a degraded label is invisible in the events
-    // themselves, so it has to be visible to the operator.
-    assert!(
-        logged(
-            &sensor.logs().await,
-            "could not read the Companion Gateway's consent snapshot"
-        ),
-        "the failure is logged"
-    );
+    // Loudly, and counted: waited for, because the Sensor's first attempt is
+    // its own and not this test's to time.
+    poll_until(
+        || async {
+            logged(
+                &sensor.logs().await,
+                "could not read the Companion Gateway's consent snapshot",
+            )
+            .then_some(())
+        },
+        "the failure to be logged",
+    )
+    .await?;
     let metrics_url = format!("http://{metrics_listen}/metrics");
     poll_until(
         || async {
@@ -881,12 +907,16 @@ async fn an_unreachable_gateway_labels_pending_without_losing_an_event() -> Resu
         "the consent snapshot failure counter",
     )
     .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert!(
+        published.try_recv().is_err(),
+        "nothing is published while the registry of connections has not been read"
+    );
 
-    // The Gateway comes up at the address the Sensor has been retrying,
-    // already holding the decision — the retry must not be able to catch it
-    // between binding and knowing its own state. The retry applies the
-    // snapshot and only then creates the stream consumer, so the label flips
-    // without anything having to arbitrate.
+    // The decision is taken while the Sensor waits; the Gateway comes back at
+    // the address the Sensor has been retrying, already holding it. The retry
+    // applies the snapshot, the sync starts, and the three messages arrive —
+    // every one of them under the decision, none under a guess.
     let sequence =
         publish_decision(&bus, alpha.user_id(), &["whatsapp"], "pending", "granted").await?;
     let gateway = StubGateway::start_on(&gateway_addr, SERVICE_TOKEN).await?;
@@ -894,10 +924,22 @@ async fn an_unreachable_gateway_labels_pending_without_losing_an_event() -> Resu
         vec![contact_entry(alpha.user_id(), "whatsapp", "granted")],
         sequence,
     );
-
-    wait_for_label(&bus, &alpha, &room_id, "après le retour", "granted").await?;
+    for matrix_event_id in &sent {
+        let event = wait_for_matrix_event(&bus, &room_id, matrix_event_id).await?;
+        validate_against_contract(&event.payload, "inbound.message.received")?;
+        assert_eq!(
+            (
+                event.payload["consent"].as_str(),
+                event.payload["connection"].as_str()
+            ),
+            (Some("granted"), Some("whatsapp")),
+            "a message received during the outage is delivered late, labelled and stamped \
+             from the snapshot, never from a guess"
+        );
+    }
 
     sensor.stop().await;
+    let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }
 
@@ -1002,34 +1044,36 @@ async fn a_room_whose_bot_no_connection_names_is_not_published_and_the_drop_is_c
     puppet.join_room(&room_id).await?;
 
     puppet.send_message(&room_id, "into no perimeter").await?;
-    // The drop is counted; that is what proves the message was seen and
-    // refused rather than not yet processed.
+    // The room is named, once, when its first event is refused: that is what
+    // proves the message was seen and refused rather than not yet processed.
+    // Waited for on the log line about *this* room and not on the counter
+    // alone, because on a long-lived stack the Sensor's initial sync also
+    // meets earlier tests' portals, whose drops would satisfy the counter
+    // before this room's message has been processed at all.
     poll_until(
         || async {
-            let body = reqwest::get(METRICS_URL).await.ok()?.text().await.ok()?;
-            body.lines()
-                .find_map(|line| {
-                    line.strip_prefix(
-                        "twalk_sensor_events_dropped_total{reason=\"unknown_connection\"} ",
-                    )
-                })
-                .and_then(|rest| rest.trim().parse::<u64>().ok())
-                .filter(|count| *count >= 1)
+            sensor.logs().await.into_iter().find(|line| {
+                line.contains("no connection covers this room") && line.contains(&room_id)
+            })
         },
-        "the uncovered room's message to be counted as dropped",
+        "the uncovered room to be named in the log",
     )
     .await?;
+    // And the drop is counted.
+    let body = reqwest::get(METRICS_URL).await?.text().await?;
+    let dropped = body
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("twalk_sensor_events_dropped_total{reason=\"unknown_connection\"} ")
+        })
+        .and_then(|rest| rest.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    assert!(dropped >= 1, "the drop is counted: {body}");
     assert!(
         bus.fetch_room_messages(STREAM, MESSAGE_SUBJECT, &room_id)
             .await?
             .is_empty(),
         "nothing from a room no connection covers reaches the bus"
-    );
-    let logs = sensor.logs().await;
-    assert!(
-        logs.iter()
-            .any(|line| line.contains("no connection covers this room") && line.contains(&room_id)),
-        "the room is named once: {logs:?}"
     );
 
     sensor.stop().await;

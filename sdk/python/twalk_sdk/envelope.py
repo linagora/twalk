@@ -50,7 +50,19 @@ SUGGESTION_FORMATS = ("text/plain", "text/markdown", "text/html")
 
 
 class EnvelopeError(ValueError):
-    """The persona asked for an envelope the contract has no shape for."""
+    """The persona asked for an envelope the contract has no shape for.
+
+    **Not transient**, and :mod:`twalk_sdk.persona` reads exactly that: the
+    envelope is built from the trigger and the configuration, neither of
+    which a redelivery changes, so the same trigger would fail the same way
+    on every attempt. The one case that reaches a running persona is a
+    trigger published before #269, which carries no ``connection`` — a fresh
+    consumer starts at the beginning of the stream (ADR 0013) and meets every
+    one of them, and three deliveries of each with an ERROR line apiece
+    would be the account of nothing. One line, terminated, is.
+    """
+
+    transient = False
 
 
 @dataclass(frozen=True)

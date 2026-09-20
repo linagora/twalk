@@ -207,6 +207,11 @@ class NatsHeadersTest(unittest.TestCase):
                 persona_id="assistant", source=SOURCE, trigger=InboundMessage(raw)
             )
         self.assertIn("connection", str(refused.exception))
+        # And the loop terminates the delivery on the first try rather than
+        # retrying it to the consumer's limit: a redelivery carries the same
+        # trigger, so the answer cannot change (the rule `completion.LlmError`
+        # set for a model that spent its budget reasoning).
+        self.assertIs(refused.exception.transient, False)
 
     def test_the_traceparent_header_is_absent_when_the_event_has_none(self) -> None:
         raw = fixture("inbound.message.received")
