@@ -380,6 +380,14 @@ export async function startStubBridge(bridgeIds, hooks = {}) {
 									id: 'SAPISID',
 									required: true,
 									sources: [{ type: 'cookie', name: 'SAPISID', cookie_domain: '.google.com' }]
+								},
+								// The one the real bridge asks for that a paste copied
+								// from the Network tab never holds (#220): scoped to
+								// messages.google.com, not sent to the API host.
+								{
+									id: 'OSID',
+									required: true,
+									sources: [{ type: 'cookie', name: 'OSID', cookie_domain: 'messages.google.com' }]
 								}
 							]
 						}

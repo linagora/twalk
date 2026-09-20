@@ -46,6 +46,7 @@ describe('the catalogues', () => {
 			domain: 'example.com',
 			expected: '0.1.0',
 			actual: '0.2.0',
+			scoped: 'OSID',
 			running: '1789839442194',
 			shipped: '1789900000000',
 			path: '/nowhere',

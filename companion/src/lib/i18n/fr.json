@@ -290,7 +290,7 @@
 	"networks.cookies.domain": "Votre passerelle indique qu’ils appartiennent à {domain}.",
 	"networks.cookies.label": "Collez les cookies ici",
 	"networks.cookies.unreadable": "Impossible d'y lire des cookies. Collez soit « nom=valeur ; nom=valeur », soit le JSON exporté par votre extension.",
-	"networks.cookies.missing": "Il manque : {names}. Vérifiez que vous avez bien copié toutes les lignes, y compris celles que votre navigateur cache sous un défilement.",
+	"networks.cookies.missing": "Il manque : {names}. Votre navigateur ne les a pas inclus dans ce que vous avez copié — la vue Application › Stockage › Cookies liste tous les cookies du site : copiez depuis là plutôt que depuis une requête.",
 
 	"networks.jar.wanted": "{count, plural, one {La valeur demandée par votre passerelle} other {Les # valeurs demandées par votre passerelle}}, telles que votre navigateur les envoie :",
 	"networks.jar.label": "Collez-les ici au format JSON",
@@ -481,7 +481,13 @@
 	"sms.step2.dbsc": "Dans Chrome, désactivez les Device Bound Session Credentials (chrome://flags, cherchez « device bound »). Cette fonction lie volontairement une session Google à la clé matérielle de l'appareil : un cookie copié ne fonctionne alors nulle part ailleurs, et donc pas sur votre serveur Twalk. Elle est activée par défaut dans les versions récentes.",
 	"sms.step2.a": "Dans une fenêtre privée, connectez-vous à",
 	"sms.step2.b": "Associez ce navigateur à votre téléphone en scannant le code que Google affiche, pour que la session soit réellement active.",
-	"sms.step2.c": "Ouvrez les outils de développement, allez dans Application puis Cookies, et copiez les cookies listés ci-dessous — ou collez l'en-tête Cookie complet depuis l'onglet Réseau.",
+	"sms.step2.c": "Ouvrez les outils de développement, allez dans Application › Stockage › Cookies et sélectionnez https://messages.google.com : cette vue liste tous les cookies du site. Copiez ceux listés ci-dessous dans le champ.",
+	"sms.cookies.where.title": "Où sont les cookies, et où ils ne sont pas",
+	"sms.cookies.where.application": "Application › Stockage › Cookies › https://messages.google.com, dans les outils de développement. Cette liste est complète.",
+	"sms.cookies.where.notNetwork": "Pas « Copier en cURL » sur une requête de l’onglet Réseau : l’application Messages parle à instantmessaging-pa.clients6.google.com, et OSID appartient à messages.google.com, donc le navigateur ne l’envoie jamais là — vous obtenez six cookies sur sept à chaque fois, sans rien qui dise lequel manque ni pourquoi.",
+	"sms.cookies.notThese": "Seuls les cookies listés ci-dessous sont attendus. __Secure-3P*, NID et SIDCC n’en font pas partie, et coller tout le trousseau donnerait plus que ce que la connexion demande.",
+	"sms.cookies.onlyHere": "Ce sont les cookies de session de votre compte Google. Ils vont dans ce champ, vers votre propre serveur Twalk, et nulle part ailleurs : ni dans une conversation avec un assistant, ni dans un ticket, ni dans un fil de support — quiconque les détient peut agir en votre nom.",
+	"sms.cookies.missingScoped": "{scoped} manque — et pas parce que vous avez mal copié. Il appartient à messages.google.com, et une requête copiée depuis l’onglet Réseau allait vers l’hôte API de Google, qui ne le porte jamais. Copiez les cookies depuis Application › Stockage › Cookies › https://messages.google.com.",
 
 	"sms.cookies.whatTheyAre": "Ensemble, ces cookies sont votre session Google : quiconque les détient peut agir en votre nom sur Google Messages Web tant qu'ils restent valides. Google ne documente aucune durée de vie, Twalk n'en promet donc aucune — attendez-vous à recommencer un jour. Ils partent vers votre propre serveur Twalk, qui les transmet à la passerelle sans en garder de copie ; ce navigateur ne les écrit nulle part. Vous pouvez y mettre fin à tout moment depuis les paramètres de sécurité de votre compte Google.",
 	"sms.cookies.submit": "Les envoyer à mon serveur Twalk",
@@ -490,7 +496,7 @@
 
 	"sms.success": "Les SMS sont connectés via Google Messages.",
 	"sms.migration": "Ce réseau migrera tout seul vers la voie souveraine à la sortie de la v0.2. Rien à faire aujourd'hui.",
-	"sms.failed.google": "Google a refusé la session. Les causes les plus probables : une vérification en deux étapes restée sans réponse, des cookies copiés depuis une fenêtre normale qui s'est depuis déconnectée, ou les Device Bound Session Credentials toujours actifs. Recommencez depuis une fenêtre privée.",
+	"sms.failed.google": "Google a refusé la session. Ce qu’il a répondu est cité ci-dessous, et Twalk ne peut rien en déduire de plus — il ne devine donc pas de cause. Si Google mentionne une vérification en deux étapes, répondez-y sur votre téléphone et copiez des cookies frais ; s’il dit autre chose, recommencer l’étape avec les mêmes cookies ne changera rien, et c’est cette réponse qu’il faut signaler.",
 
 	"sms.trouble1": "Votre téléphone Android doit rester connecté pour que les SMS parviennent à Twalk. S'il est éteint, votre opérateur les met en attente jusqu'à son retour.",
 	"sms.trouble2": "Si Google demande une vérification en deux étapes pendant la connexion, répondez-y avant de copier les cookies : une connexion inachevée produit des cookies inopérants.",
