@@ -28,7 +28,7 @@ pub async fn follow(
     // Their identity here is the `mailto:` every mail and calendar event
     // spells them by; the collector has no Matrix ID to name them by.
     let owner = twalk_consent_cache::owner::Owner::new(
-        crate::caldav::owner_mailto(owner_email),
+        crate::side::owner_mailto(owner_email),
         std::iter::empty(),
     );
     let cache = ConsentCache::for_people_only(

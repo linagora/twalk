@@ -35,6 +35,19 @@ pub fn client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// The owner as the events spell people: `mailto:`, lower-cased — whether
+/// the caller passed the address or the URI. One identity for the mail and
+/// the calendar side alike (ADR 0033).
+pub fn owner_mailto(owner: &str) -> String {
+    let address = owner.trim();
+    let address = address
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &address[7..])
+        .unwrap_or(address);
+    format!("mailto:{}", address.trim().to_ascii_lowercase())
+}
+
 /// The host of a service URL, for `source` (`caldav://<host>/…`,
 /// `jmap://<host>/…`).
 pub fn host_of(url: &str) -> String {
@@ -88,5 +101,13 @@ mod tests {
         );
         assert_eq!(host_of("http://127.0.0.1:4321/"), "127.0.0.1:4321");
         assert_eq!(host_of("calendar.example.com"), "calendar.example.com");
+        assert_eq!(
+            owner_mailto("MAILTO:Michel@Example.com "),
+            "mailto:michel@example.com"
+        );
+        assert_eq!(
+            owner_mailto("michel@example.com"),
+            "mailto:michel@example.com"
+        );
     }
 }

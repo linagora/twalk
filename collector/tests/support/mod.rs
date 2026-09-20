@@ -229,6 +229,10 @@ impl Run {
 pub struct CollectorProc {
     child: tokio::process::Child,
     log_lines: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// The two readers, joined when the process ends so that its last
+    /// line — the refusal it exited on — is in `logs()` before a test reads
+    /// them.
+    readers: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl CollectorProc {
@@ -241,6 +245,7 @@ impl CollectorProc {
             .spawn()
             .context("failed to start the collector binary")?;
         let log_lines = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let mut readers = Vec::new();
         for (stream, store) in [
             (
                 Box::new(child.stderr.take().expect("stderr is piped"))
@@ -252,16 +257,20 @@ impl CollectorProc {
                 log_lines.clone(),
             ),
         ] {
-            tokio::spawn(async move {
+            readers.push(tokio::spawn(async move {
                 use tokio::io::AsyncBufReadExt;
                 let mut lines = tokio::io::BufReader::new(stream).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     eprintln!("{line}");
                     store.lock().await.push(line);
                 }
-            });
+            }));
         }
-        Ok(Self { child, log_lines })
+        Ok(Self {
+            child,
+            log_lines,
+            readers,
+        })
     }
 
     pub async fn logs(&self) -> Vec<String> {
@@ -301,7 +310,11 @@ impl CollectorProc {
     }
 
     pub async fn exit_status(&mut self) -> Result<std::process::ExitStatus> {
-        Ok(tokio::time::timeout(Duration::from_secs(20), self.child.wait()).await??)
+        let status = tokio::time::timeout(Duration::from_secs(20), self.child.wait()).await??;
+        for reader in self.readers.drain(..) {
+            let _ = tokio::time::timeout(Duration::from_secs(5), reader).await;
+        }
+        Ok(status)
     }
 }
 
