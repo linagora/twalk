@@ -14,6 +14,17 @@ docker compose up -d --wait
 
 One step, no manual provisioning: the stack's `provision` one-shot creates the Sensor account on the way up. `./provision.sh` remains for ad-hoc accounts.
 
+## What the Gateway's state directory holds, and what losing it costs
+
+The Companion Gateway keeps its SQLite stores on the `gateway-data` volume (`GATEWAY_STATE_DIR`, `/data` in the container): the owner's device sessions, the append-only consent journal and its outbox, the settings, and the relay's own note that it created the owner's account. Recreating that directory — a fresh volume, a restore from a backup taken before onboarding, a move between hosts — loses exactly those, and nothing on the homeserver.
+
+Two consequences are worth knowing before it happens rather than after:
+
+- **Sign-in still works.** Whether this deployment has its account is asked of the homeserver on every `GET /api/deployment`, whoever created the account ([#133](https://github.com/linagora/twalk/issues/133)); a store with no memory of creating it is not a deployment with no account, and the sign-in screen is offered. Every device is signed out, since the sessions were in the store, and signs back in from the Companion.
+- **Consent starts over.** The journal is the single record of who the user decided may be read; a lost journal means every contact is `pending` again until the user decides again — nothing published before is unpublished by it, and nothing decided before is remembered. Back the volume up if that history matters to you.
+
+The registration relay's own refusal does not depend on that row either: the homeserver's `M_USER_IN_USE` closes the window on a second attempt whatever the store remembers.
+
 ## Hermes, and the two things it asks of you
 
 Hermes is part of that one step, so `docker compose up -d --wait` gives you a deployment where the whole loop can close: a contact writes, a persona drafts a reply, you approve it in the Companion, and the reply reaches the room. `hermes/tests/full_loop.rs` runs exactly this stack and asserts exactly that.
