@@ -145,6 +145,12 @@
             }
           },
           "description": "Where the approved reply must be sent."
+        },
+        "disclosure": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Optional. The sentence disclosing that this reply was drafted with an AI assistant, in the language the persona wrote in (ADR 0019), selected from contracts/disclosure/v1/sentences.json by the only component that knows that language. Copied from the approved suggestion and, when present, already appended to final.body on a line of its own; absent when the sentence was switched off before this reply was approved. Its addition to this v1 schema, closed with additionalProperties: false, is a deliberate exception to the new-suffix rule this schema's own type field states, recorded and accepted in ADR 0031."
         }
       }
     }

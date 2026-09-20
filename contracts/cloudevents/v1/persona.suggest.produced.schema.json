@@ -151,6 +151,12 @@
           "type": "string",
           "format": "date-time",
           "description": "Optional RFC 3339 timestamp after which the suggestion should be considered stale (e.g. a same-day appointment answer)."
+        },
+        "disclosure": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Optional. The sentence disclosing that this reply was drafted with an AI assistant, in the language the persona wrote in (ADR 0019), selected from contracts/disclosure/v1/sentences.json by the only component that knows that language. Never part of the suggestion body itself: the Companion Gateway appends it, at approval, to the body a human can otherwise edit freely (ADR 0031). Its addition to this v1 schema, closed with additionalProperties: false, is a deliberate exception to the new-suffix rule this schema's own type field states, recorded and accepted in ADR 0031."
         }
       }
     }
