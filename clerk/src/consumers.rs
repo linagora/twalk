@@ -51,24 +51,57 @@
 //! visible before the week is out ([`verdict`]). A relay error there is a
 //! warning and a counted failure, never a stop — the next sweep is a
 //! minute away.
+//!
+//! The fourth loop is the write half (#284, [`decisions`]): every
+//! `WriteHalf::decision`, it reads the clerk's own open posts in
+//! `approbations`, the gestures on them and its own thread answers, and
+//! carries the owner's oldest unanswered gesture on each — a ✅ or an
+//! edited reply to the Companion Gateway as a device of the owner, a ❌ to
+//! a local deletion — and answers every other gesture in the thread, once,
+//! keyed on the gesture's id in the answer's `r` tag so that the relay
+//! remembers what was answered and this process need not (ADR 0035). What
+//! it does with each answer of the Gateway is [`carry`]'s table, and the
+//! rulings in it are the ones to argue with: a refusal the Companion would
+//! tell the user to retry is **not** answered in the thread but tried again
+//! next tick, because an answer spends the gesture and the owner's only
+//! way to "try again" would be a second reaction; a Gateway that gave no
+//! usable answer is tried again too, until the suggestion is a tick and a
+//! Gateway timeout from its expiry ([`not_recorded_window`]), when the
+//! thread is told "not recorded" and the post is left
+//! to the sweep, so that a ✅ during an outage does not simply vanish with
+//! the post; and `approval_published_but_not_recorded` is an approval that
+//! went out ([`crate::refusals::sent`]), so the post goes like any other.
+//! The loop also refreshes the session **at startup** — a dead one is a
+//! startup `ERROR` naming `provision-clerk-device.sh`, not a surprise in a
+//! thread a month later — and once a day after that, because the Gateway's
+//! refresh token dies after thirty days unused and a deployment whose owner
+//! approves from the Companion for a month would otherwise lose its Buzz
+//! device without having done anything. A dead session is the one thing
+//! the loop remembers between ticks ([`Session`]): it makes no Gateway
+//! call while it lasts, tells a ✅ so once without spending it, and carries
+//! it when a later refresh succeeds.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_nats::jetstream::consumer::{pull, AckPolicy, Consumer, DeliverPolicy};
 use async_nats::jetstream::{AckKind, Message};
 use futures::StreamExt;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::config::Config;
+use crate::config::{Config, WriteHalf};
+use crate::decision::{self, Decision, Gesture};
 use crate::events::{
     self, BridgeStatus, ConsentChange, Suggestion, BRIDGE_STATUS, CONSENT_CHANGED, REPLY_APPROVED,
     SUGGEST_PRODUCED,
 };
-use crate::metrics::{Channel, Deleted, Metrics, Skipped};
+use crate::gateway::{Gateway, GatewayError, Outcome};
+use crate::metrics::{ApprovalOutcome, Channel, Deleted, Metrics, Skipped};
 use crate::reference::{self, Reference};
-use crate::relay::{Relay, RelayError, KIND_FORUM_POST};
+use crate::refusals::{self, Remedy};
+use crate::relay::{answered_gesture, Relay, RelayError, KIND_FORUM_POST};
 use crate::text::{self, Lang};
 
 /// The durable consumer names, as `nats consumer ls` shows them: one per
@@ -117,14 +150,25 @@ const CONSUMER_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// How long to wait before asking a bus that did not answer again.
 const BUS_RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// How long the decisions loop lets the session it holds on the Companion
+/// Gateway go without a refresh of its own: a day, well inside the thirty
+/// the Gateway keeps an unused refresh token for, and after one that
+/// failed, an hour — often enough that a device signed in again is picked
+/// up within the hour without an approval, rarely enough that a revoked
+/// one is not a hot loop of refusals.
+pub const SESSION_REFRESH_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+pub const SESSION_REFRESH_RETRY: Duration = Duration::from_secs(60 * 60);
+
 /// Everything a consumer needs, built once by the binary and shared by
-/// every task: the configuration, the relay, the counters and the language
-/// the clerk writes in.
+/// every task: the configuration, the relay, the counters, the language
+/// the clerk writes in, and — when the write half is configured — the
+/// Companion Gateway it approves through.
 pub struct Clerk {
     pub config: Config,
     pub relay: Relay,
     pub metrics: Arc<Metrics>,
     pub lang: Lang,
+    pub gateway: Option<Gateway>,
 }
 
 /// Whether the relay already holds a post for the suggestion `id`: any of
@@ -553,7 +597,7 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
         &report.posted_as,
         &report.approval_id,
         &report.time,
-        false,
+        report.edited,
     );
     let published = clerk
         .relay
@@ -564,6 +608,7 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
         approval_id = %report.approval_id,
         network = %report.network,
         reach = %report.reach,
+        edited = report.edited,
         event_id = %published.event_id,
         total,
         "journalled a posted reply"
@@ -847,6 +892,739 @@ pub async fn sweep_once(clerk: &Clerk) -> u64 {
     undatable
 }
 
+/// What one tick of the decisions loop did, for its log line.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionsTick {
+    /// The clerk's own posts in `approbations` still open (not expired by
+    /// their reference line).
+    pub posts: usize,
+    /// The gestures read on them, by anyone but the clerk.
+    pub gestures: usize,
+    /// Approvals the Companion Gateway accepted (or had already recorded,
+    /// or published without recording): the post deleted.
+    pub approved: u64,
+    /// Posts the owner refused with ❌: deleted, nobody else told.
+    pub refused_locally: u64,
+    /// Thread answers written: to a stranger, to a refusal, to a revoked
+    /// device, to a gesture that could not be carried before the expiry.
+    pub answered: u64,
+    /// Owner's gestures the Companion Gateway gave no usable answer to this tick,
+    /// carried again next tick.
+    pub deferred: u64,
+    /// Relay calls that failed; each is also a counted relay failure.
+    pub failures: u64,
+}
+
+impl DecisionsTick {
+    /// Whether the tick is worth an `info` line rather than a `debug` one:
+    /// a tick that read posts and did nothing about them is the ordinary
+    /// case, five seconds apart for ever.
+    pub fn happened(&self) -> bool {
+        self.approved + self.refused_locally + self.answered + self.deferred + self.failures > 0
+    }
+}
+
+/// What the decisions loop knows about its session on the Companion
+/// Gateway between ticks. **Dead** is the one state a tick must remember:
+/// the Gateway answered `401` to a refresh, so the `Buzz` device was
+/// revoked or its refresh token died, and the way out is an operator
+/// signing it in again — asking again every five seconds would be the hot
+/// loop of refusals `gateway.rs` warns against, so a dead session makes no
+/// Gateway call at all until a refresh of the loop's own succeeds (the
+/// hourly retry, or the next start). An owner's ✅ seen meanwhile is told
+/// so in the thread, once, and **not spent** by it: the sentence names the
+/// script, and the ✅ is carried the moment the session is back, because
+/// the owner decided and the impediment was the clerk's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Session {
+    /// The last refresh succeeded, or none has failed with `401` yet.
+    Alive,
+    /// The Companion Gateway will not have this session until it is provisioned again.
+    Dead,
+}
+
+/// Never returns: refreshes the session, then every `WriteHalf::decision`
+/// one [`decisions_once`], and once a day the session again (an hour
+/// after one that failed). Returns at once, saying so, when the write half
+/// is not configured — the binary does not spawn it then, and this is the
+/// guard against a caller that does.
+pub async fn decisions(clerk: Arc<Clerk>) {
+    let (Some(write), Some(gateway)) = (clerk.config.write_half(), clerk.gateway.as_ref()) else {
+        debug!("the write half is not configured; the decisions loop is not started");
+        return;
+    };
+    // At startup, so a session that died while the clerk was away is an
+    // ERROR now, naming the script, and not a surprise in a thread on the
+    // first ✅ a month later.
+    let mut session = Session::Alive;
+    let mut next_refresh = Instant::now() + refresh_session(gateway, &mut session).await;
+    info!(
+        every_seconds = write.decision.as_secs(),
+        gateway = %gateway.base(),
+        owner = %write.owner_pubkey,
+        session = ?session,
+        "decisions loop running"
+    );
+    let mut ticker = tokio::time::interval(write.decision);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        if Instant::now() >= next_refresh {
+            next_refresh = Instant::now() + refresh_session(gateway, &mut session).await;
+        }
+        let tick = decisions_once(&clerk, &mut session).await;
+        if tick.happened() {
+            info!(
+                posts = tick.posts,
+                gestures = tick.gestures,
+                approved = tick.approved,
+                refused_locally = tick.refused_locally,
+                answered = tick.answered,
+                deferred = tick.deferred,
+                failures = tick.failures,
+                "decisions tick"
+            );
+        } else {
+            debug!(
+                posts = tick.posts,
+                gestures = tick.gestures,
+                "decisions tick"
+            );
+        }
+    }
+}
+
+/// One refresh of the session on the Companion Gateway, and how long to
+/// wait before the next one of the loop's own: a day after one that
+/// succeeded, an hour after one that did not. A `401` is the session dead
+/// — an `error` naming the script that issues a new one, and no approval
+/// call until a later refresh succeeds; a Gateway that gave no usable
+/// answer leaves the session as it was and is a warning, because the next
+/// approval refreshes again anyway ([`Gateway::approve`]) and the loop
+/// must start without it.
+async fn refresh_session(gateway: &Gateway, session: &mut Session) -> Duration {
+    match gateway.refresh().await {
+        Ok(()) => {
+            if *session == Session::Dead {
+                info!(
+                    gateway = %gateway.base(),
+                    "the clerk's session is back: the Buzz device was signed in again"
+                );
+            }
+            *session = Session::Alive;
+            SESSION_REFRESH_PERIOD
+        }
+        Err(GatewayError::Unauthenticated) => {
+            *session = Session::Dead;
+            error!(
+                gateway = %gateway.base(),
+                "the Companion Gateway will not have the clerk's session: the Buzz device was \
+                 revoked or its refresh token died; a ✅ on Buzz is told so in its thread and \
+                 carried once an operator runs provision-clerk-device.sh (tried again in {}s)",
+                SESSION_REFRESH_RETRY.as_secs()
+            );
+            SESSION_REFRESH_RETRY
+        }
+        Err(error) if error.is_transient() => {
+            warn!(
+                %error,
+                gateway = %gateway.base(),
+                "the clerk's session could not be refreshed; the loop starts anyway and tries \
+                 again in {}s and on the next approval",
+                SESSION_REFRESH_RETRY.as_secs()
+            );
+            SESSION_REFRESH_RETRY
+        }
+        Err(error) => {
+            error!(
+                %error,
+                gateway = %gateway.base(),
+                "the clerk's session could not be refreshed; the loop starts anyway and tries \
+                 again in {}s and on the next approval",
+                SESSION_REFRESH_RETRY.as_secs()
+            );
+            SESSION_REFRESH_RETRY
+        }
+    }
+}
+
+/// One tick: the open posts, the gestures on them, the answers already
+/// given, and for each post the strangers answered and the owner's oldest
+/// unanswered gesture carried. Every relay call that fails is a warning
+/// and a counted failure, and the tick moves on; nothing stops the loop.
+/// Does nothing when the write half is not configured.
+pub async fn decisions_once(clerk: &Clerk, session: &mut Session) -> DecisionsTick {
+    let mut tick = DecisionsTick::default();
+    let (Some(write), Some(gateway)) = (clerk.config.write_half(), clerk.gateway.as_ref()) else {
+        return tick;
+    };
+    let now = now_unix();
+    let approvals = clerk.config.channel_approvals.as_str();
+
+    // (1) The clerk's own posts still open. An expired one is the sweep's:
+    // the Companion Gateway would refuse its approval as `suggestion_expired`, and
+    // the post is about to go.
+    let posts = match clerk
+        .relay
+        .own_posts(approvals, KIND_FORUM_POST, OWN_POSTS_LIMIT)
+        .await
+    {
+        Ok(posts) => posts,
+        Err(error) => {
+            relay_failed(clerk, &mut tick, &error, "read the clerk's own posts");
+            return tick;
+        }
+    };
+    let open: Vec<&nostr::Event> = posts
+        .iter()
+        .filter(|post| !post_has_expired(&post.content, now))
+        .collect();
+    tick.posts = open.len();
+    if open.is_empty() {
+        return tick;
+    }
+    let ids: Vec<String> = open.iter().map(|post| post.id.to_hex()).collect();
+
+    // (2) The gestures on them, by anyone but the clerk: its own thread
+    // answers are direct replies with text, and read as gestures they would
+    // be a stranger's edited approval that the clerk answers, for ever.
+    let own_pubkey = clerk.relay.public_key_hex();
+    let gestures: Vec<nostr::Event> = match clerk.relay.gestures_on(&ids, OWN_POSTS_LIMIT).await {
+        Ok(gestures) => gestures
+            .into_iter()
+            .filter(|gesture| gesture.pubkey.to_hex() != own_pubkey)
+            .collect(),
+        Err(error) => {
+            relay_failed(clerk, &mut tick, &error, "read the gestures on its posts");
+            return tick;
+        }
+    };
+    tick.gestures = gestures.len();
+    if gestures.is_empty() {
+        return tick;
+    }
+    // …and the gestures the clerk already answered, by the `r` tag on its
+    // own replies: the relay as its memory (ADR 0035). Two sets, because
+    // one answer does not spend the gesture ([`Session`]).
+    let answers = match clerk.relay.own_comments_on(&ids, OWN_POSTS_LIMIT).await {
+        Ok(answers) => answers,
+        Err(error) => {
+            relay_failed(clerk, &mut tick, &error, "read its own thread answers");
+            return tick;
+        }
+    };
+    let (answered, told_revoked) = answered_gestures(&answers);
+
+    // (3) Per post: what was decided, minus what was already answered, and
+    // then the strangers answered and the owner's oldest carried.
+    for post in open {
+        let post_id = post.id.to_hex();
+        let decisions: Vec<Decision> =
+            decision::decisions_on(&post_id, &write.owner_pubkey, &gestures)
+                .into_iter()
+                .filter(|decision| !answered.contains(&decision.gesture_id))
+                .collect();
+        let triage = decision::triage(decisions);
+        for stranger in &triage.strangers {
+            answer_stranger(clerk, &mut tick, &post_id, stranger).await;
+        }
+        if let Some(act) = triage.act {
+            let told = told_revoked.contains(&act.gesture_id);
+            carry(clerk, gateway, write, session, &mut tick, post, act, told).await;
+        }
+    }
+    tick
+}
+
+/// The gestures the clerk's own thread replies answer, in two sets: those
+/// **spent** by their answer — a stranger told, a refusal explained, a
+/// "not recorded" before an expiry — and those told that the session was
+/// revoked ([`text::thread_revoked`], in either language the clerk writes,
+/// since the operator may have changed it between runs), which are not
+/// spent: the ✅ is carried once the device is signed in again.
+pub fn answered_gestures(answers: &[nostr::Event]) -> (HashSet<String>, HashSet<String>) {
+    let revoked_sentences = [
+        text::thread_revoked(Lang::Fr),
+        text::thread_revoked(Lang::En),
+    ];
+    let mut spent = HashSet::new();
+    let mut told_revoked = HashSet::new();
+    for answer in answers {
+        let Some(gesture_id) = answered_gesture(answer) else {
+            continue;
+        };
+        if revoked_sentences.contains(&answer.content) {
+            told_revoked.insert(gesture_id.to_owned());
+        } else {
+            spent.insert(gesture_id.to_owned());
+        }
+    }
+    (spent, told_revoked)
+}
+
+/// Whether one of the clerk's own posts says, on its reference line, that
+/// its suggestion has expired at `now_unix`. A post with no expiry it can
+/// read is open: the sweep's ceiling is what ends it, and until then the
+/// owner may still decide on it.
+pub fn post_has_expired(content: &str, now_unix: i64) -> bool {
+    reference::parse(content)
+        .and_then(|reference| reference.expires_at)
+        .is_some_and(|expires_at| reference::has_expired(&expires_at, now_unix))
+}
+
+/// How close to its expiry a post must be for an owner's gesture the
+/// Companion Gateway has not answered to be told "not recorded" now rather
+/// than tried again next tick: one `decision` interval **plus one Gateway
+/// request timeout** ([`crate::gateway::REQUEST_TIMEOUT`]). The next tick
+/// is `decision` away only when this one ends on time, and a Gateway that
+/// hangs rather than refuses holds a tick for the whole timeout — ten
+/// seconds, twice the default interval — so a post with seven seconds to
+/// live would be "not within a tick" now, expired by the next tick, and
+/// deleted by the sweep with no line in its thread: the silence this line
+/// exists to prevent. Over-approximating costs a "not recorded" written
+/// one tick early on a post that would have expired anyway.
+pub fn not_recorded_window(decision: Duration) -> Duration {
+    decision + crate::gateway::REQUEST_TIMEOUT
+}
+
+/// Whether a post's suggestion expires within `window` of `now_unix` — at
+/// the last tick, an owner's gesture the Companion Gateway has not
+/// answered can still be told so in the thread before the sweep deletes
+/// the post. A post with no expiry it can read never does: it stands
+/// until the sweep's ceiling, and the gesture is simply tried again.
+pub fn expires_within(content: &str, now_unix: i64, window: Duration) -> bool {
+    reference::parse(content)
+        .and_then(|reference| reference.expires_at)
+        .and_then(|expires_at| reference::expires_at_unix(&expires_at))
+        .is_some_and(|expires_at| expires_at.saturating_sub(now_unix) <= window.as_secs() as i64)
+}
+
+/// A gesture by a key that is not the owner's: answered in the thread, once
+/// — the next tick finds the answer by the gesture's id — and counted. The
+/// relay let a member react and the clerk did nothing with it, and a
+/// member who ticked a post and saw nothing happen would conclude the
+/// clerk is broken. The log names the key by its first eight characters:
+/// enough to recognise, and a public key is not a contact.
+async fn answer_stranger(
+    clerk: &Clerk,
+    tick: &mut DecisionsTick,
+    post_id: &str,
+    stranger: &Decision,
+) {
+    let by = stranger.by.get(..8).unwrap_or(&stranger.by);
+    warn!(
+        post_id,
+        gesture_id = %stranger.gesture_id,
+        by,
+        "a gesture by a key that is not the owner's"
+    );
+    if answer(
+        clerk,
+        tick,
+        post_id,
+        &stranger.gesture_id,
+        &text::thread_not_the_owner(clerk.lang),
+    )
+    .await
+    {
+        clerk.metrics.record_approval(&ApprovalOutcome::NotTheOwner);
+    }
+}
+
+/// The owner's oldest unanswered gesture on one post, carried: a ❌ is the
+/// post deleted and a line in `activite`; a ✅ or an edited reply is
+/// `POST /api/approvals` as the owner's device, and then, by what the
+/// Companion Gateway answered:
+///
+/// - accepted, already recorded, or published-but-not-recorded
+///   ([`refusals::sent`]): the reply went out — the post deleted, a line in
+///   `activite` saying edited or not, the outcome counted (the last under
+///   its own code, so the number says what happened);
+/// - refused with a code whose remedy is *retry* ([`Remedy::Retry`]: the
+///   bus or the store behind the Gateway was out): tried again next tick,
+///   like a Gateway that did not answer — an answer in the thread would
+///   spend the gesture, and the owner's only way to "try again" would be
+///   a second reaction;
+/// - refused with any other code: the Companion's own sentence for it in
+///   the thread ([`text::thread_refused`]), once; the post stays, for the
+///   sweep or a later gesture;
+/// - the Gateway will not have the session: "revoked" in the thread, once
+///   (`told` says whether it already was), an `error` naming
+///   `provision-clerk-device.sh`, and the session marked [`Session::Dead`]
+///   — after which a ✅ makes no call and is told the same, once, until a
+///   refresh of the loop's own brings the session back and it is carried;
+/// - no usable answer (nothing answered, `429`/`5xx`, a shape that is not
+///   the route's, a session file that could not be read): counted as
+///   `gateway_unreachable`, logged with the URL, tried again next tick —
+///   and when the suggestion is within [`not_recorded_window`] of its
+///   expiry, "not recorded" in the thread, keyed on the gesture, and the
+///   post left to the sweep.
+#[allow(clippy::too_many_arguments)]
+async fn carry(
+    clerk: &Clerk,
+    gateway: &Gateway,
+    write: &WriteHalf,
+    session: &mut Session,
+    tick: &mut DecisionsTick,
+    post: &nostr::Event,
+    act: Decision,
+    told: bool,
+) {
+    let post_id = post.id.to_hex();
+    let gesture_id = act.gesture_id.as_str();
+    // The network as the post names it, for the `activite` line; a post
+    // that does not name one gets a line that names none.
+    let network = text::network_off_post(&post.content).unwrap_or("");
+    let Some(reference) = reference::parse(&post.content) else {
+        // One of the clerk's own posts with no reference line it recognises:
+        // there is no suggestion to approve or refuse. The sweep already
+        // counts and warns about it; the gesture waits with the post.
+        debug!(
+            post_id,
+            gesture_id, "a gesture on a post with no readable reference line"
+        );
+        return;
+    };
+    let suggestion_id = reference.suggestion_id.as_str();
+
+    if act.gesture == Gesture::Refuse {
+        if delete_post(clerk, tick, &post_id, suggestion_id, "refused").await {
+            let total = clerk
+                .metrics
+                .record_approval(&ApprovalOutcome::RefusedLocally);
+            tick.refused_locally += 1;
+            info!(
+                suggestion_id,
+                post_id,
+                gesture_id,
+                total,
+                "the owner refused a suggestion from Buzz; nobody else is told"
+            );
+            activity_line(
+                clerk,
+                &text::activity_refused_locally(clerk.lang, network),
+                suggestion_id,
+            )
+            .await;
+        }
+        return;
+    }
+
+    if *session == Session::Dead {
+        // No call: the answer is known, and asking would be the hot loop of
+        // refusals. The gesture waits, told once, for the session to come
+        // back.
+        if !told {
+            session_revoked(clerk, gateway, tick, &post_id, suggestion_id, gesture_id).await;
+        } else {
+            debug!(
+                suggestion_id,
+                gesture_id, "the session is dead; the owner's gesture waits for it"
+            );
+        }
+        return;
+    }
+
+    let edited = act.gesture.edited_text().is_some();
+    let answered = gateway
+        .approve(suggestion_id, act.gesture.edited_text())
+        .await;
+    match answered {
+        Ok(Outcome::Approved {
+            event_id,
+            edited,
+            already,
+        }) => {
+            let outcome = if already {
+                ApprovalOutcome::AlreadyApproved
+            } else {
+                ApprovalOutcome::Approved
+            };
+            let total = clerk.metrics.record_approval(&outcome);
+            info!(
+                suggestion_id,
+                approval_id = %event_id,
+                edited,
+                already,
+                outcome = outcome.as_str(),
+                total,
+                "the Companion Gateway accepted an approval from Buzz"
+            );
+            went_out(clerk, tick, &post_id, suggestion_id, network, edited).await;
+        }
+        Ok(Outcome::Refused { status, code }) if refusals::sent(&code) => {
+            // The reply went out and the Companion Gateway could not write that down:
+            // an approval for every purpose here, counted under its code.
+            let total = clerk
+                .metrics
+                .record_approval(&ApprovalOutcome::Refused(code.clone()));
+            warn!(
+                suggestion_id,
+                status,
+                code,
+                total,
+                "the reply went out but the Companion Gateway could not record the approval"
+            );
+            went_out(clerk, tick, &post_id, suggestion_id, network, edited).await;
+        }
+        Ok(Outcome::Refused { status, code }) if refusals::remedy(&code) == Remedy::Retry => {
+            let total = clerk
+                .metrics
+                .record_approval(&ApprovalOutcome::Refused(code.clone()));
+            warn!(
+                suggestion_id,
+                gesture_id,
+                status,
+                code,
+                total,
+                gateway = %gateway.base(),
+                "the Companion Gateway could not carry an approval right now; tried again next tick"
+            );
+            defer(clerk, write, tick, post, gesture_id).await;
+        }
+        Ok(Outcome::Refused { status, code }) => {
+            let total = clerk
+                .metrics
+                .record_approval(&ApprovalOutcome::Refused(code.clone()));
+            info!(
+                suggestion_id,
+                gesture_id,
+                status,
+                code,
+                total,
+                "the Companion Gateway refused an approval from Buzz; answered in the thread"
+            );
+            answer(
+                clerk,
+                tick,
+                &post_id,
+                gesture_id,
+                &text::thread_refused(clerk.lang, &code),
+            )
+            .await;
+        }
+        Err(GatewayError::Unauthenticated) => {
+            *session = Session::Dead;
+            if told {
+                // Told already, on an earlier death of the session; the
+                // count says the call was made and refused.
+                let total = clerk
+                    .metrics
+                    .record_approval(&ApprovalOutcome::Unauthenticated);
+                error!(
+                    suggestion_id,
+                    gesture_id,
+                    total,
+                    gateway = %gateway.base(),
+                    "the Companion Gateway will not have the clerk's session again; run \
+                     provision-clerk-device.sh"
+                );
+            } else {
+                session_revoked(clerk, gateway, tick, &post_id, suggestion_id, gesture_id).await;
+            }
+        }
+        Err(error) => {
+            let total = clerk
+                .metrics
+                .record_approval(&ApprovalOutcome::GatewayUnreachable);
+            if error.is_transient() {
+                warn!(
+                    %error,
+                    suggestion_id,
+                    gesture_id,
+                    total,
+                    gateway = %gateway.base(),
+                    "the Companion Gateway gave no answer to an approval; tried again next tick"
+                );
+            } else {
+                error!(
+                    %error,
+                    suggestion_id,
+                    gesture_id,
+                    total,
+                    gateway = %gateway.base(),
+                    "the Companion Gateway gave no usable answer to an approval; tried again next \
+                     tick"
+                );
+            }
+            defer(clerk, write, tick, post, gesture_id).await;
+        }
+    }
+}
+
+/// The owner's gesture met a dead session: counted as `unauthenticated`,
+/// an `error` naming the script, and the thread told — with
+/// [`text::thread_revoked`], the one answer that does not spend the
+/// gesture ([`answered_gestures`]).
+async fn session_revoked(
+    clerk: &Clerk,
+    gateway: &Gateway,
+    tick: &mut DecisionsTick,
+    post_id: &str,
+    suggestion_id: &str,
+    gesture_id: &str,
+) {
+    let total = clerk
+        .metrics
+        .record_approval(&ApprovalOutcome::Unauthenticated);
+    error!(
+        suggestion_id,
+        gesture_id,
+        total,
+        gateway = %gateway.base(),
+        "the Companion Gateway will not have the clerk's session: the Buzz device was revoked \
+         or its refresh token died, so the owner's gesture waits; run provision-clerk-device.sh"
+    );
+    answer(
+        clerk,
+        tick,
+        post_id,
+        gesture_id,
+        &text::thread_revoked(clerk.lang),
+    )
+    .await;
+}
+
+/// An approval that went out: the post deleted, and — once it is — a line
+/// in `activite` saying so and whether the text was the owner's. The line
+/// follows the deletion, not the Companion Gateway's answer, so that a deletion the
+/// relay refused (tried again next tick, when the Gateway answers
+/// `already_approved`) does not put two lines in the feed.
+async fn went_out(
+    clerk: &Clerk,
+    tick: &mut DecisionsTick,
+    post_id: &str,
+    suggestion_id: &str,
+    network: &str,
+    edited: bool,
+) {
+    if delete_post(clerk, tick, post_id, suggestion_id, "approved").await {
+        tick.approved += 1;
+        activity_line(
+            clerk,
+            &text::activity_approved(clerk.lang, network, edited),
+            suggestion_id,
+        )
+        .await;
+    }
+}
+
+/// The Companion Gateway gave no usable answer to the owner's gesture this
+/// tick: counted as deferred, and — when the suggestion is within
+/// [`not_recorded_window`] of its expiry — told in the thread as "not
+/// recorded", keyed on the gesture, so that the sweep deleting the post a
+/// moment later is not the owner's only news of their ✅. Nothing is
+/// written otherwise; the next tick tries again. The clock is read here
+/// and not at the tick's start, because the Gateway call that just failed
+/// may have taken its whole timeout, and several deferred posts in one
+/// tick each wait their own.
+async fn defer(
+    clerk: &Clerk,
+    write: &WriteHalf,
+    tick: &mut DecisionsTick,
+    post: &nostr::Event,
+    gesture_id: &str,
+) {
+    tick.deferred += 1;
+    if !expires_within(
+        &post.content,
+        now_unix(),
+        not_recorded_window(write.decision),
+    ) {
+        return;
+    }
+    let post_id = post.id.to_hex();
+    info!(
+        post_id,
+        gesture_id,
+        "the suggestion expires before the next tick; the thread is told the gesture was not \
+         recorded"
+    );
+    answer(
+        clerk,
+        tick,
+        &post_id,
+        gesture_id,
+        &text::thread_not_recorded(clerk.lang),
+    )
+    .await;
+}
+
+/// One reply in the thread of `post_id`, answering `gesture_id`. Not
+/// counted under `twalk_clerk_posts_total{channel="approbations"}`, which
+/// has meant "one forum post per suggestion" since #265 and keeps meaning
+/// it; every answer is already a row of `twalk_clerk_approvals_total`. A
+/// relay failure is a warning and a counted failure, and `false`: the next
+/// tick, finding no answer keyed on the gesture, writes it then.
+async fn answer(
+    clerk: &Clerk,
+    tick: &mut DecisionsTick,
+    post_id: &str,
+    gesture_id: &str,
+    content: &str,
+) -> bool {
+    match clerk
+        .relay
+        .comment(
+            &clerk.config.channel_approvals,
+            post_id,
+            gesture_id,
+            content,
+        )
+        .await
+    {
+        Ok(published) => {
+            tick.answered += 1;
+            debug!(post_id, gesture_id, event_id = %published.event_id, "answered in the thread");
+            true
+        }
+        Err(error) => {
+            relay_failed(clerk, tick, &error, "answer in a post's thread");
+            false
+        }
+    }
+}
+
+/// One of the clerk's own posts deleted because the owner decided on it
+/// (`why` for the log: `approved` or `refused`). `false` on a relay
+/// failure, which is counted and warned about; the next tick decides the
+/// same post again, and the Companion Gateway's `already_approved` makes
+/// that safe.
+async fn delete_post(
+    clerk: &Clerk,
+    tick: &mut DecisionsTick,
+    post_id: &str,
+    suggestion_id: &str,
+    why: &str,
+) -> bool {
+    match clerk
+        .relay
+        .delete(&clerk.config.channel_approvals, post_id)
+        .await
+    {
+        Ok(_) => {
+            info!(
+                why,
+                suggestion_id, post_id, "deleted a suggestion's post: the owner decided"
+            );
+            true
+        }
+        Err(error) => {
+            relay_failed(clerk, tick, &error, "delete a decided post");
+            false
+        }
+    }
+}
+
+/// One relay call the decisions loop could not make: a warning naming what
+/// it tried (`did` completes "could not …"), a counted relay failure, and
+/// the tick's own count of them.
+fn relay_failed(clerk: &Clerk, tick: &mut DecisionsTick, error: &RelayError, did: &str) {
+    clerk.metrics.record_relay_failure();
+    tick.failures += 1;
+    warn!(%error, "the decisions loop could not {did}; the next tick will try again");
+}
+
 /// A parse failure as the log may carry it: serde_json's category and the
 /// position in the payload, never its `Display`, which quotes the value it
 /// choked on — `invalid type: string "…"` — so a malformed producer would
@@ -946,6 +1724,122 @@ mod tests {
                 Verdict::PastCeiling,
                 "{undatable}"
             );
+        }
+    }
+
+    #[test]
+    fn the_decisions_loop_reads_expiry_off_the_reference_line() {
+        // 2026-09-17T11:00:00Z is 1789642800 seconds after the epoch.
+        let expires = 1789642800;
+        let tick = Duration::from_secs(5);
+        let dated = format!(
+            "Proposed reply · WhatsApp\n“Oui”\ntwalk:suggestion:{ID} expires 2026-09-17T11:00:00Z"
+        );
+
+        // Open until the expiry, expired from it: the same line the sweep
+        // draws, so the loop never carries a gesture the sweep is deleting
+        // the post of.
+        assert!(!post_has_expired(&dated, expires - 1));
+        assert!(post_has_expired(&dated, expires));
+        assert!(post_has_expired(&dated, expires + 3600));
+
+        // "Within the window": from five seconds before the expiry, not six.
+        assert!(!expires_within(&dated, expires - 6, tick));
+        assert!(expires_within(&dated, expires - 5, tick));
+        assert!(expires_within(&dated, expires - 1, tick));
+        assert!(expires_within(&dated, expires, tick));
+
+        // The window the loop really uses is a tick plus a Gateway timeout:
+        // a Gateway that hangs holds the tick for the whole timeout, so a
+        // post with seven seconds to live at a five-second tick — "not
+        // within a tick" — would be expired by the next one and swept
+        // in silence. At the default tick that is fifteen seconds.
+        let window = not_recorded_window(tick);
+        assert_eq!(window, tick + crate::gateway::REQUEST_TIMEOUT, "{window:?}");
+        assert_eq!(window, Duration::from_secs(15));
+        assert!(expires_within(&dated, expires - 7, window));
+        assert!(expires_within(&dated, expires - 15, window));
+        assert!(!expires_within(&dated, expires - 16, window));
+
+        // A post the loop cannot date is open and never "within a tick":
+        // the gesture on it is tried again for as long as the sweep's
+        // ceiling lets the post stand.
+        for undatable in [
+            format!("“Oui”\ntwalk:suggestion:{ID}"),
+            format!("“Oui”\ntwalk:suggestion:{ID} expires tomorrow"),
+            "“Oui”\nno reference line".to_owned(),
+        ] {
+            assert!(!post_has_expired(&undatable, expires + 3600), "{undatable}");
+            assert!(!expires_within(&undatable, expires, tick), "{undatable}");
+        }
+    }
+
+    #[test]
+    fn a_revoked_answer_does_not_spend_the_gesture_and_every_other_does() {
+        fn answer(gesture: &str, content: &str) -> nostr::Event {
+            EventBuilder::new(Kind::Custom(crate::relay::KIND_FORUM_COMMENT), content)
+                .tags([
+                    nostr::Tag::parse(["e", ID, "", "reply"]).unwrap(),
+                    nostr::Tag::parse(["r", &format!("twalk:gesture:{gesture}")]).unwrap(),
+                ])
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        }
+        let g = |n: usize| format!("{:0>64x}", n + 1);
+        let answers = [
+            answer(&g(0), &text::thread_not_the_owner(Lang::Fr)),
+            answer(&g(1), &text::thread_refused(Lang::En, "consent_revoked")),
+            answer(&g(2), &text::thread_not_recorded(Lang::Fr)),
+            answer(&g(3), &text::thread_revoked(Lang::Fr)),
+            answer(&g(4), &text::thread_revoked(Lang::En)),
+            // A reply of the clerk's with no gesture tag answers nothing.
+            EventBuilder::new(Kind::Custom(crate::relay::KIND_FORUM_COMMENT), "…")
+                .sign_with_keys(&Keys::generate())
+                .unwrap(),
+        ];
+        let (spent, told_revoked) = answered_gestures(&answers);
+        assert_eq!(
+            spent,
+            [g(0), g(1), g(2)].into_iter().collect::<HashSet<_>>()
+        );
+        assert_eq!(
+            told_revoked,
+            [g(3), g(4)].into_iter().collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn a_tick_that_did_nothing_is_debug_and_one_that_did_is_info() {
+        assert!(!DecisionsTick::default().happened());
+        assert!(!DecisionsTick {
+            posts: 12,
+            gestures: 3,
+            ..DecisionsTick::default()
+        }
+        .happened());
+        for did in [
+            DecisionsTick {
+                approved: 1,
+                ..DecisionsTick::default()
+            },
+            DecisionsTick {
+                refused_locally: 1,
+                ..DecisionsTick::default()
+            },
+            DecisionsTick {
+                answered: 1,
+                ..DecisionsTick::default()
+            },
+            DecisionsTick {
+                deferred: 1,
+                ..DecisionsTick::default()
+            },
+            DecisionsTick {
+                failures: 1,
+                ..DecisionsTick::default()
+            },
+        ] {
+            assert!(did.happened(), "{did:?}");
         }
     }
 

@@ -178,15 +178,47 @@ pub fn thread_revoked(l: Lang) -> String {
     }
 }
 
+/// The network named on one of the clerk's own `approbations` posts, read
+/// back off its first line — the inverse of [`approval_post`]'s
+/// `Réponse proposée · WhatsApp · expire à …`, kept beside it so the
+/// layout and its reader are one edit. As the owner reads it (`WhatsApp`,
+/// not `whatsapp`), which [`network_name`] passes through unchanged, for
+/// the `activite` line the decisions loop writes when a suggestion is
+/// approved or declined from Buzz (#284). `None` for a post not in that
+/// shape. Read off the post rather than kept, because the relay is the
+/// clerk's only memory (ADR 0035), and off the first line rather than the
+/// reference line, which names the suggestion and its expiry and nothing
+/// else.
+pub fn network_off_post(post_content: &str) -> Option<&str> {
+    let first = post_content.lines().next()?;
+    let mut parts = first.split(" · ");
+    parts.next()?;
+    parts
+        .next()
+        .map(str::trim)
+        .filter(|network| !network.is_empty())
+}
+
+/// ` · WhatsApp` for a line that names a network, nothing for one that
+/// names none — a post the loop could not read a network off must not
+/// leave a dangling separator.
+fn network_suffix(network: &str) -> String {
+    if network.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", network_name(network))
+    }
+}
+
 /// An `activite` line: a suggestion was approved from Buzz, edited or as
 /// proposed, on which network — and never what it said.
 pub fn activity_approved(l: Lang, network: &str, edited: bool) -> String {
-    let network = network_name(network);
+    let network = network_suffix(network);
     match (l, edited) {
-        (Lang::Fr, true) => format!("Suggestion approuvée depuis Buzz (modifiée) · {network}"),
-        (Lang::Fr, false) => format!("Suggestion approuvée depuis Buzz · {network}"),
-        (Lang::En, true) => format!("Suggestion approved from Buzz (edited) · {network}"),
-        (Lang::En, false) => format!("Suggestion approved from Buzz · {network}"),
+        (Lang::Fr, true) => format!("Suggestion approuvée depuis Buzz (modifiée){network}"),
+        (Lang::Fr, false) => format!("Suggestion approuvée depuis Buzz{network}"),
+        (Lang::En, true) => format!("Suggestion approved from Buzz (edited){network}"),
+        (Lang::En, false) => format!("Suggestion approved from Buzz{network}"),
     }
 }
 
@@ -196,10 +228,10 @@ pub fn activity_approved(l: Lang, network: &str, edited: bool) -> String {
 /// and told nobody else (the approval screen's own `dismissed.ts` is the
 /// same decision, with the same disclosure).
 pub fn activity_refused_locally(l: Lang, network: &str) -> String {
-    let network = network_name(network);
+    let network = network_suffix(network);
     match l {
-        Lang::Fr => format!("Suggestion refusée depuis Buzz (❌, non transmise) · {network}"),
-        Lang::En => format!("Suggestion declined from Buzz (❌, not forwarded) · {network}"),
+        Lang::Fr => format!("Suggestion refusée depuis Buzz (❌, non transmise){network}"),
+        Lang::En => format!("Suggestion declined from Buzz (❌, not forwarded){network}"),
     }
 }
 
@@ -790,5 +822,42 @@ mod tests {
             activity_refused_locally(Lang::En, "sms"),
             "Suggestion declined from Buzz (❌, not forwarded) · SMS"
         );
+        // A post the loop could not read a network off: no dangling
+        // separator.
+        assert_eq!(
+            activity_approved(Lang::Fr, "", false),
+            "Suggestion approuvée depuis Buzz"
+        );
+        assert_eq!(
+            activity_approved(Lang::En, "", true),
+            "Suggestion approved from Buzz (edited)"
+        );
+        assert_eq!(
+            activity_refused_locally(Lang::En, ""),
+            "Suggestion declined from Buzz (❌, not forwarded)"
+        );
+    }
+
+    #[test]
+    fn the_network_is_read_back_off_the_posts_first_line() {
+        let reference = format!("twalk:suggestion:{}", "1".repeat(64));
+        for lang in [Lang::Fr, Lang::En] {
+            for expires in [Some("2026-09-17T11:00:00Z"), Some("tomorrow"), None] {
+                // A body with the separator in it does not confuse the
+                // reader: only the first line is read.
+                let post = approval_post(lang, "Oui · à 20h", "whatsapp", expires, &reference);
+                assert_eq!(network_off_post(&post), Some("WhatsApp"), "{post}");
+                // …and what is read back is what the activity line names.
+                assert_eq!(
+                    activity_approved(lang, network_off_post(&post).unwrap(), false),
+                    activity_approved(lang, "whatsapp", false)
+                );
+                let post = approval_post(lang, "Oui", "irc", expires, &reference);
+                assert_eq!(network_off_post(&post), Some("irc"), "{post}");
+            }
+        }
+        assert_eq!(network_off_post(""), None);
+        assert_eq!(network_off_post("Just prose\nand a second line"), None);
+        assert_eq!(network_off_post("Proposed reply ·  \n« … »"), None);
     }
 }

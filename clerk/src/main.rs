@@ -16,6 +16,14 @@
 //! fails fast and loud — a configured-but-unusable origin is an operator
 //! error to fix, not a condition to swallow (the Companion Gateway's and
 //! the Sensor's origins behave the same way).
+//!
+//! The write half (#284) is wired the same way when it is configured: the
+//! session file is opened here, and refused here on the same terms as the
+//! Nostr key file — a file the whole host can read is a misconfiguration
+//! to fix before the clerk runs, not one to run past — then the Companion
+//! Gateway client is built from it and the decisions loop
+//! ([`twalk_clerk::consumers::decisions`]) is spawned beside the bus, not
+//! from it, because a ✅ on Buzz does not need the bus to be carried.
 
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -30,6 +38,7 @@ use axum::Router;
 use tracing::{info, warn};
 use twalk_clerk::config::Config;
 use twalk_clerk::consumers::{self, Clerk};
+use twalk_clerk::gateway::{Gateway, SessionFile};
 use twalk_clerk::metrics::Metrics;
 use twalk_clerk::relay::{load_keys, Relay};
 use twalk_clerk::text;
@@ -59,12 +68,34 @@ async fn main() -> Result<()> {
     // absence is a supported deployment — the clerk still reads the bus and
     // posts — but a silent one would leave an operator wondering why
     // reacting to a post never sends anything.
-    if config.write_half().is_none() {
-        warn!(
-            "the write half is not configured: a ✅ on Buzz decides nothing; set \
-             CLERK_OWNER_PUBKEY, CLERK_GATEWAY_URL and CLERK_GATEWAY_SESSION_FILE (#284)"
-        );
-    }
+    let gateway = match config.write_half() {
+        Some(write) => {
+            let session = SessionFile::open(&write.session_file).with_context(|| {
+                format!(
+                    "the clerk's session file {} cannot be used; run \
+                     provision-clerk-device.sh, or unset CLERK_OWNER_PUBKEY, \
+                     CLERK_GATEWAY_URL and CLERK_GATEWAY_SESSION_FILE to run without the \
+                     write half",
+                    write.session_file.display()
+                )
+            })?;
+            info!(
+                gateway = %write.gateway_url,
+                owner = %write.owner_pubkey,
+                session_file = %session.path().display(),
+                decision_seconds = write.decision.as_secs(),
+                "the write half is configured: a ✅ on Buzz by the owner is an approval"
+            );
+            Some(Gateway::new(&write.gateway_url, session))
+        }
+        None => {
+            warn!(
+                "the write half is not configured: a ✅ on Buzz decides nothing; set \
+                 CLERK_OWNER_PUBKEY, CLERK_GATEWAY_URL and CLERK_GATEWAY_SESSION_FILE (#284)"
+            );
+            None
+        }
+    };
     // Unset is a supported state and is said rather than chosen silently:
     // on the reference deployment the personas' language comes from the
     // Companion's settings, which the clerk cannot read (it holds no
@@ -99,7 +130,11 @@ async fn main() -> Result<()> {
         relay,
         metrics,
         lang,
+        gateway,
     });
+    if clerk.gateway.is_some() {
+        tokio::spawn(consumers::decisions(clerk.clone()));
+    }
     tokio::spawn(consumers::run(clerk));
 
     shutdown_signal().await;
