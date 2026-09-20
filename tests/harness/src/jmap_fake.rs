@@ -2,10 +2,11 @@
 //! RFC 8621): what the collector's `jmap` module and its mail poll are
 //! tested against, so that no test needs a TMail. One account, three
 //! mailboxes (INBOX, Sent, Archive), an Email state that moves on every
-//! delivery, and the three methods the collector calls — `Mailbox/get`,
-//! `Email/changes`, `Email/get` (#277 adds `Email/query` with the
-//! recovery it serves). A test delivers mail with [`FakeMail`]; nothing
-//! else writes.
+//! delivery, and the methods the collector calls: `Mailbox/get`,
+//! `Email/changes`, `Email/get` to read (#276); `Identity/get`,
+//! `Email/query` by Message-ID, `Email/set` and `EmailSubmission/set` to
+//! reply (#278). A test delivers mail with [`FakeMail`]; the collector's
+//! replies are what [`Submission`] records.
 //!
 //! What it does not fake: blobs, keywords, threads beyond `threadId`, and
 //! push — the collector reads none of them in #276.
@@ -62,6 +63,9 @@ pub struct FakeMail {
     /// Attachments: (filename, media type, size).
     pub attachments: Vec<(String, String, u64)>,
     pub received_at: String,
+    /// Keywords, as a creation set them (`$draft`, `$seen`); empty on a
+    /// delivered mail.
+    pub keywords: Vec<String>,
 }
 
 impl FakeMail {
@@ -84,6 +88,7 @@ impl FakeMail {
             headers: Vec::new(),
             attachments: Vec::new(),
             received_at: "2026-09-21T08:14:58Z".to_owned(),
+            keywords: Vec::new(),
         }
     }
 
@@ -118,7 +123,45 @@ pub(crate) struct MailStore {
     /// Every Email id whose content (`bodyValues`) was read, in order —
     /// what "a mail in Sent or Archive is never read" is asserted on.
     read_ids: Vec<String>,
+    /// Every submission the collector made (#278), in order: the mail as
+    /// created by `Email/set`, and what `EmailSubmission/set` said.
+    submissions: Vec<Submission>,
+    /// A test can make `EmailSubmission/set` refuse (`pending_operator`'s
+    /// shape on the sending side): every submission answers `notCreated`.
+    refuse_submissions: bool,
 }
+
+/// One reply the collector submitted, as the fake received it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submission {
+    /// The created Email object's id.
+    pub email_id: String,
+    pub identity_id: String,
+    /// The SMTP envelope the collector asked for — who the server is told to
+    /// deliver to — beside the headers of the mail it wrote.
+    pub envelope_from: String,
+    pub envelope_to: Vec<String>,
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub in_reply_to: Vec<String>,
+    pub references: Vec<String>,
+    pub text: String,
+    /// The mailboxes the created mail was in when submitted, then after
+    /// `onSuccessUpdateEmail` was applied; the keywords likewise, from the
+    /// keywords the collector set on the created mail.
+    pub mailboxes_at_submission: Vec<String>,
+    pub mailboxes_after: Vec<String>,
+    pub keywords_after: Vec<String>,
+    /// Every header the created mail carried by name (`header:<Name>:asText`
+    /// on the creation), the approval's id among them.
+    pub headers: Vec<(String, String)>,
+}
+
+/// The owner's JMAP identity id on the fake.
+pub const IDENTITY_ID: &str = "id-owner";
+pub const DRAFTS_ID: &str = "drafts-1";
 
 impl Default for MailStore {
     fn default() -> Self {
@@ -131,6 +174,8 @@ impl Default for MailStore {
             state: 0,
             next_id: offset * 1000,
             read_ids: Vec::new(),
+            submissions: Vec::new(),
+            refuse_submissions: false,
         }
     }
 }
@@ -152,6 +197,22 @@ impl MailStore {
     pub(crate) fn read_ids(&self) -> Vec<String> {
         self.read_ids.clone()
     }
+
+    pub(crate) fn submissions(&self) -> Vec<Submission> {
+        self.submissions.clone()
+    }
+
+    pub(crate) fn mails_in(&self, mailbox: &str) -> Vec<String> {
+        self.mails
+            .iter()
+            .filter(|(_, (m, _, _))| m == mailbox)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub(crate) fn refuse_submissions(&mut self, refuse: bool) {
+        self.refuse_submissions = refuse;
+    }
 }
 
 /// The session document, as the collector reads it: the account, its mail
@@ -164,7 +225,8 @@ pub(crate) fn session(account: &str, issuer: &str, state: &str) -> Value {
                 "maxConcurrentRequests": 4, "maxCallsInRequest": 16, "maxObjectsInGet": 500,
                 "maxObjectsInSet": 500, "collationAlgorithms": ["i;unicode-casemap"]
             },
-            "urn:ietf:params:jmap:mail": {}
+            "urn:ietf:params:jmap:mail": {},
+            "urn:ietf:params:jmap:submission": {}
         },
         "accounts": {
             ACCOUNT_ID: {
@@ -176,11 +238,15 @@ pub(crate) fn session(account: &str, issuer: &str, state: &str) -> Value {
                         "maxMailboxesPerEmail": 10, "maxMailboxDepth": 10,
                         "maxSizeMailboxName": 200, "maxSizeAttachmentsPerEmail": 20000000,
                         "emailQuerySortOptions": ["receivedAt"], "mayCreateTopLevelMailbox": true
+                    },
+                    "urn:ietf:params:jmap:submission": {
+                        "maxDelayedSend": 0,
+                        "submissionExtensions": {}
                     }
                 }
             }
         },
-        "primaryAccounts": { "urn:ietf:params:jmap:mail": ACCOUNT_ID },
+        "primaryAccounts": { "urn:ietf:params:jmap:mail": ACCOUNT_ID, "urn:ietf:params:jmap:submission": ACCOUNT_ID },
         "username": account,
         "apiUrl": format!("{issuer}/jmap/api"),
         "downloadUrl": format!("{issuer}/jmap/download/{{accountId}}/{{blobId}}/{{name}}?type={{type}}"),
@@ -191,7 +257,7 @@ pub(crate) fn session(account: &str, issuer: &str, state: &str) -> Value {
 }
 
 /// One API request: every method call answered in order, RFC 8620 §3.3.
-pub(crate) fn api(body: &str, store: &mut MailStore) -> (&'static str, Value) {
+pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static str, Value) {
     let Ok(request) = serde_json::from_str::<Value>(body) else {
         return (
             "400 Bad Request",
@@ -205,6 +271,9 @@ pub(crate) fn api(body: &str, store: &mut MailStore) -> (&'static str, Value) {
         );
     };
     let mut responses = Vec::new();
+    // Creation ids (`#reply`) of this request, for a back-reference from a
+    // later call (RFC 8620 §3.7).
+    let mut created: BTreeMap<String, String> = BTreeMap::new();
     for call in calls {
         let (Some(name), Some(args), Some(call_id)) = (
             call.get(0).and_then(Value::as_str),
@@ -213,8 +282,8 @@ pub(crate) fn api(body: &str, store: &mut MailStore) -> (&'static str, Value) {
         ) else {
             continue;
         };
-        let account = args.get("accountId").and_then(Value::as_str);
-        if account != Some(ACCOUNT_ID) {
+        let account_id = args.get("accountId").and_then(Value::as_str);
+        if account_id != Some(ACCOUNT_ID) {
             responses.push(json!(["error", { "type": "accountNotFound" }, call_id]));
             continue;
         }
@@ -225,6 +294,13 @@ pub(crate) fn api(body: &str, store: &mut MailStore) -> (&'static str, Value) {
                 Err(error) => ("error", error),
             },
             "Email/get" => ("Email/get", email_get(args, store)),
+            "Identity/get" => ("Identity/get", identity_get(account)),
+            "Email/query" => ("Email/query", email_query(args, store)),
+            "Email/set" => ("Email/set", email_set(args, store, &mut created)),
+            "EmailSubmission/set" => match submission_set(args, store, &created) {
+                Ok(result) => ("EmailSubmission/set", result),
+                Err(error) => ("error", error),
+            },
             _ => ("error", json!({ "type": "unknownMethod" })),
         };
         responses.push(json!([name, result, call_id]));
@@ -253,6 +329,7 @@ fn mailbox_get(store: &MailStore) -> Value {
         "list": [
             mailbox(INBOX_ID, "INBOX", Some("inbox")),
             mailbox(SENT_ID, "Sent", Some("sent")),
+            mailbox(DRAFTS_ID, "Drafts", Some("drafts")),
             mailbox(ARCHIVE_ID, "Archive", Some("archive")),
         ],
         "notFound": []
@@ -493,4 +570,305 @@ fn email_object(id: &str, mailbox: &str, mail: &FakeMail, properties: Option<&[S
         }
     }
     Value::Object(object)
+}
+
+/// The owner's one identity: the account's address.
+fn identity_get(account: &str) -> Value {
+    json!({
+        "accountId": ACCOUNT_ID,
+        "state": "idn-1",
+        "list": [{
+            "id": IDENTITY_ID,
+            "name": "The Owner",
+            "email": account,
+            "replyTo": null,
+            "bcc": null,
+            "textSignature": "",
+            "htmlSignature": "",
+            "mayDelete": false
+        }],
+        "notFound": []
+    })
+}
+
+/// `Email/query` with the filters the collector uses: `inMailbox`, and
+/// `header: ["Message-ID", "<…>"]` to find the mail a reply answers (#278).
+fn email_query(args: &Value, store: &MailStore) -> Value {
+    let filter = args.get("filter").cloned().unwrap_or(Value::Null);
+    let in_mailbox = filter.get("inMailbox").and_then(Value::as_str);
+    let header = filter
+        .get("header")
+        .and_then(Value::as_array)
+        .and_then(|pair| {
+            Some((
+                pair.first()?.as_str()?.to_ascii_lowercase(),
+                pair.get(1)?.as_str()?.trim().to_owned(),
+            ))
+        });
+    let ids: Vec<&String> = store
+        .mails
+        .iter()
+        .filter(|(_, (mailbox, _, mail))| {
+            in_mailbox.is_none_or(|wanted| wanted == mailbox)
+                && header.as_ref().is_none_or(|(name, value)| {
+                    if name == "message-id" {
+                        mail.message_id.trim_matches(|c| c == '<' || c == '>')
+                            == value.trim_matches(|c| c == '<' || c == '>')
+                    } else {
+                        mail.headers
+                            .iter()
+                            .any(|(n, v)| n.eq_ignore_ascii_case(name) && v.trim() == value)
+                    }
+                })
+        })
+        .map(|(id, _)| id)
+        .collect();
+    json!({
+        "accountId": ACCOUNT_ID,
+        "queryState": store.state(),
+        "canCalculateChanges": false,
+        "position": 0,
+        "ids": ids,
+        "total": ids.len()
+    })
+}
+
+/// `Email/set` with `create`: the reply the collector writes, kept as a mail
+/// in the mailboxes it named (Drafts, as a client does), so the submission
+/// can move it to Sent.
+fn email_set(args: &Value, store: &mut MailStore, created: &mut BTreeMap<String, String>) -> Value {
+    let mut created_out = serde_json::Map::new();
+    let mut not_created = serde_json::Map::new();
+    if let Some(creations) = args.get("create").and_then(Value::as_object) {
+        for (creation_id, object) in creations {
+            let addresses = |name: &str| -> Vec<Address> {
+                object
+                    .get(name)
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|a| {
+                                Some(Address::new(
+                                    a.get("name").and_then(Value::as_str),
+                                    a.get("email")?.as_str()?,
+                                ))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let text = object
+                .get("bodyValues")
+                .and_then(Value::as_object)
+                .and_then(|values| values.values().next())
+                .and_then(|value| value.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let ids = |name: &str| -> Vec<String> {
+                object
+                    .get(name)
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| format!("<{}>", s.trim_matches(|c| c == '<' || c == '>')))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let from = addresses("from");
+            let Some(sender) = from.first().cloned() else {
+                not_created.insert(
+                    creation_id.clone(),
+                    json!({ "type": "invalidProperties", "properties": ["from"] }),
+                );
+                continue;
+            };
+            let mailbox = object
+                .get("mailboxIds")
+                .and_then(Value::as_object)
+                .and_then(|m| m.keys().next().cloned())
+                .unwrap_or_else(|| DRAFTS_ID.to_owned());
+            // `header:<Name>:asText` on a creation is a header of the mail
+            // (RFC 8621 §4.1.3), kept by name so a query finds it.
+            let headers: Vec<(String, String)> = object
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(key, value)| {
+                    let name = key.strip_prefix("header:")?.strip_suffix(":asText")?;
+                    Some((name.to_owned(), value.as_str()?.to_owned()))
+                })
+                .collect();
+            let keywords: Vec<String> = object
+                .get("keywords")
+                .and_then(Value::as_object)
+                .map(|k| k.keys().cloned().collect())
+                .unwrap_or_default();
+            let mail = FakeMail {
+                from: sender,
+                to: addresses("to"),
+                cc: addresses("cc"),
+                subject: object
+                    .get("subject")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                text: Some(text),
+                html: None,
+                message_id: ids("messageId")
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| format!("<{}@fake>", store.next_id + 1)),
+                in_reply_to: ids("inReplyTo").into_iter().next(),
+                references: ids("references"),
+                headers,
+                attachments: Vec::new(),
+                received_at: "2026-09-21T08:20:12Z".to_owned(),
+                keywords,
+            };
+            let id = store.deliver(&mailbox, mail);
+            created.insert(creation_id.clone(), id.clone());
+            created_out.insert(creation_id.clone(), json!({ "id": id, "blobId": format!("b{id}"), "threadId": format!("t{id}"), "size": 1234 }));
+        }
+    }
+    // `destroy`: the draft a refused submission left behind, removed.
+    let mut destroyed = Vec::new();
+    for id in args
+        .get("destroy")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if store.mails.remove(id).is_some() {
+            store.state += 1;
+            destroyed.push(id.to_owned());
+        }
+    }
+    json!({
+        "accountId": ACCOUNT_ID,
+        "oldState": (store.state.saturating_sub(1)).to_string(),
+        "newState": store.state(),
+        "created": created_out,
+        "notCreated": not_created,
+        "updated": null,
+        "destroyed": destroyed
+    })
+}
+
+/// `EmailSubmission/set` with `create` and `onSuccessUpdateEmail`: the
+/// submission recorded with everything the reply carried, and the created
+/// mail moved as the update says (to Sent, out of Drafts, `$draft` off).
+fn submission_set(
+    args: &Value,
+    store: &mut MailStore,
+    created: &BTreeMap<String, String>,
+) -> Result<Value, Value> {
+    let mut created_out = serde_json::Map::new();
+    let mut not_created = serde_json::Map::new();
+    let mut updated_emails = serde_json::Map::new();
+    if let Some(creations) = args.get("create").and_then(Value::as_object) {
+        for (creation_id, object) in creations {
+            let email_ref = object
+                .get("emailId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let email_id = email_ref
+                .strip_prefix('#')
+                .and_then(|reference| created.get(reference).cloned())
+                .unwrap_or_else(|| email_ref.to_owned());
+            let identity_id = object
+                .get("identityId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if store.refuse_submissions {
+                not_created.insert(creation_id.clone(), json!({ "type": "forbiddenFrom", "description": "the fake was told to refuse every submission" }));
+                continue;
+            }
+            let Some((mailbox, _, mail)) = store.mails.get(&email_id).cloned() else {
+                not_created.insert(creation_id.clone(), json!({ "type": "emailNotFound" }));
+                continue;
+            };
+            if identity_id != IDENTITY_ID {
+                not_created.insert(
+                    creation_id.clone(),
+                    json!({ "type": "invalidProperties", "properties": ["identityId"] }),
+                );
+                continue;
+            }
+            let envelope_from = object
+                .pointer("/envelope/mailFrom/email")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let envelope_to: Vec<String> = object
+                .pointer("/envelope/rcptTo")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|r| r.get("email").and_then(Value::as_str))
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mailboxes_at_submission = vec![mailbox.clone()];
+            // onSuccessUpdateEmail: `#<creationId>` → the patch.
+            let mut mailboxes_after = mailboxes_at_submission.clone();
+            let mut keywords_after = mail.keywords.clone();
+            if let Some(patch) = args
+                .pointer(&format!("/onSuccessUpdateEmail/#{creation_id}"))
+                .and_then(Value::as_object)
+            {
+                for (path, value) in patch {
+                    if let Some(id) = path.strip_prefix("mailboxIds/") {
+                        if value.is_null() || value == &Value::Bool(false) {
+                            mailboxes_after.retain(|m| m != id);
+                        } else {
+                            mailboxes_after.push(id.to_owned());
+                        }
+                    } else if let Some(keyword) = path.strip_prefix("keywords/") {
+                        if value.is_null() || value == &Value::Bool(false) {
+                            keywords_after.retain(|k| k != keyword);
+                        } else {
+                            keywords_after.push(keyword.to_owned());
+                        }
+                    }
+                }
+                if let Some(target) = mailboxes_after.first().cloned() {
+                    if let Some(entry) = store.mails.get_mut(&email_id) {
+                        entry.0 = target;
+                    }
+                }
+                updated_emails.insert(email_id.clone(), Value::Null);
+            }
+            store.submissions.push(Submission {
+                email_id: email_id.clone(),
+                identity_id,
+                envelope_from,
+                envelope_to,
+                from: vec![mail.from.email.clone()],
+                to: mail.to.iter().map(|a| a.email.clone()).collect(),
+                cc: mail.cc.iter().map(|a| a.email.clone()).collect(),
+                subject: mail.subject.clone(),
+                in_reply_to: mail.in_reply_to.iter().cloned().collect(),
+                references: mail.references.clone(),
+                text: mail.text.clone().unwrap_or_default(),
+                mailboxes_at_submission,
+                mailboxes_after,
+                keywords_after,
+                headers: mail.headers.clone(),
+            });
+            created_out.insert(creation_id.clone(), json!({ "id": format!("s{}", store.submissions.len()), "sendAt": "2026-09-21T08:20:12Z", "undoStatus": "final" }));
+        }
+    }
+    Ok(json!({
+        "accountId": ACCOUNT_ID,
+        "oldState": "sub-0",
+        "newState": "sub-1",
+        "created": created_out,
+        "notCreated": not_created
+    }))
 }

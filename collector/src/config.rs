@@ -61,6 +61,11 @@ pub struct Config {
     /// (`COLLECTOR_MAIL_POLL_SECONDS`, 60 by default; #277 makes the push
     /// the rule and this the fallback).
     pub mail_poll_interval: std::time::Duration,
+    /// The retry policy for an approved reply the mailbox would not take
+    /// (`COLLECTOR_SEND_RETRY_BASE_MS`, 1000; `COLLECTOR_SEND_RETRY_MAX_ATTEMPTS`,
+    /// 5) — the Sensor's variables, on this side.
+    pub send_retry_base: std::time::Duration,
+    pub send_retry_max_attempts: i64,
 }
 
 impl Config {
@@ -161,6 +166,20 @@ impl Config {
                     None => 60,
                 },
             ),
+            send_retry_base: std::time::Duration::from_millis(
+                match optional_string("COLLECTOR_SEND_RETRY_BASE_MS") {
+                    Some(value) => value.parse().with_context(|| {
+                        format!("COLLECTOR_SEND_RETRY_BASE_MS is not a number: {value:?}")
+                    })?,
+                    None => 1000,
+                },
+            ),
+            send_retry_max_attempts: match optional_string("COLLECTOR_SEND_RETRY_MAX_ATTEMPTS") {
+                Some(value) => value.parse().with_context(|| {
+                    format!("COLLECTOR_SEND_RETRY_MAX_ATTEMPTS is not a number: {value:?}")
+                })?,
+                None => 5,
+            },
         })
     }
 
@@ -247,6 +266,8 @@ mod tests {
             health_interval: std::time::Duration::from_secs(60),
             calendar_poll_interval: std::time::Duration::from_secs(60),
             mail_poll_interval: std::time::Duration::from_secs(60),
+            send_retry_base: std::time::Duration::from_millis(1000),
+            send_retry_max_attempts: 5,
         }
     }
 

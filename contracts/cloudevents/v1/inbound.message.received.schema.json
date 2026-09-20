@@ -330,6 +330,12 @@
           ],
           "description": "Optional: the root of the thread the message is part of — a Matrix event for a Matrix thread, a Message-ID for a mail thread."
         },
+        "message_id": {
+          "type": "string",
+          "maxLength": 998,
+          "pattern": "^<[^<>\\s]+>$",
+          "description": "Optional (#276, #278): the mail's own Message-ID (RFC 5322 §3.6.4), angle brackets kept — the mail's identity in every client's threading, and what a reply's In-Reply-To names. Not the sender's words: an identifier the sending server minted. A bridged message has none; its identity is the Matrix event the id is derived from."
+        },
         "title": {
           "type": "string",
           "maxLength": 1024,

@@ -15,6 +15,7 @@
     "reply_to": {
       "message_id": "<7a1e0c2b-9f3d-4b8e-a1c5-2d6f8e9b0c1a@example.com>"
     },
+    "message_id": "<9b8c7d6e-1@example.org>",
     "attachments": [
       {
         "kind": "file",

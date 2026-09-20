@@ -247,7 +247,30 @@ async fn run(config: Config) -> Result<()> {
                 consent.clone(),
             )
         })
-        .transpose()?;
+        .transpose()?
+        .map(Arc::new);
+    // The access token, shared with the reply consumer (#278): the run loop
+    // keeps it fresh, the consumer sends with whatever is current, and
+    // waits when there is none.
+    let shared_access: twalk_collector::replies::SharedAccess = Arc::default();
+    if let Some(mailbox) = &mailbox {
+        tokio::spawn(twalk_collector::replies::consume_approvals(
+            jetstream.clone(),
+            mailbox.clone(),
+            config
+                .connections
+                .iter()
+                .map(|held| held.id.clone())
+                .collect(),
+            config.owner_email.clone(),
+            shared_access.clone(),
+            metrics.clone(),
+            twalk_collector::replies::RetryPolicy {
+                base: config.send_retry_base,
+                max_attempts: config.send_retry_max_attempts,
+            },
+        ));
+    }
 
     let client = Client::discover(config.oidc.clone()).await?;
     let mut trackers: Vec<Tracker> = config
@@ -381,6 +404,7 @@ async fn run(config: Config) -> Result<()> {
                 }
             }
         };
+        *shared_access.write().await = access.clone();
         // One observation of the grant, published per connection it holds:
         // a calendar connection whose service refused gets its own words.
         let occurred_at = twalk_collector::oidc::now_rfc3339();

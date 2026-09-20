@@ -53,8 +53,8 @@ Measured on the project's reference host on 2026-09-19 — 20 cores, 62 GB RAM, 
 | `gateway` | required | **163 s**, 125 tests | +3.0 GB target | 184 MB | warm stack |
 | `hermes` | required | **132 s** | +2.0 GB target | 87 MB | warm stack |
 | `clerk` | required | **not measured yet** (#265) | — | — | warm stack plus a Buzz relay, Postgres and Redis of its own; measure it before trusting the "full required run" figure below |
-| `collector` | required | 22 unit + 4 + 3 tests, 0.5 s warm after the build (measured 2026-09-20); the build shares nothing with the other crates' targets | +1.6 GB target | — | no Docker: the fake SSO, side service and JMAP server run in-process |
-| `collector-stack` | required | **35 s**, 8 tests — 13.4 s `calendar`, 11.9 s `mail`, 9.9 s `status` (measured 2026-09-20; ~180 s before #280 taught the tests to read from the bus head noted at their start) | — | — | warm stack; the process boundary against the bus, every poll at 1 s |
+| `collector` | required | 25 unit + 4 + 3 tests, 0.5 s warm after the build (measured 2026-09-20); the build shares nothing with the other crates' targets | +1.6 GB target | — | no Docker: the fake SSO, side service and JMAP server run in-process |
+| `collector-stack` | required | **46 s**, 10 tests — 13.4 s `calendar`, 11.9 s `mail`, 10.4 s `reply`, 9.9 s `status` (measured 2026-09-20; ~180 s before #280 taught the tests to read from the bus head noted at their start) | — | — | warm stack; the process boundary against the bus, every poll at 1 s |
 | `sensor-deployment` | advisory | 61 s, 3 tests | small | 634 MB | **warm images** |
 | `gateway-deployment` | advisory | 56 s, 4 tests | small | 305 MB | **warm images** |
 | `hermes-full-loop` | advisory | 39 s | small | 153 MB | **warm images**; +10 containers |

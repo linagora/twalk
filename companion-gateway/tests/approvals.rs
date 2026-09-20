@@ -151,6 +151,40 @@ fn inbound_event(sender: &str, room_id: &str, consent: &str) -> Value {
     event
 }
 
+/// One `inbound.message.received.v1` as the collector publishes a mail
+/// (#276): a `mailto:` sender on the mail connection, a mailbox source, and
+/// the mail's own Message-ID — what a reply is threaded under (#278).
+fn mail_event(sender_email: &str, connection: &str) -> Value {
+    let at = in_seconds(-120);
+    let event = json!({
+        "specversion": "1.0",
+        "id": harness::sha256_hex(&format!("jmap:u1:{sender_email}:{at}")),
+        "source": "jmap://mail.example.com/u1/inbox-1",
+        "type": INBOUND_TYPE,
+        "time": at,
+        "subject": format!("mailto:{sender_email}"),
+        "datacontenttype": "application/json",
+        "dataschema": "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json",
+        "traceparent": TRACEPARENT,
+        "network": "email",
+        "connection": connection,
+        "consent": "granted",
+        "data": {
+            "body": "On se voit toujours lundi ?",
+            "format": "text/plain",
+            "reply_to": null,
+            "attachments": [],
+            "contact": { "display_name": "Alice Martin" },
+            "message_id": format!("<{}@example.org>", unique("mail")),
+            "title": "Point hebdo",
+            "audience": "direct"
+        }
+    });
+    validate_against_contract(&event, "inbound.message.received")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
 /// One `persona.suggest.produced.v1` as the assistant publishes it, with the
 /// expiry ticket #22's policy always sets.
 fn suggest_event(trigger: &Value, body: &str, expires_at: &str) -> Value {
@@ -978,5 +1012,64 @@ async fn a_suggestion_nobody_approved_says_so_rather_than_nothing() -> Result<()
     let (status, answer) = running.get("/api/approvals/not-an-event-id").await?;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{answer}");
     assert_eq!(answer["error"], json!("malformed_request"));
+    Ok(())
+}
+
+/// #278: a suggestion whose trigger is a mail is approved towards the mail
+/// connection, in the mail's thread — the contract's second target shape,
+/// which the collector sends and the Sensor leaves alone. The Gateway holds
+/// the mail connection in its registry for this, and the sender was granted
+/// on it.
+#[tokio::test]
+async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let static_dir = companion_build("approve-mail")?;
+    let mut env = gateway_env_with_consent(&static_dir, &nats_url());
+    for (key, value) in env.iter_mut() {
+        if key == "GATEWAY_CONNECTIONS" {
+            *value = format!("{value},mail-linagora=email");
+        }
+    }
+    let running = Running::start_with(static_dir, env).await?;
+    let sender = format!("{}@example.org", unique("alice"));
+    let (status, body) = running
+        .post(
+            "/api/consent/decisions",
+            &json!({
+                "subject": { "type": "contact", "id": format!("mailto:{sender}") },
+                "new_state": "granted",
+                "scope": { "connections": ["mail-linagora"] }
+            }),
+        )
+        .await?;
+    anyhow::ensure!(status == reqwest::StatusCode::CREATED, "{body}");
+    let trigger = mail_event(&sender, "mail-linagora");
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+    let suggestion = suggest_event(&trigger, "Oui, lundi 9h me va.", &in_seconds(3600));
+    bus.publish_event(SUGGEST_SUBJECT, &suggestion).await?;
+    let suggestion_id = suggestion["id"].as_str().unwrap();
+
+    let (status, answer) = running
+        .approve(&json!({ "suggestion_event_id": suggestion_id }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{answer}");
+    let sequence = answer["stream_sequence"].as_u64().context("no position")?;
+    let stored = stored_reply(&bus, sequence).await?;
+    validate_against_contract(&stored.payload, "persona.reply.approved")?;
+    let event = &stored.payload;
+    assert_eq!(event["network"], json!("email"));
+    assert_eq!(event["connection"], json!("mail-linagora"));
+    assert_eq!(
+        event["data"]["target"],
+        json!({
+            "connection": "mail-linagora",
+            "in_reply_to": trigger["data"]["message_id"],
+            "recipient": trigger["subject"]
+        }),
+        "the reply goes to the mail connection, in the mail's thread, to the sender the \
+         consent check was about: {event}"
+    );
+    assert!(event["data"]["target"].get("room_id").is_none());
     Ok(())
 }
