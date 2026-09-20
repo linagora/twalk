@@ -3,6 +3,8 @@
 
 import { describe, expect, it } from 'vitest';
 
+import type { Connection } from '$lib/connections/registry';
+
 import {
 	activityFeed,
 	bridgeRows,
@@ -112,9 +114,55 @@ function device(overrides: Partial<Device> = {}): Device {
 	};
 }
 
+/**
+ * The registry a Gateway derives from its bridges (#269): one connection per
+ * bridge, named after its network.
+ */
+function derived(bridges: readonly ConfiguredBridge[]): Connection[] {
+	return bridges.map((row) => ({
+		id: row.network,
+		kind: row.network as Connection['kind'],
+		label: row.bridge_id,
+		bridge_id: row.bridge_id
+	}));
+}
+
+/** `bridgeRows` on a deployment whose registry is derived from its bridges. */
+function rowsFor(bridges: readonly ConfiguredBridge[]) {
+	return bridgeRows(derived(bridges), bridges);
+}
+
 describe('bridgeRows', () => {
+	it('is one row per connection a bridge carries, found by the bridge id it names', () => {
+		// Two WhatsApp accounts, two bridges (#272): two rows, each its own
+		// connection, each labelled, each leading to its own manage screen.
+		// A connection no bridge carries — Matrix — is not a bridge row.
+		const bridges = [
+			bridge('whatsapp', connection('connected')),
+			{ ...bridge('whatsapp', connection('disconnected', true)), bridge_id: 'mautrix-whatsapp-work' },
+			bridge('signal', connection('connected'))
+		];
+		const registry: Connection[] = [
+			{ id: 'wa-home', kind: 'whatsapp', label: 'Home', bridge_id: 'mautrix-whatsapp' },
+			{ id: 'wa-work', kind: 'whatsapp', label: 'Work', bridge_id: 'mautrix-whatsapp-work' },
+			{ id: 'signal', kind: 'signal', label: 'mautrix-signal', bridge_id: 'mautrix-signal' },
+			{ id: 'matrix', kind: 'matrix', label: 'example.com' }
+		];
+		const rows = bridgeRows(registry, bridges);
+		expect(rows.map((row) => row.connectionId)).toEqual(['wa-home', 'wa-work', 'signal']);
+		expect(rows.map((row) => row.bridgeId)).toEqual([
+			'mautrix-whatsapp',
+			'mautrix-whatsapp-work',
+			'mautrix-signal'
+		]);
+		expect(rows.map((row) => row.label)).toEqual(['Home', 'Work', null]);
+		expect(rows.map((row) => row.state)).toEqual(['connected', 'failed', 'connected']);
+		expect(rows[0]!.route).toBe('/networks/whatsapp/manage?connection=wa-home');
+		expect(rows[2]!.route).toBe('/networks/signal/manage');
+	});
+
 	it('reads the contract state the bridge reports, not a login process', () => {
-		const rows = bridgeRows([
+		const rows = rowsFor([
 			bridge('whatsapp', connection('connected')),
 			bridge('signal', connection('session_expired')),
 			bridge('sms', connection('disconnected', true)),
@@ -128,24 +176,24 @@ describe('bridgeRows', () => {
 		// The defect of #108 as this screen showed it: the dot was read off
 		// `login`, so a scan in progress and a forgotten process each turned a
 		// live WhatsApp link into "not connected".
-		const scanning = bridgeRows([
+		const scanning = rowsFor([
 			bridge('whatsapp', connection('connected'), { state: 'awaiting_remote' })
 		]);
 		expect(scanning[0]!.state).toBe('connected');
 
-		const restarted = bridgeRows([bridge('whatsapp', connection('connected'), null)]);
+		const restarted = rowsFor([bridge('whatsapp', connection('connected'), null)]);
 		expect(restarted[0]!.state).toBe('connected');
 	});
 
 	it('says the state is unknown, not "never", when the bridge could not be asked', () => {
-		const [row] = bridgeRows([bridge('whatsapp', connection(null, false))]);
+		const [row] = rowsFor([bridge('whatsapp', connection(null, false))]);
 		expect(row.state).toBe('unknown');
 		// Idle, not red: nothing is known to be wrong either.
 		expect(row.tone).toBe('idle');
 	});
 
 	it('treats a bridge that is coming back up as connecting, not broken', () => {
-		const rows = bridgeRows([
+		const rows = rowsFor([
 			bridge('whatsapp', connection('starting')),
 			bridge('signal', connection('degraded'))
 		]);
@@ -153,30 +201,30 @@ describe('bridgeRows', () => {
 	});
 
 	it('sends Manage to the management screen once an account is linked', () => {
-		const [linked] = bridgeRows([bridge('whatsapp', connection('connected'))]);
+		const [linked] = rowsFor([bridge('whatsapp', connection('connected'))]);
 		expect(linked.route).toBe('/networks/whatsapp/manage');
 		// Nothing linked: the row leads to the login screen, which is the only
 		// useful thing there.
-		const [empty] = bridgeRows([bridge('whatsapp', connection('disconnected'))]);
+		const [empty] = rowsFor([bridge('whatsapp', connection('disconnected'))]);
 		expect(empty.route).toBe('/networks/whatsapp');
 	});
 
 	it('dates the row from when the link last changed state', () => {
-		const [row] = bridgeRows([bridge('whatsapp', connection('connected'))]);
+		const [row] = rowsFor([bridge('whatsapp', connection('connected'))]);
 		expect(row.since).toBe('2026-09-18T07:27:59.000Z');
 	});
 
 	it('reports no last-message time, because nothing reports one yet', () => {
 		// The honest answer: a zero or a boot time here would be a number the
 		// user could act on and that means nothing.
-		const [row] = bridgeRows([bridge('whatsapp', connection('connected'))]);
+		const [row] = rowsFor([bridge('whatsapp', connection('connected'))]);
 		expect(row.lastMessageAt).toBeNull();
 	});
 
 	it('names only the expired bridges for the amber banner', () => {
 		// `session_expired` — which is `BAD_CREDENTIALS`, what a session
 		// revoked from the user's own phone reports.
-		const rows = bridgeRows([
+		const rows = rowsFor([
 			bridge('whatsapp', connection('session_expired')),
 			bridge('signal', connection('connected'))
 		]);
@@ -236,7 +284,7 @@ describe('pendingDecisions', () => {
 });
 
 describe('overallHealth', () => {
-	const connected = bridgeRows([bridge('whatsapp', connection('connected'))]);
+	const connected = rowsFor([bridge('whatsapp', connection('connected'))]);
 	const active = personaRows([entry('persona', 'assistant', 'whatsapp', 'granted')]);
 
 	it('is green when a network is connected and an agent is active', () => {
@@ -250,7 +298,7 @@ describe('overallHealth', () => {
 	});
 
 	it('wants attention for an expired bridge or an unreachable Gateway', () => {
-		const stale = bridgeRows([
+		const stale = rowsFor([
 			bridge('whatsapp', connection('session_expired'))
 		]);
 		expect(overallHealth({ bridges: stale, personas: active, gatewayReachable: true })).toBe(

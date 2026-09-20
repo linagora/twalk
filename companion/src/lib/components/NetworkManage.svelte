@@ -30,9 +30,19 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 
+	import { page } from '$app/state';
+
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 	import ActionProblem from '$lib/components/ActionProblem.svelte';
+	import {
+		bridgeOf,
+		connectionQuery,
+		loadRegistry,
+		namedIn,
+		ofKind,
+		pick
+	} from '$lib/connections/registry';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
@@ -63,15 +73,28 @@
 
 	const card = $derived(cardFor(network));
 	const account = $derived(connection.account);
-	const loginRoute = $derived(card?.route ?? '/networks');
+	/** The login screen of this same connection: the query travels with it (#272). */
+	let query = $state('');
+	const loginRoute = $derived(card === undefined ? '/networks' : `${card.route}${query}`);
 
 	onMount(load);
 
+	/**
+	 * The connection this screen manages — the URL's, or the kind's only one
+	 * — and the bridge carrying it, by the id the connection names (#272).
+	 */
 	async function load() {
-		const listed = await gateway.GET('/api/bridges').catch(() => null);
-		listKnown = listed !== null && listed.error === undefined;
-		listTrouble = listKnown ? null : troubleOf(listed);
-		const row = listed?.data?.bridges.find((bridge) => bridge.network === network) ?? null;
+		const [registry, listed] = await Promise.all([
+			loadRegistry(),
+			gateway.GET('/api/bridges').catch(() => null)
+		]);
+		listKnown = registry.known && listed !== null && listed.error === undefined;
+		listTrouble = listKnown ? null : (registry.trouble ?? troubleOf(listed));
+		const picked = pick(registry.connections, network, namedIn(page.url));
+		query =
+			picked === null ? '' : connectionQuery(picked, ofKind(registry.connections, network));
+		const row =
+			picked === null || listed?.data === undefined ? null : bridgeOf(picked, listed.data.bridges);
 		bridgeId = row?.bridge_id ?? null;
 		connection = connectionOf(row);
 		loaded = true;

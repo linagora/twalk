@@ -159,7 +159,8 @@
 				pending: answer.loaded.pending,
 				entries: answer.loaded.entries,
 				names: answer.loaded.names,
-				owner
+				owner,
+				connections: answer.loaded.connections
 			});
 			waiting = answer.loaded.waiting;
 			waitingProblem = answer.loaded.waitingProblem;
@@ -190,23 +191,23 @@
 		return key === null ? network : $t(key);
 	}
 
-	/** A row's identity: a decision is about `(contact, network)`, never a contact alone. */
+	/** A row's identity: a decision is about `(contact, connection)`, never a contact alone (#272). */
 	function idOf(row: Row): string {
-		return `${row.contact}|${row.network}`;
+		return `${row.contact}|${row.connection}`;
 	}
 
 	function when(instant: string | null): string | null {
 		return relativeTime(instant, now, $locale);
 	}
 
-	/** Records one decision about one contact on one network. */
+	/** Records one decision about one contact on one connection. */
 	async function set(row: Row, state: State) {
 		if (busy !== null || row.isOwner) {
 			return;
 		}
 		const id = idOf(row);
 		busy = id;
-		const answer = await decide(row.contact, row.network, state);
+		const answer = await decide(row.contact, row.connection, state);
 		busy = null;
 		if (answer.ok) {
 			outcomes = {
@@ -251,7 +252,7 @@
 		busy = 'bulk';
 		let written = 0;
 		for (const decision of decisions) {
-			const answer = await decide(decision.contact, decision.network, request.state);
+			const answer = await decide(decision.contact, decision.connection, request.state);
 			if (!answer.ok) {
 				busy = null;
 				armed = null;
@@ -571,15 +572,24 @@
 				{@const outcome = outcomes[id]}
 				<li
 					class="card contact"
-					data-testid={`consent-row-${row.contact}-${row.network}`}
+					data-testid={`consent-row-${row.contact}-${row.connection}`}
 					data-state={row.state}
 					data-decided-by={row.decidedBy}
 					data-network={row.network}
+					data-connection={row.connection}
 					data-owner={row.isOwner ? 'yes' : 'no'}
 				>
 					<p class="card__title">
 						<Icon name={row.network} size="dense" />
 						<span class:derived={row.labelSource !== 'display-name'}>{row.label}</span>
+						{#if row.connectionLabel !== null}
+							<!-- Which account this decision is about, when the kind has
+							     two (#272): the same person on the work WhatsApp and the
+							     home one is two rows, and each says which it is. -->
+							<span class="small muted" data-testid="row-connection"
+								>— {networkLabel(row.network)} · {row.connectionLabel}</span
+							>
+						{/if}
 					</p>
 					{#if row.labelSource !== 'display-name'}
 						<!-- Honest rather than blank: say what this label is. -->

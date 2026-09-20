@@ -1,17 +1,19 @@
-// The networks screen 3 offers, and what the Companion knows about each one
-// without asking the Gateway anything.
+// The kinds of connection screen 3 offers, and what the Companion knows about
+// each one without asking the Gateway anything.
 //
 // A **network** is what the user experiences — WhatsApp, Signal, SMS, Matrix —
-// and never a bridge name (CONTEXT.md). `GET /api/bridges` maps the two: it
-// reports one row per configured bridge instance, each carrying the network it
-// serves. So this table is the user-facing half (copy, icon, route, milestone,
-// what the platform allows) and the Gateway's list is the deployment half
-// (which of them this deployment can actually connect, and under which
-// `bridge_id`). Screen 3 joins them.
+// and never a bridge name (CONTEXT.md). It is the *kind* of a connection, not
+// its identity (ADR 0033): this table is the user-facing half of a kind (copy,
+// icon, route, milestone, what the platform allows), and the Gateway's
+// registry (`GET /api/connections`) is the deployment half — which
+// connections there are, and under which `bridge_id` each is carried. Screen
+// 3 joins them: **one card per connection**, and a kind with no connection
+// keeps one card, blocked. A bridge is found by the id its connection names,
+// never by matching networks (#272).
 //
 // Matrix is in the table and in no bridge list: the bring-your-own-account path
-// (ADR 0009) needs no bridge, so its card is always active and its screen talks
-// to the homeserver and to `/api/bootstrap/rooms`.
+// (ADR 0009) needs no bridge, its connection is in every registry, and its
+// screen talks to the homeserver and to `/api/bootstrap/rooms`.
 //
 // What a card says about being connected comes from `connection.ts`, which
 // reads the bridge's own answer. It must never come from the login *process*
@@ -21,6 +23,13 @@
 
 import type { IconName } from '$lib/icons';
 import type { MessageKey } from '$lib/i18n';
+import {
+	bridgeOf,
+	connectionQuery,
+	labelFor,
+	ofKind,
+	type Connection
+} from '$lib/connections/registry';
 import {
 	connectionOf,
 	isConnected,
@@ -137,15 +146,20 @@ export function cardFor(network: string): NetworkCard | undefined {
 }
 
 /**
- * Where *Manage* leads for a card that has a link to manage.
+ * Where *Manage* leads for a card that has a link to manage — naming the
+ * connection when its kind has several, as the card's own link does.
  *
- * `null` for a network with no bridge behind it: Matrix reaches Twalk by the
+ * `null` for a kind with no bridge behind it: Matrix reaches Twalk by the
  * Sensor being invited into the user's own rooms (ADR 0009), so there is no
  * login to disconnect and no management screen to open. Its card keeps
  * leading to its own screen.
  */
-export function manageRouteFor(card: NetworkCard): string | null {
-	return card.needsBridge && card.route !== null ? `${card.route}/manage` : null;
+export function manageRouteFor(state: Pick<CardState, 'card' | 'href'>): string | null {
+	if (!state.card.needsBridge || state.card.route === null || state.href === null) {
+		return null;
+	}
+	const [path, query] = state.href.split('?');
+	return `${path}/manage${query === undefined ? '' : `?${query}`}`;
 }
 
 /**
@@ -165,14 +179,27 @@ export type CardBlock = 'coming-soon' | 'no-bridge' | 'ios';
 /** A card joined with what this deployment and this browser allow. */
 export interface CardState {
 	readonly card: NetworkCard;
-	/** The bridge instance serving it, when the deployment has one. */
+	/**
+	 * The connection this card is (#272), or `null` for a kind the registry
+	 * has none of — the one card such a kind keeps, blocked.
+	 */
+	readonly connection: Connection | null;
+	/** Distinct per card: the connection's id, or the kind's when it has none. */
+	readonly key: string;
+	/** Which account, when the kind has more than one; `null` when it is the only one. */
+	readonly label: string | null;
+	/** Where the card leads — the kind's route, naming the connection when the kind has several. */
+	readonly href: string | null;
+	/** The bridge instance carrying it, by the id the connection names. */
 	readonly bridgeId: string | null;
 	/**
-	 * The link the bridge holds, read from `connection` and from nothing else
-	 * (#108). Survives a login being started, cancelled, or the Gateway being
-	 * restarted, because none of those is a thing that can unlink an account.
+	 * The link the bridge holds, read from the bridge's `connection` member
+	 * and from nothing else (#108). Survives a login being started, cancelled,
+	 * or the Gateway being restarted, because none of those is a thing that
+	 * can unlink an account. Named `link` here since #272, because
+	 * `connection` is the perimeter (ADR 0033) and the two are not one thing.
 	 */
-	readonly connection: NetworkConnection;
+	readonly link: NetworkConnection;
 	/** The wireframe's green check: `connection.state === 'connected'`. */
 	readonly connected: boolean;
 	/**
@@ -185,39 +212,77 @@ export interface CardState {
 }
 
 /**
- * Screen 3's grid: every card, with the deployment's bridges and the platform
- * folded in.
+ * Screen 3's grid: one card per connection of each catalogued kind, with the
+ * deployment's bridges and the platform folded in.
  *
- * `bridges` is `GET /api/bridges`, or an empty list when the call failed —
- * a Gateway that cannot answer must not silently turn every card into "not
- * configured", so the caller passes `bridgesKnown: false` and the screen says
- * so instead. Pure, so `catalogue.test.ts` covers every combination.
+ * `connections` is `GET /api/connections` and `bridges` is `GET /api/bridges`,
+ * each an empty list when its call failed — a Gateway that cannot answer must
+ * not silently turn every card into "not configured", so the caller passes
+ * `connectionsKnown: false` or `bridgesKnown: false` and the screen says so
+ * instead. Pure, so `catalogue.test.ts` covers every combination, the
+ * two-accounts shape included.
  */
 export function gridFor(options: {
+	connections: readonly Connection[];
+	connectionsKnown: boolean;
 	bridges: readonly BridgeRow[];
 	bridgesKnown: boolean;
 	ios: boolean;
 }): CardState[] {
-	return NETWORK_CARDS.map((card) => {
-		const bridge = options.bridges.find((row) => row.network === card.network) ?? null;
-		const connection = connectionOf(bridge);
-		let blockedBy: CardBlock | null = null;
-		if (card.milestone === 'v0.2') {
-			blockedBy = 'coming-soon';
-		} else if (card.androidOnly && options.ios) {
-			blockedBy = 'ios';
-		} else if (card.needsBridge && options.bridgesKnown && bridge === null) {
-			blockedBy = 'no-bridge';
+	return NETWORK_CARDS.flatMap((card) => {
+		const siblings = ofKind(options.connections, card.network);
+		if (siblings.length === 0) {
+			// A kind with no connection: one card, blocked when the registry
+			// was read and says so; tappable when nobody could be asked.
+			return [
+				cardState(card, null, null, null, options, {
+					noConnection: options.connectionsKnown
+				})
+			];
 		}
-		return {
-			card,
-			bridgeId: bridge?.bridge_id ?? null,
-			connection,
-			connected: isConnected(connection),
-			linked: connection.linked,
-			blockedBy
-		};
+		return siblings.map((connection) =>
+			cardState(
+				card,
+				connection,
+				labelFor(connection, siblings),
+				card.route === null ? null : `${card.route}${connectionQuery(connection, siblings)}`,
+				options,
+				{ noConnection: false }
+			)
+		);
 	});
+}
+
+function cardState(
+	card: NetworkCard,
+	connection: Connection | null,
+	label: string | null,
+	href: string | null,
+	options: { bridges: readonly BridgeRow[]; bridgesKnown: boolean; ios: boolean },
+	facts: { noConnection: boolean }
+): CardState {
+	const bridge = connection === null ? null : bridgeOf(connection, options.bridges);
+	const link = connectionOf(bridge);
+	let blockedBy: CardBlock | null = null;
+	if (card.milestone === 'v0.2') {
+		blockedBy = 'coming-soon';
+	} else if (card.androidOnly && options.ios) {
+		blockedBy = 'ios';
+	} else if (card.needsBridge && (facts.noConnection || (options.bridgesKnown && bridge === null))) {
+		blockedBy = 'no-bridge';
+	}
+	return {
+		card,
+		connection,
+		key: connection?.id ?? card.network,
+		label,
+		href: href ?? (connection === null && !facts.noConnection ? card.route : href),
+		bridgeId: bridge?.bridge_id ?? null,
+		link,
+		connected: isConnected(link),
+		linked: link.linked,
+		blockedBy
+	};
 }
 
 /**

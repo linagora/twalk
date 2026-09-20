@@ -37,6 +37,7 @@
 	import { t } from '$lib/i18n';
 	import { cardFor } from '$lib/networks/catalogue';
 	import { PERSONA_CARDS, ASSISTANT, type PersonaCard } from '$lib/personas/catalogue';
+	import { loadRegistry } from '$lib/connections/registry';
 	import { activatePersona, type ActivationFailure } from '$lib/personas/activation';
 	import {
 		defaultSelection,
@@ -73,23 +74,38 @@
 
 	async function readScope() {
 		bridgesTrouble = null;
-		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		// The registry says which connections there are (#272); the bridge
+		// list says which of them is connected.
+		const [registry, listed] = await Promise.all([
+			loadRegistry(),
+			gateway.GET('/api/bridges').catch(() => null)
+		]);
+		if (!registry.known) {
+			bridgesTrouble = registry.trouble;
+			loaded = true;
+			return;
+		}
 		if (listed === null || listed.error !== undefined) {
 			bridgesTrouble = troubleOf(listed);
 			loaded = true;
 			return;
 		}
-		options = scopeOptions(listed.data.bridges as BridgeRow[]);
+		options = scopeOptions(registry.connections, listed.data.bridges as BridgeRow[]);
 		selected = defaultSelection(options);
 		loaded = true;
 	}
 
 	const anyProven = $derived(options.some((option) => option.proven));
 
-	function toggle(network: string) {
-		selected = selected.includes(network)
-			? selected.filter((entry) => entry !== network)
-			: [...selected, network];
+	function toggle(connection: string) {
+		selected = selected.includes(connection)
+			? selected.filter((entry) => entry !== connection)
+			: [...selected, connection];
+	}
+
+	/** What an option is called: its kind, and which account when the kind has two. */
+	function optionLabel(option: ScopeOption): string {
+		return option.label === null ? label(option.network) : `${label(option.network)} — ${option.label}`;
 	}
 
 	function label(network: string): string {
@@ -105,7 +121,7 @@
 		stage = 'working';
 		const result = await activatePersona(card.id, selected);
 		if (result.ok) {
-			activatedOn = result.decision.scope.networks;
+			activatedOn = result.decision.scope.connections;
 			stage = 'done';
 			return;
 		}
@@ -148,7 +164,10 @@
 			<p class="card__title">
 				<Icon name="ok" size="dense" />
 				{$t('persona.activated.title', {
-					networks: activatedOn.map(label).join(', ')
+					networks: activatedOn
+						.map((id) => options.find((option) => option.connection === id))
+						.map((option, at) => (option === undefined ? activatedOn[at]! : optionLabel(option)))
+						.join(', ')
 				})}
 			</p>
 			<p>{$t('persona.activated.body')}</p>
@@ -233,16 +252,20 @@
 			{/if}
 
 			<ul class="scope" aria-busy={!loaded}>
-				{#each options as option (option.network)}
+				{#each options as option (option.connection)}
 					<li>
-						<label class="scope__row" data-testid={`scope-${option.network}`}>
+						<label
+							class="scope__row"
+							data-testid={`scope-${option.connection}`}
+							data-network={option.network}
+						>
 							<input
 								type="checkbox"
-								checked={selected.includes(option.network)}
-								onchange={() => toggle(option.network)}
+								checked={selected.includes(option.connection)}
+								onchange={() => toggle(option.connection)}
 							/>
 							<span class="scope__text">
-								<span>{label(option.network)}</span>
+								<span>{optionLabel(option)}</span>
 								{#if option.proven}
 									<span class="badge badge--ok">
 										<Icon name="check" size="dense" />

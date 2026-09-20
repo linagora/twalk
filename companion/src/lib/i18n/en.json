@@ -110,6 +110,9 @@
 
 	"networks.noBridge.title": "This network is not configured",
 	"networks.noBridge.body": "Your Twalk server has no bridge for {network}. Turn on the bridges profile of your deployment, then come back to this screen.",
+	"networks.whichConnection.title": "Which {network} account?",
+	"networks.whichConnection.body": "Your Twalk server has more than one {network} account. Choose the one you mean from its card.",
+	"networks.whichConnection.back": "Back to the networks",
 
 	"networks.starting": "Asking for a code…",
 	"networks.expiresIn": "This code refreshes in {seconds, plural, one {# second} other {# seconds}}.",

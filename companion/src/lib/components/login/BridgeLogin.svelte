@@ -47,6 +47,7 @@
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
+	import { bridgeOf, loadRegistry, namedIn, ofKind, pick } from '$lib/connections/registry';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n';
 	import type { LoginScreenCopy } from '$lib/networks/copy';
@@ -86,6 +87,11 @@
 	/** `null` until `GET /api/bridges` has answered. */
 	let bridgeId = $state<string | null>(null);
 	let bridgeKnown = $state(false);
+	/**
+	 * This kind has several connections and the URL named none: the screen
+	 * will not pick one, and sends the user back to the cards (#272).
+	 */
+	let ambiguous = $state(false);
 	/**
 	 * Why the bridge list could not be read, or `null` when it could.
 	 *
@@ -134,11 +140,15 @@
 	});
 
 	/**
-	 * Which bridge serves this network, and the login on it.
+	 * Which connection this screen is about, which bridge carries it, and the
+	 * login on it (#272).
 	 *
-	 * Separate from `onMount` so the terminal state below can offer it again:
-	 * the Gateway being momentarily unreadable is a thing that passes, and the
-	 * user's only useful action is to ask once more.
+	 * The connection is the URL's (`?connection=`) or the kind's only one —
+	 * never the first of two — and the bridge is found by the id the
+	 * connection names, never by matching networks. Separate from `onMount`
+	 * so the terminal state below can offer it again: the Gateway being
+	 * momentarily unreadable is a thing that passes, and the user's only
+	 * useful action is to ask once more.
 	 */
 	async function findBridge() {
 		bridgeKnown = false;
@@ -148,13 +158,22 @@
 		unsubscribe = null;
 		session?.stop();
 		session = null;
-		const listed = await gateway.GET('/api/bridges').catch(() => null);
+		const [registry, listed] = await Promise.all([
+			loadRegistry(),
+			gateway.GET('/api/bridges').catch(() => null)
+		]);
+		if (!registry.known) {
+			bridgesTrouble = registry.trouble;
+			return;
+		}
 		if (listed === null || listed.error !== undefined) {
 			bridgesTrouble = troubleOf(listed);
 			return;
 		}
 		bridgeKnown = true;
-		const row = listed.data.bridges.find((bridge) => bridge.network === copy.network);
+		const connection = pick(registry.connections, copy.network, namedIn(page.url));
+		ambiguous = connection === null && ofKind(registry.connections, copy.network).length > 1;
+		const row = connection === null ? null : bridgeOf(connection, listed.data.bridges);
 		bridgeId = row?.bridge_id ?? null;
 		if (bridgeId !== null) {
 			session = new LoginSession(bridgeId);
@@ -252,6 +271,19 @@
 					</button>
 				</p>
 			{/if}
+		</div>
+	{:else if bridgeKnown && ambiguous}
+		<!-- Two accounts of this kind and no word which: the cards say which is
+		     which, and this screen will not guess (ADR 0033). -->
+		<div class="card card--warning" data-testid="which-connection">
+			<p class="card__title">
+				<Icon name="warning" size="dense" />
+				{$t('networks.whichConnection.title')}
+			</p>
+			<p>{$t('networks.whichConnection.body', { network: $t(copy.title) })}</p>
+			<p class="actions">
+				<a class="button button--secondary" href="/networks">{$t('networks.whichConnection.back')}</a>
+			</p>
 		</div>
 	{:else if bridgeKnown && bridgeId === null}
 		<!-- The deployment has no bridge for this network. Configuration, not a

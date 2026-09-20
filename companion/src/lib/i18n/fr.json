@@ -245,6 +245,9 @@
 
 	"networks.noBridge.title": "Ce réseau n'est pas configuré",
 	"networks.noBridge.body": "Votre serveur Twalk n'a pas de passerelle pour {network}. Activez le profil « bridges » de votre installation, puis revenez sur cet écran.",
+	"networks.whichConnection.title": "Quel compte {network} ?",
+	"networks.whichConnection.body": "Votre serveur Twalk a plusieurs comptes {network}. Choisissez celui que vous voulez depuis sa carte.",
+	"networks.whichConnection.back": "Retour aux réseaux",
 
 	"networks.starting": "Demande d'un code…",
 	"networks.expiresIn": "Ce code se renouvelle dans {seconds, plural, one {# seconde} other {# secondes}}.",

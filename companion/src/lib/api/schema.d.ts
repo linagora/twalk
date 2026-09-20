@@ -875,9 +875,11 @@ export interface paths {
          *     this list is read, so an upgraded deployment stops offering the user a
          *     decision about their own ghost (ticket #149, ADR 0018, ADR 0021).
          *
-         *     **The numbers.** `total` and `networks` always count the whole list,
-         *     whatever `?network=` narrows `contacts` to, so a badge and the list
-         *     beside it can never disagree.
+         *     **The numbers.** `total`, `connections` and `networks` always count
+         *     the whole list, whatever `?connection=` or `?network=` narrows
+         *     `contacts` to, so a badge and the list beside it can never disagree.
+         *     A screen that decides per connection (#272) reads `connections`;
+         *     `networks` adds the connections of one kind up.
          *
          *     Not paginated and not capped, like `GET /api/consent/state`.
          */
@@ -2677,6 +2679,13 @@ export interface components {
          * @enum {string}
          */
         Network: "whatsapp" | "telegram" | "signal" | "discord" | "sms" | "matrix" | "email";
+        PendingConnectionCount: {
+            connection: components["schemas"]["ConnectionId"];
+            /** @description How many contacts are waiting on that connection. */
+            count: number;
+            /** @description The connection's kind. */
+            network: components["schemas"]["Network"];
+        };
         /**
          * @description One contact waiting for a decision, on one connection. An id, a
          *     perimeter and two instants — and deliberately nothing else: a body, a
@@ -2715,6 +2724,13 @@ export interface components {
         };
         PendingContacts: {
             /**
+             * @description The same total, broken down per connection (#272): the numbers a
+             *     screen that decides per connection reads. In the contract's
+             *     order of network values, then by connection id. A connection
+             *     with nothing waiting is absent rather than present at zero.
+             */
+            connections: components["schemas"]["PendingConnectionCount"][];
+            /**
              * @description The contacts themselves, oldest first sighting first - the order
              *     the user met them in, and stable between polls. Narrowed by
              *     `?network=` when one was given.
@@ -2722,14 +2738,15 @@ export interface components {
             contacts: components["schemas"]["PendingContact"][];
             /**
              * @description The same total, broken down per network, in the contract's own
-             *     order of network values. A network with nothing waiting is absent
-             *     rather than present at zero.
+             *     order of network values — kept for a screen that has not learned
+             *     connections yet. A network with nothing waiting is absent rather
+             *     than present at zero.
              */
             networks: components["schemas"]["PendingContactCount"][];
             /**
              * @description How many contacts are waiting for a decision in all - the
              *     dashboard's number. Counts the whole list, never only what a
-             *     `?network=` filter left in `contacts`.
+             *     `?connection=` or `?network=` filter left in `contacts`.
              */
             total: number;
         };
@@ -5283,7 +5300,16 @@ export interface operations {
     getPendingContacts: {
         parameters: {
             query?: {
-                /** @description Narrows `contacts` to one network. The counts are unaffected. */
+                /**
+                 * @description Narrows `contacts` to one connection, by its id in
+                 *     `GET /api/connections`. The counts are unaffected. Wins over
+                 *     `network` when both are sent.
+                 */
+                connection?: components["schemas"]["ConnectionId"];
+                /**
+                 * @description Narrows `contacts` to one network — every connection of that
+                 *     kind. The counts are unaffected.
+                 */
                 network?: components["schemas"]["Network"];
             };
             header?: never;
@@ -5301,7 +5327,10 @@ export interface operations {
                     "application/json": components["schemas"]["PendingContacts"];
                 };
             };
-            /** @description `unknown_value` - `network` is not one of the contract's. */
+            /**
+             * @description `unknown_value` - `network` is not one of the contract's, or
+             *     `connection` is not one of the registry's.
+             */
             400: {
                 headers: {
                     [name: string]: unknown;

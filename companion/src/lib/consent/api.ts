@@ -32,7 +32,9 @@
 //
 // # One decision, one request
 //
-// [`decide`] takes one contact and one network. `POST /api/consent/decisions`
+// [`decide`] takes one contact and one connection (ADR 0033, #272) — the
+// perimeter, never its kind: two WhatsApp accounts are two decisions.
+// `POST /api/consent/decisions`
 // accepts one subject and one scope, and there is no batch endpoint to reach
 // for: the bulk control writes N decisions with N requests, which is also what
 // keeps the count on the button honest about what is about to happen.
@@ -51,15 +53,18 @@
 import { gateway } from '$lib/api/client';
 import { troubleOf } from '$lib/api/trouble';
 import type { components } from '$lib/api/schema';
+import { loadRegistry, type Connection } from '$lib/connections/registry';
 import { explain, type Explained } from './refusal';
-import type { DisplayName, Entry, Network, PendingContact, State } from './model';
+import type { DisplayName, Entry, PendingContact, State } from './model';
 
 export type Recorded = components['schemas']['RecordedConsentDecision'];
 export type PendingCount = components['schemas']['PendingContactCount'];
+export type PendingConnectionCount = components['schemas']['PendingConnectionCount'];
 
-/** How many contacts are waiting, in all and per network — the Gateway's own counts. */
+/** How many contacts are waiting, in all, per connection and per network — the Gateway's own counts. */
 export interface Waiting {
 	total: number;
+	connections: PendingConnectionCount[];
 	networks: PendingCount[];
 }
 
@@ -67,6 +72,10 @@ export interface Loaded {
 	pending: readonly PendingContact[];
 	entries: readonly Entry[];
 	names: readonly DisplayName[];
+	/** The registry (#272), or `[]` when it could not be read — the rows are then unlabelled. */
+	connections: readonly Connection[];
+	/** A refused registry read, beside rows that are still true. */
+	connectionsProblem: Explained | null;
 	/**
 	 * The Gateway's counts, which always describe the whole list whatever a
 	 * `?network=` narrowed — so a badge and the list beside it cannot disagree.
@@ -103,9 +112,13 @@ const NAMES_PER_CALL = 200;
 
 /** Everything the screen draws, in one call. */
 export async function load(): Promise<Load> {
-	const [waitingAnswer, stateAnswer] = await Promise.all([
+	const [waitingAnswer, stateAnswer, registry] = await Promise.all([
 		gateway.GET('/api/contacts/pending').catch(() => null),
-		gateway.GET('/api/consent/state').catch(() => null)
+		gateway.GET('/api/consent/state').catch(() => null),
+		// The registry names an account when a kind has two (#272). A read
+		// that fails takes away only what it answers: the rows still read,
+		// unlabelled, and the screen says the registry could not be read.
+		loadRegistry()
 	]);
 
 	if (stateAnswer === null || stateAnswer.data === undefined) {
@@ -147,10 +160,12 @@ export async function load(): Promise<Load> {
 			pending,
 			entries,
 			names,
+			connections: registry.connections,
+			connectionsProblem: registry.known ? null : explain(registry.trouble ?? 'unreachable', null),
 			waiting:
 				counted === undefined
 					? null
-					: { total: counted.total, networks: counted.networks },
+					: { total: counted.total, connections: counted.connections, networks: counted.networks },
 			waitingProblem,
 			namesProblem: problem
 		}
@@ -188,16 +203,17 @@ async function displayNames(
 }
 
 /**
- * Records one decision about one contact on one network.
+ * Records one decision about one contact on one connection.
  *
  * `state` is one of the three the contract has. There is no fourth argument for
  * "forget this decision": the journal is append-only, and the Gateway refuses
  * `unset` as a `new_state` because it is the absence of a decision rather than
- * one (ADR 0010).
+ * one (ADR 0010). The scope is the connection's id (#270): the Gateway holds
+ * consent per perimeter, and this module never names a network in its place.
  */
 export async function decide(
 	contact: string,
-	network: Network,
+	connection: string,
 	state: State,
 	reason?: string
 ): Promise<Decided> {
@@ -206,7 +222,7 @@ export async function decide(
 			body: {
 				subject: { type: 'contact', id: contact },
 				new_state: state,
-				scope: { networks: [network] },
+				scope: { connections: [connection] },
 				...(reason === undefined ? {} : { reason })
 			}
 		})
