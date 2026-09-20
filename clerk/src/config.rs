@@ -82,6 +82,29 @@ pub struct Config {
     /// and deletes it.
     pub sweep: Duration,
     pub log_level: String,
+    /// The write half of the clerk (#284): present only when its three
+    /// variables are all set. `None` is a supported deployment — a clerk
+    /// with no write half still reads the bus and posts, it just cannot
+    /// turn a ✅ into an approval — and the binary says so at startup
+    /// rather than a ✅ silently deciding nothing.
+    pub write_half: Option<WriteHalf>,
+}
+
+/// The write half of the clerk (#284), present only when all three are
+/// set.
+#[derive(Debug, Clone)]
+pub struct WriteHalf {
+    /// 64 lowercase hex characters: the owner's Nostr public key.
+    pub owner_pubkey: String,
+    /// The Companion Gateway's origin, no trailing slash, `http://` or
+    /// `https://`.
+    pub gateway_url: String,
+    /// The file holding `TWALK_GATEWAY_REFRESH_TOKEN=<token>`; the clerk
+    /// rewrites it.
+    pub session_file: PathBuf,
+    /// How often the clerk looks at the gestures on its posts (default
+    /// 5 s).
+    pub decision: Duration,
 }
 
 impl Config {
@@ -114,9 +137,16 @@ impl Config {
                 .context("CLERK_LISTEN must be a host:port address")?,
             sweep: Duration::from_secs(number(vars, "CLERK_SWEEP_SECONDS", 60)?),
             log_level: optional(vars, "CLERK_LOG_LEVEL").unwrap_or_else(|| "info".to_owned()),
+            write_half: build_write_half(vars)?,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// The write half of the clerk (#284), when its three variables are all
+    /// set.
+    pub fn write_half(&self) -> Option<&WriteHalf> {
+        self.write_half.as_ref()
     }
 
     /// The bus subject of a contract event type, in this deployment's
@@ -173,6 +203,79 @@ fn is_relay_url(url: &str) -> bool {
         return false;
     };
     !rest.is_empty() && !rest.contains('/')
+}
+
+/// Builds the write half from its three variables, or refuses to build a
+/// partial one: `None` unless all three are set, because a clerk holding
+/// two of the three has a broken write half rather than an absent one, and
+/// silently treating that as "no write half" would leave an operator
+/// looking for why a ✅ still decides nothing.
+fn build_write_half(vars: &dyn Fn(&str) -> Option<String>) -> Result<Option<WriteHalf>> {
+    let owner_pubkey = optional(vars, "CLERK_OWNER_PUBKEY");
+    let gateway_url = optional(vars, "CLERK_GATEWAY_URL");
+    let session_file = optional(vars, "CLERK_GATEWAY_SESSION_FILE");
+    match (owner_pubkey, gateway_url, session_file) {
+        (None, None, None) => Ok(None),
+        (Some(owner_pubkey), Some(gateway_url), Some(session_file)) => {
+            let owner_pubkey = normalize_owner_pubkey(&owner_pubkey)?;
+            if !is_origin_url(&gateway_url) {
+                bail!(
+                    "CLERK_GATEWAY_URL must be the Companion Gateway's origin — http:// or \
+                     https://, host and port only, no path and no trailing slash — because the \
+                     clerk builds every request path onto it; got {:?}",
+                    gateway_url
+                );
+            }
+            Ok(Some(WriteHalf {
+                owner_pubkey,
+                gateway_url,
+                session_file: PathBuf::from(session_file),
+                decision: Duration::from_secs(number(vars, "CLERK_DECISION_SECONDS", 5)?),
+            }))
+        }
+        (owner_pubkey, gateway_url, session_file) => {
+            let missing: Vec<&str> = [
+                (owner_pubkey.is_none(), "CLERK_OWNER_PUBKEY"),
+                (gateway_url.is_none(), "CLERK_GATEWAY_URL"),
+                (session_file.is_none(), "CLERK_GATEWAY_SESSION_FILE"),
+            ]
+            .into_iter()
+            .filter_map(|(is_missing, name)| is_missing.then_some(name))
+            .collect();
+            bail!(
+                "the clerk's write half (#284) needs CLERK_OWNER_PUBKEY, CLERK_GATEWAY_URL and \
+                 CLERK_GATEWAY_SESSION_FILE together; missing: {}",
+                missing.join(", ")
+            );
+        }
+    }
+}
+
+/// The owner's Nostr public key, as `CLERK_OWNER_PUBKEY` gives it: 64
+/// hexadecimal characters, lowercased (Nostr's own convention for a hex
+/// key), never an `npub1…` bech32 string — the clerk needs the same raw
+/// hex the rest of the Nostr ecosystem tags a pubkey with, not the address
+/// a human reads it as.
+fn normalize_owner_pubkey(value: &str) -> Result<String> {
+    let lowered = value.to_ascii_lowercase();
+    if lowered.len() == 64 && lowered.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(lowered)
+    } else {
+        bail!(
+            "CLERK_OWNER_PUBKEY must be the owner's Nostr public key as 64 hexadecimal \
+             characters, not an npub1… string or anything else; got {:?}",
+            value
+        );
+    }
+}
+
+/// Whether `url` is the Companion Gateway's origin alone: the same shape
+/// [`is_relay_url`] checks for the relay — `http://` or `https://`, a host
+/// and optionally a port, and nothing after it — because the clerk builds
+/// every request path onto this value and a trailing slash or a path
+/// already there would double up.
+fn is_origin_url(url: &str) -> bool {
+    is_relay_url(url)
 }
 
 /// A Buzz channel is identified by a UUID, the same shape
@@ -317,6 +420,91 @@ mod tests {
             .contains("CLERK_SWEEP_SECONDS"));
     }
 
+    /// A valid write half, added onto [`FULL`] the same way `FULL` itself
+    /// is extended in the tests above.
+    const WRITE_HALF: &[(&str, &str)] = &[
+        (
+            "CLERK_OWNER_PUBKEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ),
+        ("CLERK_GATEWAY_URL", "http://127.0.0.1:8080"),
+        (
+            "CLERK_GATEWAY_SESSION_FILE",
+            "/run/secrets/clerk-gateway-session",
+        ),
+    ];
+
+    #[test]
+    fn write_half_is_absent_when_none_of_its_variables_is_set() {
+        let c = Config::from_vars(&vars(FULL)).unwrap();
+        assert!(c.write_half().is_none());
+    }
+
+    #[test]
+    fn write_half_needs_all_three() {
+        let mut v = FULL.to_vec();
+        v.push(WRITE_HALF[0]); // CLERK_OWNER_PUBKEY alone
+        let err = Config::from_vars(&vars(&v)).unwrap_err().to_string();
+        assert!(err.contains("CLERK_GATEWAY_URL"), "{err}");
+        assert!(err.contains("CLERK_GATEWAY_SESSION_FILE"), "{err}");
+    }
+
+    #[test]
+    fn owner_pubkey_is_64_lowercase_hex() {
+        for bad in [
+            "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc", // 63 chars
+        ] {
+            let mut v = FULL.to_vec();
+            v.push(("CLERK_OWNER_PUBKEY", bad));
+            v.push(WRITE_HALF[1]);
+            v.push(WRITE_HALF[2]);
+            let err = Config::from_vars(&vars(&v)).unwrap_err().to_string();
+            assert!(
+                err.contains("CLERK_OWNER_PUBKEY") && err.contains("64 hexadecimal characters"),
+                "{bad}: {err}"
+            );
+        }
+
+        let mut v = FULL.to_vec();
+        v.push((
+            "CLERK_OWNER_PUBKEY",
+            "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        ));
+        v.push(WRITE_HALF[1]);
+        v.push(WRITE_HALF[2]);
+        let c = Config::from_vars(&vars(&v)).unwrap();
+        assert_eq!(
+            c.write_half().unwrap().owner_pubkey,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn gateway_url_has_no_path_and_no_trailing_slash() {
+        for bad in ["https://gw.example/", "https://gw.example/api"] {
+            let mut v = FULL.to_vec();
+            v.push(WRITE_HALF[0]);
+            v.push(("CLERK_GATEWAY_URL", bad));
+            v.push(WRITE_HALF[2]);
+            let err = Config::from_vars(&vars(&v)).unwrap_err().to_string();
+            assert!(err.contains("CLERK_GATEWAY_URL"), "{bad}: {err}");
+        }
+
+        let mut v = FULL.to_vec();
+        v.extend_from_slice(WRITE_HALF);
+        let c = Config::from_vars(&vars(&v)).unwrap();
+        assert_eq!(c.write_half().unwrap().gateway_url, "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn decision_seconds_defaults_to_five() {
+        let mut v = FULL.to_vec();
+        v.extend_from_slice(WRITE_HALF);
+        let c = Config::from_vars(&vars(&v)).unwrap();
+        assert_eq!(c.write_half().unwrap().decision, Duration::from_secs(5));
+    }
+
     #[test]
     fn bus_subjects_follow_the_prefix() {
         let c = Config::from_vars(&vars(FULL)).unwrap();
@@ -374,13 +562,19 @@ mod tests {
 
     /// The ticket's container-environment criterion, guarded at the file
     /// that decides it: the clerk's compose service is handed its own
-    /// `CLERK_*` variables and nothing of the Gateway's or Hermes's — not
-    /// the service token that opens the consent snapshot, not Hermes's key,
-    /// no token or secret of any kind — with one named exception, the
+    /// `CLERK_*` variables and no credential of the Gateway's or Hermes's —
+    /// not the service token that opens the consent snapshot, not Hermes's
+    /// key, no token or secret of any kind — with one named exception, the
     /// `${HERMES_USER_LANGUAGE:-}` fallback source for the clerk's own
-    /// language, a preference and not a credential. Asserting it on a container Docker
-    /// really started is #284's deployment suite; this is what fails first
-    /// if a later edit adds a variable here.
+    /// language, a preference and not a credential. Since #284 the write
+    /// half's own credential is a refresh token in a file the compose
+    /// service mounts (`CLERK_GATEWAY_SESSION_FILE`), never a value in its
+    /// environment, so a `CLERK_GATEWAY_URL: ${CLERK_GATEWAY_URL:-…}` line
+    /// naming the Gateway is expected and passes; only a credential —
+    /// `_TOKEN`, `_SECRET`, the Gateway's own service token or Hermes's key
+    /// — is refused. Asserting it on a container Docker really started is
+    /// #284's deployment suite; this is what fails first if a later edit
+    /// adds a variable here.
     #[test]
     fn the_compose_service_holds_no_gateway_or_hermes_credential() {
         let environment = compose_clerk_environment();
@@ -407,15 +601,17 @@ mod tests {
             );
             // What the value may name: the deployment's own CLERK_* and
             // NATS_PORT interpolations, and HERMES_USER_LANGUAGE as a
-            // fallback source — never a Gateway variable, any other Hermes
-            // one, Hermes's key, or anything called a token or a secret.
+            // fallback source — never Hermes's key or a credential of any
+            // kind. A bare `GATEWAY_` reference is not itself the leak
+            // (CLERK_GATEWAY_URL: ${CLERK_GATEWAY_URL:-…} must pass) — the
+            // write half's credential lives in a mounted file, never here.
             let names = value
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .filter(|name| !name.is_empty());
             for name in names {
-                assert!(
-                    !name.starts_with("GATEWAY_"),
-                    "{key} references the Gateway's {name}"
+                assert_ne!(
+                    name, "GATEWAY_SERVICE_TOKEN",
+                    "{key} references the Gateway's service token"
                 );
                 assert!(
                     !name.starts_with("HERMES_") || name == "HERMES_USER_LANGUAGE",

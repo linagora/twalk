@@ -52,8 +52,19 @@ async fn main() -> Result<()> {
         language = %config.user_language,
         language_unset = config.user_language_unset,
         fallback_to_english,
+        write_half = config.write_half().is_some(),
         "clerk starting"
     );
+    // The write half turns a ✅ on Buzz into a Gateway approval (#284); its
+    // absence is a supported deployment — the clerk still reads the bus and
+    // posts — but a silent one would leave an operator wondering why
+    // reacting to a post never sends anything.
+    if config.write_half().is_none() {
+        warn!(
+            "the write half is not configured: a ✅ on Buzz decides nothing; set \
+             CLERK_OWNER_PUBKEY, CLERK_GATEWAY_URL and CLERK_GATEWAY_SESSION_FILE (#284)"
+        );
+    }
     // Unset is a supported state and is said rather than chosen silently:
     // on the reference deployment the personas' language comes from the
     // Companion's settings, which the clerk cannot read (it holds no
