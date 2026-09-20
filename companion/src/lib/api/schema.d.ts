@@ -871,10 +871,16 @@ export interface paths {
          *     account and discovered on submit that one existed, a network screen
          *     that rendered an expired session as "your server could not be reached".
          *
-         *     `bootstrapped` is whether this deployment has its one account. It is
-         *     the same fact the registration relay refuses on, so this publishes
-         *     nothing a registration attempt would not reveal. `homeserver` is the
-         *     server name, which is in the deployment's own DNS.
+         *     `bootstrapped` is whether this deployment has its one account — on the
+         *     homeserver, whoever created it. The Gateway's own memory of the
+         *     registration relay succeeding settles it when that row exists; when it
+         *     does not (an account provisioned by hand, a state directory recreated
+         *     or restored from before onboarding), the homeserver is asked, because
+         *     a working deployment whose owner is told it has no account and shown
+         *     no way in is the failure this operation exists to end (ticket #133).
+         *     It is the same fact the registration relay refuses on, so this
+         *     publishes nothing a registration attempt would not reveal.
+         *     `homeserver` is the server name, which is in the deployment's own DNS.
          *
          *     Absent by design: the owner's Matrix ID. Naming the human who owns a
          *     deployment to anyone who can reach it is a different disclosure, and no
@@ -5304,11 +5310,14 @@ export interface operations {
                 };
             };
             /**
-             * @description `sign_in_not_configured` — this deployment has no owner at all — or
-             *     `store_unreadable`, when the Gateway's store could not be read. A
-             *     store that cannot answer is never reported as "no account yet":
-             *     that would send a returning user back to the account form, which is
-             *     the journey this operation exists to end.
+             * @description `sign_in_not_configured` — this deployment has no owner at all;
+             *     `store_unreadable`, when the Gateway's store could not be read and
+             *     the homeserver could not answer either; or
+             *     `homeserver_unreachable`, when the store has no row and the
+             *     homeserver could not be asked. A source that cannot answer is never
+             *     reported as "no account yet": that would send a returning user back
+             *     to the account form, which is the journey this operation exists to
+             *     end.
              */
             503: {
                 headers: {
@@ -5317,7 +5326,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "sign_in_not_configured" | "store_unreadable";
+                        error?: "sign_in_not_configured" | "store_unreadable" | "homeserver_unreachable";
                     };
                 };
             };
