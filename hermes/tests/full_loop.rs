@@ -60,6 +60,22 @@
 //!   runtime somebody started by hand is a different claim from the one the
 //!   product makes.
 //!
+//! # What the contact reads
+//!
+//! Since ADR 0031 (issue #121) the reply reaches the contact with one
+//! sentence after it, on a line of its own, in the language it was written
+//! in: *"Rédigé avec mon assistant IA."* The persona selects the sentence
+//! (from the contract's five, by the language the model says it wrote in),
+//! the suggestion carries it as a member, and the Companion Gateway appends
+//! it at approval. This is the one place all three are real at once, so the
+//! body is asserted with the line on the bus and in the room — as the
+//! contact reads it — and the draft the user approved is asserted to be
+//! exactly the first line of it. And the other half of that criterion: a
+//! message the user writes themselves, from their own account into the same
+//! room, reaches the contact bare and is published as
+//! `outbound.message.sent` with no sentence and no `disclosure` member —
+//! the line discloses a persona's draft, and nothing else.
+//!
 //! The stack, its ports and its teardown are documented in
 //! `hermes/tests/harness/deployment.rs`.
 
@@ -67,8 +83,8 @@ mod harness;
 
 use anyhow::Result;
 use harness::{
-    owner, validate_against_contract, Contact, Deployment, APPROVED_TYPE, DEPLOY_SERVER_NAME,
-    MODEL, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
+    owner, poll_deploy, validate_against_contract, Contact, Deployment, APPROVED_TYPE,
+    DEPLOY_SERVER_NAME, MODEL, OUTBOUND_TYPE, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
 };
 use serde_json::{json, Value};
 
@@ -78,6 +94,18 @@ use serde_json::{json, Value};
 /// suggestions are told apart by their text.
 const UNAPPROVED_DRAFT: &str = "Oui, ça me va pour 20h — mais personne n'a approuvé cette phrase.";
 const APPROVED_DRAFT: &str = "Parfait, à demain 14h !";
+
+/// The contract's French sentence (`contracts/disclosure/v1/sentences.json`,
+/// ADR 0031): the stub answers `fr` to the persona's language ask, so this
+/// is the line the contact reads after the approved draft.
+const DISCLOSURE: &str = "Rédigé avec mon assistant IA.";
+
+/// What the contact reads: the approved draft, a newline, the disclosure —
+/// appended by the Companion Gateway at approval, posted verbatim by the
+/// Sensor.
+fn disclosed(draft: &str) -> String {
+    format!("{draft}\n{DISCLOSURE}")
+}
 
 /// The trace id half of a traceparent: what has to be identical across a
 /// message's sensor, persona and approval events for the trace to link them.
@@ -229,6 +257,12 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
         "a suggestion ages out rather than staying approvable for ever (#22): {}",
         suggestion.payload
     );
+    assert_eq!(
+        suggestion.payload["data"]["disclosure"],
+        json!(DISCLOSURE),
+        "the persona selected the sentence for the language it wrote in (ADR 0031): {}",
+        suggestion.payload
+    );
 
     // The first absence, now that the fence has passed: the message of the
     // contact nobody decided about produced no activity at all, and the
@@ -257,7 +291,8 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
     assert_eq!(
         asked_about.len(),
         1,
-        "one granted message, one completion request (v0.1 is a single completion)"
+        "one granted message, one completion request about it; the language ask that \
+         follows is about the draft and mentions the message nowhere (ADR 0031)"
     );
     assert_eq!(
         asked_about[0].last_message_content(),
@@ -330,10 +365,22 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
         "the audit trail says who sent it: {}",
         published.payload
     );
+    // What was approved is the first line of what is published, and the
+    // second line is the disclosure the suggestion carried: appended by the
+    // Gateway at approval, on a line of its own, with the switch in its
+    // default state — on, nobody having decided otherwise (ADR 0031).
+    let reply = disclosed(APPROVED_DRAFT);
     assert_eq!(
         published.payload["data"]["final"]["body"].as_str(),
-        Some(APPROVED_DRAFT),
-        "what was approved is exactly what is published"
+        Some(reply.as_str()),
+        "what goes out is what was approved, then the disclosure on its own line: {}",
+        published.payload
+    );
+    assert_eq!(
+        published.payload["data"]["disclosure"],
+        json!(DISCLOSURE),
+        "and the approved event says which sentence was appended: {}",
+        published.payload
     );
     assert_eq!(
         published.payload["data"]["target"]["room_id"].as_str(),
@@ -361,7 +408,7 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
     //
     // Asked of the homeserver, as the contact themselves, because that is
     // the only witness that matters: the reply is in their conversation.
-    stack.wait_for_room_body(&decided, APPROVED_DRAFT).await?;
+    stack.wait_for_room_body(&decided, &reply).await?;
 
     // The same read, once more, for what is *not* there. The approved reply
     // arriving is the fence: the Sensor has consumed the approved subject
@@ -369,8 +416,14 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
     // the room by now if anything had sent one.
     let bodies = stack.room_bodies(&decided).await?;
     assert!(
-        !bodies.iter().any(|body| body == UNAPPROVED_DRAFT),
+        !bodies.iter().any(|body| body.contains(UNAPPROVED_DRAFT)),
         "a suggestion nobody approved must never reach the room, and the room holds: {bodies:?}"
+    );
+    // And the draft never reached the room *without* its line: the contact
+    // is told, or nothing is sent.
+    assert!(
+        !bodies.iter().any(|body| body == APPROVED_DRAFT),
+        "the approved draft must not reach the room undisclosed, and the room holds: {bodies:?}"
     );
     // And nothing at all was published for the first suggestion.
     let approvals_of_the_unapproved: Vec<Value> = stack
@@ -391,7 +444,7 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
         .room_events(&decided)
         .await?
         .into_iter()
-        .find(|event| event["content"]["body"].as_str() == Some(APPROVED_DRAFT))
+        .find(|event| event["content"]["body"].as_str() == Some(reply.as_str()))
         .expect("the reply that was just found in the room is one of its events");
     assert_eq!(
         posted["sender"].as_str(),
@@ -402,6 +455,69 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
         posted["content"].get("m.relates_to").is_none(),
         "the approved reply lands in the room without being a native Matrix reply, which is \
          ADR 0022's named gap: {posted}"
+    );
+
+    // --- 4b. What the user writes themselves carries nothing --------------
+    //
+    // #121's other half: the sentence discloses a persona's draft, and a
+    // message the user typed is not one. The owner's own account posts it —
+    // Matrix to the room, as their client would, touching no Gateway — so
+    // the same network that just carried a disclosed reply now carries a
+    // bare one, and the Sensor publishes it as `outbound.message.sent` (ADR
+    // 0018) with no `disclosure` member. A distinct text rather than the
+    // draft over again, because the room is already asserted above never
+    // to hold the draft bare, and a second copy would make that assertion
+    // ambiguous about which one it found.
+    let direct = format!("Et je passe te voir dimanche. [{}]", marker("direct"));
+    let owner_account = Contact {
+        user_id: owner(),
+        token: stack.owner_token.clone(),
+    };
+    stack.says(&owner_account, &direct).await?;
+    stack.wait_for_room_body(&decided, &direct).await?;
+    let bodies = stack.room_bodies(&decided).await?;
+    assert!(
+        bodies.iter().any(|body| body == &direct),
+        "the user's own message reaches the room exactly as typed: {bodies:?}"
+    );
+    assert!(
+        !bodies
+            .iter()
+            .any(|body| body != &direct && body.contains(&direct)),
+        "and in no other form — nothing appended a line to what the user wrote: {bodies:?}"
+    );
+    let own = poll_deploy(
+        || async {
+            stack
+                .published(OUTBOUND_TYPE)
+                .await
+                .ok()?
+                .into_iter()
+                .find(|message| message.payload["data"]["body"].as_str() == Some(&direct))
+        },
+        "the Sensor to publish the user's own message as outbound.message.sent",
+    )
+    .await?;
+    validate_against_contract(&own.payload, "outbound.message.sent")?;
+    assert_eq!(
+        own.payload["subject"].as_str(),
+        Some(owner().as_str()),
+        "the user's own message is the user's, and not a contact's (ADR 0018): {}",
+        own.payload
+    );
+    assert!(
+        own.payload["data"].get("disclosure").is_none(),
+        "what the user wrote themselves discloses nothing, so the event carries no such \
+         member: {}",
+        own.payload
+    );
+    assert!(
+        !own.payload["data"]["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(DISCLOSURE),
+        "and no sentence in the body either: {}",
+        own.payload
     );
 
     // --- 5. Consent revoked between the suggestion and the approval -------
@@ -439,7 +555,7 @@ async fn a_contacts_message_becomes_an_approved_reply_and_nothing_else_reaches_t
     );
     let bodies = stack.room_bodies(&decided).await?;
     assert!(
-        !bodies.iter().any(|body| body == UNAPPROVED_DRAFT),
+        !bodies.iter().any(|body| body.contains(UNAPPROVED_DRAFT)),
         "and nothing was sent to the contact whose consent is revoked: {bodies:?}"
     );
 

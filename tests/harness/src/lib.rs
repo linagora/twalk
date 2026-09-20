@@ -17,6 +17,7 @@
 pub mod bus;
 pub mod contract;
 pub mod jmap_fake;
+pub mod jmap_push;
 pub mod sso;
 pub mod stack;
 pub mod stub_llm;
@@ -34,7 +35,7 @@ pub use stack::{
     ensure_stack, nats_url, synapse_url, PORTALS_APPSERVICE_AS_TOKEN, PORTALS_APPSERVICE_SENDER,
     SERVER_NAME,
 };
-pub use stub_llm::{StubAnswer, StubLlm, StubRequest};
+pub use stub_llm::{StubAnswer, StubLlm, StubRequest, DEFAULT_LANGUAGE_ANSWER, LANGUAGE_ASK_MARK};
 pub use wait::poll_until;
 
 use sha2::{Digest, Sha256};

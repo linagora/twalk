@@ -286,13 +286,47 @@ impl CollectorProc {
             .count()
     }
 
-    /// Waits until `needle` has been logged at least `times` times.
+    /// Waits until `needle` has been logged at least `times` times, for
+    /// the harness's twenty seconds.
     pub async fn wait_logged(&self, needle: &str, times: usize) -> Result<()> {
         poll_until(
             || async { (self.count_logged(needle).await >= times).then_some(()) },
             &format!("{times}× {needle:?} in the collector's log"),
         )
         .await
+    }
+
+    /// The same, for as long as `within`: what a poll interval waited out,
+    /// or a reconnect backed off to a minute, needs. The log so far is in
+    /// the error, since the wait is the diagnosis.
+    pub async fn wait_logged_for(
+        &self,
+        needle: &str,
+        times: usize,
+        within: std::time::Duration,
+    ) -> Result<()> {
+        let started = std::time::Instant::now();
+        while self.count_logged(needle).await < times {
+            anyhow::ensure!(
+                started.elapsed() < within,
+                "timed out waiting {times}× {needle:?} within {within:?}\n{}",
+                self.logs().await.join("\n")
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Ok(())
+    }
+
+    /// The position in the log of the `nth` (from 1) line containing
+    /// `needle`, to tell what the collector did first.
+    pub async fn position_logged(&self, needle: &str, nth: usize) -> Option<usize> {
+        self.logs()
+            .await
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains(needle))
+            .nth(nth.saturating_sub(1))
+            .map(|(index, _)| index)
     }
 
     /// Asserts that no line the collector printed contains any of `words`.

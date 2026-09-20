@@ -112,9 +112,15 @@ def consent_cache_consumers() -> set[str]:
 
 
 def contract_consumers() -> set[str]:
-    """Components whose code names a file that really exists under `contracts/`."""
+    """Components whose code names a file that really exists under `contracts/`.
+
+    Both of the contract's directories: the CloudEvents schemas and fixtures,
+    and the disclosure's sentences (`contracts/disclosure/`, #121), which the
+    SDK, the Gateway and the Companion each read — a component that read only
+    the sentences would otherwise be a consumer this derivation could not see.
+    """
     consumers: set[str] = set()
-    pattern = re.compile(r"contracts/cloudevents/[A-Za-z0-9_./-]+")
+    pattern = re.compile(r"contracts/(?:cloudevents|disclosure)/[A-Za-z0-9_./-]+")
     for path in code_files():
         if component_of(path) == "contracts":
             continue
@@ -285,6 +291,17 @@ class TheRuleTheRedMainIncidentsTaught(unittest.TestCase):
                 consumer,
                 contract,
                 f"a change to the contract must run {consumer}'s suite",
+            )
+
+        # The contract's second directory (#121): three readers of one
+        # table, each pinned to it by a test that would fail on a changed
+        # sentence — so a changed sentence must run all three.
+        sentences = self.components_selected_by("contracts/disclosure/v1/sentences.json")
+        for consumer in ("sdk", "companion-gateway", "companion"):
+            self.assertIn(
+                consumer,
+                sentences,
+                f"a change to the disclosure's sentences must run {consumer}'s suite",
             )
 
     def test_a_component_only_change_does_not_run_the_others(self):

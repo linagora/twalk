@@ -2,6 +2,7 @@
 // browser's preferences resolve to, whether the five catalogues say the same
 // things, and whether their ICU patterns actually format.
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import de from './de.json';
@@ -174,12 +175,36 @@ describe('the catalogues', () => {
 			// against the `expected` an explanation was written for — the two
 			// halves of a step whose shape has drifted from its copy (ADR 0030).
 			field: 'Phone number',
-			found: 'password'
+			found: 'password',
+			// The disclosure's record (#121): who turned it off, and when. `date`
+			// and `reason` are above.
+			actor: '@you:example.com'
 		};
 		for (const locale of LOCALES) {
 			for (const key of Object.keys(en) as (keyof typeof en)[]) {
 				expect(translate(locale, key, values), `${locale} ${key}`).toBeTruthy();
 			}
+		}
+	});
+
+	it('carry the contract\'s disclosure sentence, word for word (#121)', () => {
+		// `settings.disclosure.sentence` is what the settings card shows as the
+		// example of what a contact reads, in the interface's language. The
+		// sentence has one authority — `contracts/disclosure/v1/sentences.json`,
+		// which the SDK and the Companion Gateway read — and the Companion
+		// cannot read it at build time (the Gateway image's Node stage copies
+		// `companion/` alone), so this is a copy, pinned here the way the SDK
+		// pins its own: a sentence changed in the contract fails this test
+		// rather than leaving the card showing what a contact no longer reads.
+		const contract = JSON.parse(
+			readFileSync(
+				new URL('../../../../contracts/disclosure/v1/sentences.json', import.meta.url),
+				'utf8'
+			)
+		) as Record<string, string>;
+		expect(Object.keys(contract).sort()).toEqual([...LOCALES].sort());
+		for (const locale of LOCALES) {
+			expect(catalogues[locale]['settings.disclosure.sentence'], locale).toBe(contract[locale]);
 		}
 	});
 

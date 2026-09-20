@@ -354,6 +354,59 @@ so the Sensor posts it into the portal room without threading it under the origi
 inbound event carries no Matrix event ID of its own to thread under, and inventing one would be
 worse than the gap.
 
+## The disclosure (ticket #121)
+
+Every reply a persona drafted reaches the contact with one sentence after it, on a line of its
+own, in the language the reply was written in — *"Rédigé avec mon assistant IA."*, *"Drafted with
+my AI assistant."* ([ADR 0019](../docs/architecture/adr/0019-a-persona-discloses-itself-to-the-contact.md),
+[ADR 0031](../docs/architecture/adr/0031-the-disclosure-is-written-by-neither-the-model-nor-the-gateway.md)).
+This Gateway composes none of it. The five sentences are the contract's
+(`contracts/disclosure/v1/sentences.json`, read with `include_str!` — `disclosure.rs`), the
+persona selects the one for the language it wrote in and carries it as `data.disclosure` on the
+suggestion, and **the Gateway appends it at approval**: `final.body` becomes `body + "\n" +
+sentence`, the approved event carries the same sentence as `data.disclosure`, and `edited` keeps
+comparing the body alone, so the user's edit and the sentence are two facts and the sentence is not
+in the field the user edits. The body's cap is therefore `65 536 − 1 − 200`, the schema's limit
+less the newline and the longest sentence the contract allows, on the edited body
+(`malformed_request`, naming the disclosure) and on the reply Hermes pushes (`hermes_answer_too_long`)
+alike — and a suggestion whose own body ignored that cap is refused as `409 suggestion_unreadable`
+rather than sent undisclosed, because a reply going out without the line is the outcome ADR 0031
+exists to prevent, and editing it shorter is the way out. A suggestion whose `disclosure` is not one
+of the contract's five sentences — a third-party persona writing its own, or anything on the bus
+forging one — is refused the same way at the press, and listed as carrying none: the sentence a
+contact reads is the contract's or nothing, and here the way out is the persona, not the editor.
+A suggestion that carries no sentence goes out without one, with a `warn`: the Gateway does not
+invent it.
+
+**The switch is a journal, not a setting.** `disclosure_decision`, in the consent store beside the
+consent journal, with the same `occurred_at`/`actor`/`reason` shape and the same triggers refusing
+every `DELETE` and `UPDATE`; no row at all means on, and the current state is the last row. ADR 0019
+allows the disclosure to be turned off on one condition — that turning it off be a recorded,
+deliberate act with a timestamp rather than a silent preference — and a column in `settings.sqlite3`
+would forget who decided and what stood before. Every `PUT` appends, including one that restates the
+current state; `actor` is stamped as the deployment's owner, exactly as a consent decision's is;
+`reason` is the user's optional note, at most 1 024 characters; nothing is retroactive. The state is
+read at every approval (a store that cannot answer is `store_unavailable`, never a guess), logged at
+startup (`warn` when off, with since and by whom), and on `/metrics` as
+`twalk_companion_gateway_disclosure_enabled` — `1` or `0`, rendered only once consent is configured,
+so an absent sample is not a switch that is off.
+
+| | |
+| --- | --- |
+| `GET /api/settings/disclosure` | `enabled`, and `since`, `actor`, `reason` — all `null` while nobody has decided |
+| `PUT /api/settings/disclosure` | `{ "enabled": false, "reason": "…" }` — one decision appended, the resulting state answered |
+
+Both take a device token; on a deployment with no bus they answer `503 consent_not_configured`,
+since there is no journal and no approval path for it to govern.
+
+**On the Hermes path the language is Hermes's word**, not a model's second answer: the hook
+declares a BCP-47 tag, `hermes_answer.rs` maps it to its primary subtag (`fr-CA` is `fr`, and that
+is what `HermesAnswerAccepted.language` says), selects the sentence, and refuses a tag outside the
+five with `422 hermes_answer_language_unsupported`, counted with the other answer codes and
+publishing nothing — a contribution request rather than a fallback, since a disclosure in a language
+the contact cannot read is a sentence nobody reads. The provisional `language` NATS header that
+path once carried is gone: the member is the sentence, not a tag.
+
 ## The model and the language (ticket #98)
 
 Twalk ships no LLM and has **no default**: nothing is ever sent to a model the operator did not
@@ -465,6 +518,8 @@ endpoint that knows this model's name.
 | `GET /api/settings/language` | the preference, and the five the Companion ships |
 | `PUT /api/settings/language` | set it, or `null` for no preference — which is *not* English |
 | `GET /api/settings/runtime` | everything the Hermes runtime injects, in one read. **Service token** |
+| `GET /api/settings/disclosure` | whether approved replies carry the disclosure, and who last decided (above) |
+| `PUT /api/settings/disclosure` | one recorded decision about it |
 
 Every document carries `personas`, and in v0.1 it is always `{}`. Shipping a working per-persona
 override with one persona would ship an unexercised path; adding the member later would change
@@ -526,9 +581,10 @@ cargo test --test bridge_status  # the status webhook, the mapping table and the
 cargo test --test pending     # the pending-contact projection against a real bus
 cargo test --test approvals   # approving a suggestion, and every way it is refused
 cargo test --test settings    # the model configuration, the language, and the probe's four answers
+cargo test --test disclosure  # the switch's journal, the append at approval, and the store's bytes
 cargo test --test openapi     # the description against the running binary
 ```
 
-`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/pending.rs` publishes contract-valid inbound events onto a real JetStream and asserts the five properties of the projection — that a Gateway started against a stream with history builds its list from it, that a decision taken through the write API moves the contact out of the list, that a restart resumes at its ack floor instead of replaying, that display names come from the bus and are written nowhere, and that the store's own bytes hold no body and no network identifier; `tests/settings.rs` drives the model configuration end to end against the real binary — the reference deployment's combination (the model from the browser, the key from a file) first, the write-only rule asserted by searching every answer *and* every log line for both credentials, and the probe's four answers against a stub that works, one that refuses, one that answers something that is not a completion, and an address nothing listens on; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus — which is also the one place a **real Sensor** publishes into a bus a real Gateway consumes, so that is where "messages published by a Sensor become contacts waiting for a decision" is asserted. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
+`tests/service.rs` runs the real binary and talks to it over HTTP; `tests/openapi.rs` does the same against `openapi.yaml` (two of its four checks need no process at all); `tests/signin.rs` and `tests/bootstrap.rs` do the same with the shared test stack up, so a real Synapse mints the OpenID tokens (its listener serves the `openid` resource for exactly that) and answers the admin registration call; `tests/consent.rs` signs a device in the same way and then drives decisions over HTTP against a real NATS JetStream, including the crash property — it kills the process with a decision still unpublished and asserts that the restart publishes it exactly once; `tests/consent_snapshot.rs` drives the hand-off itself: it takes decisions, reads the snapshot, takes more, and then creates a durable consumer at the sequence the snapshot named plus one, asserting that every later decision arrives exactly once and no earlier one arrives at all; `tests/bridges.rs` runs a stub bridge inside the test process and drives a whole login through the Gateway against it; `tests/pending.rs` publishes contract-valid inbound events onto a real JetStream and asserts the five properties of the projection — that a Gateway started against a stream with history builds its list from it, that a decision taken through the write API moves the contact out of the list, that a restart resumes at its ack floor instead of replaying, that display names come from the bus and are written nowhere, and that the store's own bytes hold no body and no network identifier; `tests/settings.rs` drives the model configuration end to end against the real binary — the reference deployment's combination (the model from the browser, the key from a file) first, the write-only rule asserted by searching every answer *and* every log line for both credentials, and the probe's four answers against a stub that works, one that refuses, one that answers something that is not a completion, and an address nothing listens on; `tests/disclosure.rs` starts a Gateway of its own per test, because the switch is global — the default on and the gauge at `1`, a `PUT` off read back dated and attributed and the journal refusing a `DELETE` and an `UPDATE` **on the store's own SQLite files from outside the process**, an approval while off carrying neither the line nor the member and while on carrying both with `edited: false`, and the store's bytes — the WAL included — holding the approval's row and none of the text; `tests/deployment.rs` brings the `companion-gateway` service of `deploy/docker-compose/compose.yaml` up and asserts the same properties of the deployed image — and, for bootstrap, brings the `sensor` service up beside it, so that the invited room really is joined and its traffic really reaches the bus — which is also the one place a **real Sensor** publishes into a bus a real Gateway consumes, so that is where "messages published by a Sensor become contacts waiting for a decision" is asserted. They all reuse the shared harness crate (`tests/harness/`); what is Gateway-specific lives in `tests/harness/mod.rs`.
 
 The image (`deploy/docker-compose/companion-gateway.Dockerfile`) is multi-stage: a Node stage produces the Companion's static files — a holding page until the Companion's own lot lands — the Rust stage builds the binary, and the runtime carries the two. Pass `--build-arg TWALK_BUILD_REVISION=$(git describe --always --dirty)` to have the health endpoint report the revision; the build context carries no `.git`, so without it the revision is `unknown`.

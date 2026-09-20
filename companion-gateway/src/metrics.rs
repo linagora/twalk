@@ -54,6 +54,12 @@ pub struct Metrics {
     /// `None` until consent is configured, like the outbox gauge above.
     owner_decision_refusals: Mutex<u64>,
     owner_consent_rows: Mutex<Option<u64>>,
+    /// Whether every approved reply carries the disclosure (ticket #121):
+    /// `1` while the switch is on, `0` while the journal's last decision
+    /// turned it off. A gauge and not a counter because the question is
+    /// "are replies going out undisclosed right now?", and `None` until
+    /// consent is configured, since the journal lives in that store.
+    disclosure_enabled: Mutex<Option<bool>>,
     /// Bridge states observed (#56), by the channel they arrived on
     /// (`webhook`, `startup`) and what they said: one of the contract's five
     /// states, `unchanged` when the bridge reported the state it was already
@@ -190,6 +196,7 @@ impl Metrics {
             consent_outbox_pending: Mutex::new(None),
             owner_decision_refusals: Mutex::new(0),
             owner_consent_rows: Mutex::new(None),
+            disclosure_enabled: Mutex::new(None),
             bridge_statuses: Mutex::new(BTreeMap::new()),
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             hermes_answers: Mutex::new(BTreeMap::new()),
@@ -332,6 +339,15 @@ impl Metrics {
             .owner_consent_rows
             .lock()
             .expect("the metrics mutex is never poisoned") = Some(rows);
+    }
+
+    /// The disclosure switch as the journal answers it (ticket #121). Set at
+    /// startup and on every decision, so the sample is the store's own.
+    pub fn set_disclosure_enabled(&self, enabled: bool) {
+        *self
+            .disclosure_enabled
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(enabled);
     }
 
     /// How many committed decisions are waiting for the bus, as the store
@@ -532,6 +548,22 @@ impl Metrics {
                 out.push_str("# TYPE twalk_companion_gateway_owner_consent_rows gauge\n");
                 out.push_str(&format!(
                     "twalk_companion_gateway_owner_consent_rows {owner_rows}\n"
+                ));
+            }
+            // The disclosure switch (#121), inside the same guard because its
+            // journal is in the same store. A reply going out undisclosed is
+            // a fact an operator should be able to see without opening the
+            // Companion, and this is the one place the product says it.
+            let disclosure = *self
+                .disclosure_enabled
+                .lock()
+                .expect("the metrics mutex is never poisoned");
+            if let Some(disclosure) = disclosure {
+                out.push_str("# HELP twalk_companion_gateway_disclosure_enabled Whether an approved reply carries the disclosure ADR 0019 requires: 1 while the switch is on, 0 while the last decision in the journal turned it off.\n");
+                out.push_str("# TYPE twalk_companion_gateway_disclosure_enabled gauge\n");
+                out.push_str(&format!(
+                    "twalk_companion_gateway_disclosure_enabled {}\n",
+                    u8::from(disclosure)
                 ));
             }
             // The approval series (#24), inside the same guard: approvals

@@ -135,6 +135,23 @@
 //! client from, so every ticket that adds an endpoint extends it in the same
 //! commit — the test refuses a route that is not described.
 //!
+//! Ticket #121 gave every reply a persona drafted the sentence ADR 0019
+//! requires, and this Gateway's part of it is the smallest one ([`disclosure`]):
+//! it composes nothing — no event carries a language it could compose from,
+//! and ADR 0031 closed that home explicitly — and **appends** at approval the
+//! sentence the suggestion already carries as `data.disclosure`, on a line of
+//! its own after the body, so `edited` keeps comparing the body alone and the
+//! human cannot delete the sentence with a keystroke because it is not in the
+//! field they edit. Hermes's answer names a language rather than a sentence,
+//! so on that path the Gateway maps the tag to its primary subtag and reads
+//! the contract's table (`contracts/disclosure/v1/sentences.json`, compiled
+//! in); a language the table lacks is a counted `422` and no suggestion at
+//! all. The switch is an append-only journal of its own in the consent store
+//! — `disclosure_decision`, the consent journal's triggers and its
+//! `occurred_at`/`actor`/`reason` shape, no row meaning on — read and written
+//! by `GET`/`PUT /api/settings/disclosure`, so turning the disclosure off is a
+//! dated, attributed record and never a forgotten row in a settings table.
+//!
 //! As in the Sensor, the seam-independent logic lives in these modules and
 //! the binary in `main.rs` only wires them to the network.
 
@@ -155,6 +172,7 @@ pub mod consent_http;
 pub mod consent_snapshot;
 pub mod contacts;
 pub mod contacts_http;
+pub mod disclosure;
 pub mod hermes_answer;
 pub mod hermes_answer_http;
 pub mod hermes_freebusy;

@@ -222,6 +222,10 @@ fn suggestion_json(listed: &Listed) -> Value {
             "body": listed.suggestion.body,
             "format": listed.suggestion.format.as_str(),
         },
+        // The sentence the reply will carry after the body (#121): shown
+        // fixed beside the editable text, so the user sees the whole
+        // outgoing message and cannot edit the disclosure out of it.
+        "disclosure": listed.disclosure,
         "stream_sequence": listed.stream_sequence,
         "approval": listed.approval.as_ref().map(approval_json),
         // Before the approval: whether a reply could reach the contact at
@@ -290,6 +294,7 @@ mod tests {
                 body: "Pas de problème, à 20h !".to_owned(),
                 format: Format::Plain,
             },
+            disclosure: Some("Rédigé avec mon assistant IA.".to_owned()),
             stream_sequence: 42,
             standing,
             approval,
@@ -324,6 +329,29 @@ mod tests {
                 "the listing carries the trigger's {member:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_disclosure_is_a_member_of_its_own_and_never_inside_the_body() {
+        let rendered = suggestion_json(&listed(Standing::Approvable, None));
+        assert_eq!(
+            rendered["disclosure"],
+            json!("Rédigé avec mon assistant IA."),
+            "the screen shows the sentence fixed beside the editable body (ADR 0031)"
+        );
+        assert_eq!(
+            rendered["suggestion"]["body"],
+            json!("Pas de problème, à 20h !"),
+            "the body is the persona's words alone: the sentence is not in the field the user \
+             edits"
+        );
+        let mut none = listed(Standing::Approvable, None);
+        none.disclosure = None;
+        assert_eq!(
+            suggestion_json(&none)["disclosure"],
+            Value::Null,
+            "a suggestion with no sentence says so with a null, which a screen draws as absent"
+        );
     }
 
     #[test]

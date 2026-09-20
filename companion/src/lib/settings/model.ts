@@ -40,6 +40,27 @@
 // to when it cannot tell what language a message was written in (ADR 0016).
 // It does not decide the language a suggestion is written in.
 //
+// # The disclosure (#121, ADR 0019, ADR 0031)
+//
+// Every reply a persona drafted reaches the contact with one sentence after
+// it, on a line of its own, in the language the reply was written in — and
+// this screen holds the one control over that, which is global and recorded.
+// `GET /api/settings/disclosure` answers on or off and, once somebody has
+// decided, since when and by whom: an append-only journal in the Gateway, not
+// a preference, because turning the sentence off is "a deliberate act with a
+// timestamp" (ADR 0019). [`disclosureRecord`] turns that answer into the one
+// line the card reads back, and it keeps three states apart rather than two:
+// on because nobody ever decided, on since a dated decision, and off since
+// one. The date is formatted in the interface's locale by [`disclosureDate`],
+// the same instant the Gateway stamped, so the record the user reads and the
+// row the journal holds cannot disagree on when.
+//
+// The sentence the card shows as an example is the catalogue's copy of the
+// contract's (`contracts/disclosure/v1/sentences.json`), one per interface
+// language — pinned to the contract file by `$lib/i18n/i18n.test.ts`, the way
+// the SDK pins its own copy. The Companion cannot read the contract at build
+// time: the Gateway image's Node stage copies `companion/` and nothing else.
+//
 // # What is not here
 //
 // Tracing. ADR 0017 makes it OTLP and opt-in with content as a second switch,
@@ -55,6 +76,7 @@ export type ModelRequest = components['schemas']['ModelConfigurationRequest'];
 export type LanguagePreference = components['schemas']['LanguagePreference'];
 export type Language = NonNullable<LanguagePreference['language']>;
 export type Probe = components['schemas']['ModelProbe'];
+export type DisclosureState = components['schemas']['DisclosureState'];
 
 /** The five languages, each named in itself — the Companion's own list, so the two cannot drift. */
 export const LANGUAGE_NAMES: Record<Language, string> = LOCALE_NAMES;
@@ -177,6 +199,61 @@ function parseObject(text: string): Record<string, unknown> | null {
 	}
 }
 
+/** The record line's three shapes, and the values its sentence interpolates. */
+export type DisclosureRecord =
+	/** On, and nobody has ever decided: the default state, which is a record and not a gap. */
+	| { kind: 'on'; key: 'settings.disclosure.record.on'; values: Record<string, never> }
+	/** On again, since a dated, attributed decision. */
+	| {
+			kind: 'on';
+			key: 'settings.disclosure.record.onSince';
+			values: { date: string; actor: string };
+	  }
+	/** Off, since a dated, attributed decision. */
+	| { kind: 'off'; key: 'settings.disclosure.record.off'; values: { date: string; actor: string } };
+
+/**
+ * An instant the Gateway stamped, as a date and time in the interface's
+ * locale — "20 septembre 2026 à 10:05" for a French interface, the same instant
+ * in English words for an English one.
+ *
+ * An instant that does not parse is rendered as the string the Gateway sent
+ * rather than as nothing: the record is a fact about a decision, and a blank
+ * where its date should be would read as "never".
+ */
+export function disclosureDate(iso: string, locale: string): string {
+	const at = Date.parse(iso);
+	if (Number.isNaN(at)) {
+		return iso;
+	}
+	return new Intl.DateTimeFormat(locale, { dateStyle: 'long', timeStyle: 'short' }).format(at);
+}
+
+/**
+ * The one line the disclosure card reads back: on, or "off since <date> by
+ * <actor>".
+ *
+ * `enabled` alone does not decide the sentence. The Gateway answers `since`
+ * and `actor` as `null` while nobody has decided, and that is a state the
+ * card says in its own words — the default was never chosen by anyone — so
+ * "on since 20 September by you" is reserved for a switch that was turned
+ * back on. Off is always dated and attributed, because a journal row wrote
+ * it; a `false` with no date would be a Gateway this build does not know, and
+ * it is rendered as off with the instant it did not give rather than as on.
+ */
+export function disclosureRecord(state: DisclosureState, locale: string): DisclosureRecord {
+	if (state.enabled && (state.since === null || state.actor === null)) {
+		return { kind: 'on', key: 'settings.disclosure.record.on', values: {} };
+	}
+	const values = {
+		date: state.since === null ? '' : disclosureDate(state.since, locale),
+		actor: state.actor ?? ''
+	};
+	return state.enabled
+		? { kind: 'on', key: 'settings.disclosure.record.onSince', values }
+		: { kind: 'off', key: 'settings.disclosure.record.off', values };
+}
+
 /**
  * The Gateway's refusal codes for the two writes and the probe, each a
  * sentence the user can act on — the ones #98 handed over in #101's comment.
@@ -191,6 +268,9 @@ export const REFUSAL_COPY: Record<string, MessageKey> = {
 	malformed_request: 'settings.model.refused.malformed',
 	unsupported_language: 'settings.language.refused.unsupported',
 	settings_not_configured: 'settings.refused.notConfigured',
+	// The disclosure journal lives in the consent store, so a Gateway with no
+	// bus has no switch to read — the consent routes' own code (#121).
+	consent_not_configured: 'settings.disclosure.refused.notConfigured',
 	store_unavailable: 'settings.refused.storeUnavailable'
 };
 

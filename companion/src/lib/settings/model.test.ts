@@ -7,10 +7,13 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	credentialState,
+	disclosureDate,
+	disclosureRecord,
 	formOf,
 	PROBE_FAILURE_COPY,
 	REFUSAL_COPY,
 	requestOf,
+	type DisclosureState,
 	type ModelConfiguration
 } from './model';
 
@@ -129,6 +132,64 @@ describe('the request the form sends', () => {
 	});
 });
 
+describe('the disclosure record (#121)', () => {
+	const off: DisclosureState = {
+		enabled: false,
+		since: '2026-09-20T08:05:00Z',
+		actor: '@owner:test.twalk',
+		reason: null
+	};
+
+	it('is "on" and nobody\'s decision while nobody has decided', () => {
+		// The default state answers `null` for `since` and `actor`, and that is
+		// a record — the sentence must not read as a decision somebody took.
+		expect(
+			disclosureRecord({ enabled: true, since: null, actor: null, reason: null }, 'en')
+		).toEqual({ kind: 'on', key: 'settings.disclosure.record.on', values: {} });
+	});
+
+	it('is "off since <date> by <actor>" once the switch was turned off', () => {
+		const record = disclosureRecord(off, 'en');
+		expect(record.kind).toBe('off');
+		expect(record.key).toBe('settings.disclosure.record.off');
+		expect(record.values).toEqual({
+			date: disclosureDate('2026-09-20T08:05:00Z', 'en'),
+			actor: '@owner:test.twalk'
+		});
+	});
+
+	it('keeps "turned back on" apart from "never turned off"', () => {
+		const record = disclosureRecord({ ...off, enabled: true }, 'fr');
+		expect(record.kind).toBe('on');
+		expect(record.key).toBe('settings.disclosure.record.onSince');
+		expect(record.values).toMatchObject({ actor: '@owner:test.twalk' });
+	});
+
+	it('formats the date in the interface\'s locale, from the instant the Gateway stamped', () => {
+		// The same instant, two interfaces: what the user reads is a date in
+		// their own language, and the journal's row is not translated on the
+		// way — only rendered.
+		const french = disclosureDate('2026-09-20T08:05:00Z', 'fr');
+		const english = disclosureDate('2026-09-20T08:05:00Z', 'en');
+		expect(french).toContain('septembre');
+		expect(english).toContain('September');
+		expect(french).toContain('2026');
+		expect(disclosureRecord(off, 'fr').values.date).toBe(french);
+	});
+
+	it('renders an instant it cannot parse as itself, never as nothing', () => {
+		expect(disclosureDate('not a date', 'en')).toBe('not a date');
+	});
+
+	it('reads a false with no date as off, not as on', () => {
+		// A Gateway this build does not know answered something the shape
+		// forbids; the safe rendering is the state it did say.
+		const record = disclosureRecord({ ...off, since: null, actor: null }, 'en');
+		expect(record.kind).toBe('off');
+		expect(record.values).toEqual({ date: '', actor: '' });
+	});
+});
+
 describe('every refusal the Gateway describes has a sentence', () => {
 	// Read off the description itself, so a code added to the Gateway fails
 	// here rather than rendering as a blank — #100's rule for the approval
@@ -138,12 +199,7 @@ describe('every refusal the Gateway describes has a sentence', () => {
 		'utf8'
 	);
 
-	function codesUnder(path: string): string[] {
-		const start = description.indexOf(`\n  ${path}:\n`);
-		expect(start, path).toBeGreaterThan(-1);
-		const next = description.indexOf('\n  /', start + 1);
-		const section = description.slice(start, next === -1 ? undefined : next);
-		const codes = new Set<string>();
+	function enumsIn(section: string, codes: Set<string>): void {
 		for (const match of section.matchAll(/enum:\s*\[([^\]]*)\]/g)) {
 			for (const code of match[1]?.split(',') ?? []) {
 				const trimmed = code.trim();
@@ -160,16 +216,40 @@ describe('every refusal the Gateway describes has a sentence', () => {
 				}
 			}
 		}
+	}
+
+	// The codes under a path, inline and behind a `$ref` to a shared response
+	// alike: the disclosure routes answer `consent_not_configured` only through
+	// `#/components/responses/DisclosureNotConfigured`, and a walk that stopped
+	// at the reference could not prove that code has a sentence.
+	function codesUnder(path: string): string[] {
+		const start = description.indexOf(`\n  ${path}:\n`);
+		expect(start, path).toBeGreaterThan(-1);
+		const next = description.indexOf('\n  /', start + 1);
+		const section = description.slice(start, next === -1 ? undefined : next);
+		const codes = new Set<string>();
+		enumsIn(section, codes);
+		for (const match of section.matchAll(/\$ref: "#\/components\/responses\/([A-Za-z]+)"/g)) {
+			const responseStart = description.indexOf(`\n    ${match[1]}:\n`);
+			expect(responseStart, match[1]).toBeGreaterThan(-1);
+			const rest = description.slice(responseStart + 1);
+			const sibling = rest.search(/\n    [A-Za-z]+:\n/);
+			enumsIn(sibling === -1 ? rest : rest.slice(0, sibling), codes);
+		}
 		return [...codes];
 	}
 
-	it('for writing a model and setting a language', () => {
+	it('for writing a model, setting a language and switching the disclosure', () => {
 		const known = new Set([...Object.keys(REFUSAL_COPY), 'unauthenticated', 'sign_in_not_configured']);
-		for (const path of ['/api/settings/model', '/api/settings/language']) {
+		for (const path of ['/api/settings/model', '/api/settings/language', '/api/settings/disclosure']) {
 			for (const code of codesUnder(path)) {
 				expect(known.has(code), `${path}: ${code}`).toBe(true);
 			}
 		}
+		// And the walk really reaches behind the references, or the line above
+		// proves nothing about the codes the shared responses carry.
+		expect(codesUnder('/api/settings/disclosure')).toContain('consent_not_configured');
+		expect(codesUnder('/api/settings/model')).toContain('settings_not_configured');
 	});
 
 	it('for the probe, whose four answers are four fixes', () => {

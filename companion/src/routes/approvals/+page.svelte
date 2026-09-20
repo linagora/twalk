@@ -71,6 +71,23 @@
 	event is published for it and no route reports it. This screen does not
 	invent one; that gap is named in the pull request rather than papered over
 	with a row that would always be empty.
+
+	# The outgoing message, whole (#121, ADR 0019, ADR 0031)
+
+	A reply a persona drafted goes out with one sentence after it, on a line of
+	its own, in the language it was written in — "Rédigé avec mon assistant
+	IA." — and the Gateway appends it at approval. So what the contact receives
+	is not what the blockquote shows, and this screen says so at the one
+	moment the user is thinking about a particular message going to a
+	particular person: the sentence stands under the body, and under the editor
+	while editing, drawn as fixed and labelled as not editable here, because it
+	is not in the field the user edits and cannot be removed from one reply.
+	When the switch is off (`GET /api/settings/disclosure`, read once per
+	load), the line says that instead, with the date — a fact the user may have
+	forgotten deciding. A suggestion that carries no sentence at all goes out
+	undisclosed and is said to; a switch that could not be read is said to be
+	unread rather than guessed on. Nothing here composes the sentence: it is
+	the suggestion's own member, and the Gateway appends exactly that.
 -->
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
@@ -80,6 +97,8 @@
 	import { networkNameKey, relativeTime } from '$lib/dashboard/format';
 	import { gateway } from '$lib/api/client';
 	import { approve, loadSuggestions } from '$lib/approvals/api';
+	import { loadDisclosure } from '$lib/settings/api';
+	import { disclosureRecord, type DisclosureState } from '$lib/settings/model';
 	import { personaRows } from '$lib/dashboard/model';
 	import { emptyApprovalsKey, readRuntime, UNKNOWN, type Runtime } from '$lib/runtime/presence';
 	import { dismiss, dismissed, restoreAll } from '$lib/approvals/dismissed';
@@ -126,6 +145,14 @@
 	let runtime = $state<Runtime>(UNKNOWN);
 	let anyPersonaActive = $state<boolean | null>(null);
 
+	/**
+	 * The disclosure switch, read once per load and again on refresh (#121).
+	 * `null` is "could not be read", which the row says rather than treating as
+	 * either state: whether the sentence goes out is the Gateway's decision at
+	 * approval, and this screen only reports what it was told.
+	 */
+	let disclosureSwitch = $state<DisclosureState | null>(null);
+
 	onMount(() => {
 		hidden = dismissed();
 		void refresh();
@@ -160,7 +187,8 @@
 
 	async function refresh() {
 		refreshing = true;
-		const answer = await loadSuggestions();
+		const [answer, switched] = await Promise.all([loadSuggestions(), loadDisclosure()]);
+		disclosureSwitch = switched.ok ? switched.state : null;
 		if (answer.ok) {
 			listing = answer.listing;
 			problem = null;
@@ -264,6 +292,44 @@
 		return relativeTime(instant, now, $locale) ?? instant;
 	}
 </script>
+
+{#snippet disclosureLine(row: Row)}
+	<!-- The rest of the outgoing message (#121): the sentence, fixed, or the
+	     reason there is none. One line, drawn once per row — under the editor
+	     while editing, under the body otherwise — and only on a row that is
+	     still to be decided: the switch read here is the switch *now*, and a
+	     reply already approved went out under the switch as it stood at the
+	     press, which the Gateway decided and this screen cannot read back
+	     yet. Saying "goes out with" or "is not added" about a sealed row
+	     would be a sentence about the present put on a message from the past. -->
+	{#if row.standing === 'approvable' && (outcomes[row.id]?.kind ?? 'none') !== 'sent'}
+		{#if disclosureSwitch !== null && !disclosureSwitch.enabled}
+			<p class="small muted disclosure-off" data-testid="disclosure-off">
+				<Icon name="info" size="dense" />
+				{$t('approvals.disclosure.off', {
+					date: disclosureRecord(disclosureSwitch, $locale).values.date
+				})}
+			</p>
+		{:else if row.disclosure === null}
+			<p class="small muted" data-testid="disclosure-none">{$t('approvals.disclosure.none')}</p>
+		{:else}
+			<div class="disclosure" data-testid="disclosure" data-switch={disclosureSwitch === null ? 'unread' : 'on'}>
+				<p class="small muted disclosure__label">
+					<Icon name="fixed" size="dense" />
+					{$t('approvals.disclosure.label')}
+				</p>
+				<p class="disclosure__sentence" aria-readonly="true" data-testid="disclosure-sentence">
+					{row.disclosure}
+				</p>
+				<p class="small muted">
+					{disclosureSwitch === null
+						? $t('approvals.disclosure.unknown')
+						: $t('approvals.disclosure.fixed')}
+				</p>
+			</div>
+		{/if}
+	{/if}
+{/snippet}
 
 <section class="screen" data-testid="screen-approvals">
 	<header class="stack">
@@ -390,6 +456,9 @@
 				     text on this screen. -->
 				<blockquote class="proposed" data-testid="proposed">{row.body}</blockquote>
 			{/if}
+			{#if editing !== row.id}
+				{@render disclosureLine(row)}
+			{/if}
 
 			<p class="small muted" data-testid="timing">
 				{$t('approvals.row.produced', { when: when(row.producedAt) })}
@@ -484,6 +553,9 @@
 					></textarea>
 				</label>
 				<p class="small muted" data-testid="editor-hint">{$t('approvals.editing.hint')}</p>
+				<!-- Under the editor, not inside it: the one line the user does
+				     not write. -->
+				{@render disclosureLine(row)}
 			{/if}
 
 			{#if outcome !== undefined && outcome.kind === 'sent'}
@@ -620,6 +692,35 @@
 		min-height: calc(var(--space-7) * 2);
 		resize: vertical;
 		font: inherit;
+	}
+
+	/* The disclosure: the same block as the proposed reply, so it reads as
+	   part of the outgoing message, and a dashed edge with a lock so it reads
+	   as the part nobody edits here. */
+	.disclosure {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+	}
+
+	.disclosure__label {
+		margin: 0;
+	}
+
+	.disclosure__sentence {
+		margin: 0;
+		padding: var(--space-2) var(--space-3);
+		border-left: 3px dashed var(--color-border-strong);
+		background: var(--color-surface-raised);
+		color: var(--color-text-muted);
+		border-radius: var(--radius-md);
+		font-style: italic;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
+	.disclosure-off {
+		margin: 0;
 	}
 
 	.standing {

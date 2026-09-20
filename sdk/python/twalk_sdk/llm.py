@@ -13,6 +13,14 @@ unreachable endpoint, a refused request, a model that answered nothing, and a
 model that spent its whole budget reasoning — are decided in a pure module and
 tested without a network (issue #162). This file owns the transport and
 nothing else.
+
+The client answers two questions and both go through :meth:`Llm.complete`:
+the reply itself, which the persona's handler asks for, and — after the
+handler returns — **which language that reply is in**, which the SDK asks
+for it (:meth:`Llm.language_of`, ADR 0031). One more completion per
+suggestion, shaped for one token; the question is the model's to answer and
+never a detection library's (ADR 0016), and reading the answer is
+:mod:`twalk_sdk.disclosure`'s, pure.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from .completion import (
     completion_text,
 )
 from .config import LlmConfig
+from .disclosure import LANGUAGE_ASK, LANGUAGE_ASK_MAX_TOKENS, parse_language_answer
 
 __all__ = [
     "Llm",
@@ -127,6 +136,32 @@ class Llm:
         # carried — the operator's parameters are merged last, so it is not
         # necessarily the one the persona asked for.
         return completion_text(body, budget=_budget(payload))
+
+    async def language_of(self, text: str) -> Optional[str]:
+        """Asks the model which language ``text`` is written in.
+
+        One completion — :data:`~twalk_sdk.disclosure.LANGUAGE_ASK` as the
+        system prompt, the text as the user message,
+        :data:`~twalk_sdk.disclosure.LANGUAGE_ASK_MAX_TOKENS` of budget and
+        no temperature — and one token read back: the tag the model answered
+        (``fr``, ``fr-ca``, ``ja``) or ``None`` for ``other``. What the tag
+        selects, and what happens when it selects nothing, is the persona
+        loop's (:mod:`twalk_sdk.persona`); this is only the ask.
+
+        The same four failures as :meth:`complete`, because it is the same
+        call: an endpoint that was briefly away is retried through the
+        trigger's redelivery, like the reply's own completion. The budget is
+        the operator's when ``TWALK_LLM_PARAMS`` names ``max_tokens`` — the
+        parameters are merged last — which is what a reasoning model needs,
+        and the loop says so when the ask is what ran out
+        (:class:`~twalk_sdk.disclosure.LanguageAskFailed`).
+        """
+        answer = await self.complete(
+            [system(LANGUAGE_ASK), user(text)],
+            temperature=0,
+            max_tokens=LANGUAGE_ASK_MAX_TOKENS,
+        )
+        return parse_language_answer(answer)
 
     async def aclose(self) -> None:
         if self._owns_client:

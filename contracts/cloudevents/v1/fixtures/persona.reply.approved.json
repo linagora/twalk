@@ -16,13 +16,14 @@
     "suggestion_event_id": "319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b",
     "approved_by": "@michel:example.com",
     "final": {
-      "body": "Pas de problème, à 20h ! 👍",
+      "body": "Pas de problème, à 20h ! 👍\nRédigé avec mon assistant IA.",
       "format": "text/plain"
     },
     "edited": true,
     "target": {
       "room_id": "!abcXYZ123:example.com",
       "reply_to_event_id": "$AbCdEfGh1234"
-    }
+    },
+    "disclosure": "Rédigé avec mon assistant IA."
   }
 }

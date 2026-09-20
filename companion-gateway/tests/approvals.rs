@@ -11,8 +11,11 @@
 //! > sender's consent is no longer `granted` at that moment.
 //!
 //! So: a valid approval publishes a schema-valid `persona.reply.approved.v1`
-//! and says where it landed; the edited content wins over the persona's own;
-//! an approval is never a batch and never under another name; and the three
+//! and says where it landed; the edited content wins over the persona's own
+//! — and since ticket #121 both go out with the disclosure the suggestion
+//! carried appended on a line of its own, while `edited` stays about the
+//! body alone and a body that leaves no room for the line is refused with
+//! the line named; an approval is never a batch and never under another name; and the three
 //! refusals that matter are asserted **separately**, because two failures
 //! sharing one signal is what cost this project seven incidents in two days
 //! (#116, #141):
@@ -65,6 +68,11 @@ const CONNECTION_STATUS_SUBJECT: &str = "twalk.connection.status.changed.v1";
 /// The traceparent every fixture here carries, so the assertion that the
 /// approval continues the suggestion's trace is about a known value.
 const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+/// The sentence every suggestion here carries as `data.disclosure` (ticket
+/// #121): the contract's French one, because the suggestions are French. The
+/// persona selected it; the Gateway appends it.
+const DISCLOSURE: &str = "Rédigé avec mon assistant IA.";
 
 // ---------------------------------------------------------------------------
 // Driving the seam
@@ -187,7 +195,8 @@ fn mail_event(sender_email: &str, connection: &str) -> Value {
 }
 
 /// One `persona.suggest.produced.v1` as the assistant publishes it, with the
-/// expiry ticket #22's policy always sets.
+/// expiry ticket #22's policy always sets and the disclosure #121's SDK
+/// always selects.
 fn suggest_event(trigger: &Value, body: &str, expires_at: &str) -> Value {
     let trigger_id = trigger["id"].as_str().expect("the trigger has an id");
     let attempt = 1;
@@ -211,6 +220,7 @@ fn suggest_event(trigger: &Value, body: &str, expires_at: &str) -> Value {
             "persona_id": "assistant",
             "trigger": { "event_id": trigger_id, "event_type": INBOUND_TYPE },
             "suggestion": { "body": body, "format": "text/plain" },
+            "disclosure": DISCLOSURE,
             "attempt": attempt,
             "expires_at": expires_at
         }
@@ -481,10 +491,20 @@ async fn a_valid_approval_publishes_a_schema_valid_reply_and_names_its_position(
     );
     assert_eq!(
         event["data"]["final"]["body"],
-        json!(talk.suggestion_body),
-        "with no edit, the final content is the suggestion's own body"
+        json!(format!("{}\n{DISCLOSURE}", talk.suggestion_body)),
+        "with no edit, the final content is the suggestion's own body — and, after it on a \
+         line of its own, the disclosure the suggestion carried (#121, ADR 0031)"
     );
-    assert_eq!(event["data"]["edited"], json!(false));
+    assert_eq!(
+        event["data"]["disclosure"],
+        json!(DISCLOSURE),
+        "the sentence is named again as a member, so a consumer need not parse the body"
+    );
+    assert_eq!(
+        event["data"]["edited"],
+        json!(false),
+        "appending the disclosure is not an edit: the comparison is the body alone"
+    );
     assert_eq!(
         event["data"]["target"]["room_id"],
         json!(talk.room_id),
@@ -520,8 +540,17 @@ async fn a_valid_approval_publishes_a_schema_valid_reply_and_names_its_position(
     assert_eq!(recorded["event_id"], event["id"]);
 
     // Nothing of what was said is in the Gateway's own store: the reply is
-    // on the bus, where the retention is declared.
-    let bytes = std::fs::read(running.state_dir().join("consent.sqlite3"))?;
+    // on the bus, where the retention is declared. Every file in the state
+    // directory — the store is in WAL mode and the Gateway is still up, so
+    // this run's rows are in `consent.sqlite3-wal`, and a search of the main
+    // file alone would pass vacuously. The approval row is found first, so
+    // that the absence below is an absence from bytes that hold the row.
+    let bytes = state_bytes(&running.state_dir())?;
+    assert!(
+        contains(&bytes, talk.suggestion_id.as_bytes()),
+        "the approval row was not found in the state directory, so the search below would \
+         prove nothing"
+    );
     assert!(
         !contains(&bytes, talk.suggestion_body.as_bytes()),
         "the Gateway's store holds the text of the reply that was sent"
@@ -529,8 +558,23 @@ async fn a_valid_approval_publishes_a_schema_valid_reply_and_names_its_position(
     Ok(())
 }
 
+/// Every byte of every file in the Gateway's state directory, as
+/// `tests/pending.rs` reads it: the store and its WAL.
+fn state_bytes(state_dir: &std::path::Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for entry in std::fs::read_dir(state_dir)
+        .with_context(|| format!("failed to read {}", state_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.is_file() {
+            bytes.extend(std::fs::read(&path)?);
+        }
+    }
+    Ok(bytes)
+}
+
 /// Whether a byte slice contains another — a substring search over the
-/// database file, as `tests/pending.rs` does.
+/// database files, as `tests/pending.rs` does.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -562,15 +606,35 @@ async fn the_edited_content_wins_over_what_the_persona_wrote() -> Result<()> {
     validate_against_contract(&stored.payload, "persona.reply.approved")?;
     assert_eq!(
         stored.payload["data"]["final"]["body"],
-        json!(edited),
-        "what the user approved is exactly what goes out"
+        json!(format!("{edited}\n{DISCLOSURE}")),
+        "what the user approved is exactly what goes out, with the disclosure after it: the \
+         sentence is invariant whether the suggestion was sent untouched or rewritten (ADR 0031)"
     );
     assert_ne!(
         stored.payload["data"]["final"]["body"],
-        json!(talk.suggestion_body),
+        json!(format!("{}\n{DISCLOSURE}", talk.suggestion_body)),
         "the persona's own words were replaced, not appended to"
     );
+    assert_eq!(stored.payload["data"]["disclosure"], json!(DISCLOSURE));
     assert_eq!(stored.payload["data"]["edited"], json!(true));
+
+    // A body that leaves no room for the line: the contract's 65 536 less a
+    // newline and 200 characters is 65 335, and one over is refused before
+    // anything is read from the bus — with the refusal naming what the room
+    // is reserved for.
+    let (status, refusal) = running
+        .approve(&json!({
+            "suggestion_event_id": talk.suggestion_id,
+            "final": { "body": "x".repeat(65_336), "format": "text/plain" }
+        }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{refusal}");
+    assert_eq!(refusal["error"], json!("malformed_request"));
+    let detail = refusal["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("65335") && detail.contains("disclosure"),
+        "the detail names the limit and the line it reserves room for: {refusal}"
+    );
     Ok(())
 }
 
@@ -1032,11 +1096,11 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
             *value = format!("{value},mail-linagora=email");
         }
     }
-    // The collector spoke for the mail connection (#275): a collector's
-    // connection nobody spoke for takes no reply.
+    // The collector holding the mail connection has said it is connected
+    // (#275): a collector's connection that never spoke takes no reply.
     bus.publish_event(
         CONNECTION_STATUS_SUBJECT,
-        &connection_status_event("mail-linagora", "email", "unknown", "connected", ""),
+        &connection_status_event_of_kind("mail-linagora", "email", "unknown", "connected", ""),
     )
     .await?;
     let running = Running::start_with(static_dir, env).await?;
@@ -1047,7 +1111,7 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
                 .as_array()?
                 .iter()
                 .find(|entry| entry["id"] == "mail-linagora")?
-                .get("status")
+                .pointer("/status/state")
                 .is_some()
                 .then_some(())
         },
@@ -1099,7 +1163,11 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
 /// One `connection.status.changed.v1` as a collector publishes it (#274)
 /// about a connection this deployment declares — the state a connection
 /// last said it was in is what #275 refuses an approval on.
-fn connection_status_event(
+fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -> Value {
+    connection_status_event_of_kind(connection, "whatsapp", from, to, hint)
+}
+
+fn connection_status_event_of_kind(
     connection: &str,
     kind: &str,
     from: &str,
@@ -1107,7 +1175,7 @@ fn connection_status_event(
     hint: &str,
 ) -> Value {
     let at = in_seconds(-30);
-    let mut event = json!({
+    let event = json!({
         "specversion": "1.0",
         "id": harness::sha256_hex(&format!("{connection}:{to}:{at}")),
         "source": format!("collector://collector.test/connections/{connection}"),
@@ -1126,13 +1194,6 @@ fn connection_status_event(
             "hint": hint
         }
     });
-    // A connected state carries no hint: the operator has nothing to do.
-    if hint.is_empty() {
-        event["data"]
-            .as_object_mut()
-            .expect("data is an object")
-            .remove("hint");
-    }
     validate_against_contract(&event, "connection.status.changed")
         .expect("the fixture is an event the contract allows");
     event
@@ -1168,13 +1229,7 @@ async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_c
     let hint = "Run `twalk-collector authorize --renew` on the host.";
     bus.publish_event(
         CONNECTION_STATUS_SUBJECT,
-        &connection_status_event(
-            &connection,
-            "whatsapp",
-            "connected",
-            "reconnect_required",
-            hint,
-        ),
+        &connection_status_event(&connection, "connected", "reconnect_required", hint),
     )
     .await?;
     let running = Running::start_with(static_dir, env).await?;
@@ -1257,13 +1312,7 @@ async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_c
     // The collector says `connected` again: the same approval proceeds.
     bus.publish_event(
         CONNECTION_STATUS_SUBJECT,
-        &connection_status_event(
-            &connection,
-            "whatsapp",
-            "reconnect_required",
-            "connected",
-            "",
-        ),
+        &connection_status_event(&connection, "reconnect_required", "connected", ""),
     )
     .await?;
     poll_until(

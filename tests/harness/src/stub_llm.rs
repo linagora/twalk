@@ -19,6 +19,18 @@
 //! all (issue #162). So the stub scripts [`StubAnswer`]s rather than strings,
 //! and a test can put that shape — the one a Qwen behind LiteLLM really
 //! answered — in front of a persona.
+//!
+//! Since ADR 0031 a persona asks its model one more question per
+//! suggestion: which language the reply it just drafted is written in, so
+//! that it can select the disclosure sentence the contact will read
+//! (issue #121). The stub tells that ask apart from a reply request by the
+//! phrase the SDK's `LANGUAGE_ASK` carries in its system prompt —
+//! [`LANGUAGE_ASK_MARK`] — and answers it with a bare tag from a lane of
+//! its own ([`StubLlm::set_language_answer`], `fr` by default). It never
+//! consumes a scripted reply, so a test that queued two drafts still sees
+//! both drafts go to the two reply requests it queued them for. The ask is
+//! recorded like any request: `requests()` shows both, which is how a test
+//! asserts the ask's shape and the reply request's separately.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -33,6 +45,17 @@ use crate::sha256_hex;
 
 /// What the stub answers when no reply has been scripted.
 pub const DEFAULT_REPLY: &str = "This is a canned suggestion from the stub LLM.";
+
+/// The phrase by which the stub recognises the SDK's language ask (ADR
+/// 0031): the SDK's `twalk_sdk.disclosure.LANGUAGE_ASK` contains it, and
+/// `sdk/python/tests/test_disclosure.py` pins that it does, because the two
+/// sides cannot share the constant.
+pub const LANGUAGE_ASK_MARK: &str = "exactly one language tag";
+
+/// The tag the stub answers a language ask with unless a test says
+/// otherwise: French, the language every canned reply in these suites is
+/// written in, and the one whose sentence the contract's own fixtures carry.
+pub const DEFAULT_LANGUAGE_ANSWER: &str = "fr";
 
 /// The `model` the stub reports when the request names none.
 const DEFAULT_MODEL: &str = "stub-model";
@@ -65,6 +88,28 @@ impl StubRequest {
             .get("content")?
             .as_str()
     }
+
+    /// Whether this request is the SDK's language ask rather than a reply
+    /// request: a system message carrying [`LANGUAGE_ASK_MARK`].
+    pub fn is_language_ask(&self) -> bool {
+        is_language_ask(&self.body)
+    }
+}
+
+/// Whether a chat-completions body is the language ask: any `system` message
+/// whose content carries [`LANGUAGE_ASK_MARK`].
+fn is_language_ask(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("system")
+                    && message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| content.contains(LANGUAGE_ASK_MARK))
+            })
+        })
 }
 
 /// What the stub answers one request with: a completion, or one of the two
@@ -121,6 +166,9 @@ struct State {
     answer: StubAnswer,
     /// Answers scripted one at a time, consumed in order before `answer`.
     scripted: VecDeque<StubAnswer>,
+    /// What a language ask is answered with — a lane of its own, so that
+    /// the ask never eats a scripted reply.
+    language: String,
     requests: Vec<StubRequest>,
 }
 
@@ -129,6 +177,7 @@ impl Default for State {
         Self {
             answer: StubAnswer::Completion(DEFAULT_REPLY.to_owned()),
             scripted: VecDeque::new(),
+            language: DEFAULT_LANGUAGE_ANSWER.to_owned(),
             requests: Vec::new(),
         }
     }
@@ -207,6 +256,14 @@ impl StubLlm {
     /// Queues one answer, served (in order) before the standing one.
     pub fn push_answer(&self, answer: StubAnswer) {
         self.lock().scripted.push_back(answer);
+    }
+
+    /// What every language ask is answered with from now on: a bare tag,
+    /// as a model asked for exactly one answers it (`fr`, `fr-CA`, `ja`,
+    /// `other`). [`DEFAULT_LANGUAGE_ANSWER`] until set. Scripted and
+    /// standing replies are untouched: the ask has a lane of its own.
+    pub fn set_language_answer(&self, tag: &str) {
+        self.lock().language = tag.to_owned();
     }
 
     /// Every request received so far, oldest first.
@@ -380,10 +437,16 @@ fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> (&'static str, Va
             authorization: request.authorization.clone(),
             body: body.clone(),
         });
-        state
-            .scripted
-            .pop_front()
-            .unwrap_or_else(|| state.answer.clone())
+        if is_language_ask(&body) {
+            // The ask is answered from its own lane and consumes nothing a
+            // test scripted for the reply requests.
+            StubAnswer::Completion(state.language.clone())
+        } else {
+            state
+                .scripted
+                .pop_front()
+                .unwrap_or_else(|| state.answer.clone())
+        }
     };
     let (message, finish_reason) = answer.body();
 
@@ -420,7 +483,7 @@ fn error_body(message: impl Into<String>, kind: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{StubAnswer, StubLlm, DEFAULT_REPLY};
+    use super::{StubAnswer, StubLlm, DEFAULT_LANGUAGE_ANSWER, DEFAULT_REPLY, LANGUAGE_ASK_MARK};
     use anyhow::Result;
     use serde_json::{json, Value};
 
@@ -568,6 +631,91 @@ mod tests {
                 .and_then(Value::as_str),
             Some(DEFAULT_REPLY),
             "the scripted answers run out and the canned completion resumes"
+        );
+        Ok(())
+    }
+
+    /// The ask a persona makes after drafting a reply (ADR 0031): the
+    /// system prompt the SDK sends, the reply as the user message. Shaped
+    /// as the SDK shapes it so that the test of the stub is a test of what
+    /// the persona really sends.
+    fn language_ask(reply: &str) -> Value {
+        json!({
+            "model": "local-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": format!(
+                        "Answer with {LANGUAGE_ASK_MARK} among en, fr, it, es, de, or other."
+                    ),
+                },
+                { "role": "user", "content": reply },
+            ],
+            "max_tokens": 5,
+        })
+    }
+
+    fn content(body: &Value) -> String {
+        body.pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The language ask has a lane of its own: it is answered with a bare
+    /// tag, it never consumes a scripted reply, and it is recorded — so a
+    /// test that queued two drafts for two reply requests still sees both
+    /// drafts land where it queued them, with an ask in between.
+    #[tokio::test]
+    async fn answers_the_language_ask_from_its_own_lane_without_eating_a_scripted_reply(
+    ) -> Result<()> {
+        let stub = StubLlm::start_with_reply("canned").await?;
+        stub.push_reply("first");
+        stub.push_reply("second");
+        let url = stub.chat_completions_url();
+
+        let (_, first) = post(&url, &chat_request()).await?;
+        let (_, asked) = post(&url, &language_ask("first")).await?;
+        let (_, second) = post(&url, &chat_request()).await?;
+        assert_eq!(
+            (content(&first), content(&asked), content(&second)),
+            (
+                "first".to_owned(),
+                DEFAULT_LANGUAGE_ANSWER.to_owned(),
+                "second".to_owned()
+            ),
+            "the ask between two scripted replies is answered with the default tag \
+             and the second draft still goes to the second reply request"
+        );
+
+        stub.set_language_answer("ja");
+        let (_, asked) = post(&url, &language_ask("second")).await?;
+        assert_eq!(
+            content(&asked),
+            "ja",
+            "a test names the language the model answers"
+        );
+        let (_, canned) = post(&url, &chat_request()).await?;
+        assert_eq!(
+            content(&canned),
+            "canned",
+            "and the reply lane is untouched by it"
+        );
+
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 5, "every ask is recorded like any request");
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.is_language_ask())
+                .collect::<Vec<_>>(),
+            vec![false, true, false, true, false],
+            "a test can tell the asks from the reply requests"
+        );
+        assert_eq!(
+            requests[1].last_message_content(),
+            Some("first"),
+            "and read what the persona asked the language of"
         );
         Ok(())
     }

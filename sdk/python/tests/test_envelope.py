@@ -17,6 +17,7 @@ from twalk_sdk import (
     thinking_event,
     thinking_id,
 )
+from twalk_sdk import DISCLOSURE_MAX_CHARS, SENTENCES
 from twalk_sdk.envelope import MAX_BODY_CHARS, MAX_RATIONALE_CHARS, nats_headers
 
 SOURCE = "hermes://twalk.example.com/personas/assistant"
@@ -117,6 +118,10 @@ class SuggestEventTest(unittest.TestCase):
                 body="Pas de problème, à 20h !",
                 confidence=0.86,
                 rationale="Demande simple et ton amical : une confirmation courte suffit.",
+                # The sentence the loop selects from the language the model
+                # answered (ADR 0031) — here handed in as the loop would
+                # have set it, since this module only writes it down.
+                disclosure="Rédigé avec mon assistant IA.",
             ),
             time="2026-09-17T10:00:09Z",
             # The fixture's own expiry, handed in: when a suggestion goes
@@ -153,11 +158,49 @@ class SuggestEventTest(unittest.TestCase):
         self.assertEqual(len(event["data"]["suggestion"]["body"]), MAX_BODY_CHARS)
         self.assertEqual(len(event["data"]["rationale"]), MAX_RATIONALE_CHARS)
 
+    def test_the_disclosure_is_a_field_of_its_own_and_absent_when_none_was_set(self) -> None:
+        # ADR 0031: never inside the body, which the user may edit; the
+        # Companion Gateway appends it at approval. And omitted rather than
+        # empty when the loop set none — the schema allows the absence, and
+        # the loop's own answer to "no sentence" is no suggestion at all.
+        with_sentence = suggest_event(
+            persona_id="assistant",
+            source=SOURCE,
+            trigger=trigger(),
+            suggestion=Suggestion(body="ok", disclosure=SENTENCES["en"]),
+        )
+        self.assertEqual(with_sentence["data"]["disclosure"], SENTENCES["en"])
+        self.assertEqual(with_sentence["data"]["suggestion"]["body"], "ok")
+        without = suggest_event(
+            persona_id="assistant",
+            source=SOURCE,
+            trigger=trigger(),
+            suggestion=Suggestion(body="ok"),
+        )
+        self.assertNotIn("disclosure", without["data"])
+        # And the id is the natural key's alone: a sentence does not make a
+        # second suggestion of one reply.
+        self.assertEqual(with_sentence["id"], without["id"])
+
+    def test_the_body_cap_leaves_room_for_the_appended_line(self) -> None:
+        # `final.body` on the approved event is capped at 65 536 and the
+        # Gateway appends "\n" + disclosure to it, so the largest body the
+        # SDK publishes plus the largest sentence the schema allows must fit.
+        self.assertEqual(MAX_BODY_CHARS, 65_536 - 1 - DISCLOSURE_MAX_CHARS)
+        self.assertLessEqual(MAX_BODY_CHARS + 1 + DISCLOSURE_MAX_CHARS, 65_536)
+
     def test_it_refuses_a_suggestion_the_contract_has_no_shape_for(self) -> None:
         with self.assertRaises(EnvelopeError):
             Suggestion(body="ok", format="application/pdf")
         with self.assertRaises(EnvelopeError):
             Suggestion(body="ok", confidence=1.5)
+        # A sentence is selected, never written: an author cannot put their
+        # own wording in the field, for the same reason they cannot forget
+        # the consent gate. `language` is the member for an author who knows.
+        with self.assertRaises(EnvelopeError) as refused:
+            Suggestion(body="ok", disclosure="Written by a robot.")
+        self.assertIn("language", str(refused.exception))
+        self.assertEqual(Suggestion(body="ok", language="fr").disclosure, None)
         with self.assertRaises(EnvelopeError):
             suggest_event(
                 persona_id="assistant",

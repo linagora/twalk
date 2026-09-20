@@ -1,0 +1,3 @@
+# disclosure
+
+`v1/sentences.json` holds the one sentence a persona's reply discloses itself with, one per language, keyed `en fr it es de` (ADR 0019, ADR 0031); if a component and this file disagree, this file wins, the same rule the schemas keep. The Python SDK selects the sentence for the language the reply was written in and the Companion Gateway appends it to the approved reply's body — the only two readers, since neither the model nor the Gateway is allowed to compose the words itself. A sentence changes only by adding a new version directory (`v2/`, ...), never by editing `v1/sentences.json` in place, exactly as a breaking schema change gets a new suffix rather than a mutated v1.

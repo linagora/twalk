@@ -180,6 +180,16 @@ pub struct Listed {
     /// What the persona proposed: the text the screen draws and the user
     /// approves or edits.
     pub suggestion: Content,
+    /// The sentence the reply will disclose itself with, in the language the
+    /// persona wrote in (`data.disclosure`, ticket #121) — what the approval
+    /// screen shows fixed beside the editable body, or `None` when the
+    /// suggestion carries none. Whether it is *appended* is the switch's
+    /// business at the moment of approval, not this read's.
+    ///
+    /// One of the contract's five, verbatim, or `None`: a value on the bus
+    /// that is neither is listed as `None` and logged rather than drawn
+    /// (see [`Suggestions::settle`]).
+    pub disclosure: Option<String>,
     pub stream_sequence: u64,
     pub standing: Standing,
     /// The approval this Gateway recorded, when there is one. `publication`
@@ -258,6 +268,8 @@ struct SuggestionData {
     persona_id: String,
     trigger: TriggerReference,
     suggestion: SuggestionContent,
+    #[serde(default)]
+    disclosure: Option<String>,
     #[serde(default)]
     attempt: Option<u64>,
     #[serde(default)]
@@ -447,6 +459,11 @@ impl Suggestions {
         })?;
         let now = crate::consent::rfc3339_millis((self.now)());
         let standing = standing(approval.as_ref(), document.data.expires_at.as_deref(), &now);
+        let disclosure = listed_disclosure(
+            &document.id,
+            &document.data.persona_id,
+            document.data.disclosure,
+        );
         Ok(Listed {
             event_id: document.id,
             source: document.source,
@@ -462,6 +479,7 @@ impl Suggestions {
                 body: document.data.suggestion.body,
                 format,
             },
+            disclosure,
             stream_sequence: sequence,
             standing,
             approval,
@@ -858,6 +876,41 @@ pub fn standing(
     }
 }
 
+/// The `data.disclosure` a listing draws: the contract's own sentence,
+/// verbatim, or `None` (ticket #121, ADR 0031).
+///
+/// The approval path *refuses* a suggestion whose sentence the contract does
+/// not hold (`approval::contract_sentence`, `409 suggestion_unreadable`),
+/// and that refusal is the load-bearing one: it is what keeps two hundred
+/// characters of a rogue persona's wording from going out after the user's
+/// reply. This read does not refuse — one bad message must not blank a
+/// screen (the same rule `unreadable` in the window follows) — and it does
+/// not pass the value through either, because the approval screen draws
+/// this member as *fixed* and tells the user it is the sentence that goes
+/// out with every reply, which is exactly the block a forgery would hide
+/// in. So a value that is not one of the five is listed as `None`: the row
+/// then says the suggestion carries no sentence, which is the truth as far
+/// as this Gateway is concerned, since it will never append that one. The
+/// occurrence is logged with the persona and the length, never the text —
+/// a warning at read is the count, and the approval, when it is pressed,
+/// is counted under `suggestion_unreadable` on `/metrics`.
+fn listed_disclosure(suggestion: &str, persona: &str, member: Option<String>) -> Option<String> {
+    let sentence = member?;
+    if crate::disclosure::is_contract_sentence(&sentence) {
+        return Some(sentence);
+    }
+    warn!(
+        suggestion,
+        persona,
+        chars = sentence.chars().count(),
+        "this suggestion's disclosure is not one of the contract's sentences \
+         (contracts/disclosure/v1/sentences.json), so it is listed with none and would be \
+         refused at approval: the sentence a contact is told is the contract's own and never a \
+         persona's wording (ADR 0031)"
+    );
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,6 +1013,7 @@ mod tests {
                     "contact": { "display_name": "Aicha Benali" }
                 },
                 "suggestion": { "body": "Pas de problème, à 20h !", "format": "text/plain" },
+                "disclosure": "Rédigé avec mon assistant IA.",
                 "rationale": "SHE ASKED TO MOVE THE APPOINTMENT TO 20H",
                 "confidence": 0.9,
                 "attempt": 1,
@@ -983,6 +1037,36 @@ mod tests {
         }
         assert_eq!(document.data.trigger.event_id, "b".repeat(64));
         assert_eq!(document.data.suggestion.body, "Pas de problème, à 20h !");
+        assert_eq!(
+            document.data.disclosure.as_deref(),
+            Some("Rédigé avec mon assistant IA."),
+            "the persona's own sentence is read, so the screen can show it (#121)"
+        );
+    }
+
+    #[test]
+    fn a_sentence_the_contract_does_not_hold_is_listed_as_none_and_never_drawn() {
+        let contracts = "Rédigé avec mon assistant IA.";
+        assert_eq!(
+            listed_disclosure("a", "assistant", Some(contracts.to_owned())).as_deref(),
+            Some(contracts)
+        );
+        assert_eq!(listed_disclosure("a", "assistant", None), None);
+        // A rogue persona's own wording, contract-valid on the bus: the
+        // screen would draw it as the fixed sentence that goes out with
+        // every reply. It is listed as none instead — the approval refuses
+        // it, so "carries no sentence" is what this Gateway will do with it.
+        for forged in [
+            "Written by an assistant you can trust.",
+            "Rédigé avec mon assistant IA",
+            "",
+        ] {
+            assert_eq!(
+                listed_disclosure("a", "assistant", Some(forged.to_owned())),
+                None,
+                "{forged:?}"
+            );
+        }
     }
 
     #[test]

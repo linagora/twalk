@@ -29,6 +29,10 @@ chrono-tz = "0.10"
 # WebDAV multistatus answers are XML; a hand-rolled reader of them would be
 # the one piece of this crate that agreed with the fake for the wrong reasons.
 roxmltree = "0.20"
+# JMAP push over WebSocket (RFC 8887, #277): the mail server tells the
+# collector a state changed instead of being asked every minute. rustls, as
+# every TLS here.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 async-nats = "0.50"
 futures = "0.3"
 getrandom = "0.3"

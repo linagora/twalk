@@ -30,6 +30,11 @@ pub struct Metrics {
     /// agenda is counted, since a read nobody can see is the thing #281
     /// exists to prevent.
     freebusy_reads: Mutex<BTreeMap<&'static str, u64>>,
+    /// Whether the push socket to the mail server is open (#277): 1 when a
+    /// delivery wakes the poll, 0 when the poll is on its own.
+    push_connected: AtomicU64,
+    /// How many times the server woke the mail poll.
+    push_wakes: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -47,6 +52,8 @@ impl Metrics {
             last_renewal_unix_seconds: AtomicU64::new(0),
             mails_dropped: Mutex::new(BTreeMap::new()),
             freebusy_reads: Mutex::new(BTreeMap::new()),
+            push_connected: AtomicU64::new(0),
+            push_wakes: AtomicU64::new(0),
         }
     }
 
@@ -57,6 +64,15 @@ impl Metrics {
             .expect("the metrics mutex is never poisoned")
             .entry(outcome)
             .or_insert(0) += 1;
+    }
+
+    pub fn set_push_connected(&self, connected: bool) {
+        self.push_connected
+            .store(u64::from(connected), Ordering::Relaxed);
+    }
+
+    pub fn record_push_wake(&self) {
+        self.push_wakes.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_mail_dropped(&self, reason: &'static str) {
@@ -178,6 +194,18 @@ impl Metrics {
             ));
         }
         drop(reads);
+        out.push_str("# HELP twalk_collector_push_connected Whether the push socket to the mail server is open: 1 when a delivery wakes the poll, 0 when the poll is on its own.\n");
+        out.push_str("# TYPE twalk_collector_push_connected gauge\n");
+        out.push_str(&format!(
+            "twalk_collector_push_connected {}\n",
+            self.push_connected.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP twalk_collector_push_wakes_total Times the mail server's push woke the mail poll.\n");
+        out.push_str("# TYPE twalk_collector_push_wakes_total counter\n");
+        out.push_str(&format!(
+            "twalk_collector_push_wakes_total {}\n",
+            self.push_wakes.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP twalk_collector_connection_state Each connection's state: 1 on the state it is in, 0 on the three it is not.\n");
         out.push_str("# TYPE twalk_collector_connection_state gauge\n");
         for ((connection, state), value) in self
@@ -227,6 +255,15 @@ mod tests {
         ));
         assert!(body.contains("twalk_collector_grant_age_seconds 100\n"));
         assert!(body.contains("twalk_collector_events_dropped_total{reason=\"owner\"} 0\n"));
+        assert!(body.contains("twalk_collector_push_connected 0\n"));
+        metrics.set_push_connected(true);
+        metrics.record_push_wake();
+        assert!(metrics
+            .render(1_000)
+            .contains("twalk_collector_push_connected 1\n"));
+        assert!(metrics
+            .render(1_000)
+            .contains("twalk_collector_push_wakes_total 1\n"));
         metrics.record_mail_dropped("non_human_sender");
         assert!(metrics
             .render(1_000)

@@ -105,8 +105,20 @@ export interface paths {
          *     than defaulted**: a reply's disclosure is written in the language of
          *     the reply and not the user's (ADR 0031), so a silent default is how a
          *     French disclosure ends up under an English reply with nothing anywhere
-         *     to say so. Any language tag is allowed, because a suggestion follows
-         *     the conversation and not the user (ADR 0016).
+         *     to say so.
+         *
+         *     **The language becomes the disclosure here** (ticket #121). Hermes is
+         *     outside this deployment and holds no copy of the contract, so its
+         *     answer names a language and the Gateway selects the sentence: the
+         *     tag's primary subtag (`fr-CA` is `fr`) is looked up in
+         *     `contracts/disclosure/v1/sentences.json` and the suggestion is
+         *     published with the sentence as `data.disclosure`, exactly as a
+         *     persona's own SDK would have. A language the contract holds no
+         *     sentence for — anything but `en`, `fr`, `it`, `es`, `de` today — is
+         *     `422 hermes_answer_language_unsupported`, counted, and **no
+         *     suggestion at all**: a reply that cannot be disclosed is one that
+         *     should not exist (ADR 0031), and the refusal names the five so it
+         *     reads as the one-line contribution it is asking for.
          *
          *     **What is ignored rather than refused.** The Hermes hook fires for
          *     every turn of its profile, so a turn the owner typed themselves
@@ -263,6 +275,20 @@ export interface paths {
          *     `502` the user can retry. An approval is never "accepted, we will try
          *     later", because a send held for later is a send whose consent check
          *     has gone stale.
+         *
+         *     **The disclosure is appended here** (ticket #121, ADR 0019, ADR
+         *     0031). When the suggestion carries `disclosure` — the sentence the
+         *     persona selected in the language it wrote in, *"Rédigé avec mon
+         *     assistant IA."* — and the switch (`GET /api/settings/disclosure`) is
+         *     on, the published event's `final.body` is the approved body, a
+         *     newline and that sentence, and the event carries the sentence again
+         *     as `data.disclosure`. The body the user approves or edits is the
+         *     reply alone: the sentence is not in `final.body` of the request, is
+         *     not counted against its limit, and cannot be edited out. `edited`
+         *     compares the body alone. With the switch off, neither the line nor
+         *     the member is on the event; the Gateway composes no sentence of its
+         *     own, so a suggestion that carries none goes out undisclosed and says
+         *     so in the log.
          *
          *     The suggestion and the message it answers are read from the bus,
          *     which has no index from an event id to a stream position, so the read
@@ -1304,6 +1330,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/disclosure": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether approved replies carry the disclosure, and who last decided.
+         * @description The switch ADR 0019 requires and ADR 0031 placed (ticket #121). Every
+         *     reply a persona drafted reaches the contact with one sentence after
+         *     it, on a line of its own, in the language the reply was written in —
+         *     *"Rédigé avec mon assistant IA."* — and this is the one control over
+         *     that: **global**, never per message, because a sentence that can be
+         *     argued down conversation by conversation is one that ends up nowhere.
+         *
+         *     It is on by default and the answer says so with `enabled: true` and
+         *     nothing else: `since`, `actor` and `reason` are `null` while nobody
+         *     has decided. After a decision they name when it was taken and by whom
+         *     (this deployment's owner — the only person who can), so the approval
+         *     screen can say "the disclosure is not added: turned off on … by …" at
+         *     the one moment the user is thinking about a particular message going
+         *     to a particular person.
+         *
+         *     The record is an append-only journal in the consent store — a
+         *     sibling of the consent journal, sharing its shape and its triggers,
+         *     and deliberately not the settings table, which would forget who
+         *     decided and what was before. So on a deployment with no bus there is
+         *     no journal and no approval path for it to govern, and the answer is
+         *     `503 consent_not_configured`.
+         */
+        get: operations["getDisclosureState"];
+        /**
+         * Turn the disclosure off, or back on, as a recorded decision.
+         * @description Appends one decision to the disclosure journal and answers the state
+         *     it leaves behind. `actor` is stamped by the Gateway — this
+         *     deployment's owner, from configuration, exactly as a consent
+         *     decision's is — and `reason` is the user's own note, optional and at
+         *     most 1 024 characters, kept with the decision.
+         *
+         *     Every call appends, including one that restates the current state:
+         *     the journal is the record of what was decided and when, not a
+         *     projection to keep tidy. Nothing is retroactive: a reply approved
+         *     while the switch was off went out without the sentence, and turning
+         *     it on does not send one after it.
+         */
+        put: operations["putDisclosureState"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings/language": {
         parameters: {
             query?: never;
@@ -1688,7 +1768,10 @@ export interface components {
          *     There is no member for the reply's text, and there will not be one:
          *     the text is on the bus, where the retention is declared, and the
          *     Gateway keeps the suggestion's id, who approved it, whether they
-         *     edited it and where the publication landed.
+         *     edited it and where the publication landed. The published event's
+         *     `final.body` is that text followed, on a line of its own, by the
+         *     disclosure the suggestion carried — when the switch is on (ticket
+         *     #121, ADR 0031) — and `edited` is about the text alone.
          */
         Approval: {
             /**
@@ -1774,8 +1857,13 @@ export interface components {
              */
             final?: {
                 /**
-                 * @description The exact text to send. Empty is refused: approving an empty
-                 *     reply sends an empty message, which is never what was meant.
+                 * @description The exact text to send, **without** the disclosure: the
+                 *     Gateway appends that after the body at publication (ticket
+                 *     #121). Empty is refused: approving an empty reply sends an
+                 *     empty message, which is never what was meant. The limit is
+                 *     the contract's 65 536 less a newline and the 200 characters a
+                 *     disclosure may run to, so the sum never exceeds the schema —
+                 *     reserved whether the switch is on or off.
                  */
                 body: string;
                 /**
@@ -2528,6 +2616,45 @@ export interface components {
              */
             devices: components["schemas"]["Device"][];
         };
+        /**
+         * @description The disclosure switch as the journal answers it (ticket #121): on or
+         *     off, and — when somebody decided — since when, by whom and why. All
+         *     three are `null` in the default state, which is on: "nobody
+         *     decided" is the record, not a gap in it.
+         */
+        DisclosureState: {
+            /**
+             * @description The Matrix ID of who decided: this deployment's owner, stamped
+             *     by the Gateway. `null` when nobody has.
+             */
+            actor: string | null;
+            /**
+             * @description `true`: every approved reply goes out with the disclosure after
+             *     it, in the language it was written in. `false`: none does, until
+             *     it is turned on again.
+             */
+            enabled: boolean;
+            /** @description The note given with the decision, if one was. */
+            reason: string | null;
+            /**
+             * Format: date-time
+             * @description When the current state was decided; `null` when never.
+             */
+            since: string | null;
+        };
+        /** @description One decision about the disclosure. A closed object. */
+        DisclosureUpdate: {
+            /**
+             * @description `false` turns the disclosure off for every reply approved from
+             *     now on; `true` turns it back on. Never per message (ADR 0019).
+             */
+            enabled: boolean;
+            /**
+             * @description Why, in the user's own words. Optional, kept with the decision,
+             *     and shown back on the settings screen.
+             */
+            reason?: string | null;
+        };
         /** @description The state that applies to one contact on one connection. */
         EffectiveConsent: {
             /** @description The connection the answer is about (#270). */
@@ -2650,8 +2777,13 @@ export interface components {
          *     discover which by looking for a null.
          */
         HermesAnswerAccepted: {
-            /** @description The language the answer declared it was written in. */
-            language: string;
+            /**
+             * @description The primary subtag of the language the answer declared —
+             *     `fr` for `fr-CA` — which is the language the suggestion's
+             *     `disclosure` was selected by.
+             * @enum {string}
+             */
+            language: "en" | "fr" | "it" | "es" | "de";
             /** @enum {string} */
             status: "published";
             /** @description Where on the bus the suggestion landed. */
@@ -2694,7 +2826,9 @@ export interface components {
                 platform?: string;
                 /**
                  * @description What the model wrote: a JSON object with `reference`, `reply`
-                 *     and `language`. A fenced code block around it is unwrapped.
+                 *     and `language` — a BCP 47 tag whose primary subtag must be one
+                 *     the contract holds a disclosure sentence for. A fenced code
+                 *     block around it is unwrapped.
                  */
                 response_text: string;
                 /** @description Hermes's own session key. Logged, never the correlation. */
@@ -3571,6 +3705,25 @@ export interface components {
             consent: "granted" | "pending" | "revoked";
             delivery: components["schemas"]["Delivery"];
             /**
+             * @description The sentence the reply will disclose itself with, after the body
+             *     and on a line of its own, in the language the persona wrote in —
+             *     *"Rédigé avec mon assistant IA."*, *"Drafted with my AI
+             *     assistant."* (ticket #121, ADR 0019, ADR 0031). Selected by the
+             *     persona, or by the Gateway from the language Hermes declared;
+             *     never composed here. A screen shows it **fixed** beside the
+             *     editable body, because it is not in the field the user edits and
+             *     cannot be removed from one message. Whether it is appended at
+             *     approval is the switch's business (`GET /api/settings/disclosure`),
+             *     not this read's. `null` when the suggestion carries none — one
+             *     published before the member existed, or by a persona that set
+             *     none — and the reply then goes out undisclosed. Always one of
+             *     the contract's five sentences verbatim: a value on the bus that
+             *     is none of them is listed as `null` rather than drawn as fixed,
+             *     and `POST /api/approvals` refuses that suggestion as
+             *     `suggestion_unreadable`.
+             */
+            disclosure: string | null;
+            /**
              * @description The CloudEvents id of the `persona.suggest.produced.v1`. This is
              *     what `POST /api/approvals` takes as `suggestion_event_id`.
              */
@@ -3630,7 +3783,10 @@ export interface components {
              *     which is why it is here when the quoted message's are not.
              */
             suggestion: {
-                /** @description The suggested reply in its canonical text form. */
+                /**
+                 * @description The suggested reply in its canonical text form — the
+                 *     persona's words alone, without the disclosure.
+                 */
                 body: string;
                 /**
                  * @description Content type of the body.
@@ -3834,6 +3990,41 @@ export interface components {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
                     error?: "contacts_not_configured";
+                };
+            };
+        };
+        /**
+         * @description - `sign_in_not_configured` — this deployment has no owner
+         *       (`GATEWAY_OWNER` is unset), so its whole API is closed. This is
+         *       what the guard answers.
+         *     - `consent_not_configured` — `GATEWAY_NATS_URL` is unset, so there
+         *       is no consent store, no disclosure journal in it, and no approval
+         *       path for the switch to govern. The consent routes' own code, so a
+         *       client learns one fact under one word.
+         */
+        DisclosureNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "sign_in_not_configured" | "consent_not_configured";
+                };
+            };
+        };
+        /**
+         * @description `store_unavailable` — the disclosure journal could not be read, or
+         *     the decision could not be recorded; nothing was changed.
+         */
+        DisclosureStoreUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "store_unavailable";
                 };
             };
         };
@@ -4174,10 +4365,10 @@ export interface operations {
         responses: {
             /**
              * @description Either the answer became a suggestion (`status: "published"`, with
-             *     the suggestion's CloudEvents id, the language it declared and the
-             *     stream position it landed at) or the push was not a Twalk wake and
-             *     was ignored (`status: "ignored"`, with the reason, also counted on
-             *     `/metrics`).
+             *     the suggestion's CloudEvents id, the language its disclosure was
+             *     selected by and the stream position it landed at) or the push was
+             *     not a Twalk wake and was ignored (`status: "ignored"`, with the
+             *     reason, also counted on `/metrics`).
              */
             200: {
                 headers: {
@@ -4310,9 +4501,14 @@ export interface operations {
              *       Refused, deliberately not defaulted (ADR 0031).
              *     - `hermes_answer_language_unreadable` — it names something that is
              *       not a language tag.
+             *     - `hermes_answer_language_unsupported` — it names a language tag
+             *       the contract holds no disclosure sentence for (ticket #121). No
+             *       suggestion is published; `detail` names the languages that have
+             *       one.
              *     - `hermes_answer_is_empty` — the reply is empty.
-             *     - `hermes_answer_too_long` — the reply is over the contract's
-             *       65536-character limit.
+             *     - `hermes_answer_too_long` — the reply is over 65 335 characters:
+             *       the contract's 65 536 less the line the disclosure is appended
+             *       on at approval.
              */
             422: {
                 headers: {
@@ -4321,7 +4517,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_is_empty" | "hermes_answer_too_long";
+                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long";
                     };
                 };
             };
@@ -4613,9 +4809,11 @@ export interface operations {
              *
              *     - `malformed_request` - the body is not JSON, a required member
              *       is missing or of the wrong type, `suggestion_event_id` is not
-             *       a contract event id, or `final.body` is empty (approving an
+             *       a contract event id, `final.body` is empty (approving an
              *       empty reply sends an empty message, which is never what was
-             *       meant).
+             *       meant), or `final.body` is over 65 335 characters — the
+             *       contract's 65 536 less the line the disclosure is appended on,
+             *       which `detail` names.
              *     - `approval_is_not_a_batch` - the body is a list, or
              *       `suggestion_event_id` is. An approval names exactly one
              *       suggestion.
@@ -4711,8 +4909,19 @@ export interface operations {
              *       is not refused on this ground.
              *     - `suggestion_unreadable` - the suggestion is on the bus and
              *       this build cannot read it (an unknown network, an unknown
-             *       consent state, a content type the contract does not name).
-             *       Found and not understood, which is not "not found".
+             *       consent state, a content type the contract does not name — or,
+             *       sent unedited, a body so long that the disclosure appended
+             *       after it would exceed the contract's 65 536, which only a
+             *       persona that ignored the SDK's cap can publish; editing the
+             *       reply shorter is the way out — or a `disclosure` that is not
+             *       one of the contract's own sentences, verbatim, from
+             *       `contracts/disclosure/v1/sentences.json`: the schema allows
+             *       any string of 1..200, the bus has no authentication, and what
+             *       a contact is told is the contract's sentence and never a
+             *       persona's wording (ADR 0031), so the reply is neither sent
+             *       with that text after it nor sent without a line; `detail`
+             *       names the file and the length, not the text). Found and not
+             *       understood, which is not "not found".
              */
             409: {
                 headers: {
@@ -6352,6 +6561,73 @@ export interface operations {
                 };
             };
             503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    getDisclosureState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The switch, and the last decision about it if any. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DisclosureState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["DisclosureStoreUnavailable"];
+            503: components["responses"]["DisclosureNotConfigured"];
+        };
+    };
+    putDisclosureState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DisclosureUpdate"];
+            };
+        };
+        responses: {
+            /** @description The switch as it now stands, with this decision as its record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DisclosureState"];
+                };
+            };
+            /**
+             * @description `malformed_request` — the body is not JSON, is not an object,
+             *     is missing `enabled`, has an `enabled` that is not a boolean, a
+             *     `reason` that is not a string or is over 1 024 characters, or
+             *     carries another member. `detail` names which.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["DisclosureStoreUnavailable"];
+            503: components["responses"]["DisclosureNotConfigured"];
         };
     };
     getLanguagePreference: {
