@@ -578,7 +578,22 @@ async fn approvals_route(
         .cloned()
         .unwrap_or(Answer::Approve)
     {
-        Answer::Approve => respond(201, approval_json(&suggestion_id, edited)),
+        Answer::Approve => {
+            // What the real Gateway's `standing` becomes once it has recorded
+            // an approval: a later `GET /api/suggestions/{id}` says
+            // `approved`, which is what keeps a suggestion redelivered
+            // after its approval from being posted again (#300). An id
+            // nobody scripted a read for gains one, with the delivery a
+            // deployment with no bridge answers.
+            state
+                .suggestions
+                .entry(suggestion_id.clone())
+                .or_insert_with(|| {
+                    SuggestionAnswer::new("approvable", "unknown", "no_portal_register")
+                })
+                .standing = "approved".to_owned();
+            respond(201, approval_json(&suggestion_id, edited))
+        }
         Answer::Refuse { status, code } => respond(
             status,
             json!({
@@ -809,6 +824,11 @@ mod tests {
             assert_eq!(state.approvals[0].suggestion_id, suggestion);
             assert_eq!(state.approvals[0].final_body.as_deref(), Some("Merci."));
             assert_eq!(state.approvals[0].device_token, "D1");
+            assert_eq!(
+                state.suggestions[suggestion].standing, "approved",
+                "an approval is what a later read says: {:?}",
+                state.suggestions
+            );
         }
 
         // A scripted refusal and the duplicate answer.

@@ -175,13 +175,19 @@ async fn everything_the_clerk_wrote(run: &Run) -> Result<Vec<Event>> {
     Ok(all)
 }
 
-/// Asserts that neither the contact the stub's `Approval` names nor the
-/// owner's Matrix ID reached anything the clerk wrote on Buzz or logged:
-/// the `201` carries both, and neither is the owner's to read on a relay.
+/// What the stub's answers carry that the clerk must write on no channel
+/// and in no log: the contact and the owner's Matrix ID the `Approval`
+/// record names (the `201`, and a `200` of an approved suggestion), and
+/// the Gateway's own copy of the suggestion's body, which a post that
+/// quoted the read rather than the bus would show (#300).
+const GATEWAY_SECRETS: [&str; 3] = [CONTACT, OWNER_MATRIX_ID, GATEWAY_SUGGESTION_BODY];
+
+/// Asserts that nothing of [`GATEWAY_SECRETS`] reached anything the clerk
+/// wrote on Buzz — every event of every channel — or logged.
 async fn assert_nothing_of_the_gateways_answer_reached_buzz(run: &Run) -> Result<()> {
     for event in everything_the_clerk_wrote(run).await? {
         let serialised = serde_json::to_string(&event)?;
-        for secret in [CONTACT, OWNER_MATRIX_ID] {
+        for secret in GATEWAY_SECRETS {
             assert!(
                 !serialised.contains(secret),
                 "the clerk wrote {secret:?} onto Buzz: {serialised}"
@@ -189,7 +195,7 @@ async fn assert_nothing_of_the_gateways_answer_reached_buzz(run: &Run) -> Result
         }
     }
     let logs = run.clerk.logs().await;
-    for secret in [CONTACT, OWNER_MATRIX_ID] {
+    for secret in GATEWAY_SECRETS {
         assert!(!logs.contains(secret), "the clerk logged {secret:?}");
     }
     Ok(())
@@ -1040,6 +1046,53 @@ async fn post_scripted_suggestion(
     Ok((id, post))
 }
 
+/// [`post_suggestion`] returning the post itself rather than its id, for
+/// a test that reads the post's lines: the event `wait_for_post`'s bounded
+/// poll already had, and not a second one-shot read of the relay.
+async fn post_unscripted_suggestion(run: &Run, n: u32) -> Result<(String, Event)> {
+    let event = suggestion(&run.id, n, LONG_LIFE_SECONDS)?;
+    let id = event["id"].as_str().unwrap().to_owned();
+    run.publish("persona.suggest.produced", &event).await?;
+    let post = run.wait_for_post(&id).await?;
+    Ok((id, post))
+}
+
+/// How many times the **current** clerk process Nak'ed a suggestion
+/// because the relay would not take its post: each one is a redelivery,
+/// and each redelivery is one more read, since the read is per post
+/// attempt and nothing on the relay records a read that produced no post.
+/// Zero on a sound relay — and a restart starts a new log, so a test
+/// that restarts adds the count it read before.
+async fn suggestion_redeliveries(run: &Run) -> usize {
+    run.clerk
+        .logs()
+        .await
+        .lines()
+        .filter(|line| line.contains("will be redelivered") && line.contains("suggestions message"))
+        .count()
+}
+
+/// Asserts the stub's record of reads is one per post attempt: every id
+/// read at least once, and in all exactly as many reads as suggestions
+/// plus redeliveries — the clerk's own account of its attempts, not a
+/// number the test hopes for.
+fn assert_one_read_per_attempt(state: &harness::State, ids: &[String], redeliveries: usize) {
+    for id in ids {
+        assert!(
+            state.reads_of(id) >= 1,
+            "{id} was never read: {:?}",
+            state.reads
+        );
+    }
+    assert_eq!(
+        state.reads.len(),
+        ids.len() + redeliveries,
+        "one read per post attempt ({} suggestions, {redeliveries} redeliveries): {:?}",
+        ids.len(),
+        state.reads
+    );
+}
+
 /// The three readings the Gateway can give (`openapi.yaml`, `Delivery`),
 /// each with the detail it usually comes with.
 fn every_reach() -> Vec<(&'static str, &'static str)> {
@@ -1096,13 +1149,11 @@ async fn a_post_carries_the_companions_delivery_sentence_for_each_reach() -> Res
         );
         ids.push(id);
     }
-    {
-        let state = stub.state();
-        for id in &ids {
-            assert_eq!(state.reads_of(id), 1, "read once: {:?}", state.reads);
-        }
-        assert_eq!(state.reads.len(), ids.len(), "{:?}", state.reads);
-    }
+    // One read per post attempt: the clerk's own count of relay refusals
+    // on the post is the number of extra reads, and it is zero on a
+    // sound relay.
+    let redeliveries = suggestion_redeliveries(&run).await;
+    assert_one_read_per_attempt(&stub.state(), &ids, redeliveries);
 
     // Two ticks later and after a restart, nothing has been read again:
     // the read is at posting time and never per tick, and the restarted
@@ -1110,17 +1161,19 @@ async fn a_post_carries_the_companions_delivery_sentence_for_each_reach() -> Res
     // know about them (ADR 0035). A fourth suggestion is the proof the
     // restarted process is consuming — and it is read once, like the rest.
     run.wait_for_ticks(2).await?;
+    let reads_before_restart = stub.state().reads.len();
     assert_eq!(
-        stub.state().reads.len(),
-        ids.len(),
+        reads_before_restart,
+        ids.len() + suggestion_redeliveries(&run).await,
         "a tick re-read a suggestion: {:?}",
         stub.state().reads
     );
+    let redeliveries_before_restart = suggestion_redeliveries(&run).await;
     run.restart_clerk().await?;
     run.wait_for_ticks(2).await?;
     assert_eq!(
         stub.state().reads.len(),
-        ids.len(),
+        reads_before_restart,
         "a restart re-read a suggestion: {:?}",
         stub.state().reads
     );
@@ -1131,13 +1184,9 @@ async fn a_post_carries_the_companions_delivery_sentence_for_each_reach() -> Res
         SuggestionAnswer::new("approvable", "can_reach", "owner_joined"),
     )
     .await?;
-    {
-        let state = stub.state();
-        for id in ids.iter().chain(std::iter::once(&fourth)) {
-            assert_eq!(state.reads_of(id), 1, "read once: {:?}", state.reads);
-        }
-        assert_eq!(state.reads.len(), ids.len() + 1, "{:?}", state.reads);
-    }
+    ids.push(fourth);
+    let redeliveries = redeliveries_before_restart + suggestion_redeliveries(&run).await;
+    assert_one_read_per_attempt(&stub.state(), &ids, redeliveries);
     run.assert_metric("twalk_clerk_posts_total{channel=\"approbations\"} 1")
         .await?;
     run.assert_metric_now("twalk_clerk_skipped_total{why=\"already_approved\"} 0")
@@ -1164,7 +1213,7 @@ async fn a_gateway_that_does_not_answer_yields_the_unread_line_and_the_post_stil
         .context("the startup refresh names the outage")?;
 
     let published = Instant::now();
-    let (id, _) = post_suggestion(&run, 1, LONG_LIFE_SECONDS).await?;
+    let (_, post) = post_unscripted_suggestion(&run, 1).await?;
     let took = published.elapsed();
     let bound = REQUEST_TIMEOUT + Duration::from_secs(DECISION_SECONDS) + POST_MARGIN;
     assert!(
@@ -1172,7 +1221,6 @@ async fn a_gateway_that_does_not_answer_yields_the_unread_line_and_the_post_stil
         "the post took {took:?}, past one tick plus the request timeout ({bound:?}): the read \
          blocked the post"
     );
-    let post = run.posts_about(&id).await?.remove(0);
     assert_eq!(
         delivery_line_of(&post),
         delivery_unread_line(LANG, Unread::GatewayUnreachable),
@@ -1202,18 +1250,18 @@ async fn an_unscripted_suggestion_is_posted_as_not_found() -> Result<()> {
     let stub = StubGateway::start(17413).await?;
     let run = Run::start_with_write_half("unread-not-found", &stub).await?;
 
-    let (id, _) = post_suggestion(&run, 1, LONG_LIFE_SECONDS).await?;
+    let (id, post) = post_unscripted_suggestion(&run, 1).await?;
 
-    let post = run.posts_about(&id).await?.remove(0);
     assert_eq!(
         delivery_line_of(&post),
         delivery_unread_line(LANG, Unread::NotFound),
         "{}",
         post.content
     );
+    let redeliveries = suggestion_redeliveries(&run).await;
     {
         let state = stub.state();
-        assert_eq!(state.reads_of(&id), 1, "{:?}", state.reads);
+        assert_one_read_per_attempt(&state, std::slice::from_ref(&id), redeliveries);
         assert_eq!(state.unauthenticated, 0, "the read was made as the device");
     }
     run.clerk
@@ -1245,7 +1293,7 @@ async fn a_suggestion_the_gateway_records_as_approved_is_not_posted() -> Result<
     run.assert_metric("twalk_clerk_skipped_total{why=\"already_approved\"} 1")
         .await?;
     run.clerk
-        .wait_for_log("already records as approved is not posted")
+        .wait_for_log("skipped a suggestion that was already_approved")
         .await?;
     // Two ticks and a second suggestion later — the second's post is the
     // proof the consumer acked the first and went on — still no post, no
@@ -1266,11 +1314,18 @@ async fn a_suggestion_the_gateway_records_as_approved_is_not_posted() -> Result<
         activity_before + 1,
         "activite changed by the second suggestion's line and nothing else: {activity:?}"
     );
-    {
-        let state = stub.state();
-        assert_eq!(state.reads_of(&id), 1, "{:?}", state.reads);
-        assert_eq!(state.reads_of(&second), 1, "{:?}", state.reads);
-    }
+    // A skipped suggestion is acked, not Nak'ed: the second's post proves
+    // the consumer went past it, and the bus's own account of the consumer
+    // says nothing is pending, awaiting an ack or redelivered.
+    let consumer = run
+        .bus
+        .consumer_state(&run.id, twalk_clerk::consumers::SUGGESTIONS_CONSUMER)
+        .await?;
+    assert_eq!(consumer.pending, 0, "{consumer:?}");
+    assert_eq!(consumer.awaiting_ack, 0, "{consumer:?}");
+    assert_eq!(consumer.redelivered, 0, "{consumer:?}");
+    let redeliveries = suggestion_redeliveries(&run).await;
+    assert_one_read_per_attempt(&stub.state(), &[id.clone(), second.clone()], redeliveries);
     run.assert_metric("twalk_clerk_posts_total{channel=\"approbations\"} 1")
         .await?;
     run.assert_metric_now("twalk_clerk_skipped_total{why=\"already_approved\"} 1")
@@ -1293,12 +1348,19 @@ async fn a_suggestion_the_gateway_records_as_approved_is_not_posted() -> Result<
     Ok(())
 }
 
-/// The session retry in the test that watches it: seconds, where a
-/// deployment has an hour (`CLERK_SESSION_RETRY_SECONDS`). Long enough
-/// that the breaker can be asserted across two ticks before a retry lands
-/// a refresh on the stub, short enough that the revival is watched inside
-/// one log poll.
-const SESSION_RETRY_SECONDS: u64 = 8;
+/// The session retry in the test that watches it, where a deployment has
+/// an hour (`CLERK_SESSION_RETRY_SECONDS`): derived from what the test
+/// does around it. It must outlast the breaker window the test observes
+/// after the read kills the session — two ticks plus the relay's margin —
+/// only so that the retried refresh is not what a reader mistakes for the
+/// breaker failing (the assertions there name the approvals route, so a
+/// retried refresh cannot fail them either way); and it must land, with a
+/// tick and the margin on top, inside the twenty-second log poll that
+/// waits for the revived session after the device is signed in again.
+/// Six seconds: 2 + 4, and 6 + 1 + 4 = 11 < 20.
+fn session_retry_seconds() -> u64 {
+    2 * DECISION_SECONDS + MARGIN_SECONDS
+}
 
 #[tokio::test]
 async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_retried() -> Result<()>
@@ -1309,7 +1371,7 @@ async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_ret
         &stub,
         &[(
             "CLERK_SESSION_RETRY_SECONDS",
-            &SESSION_RETRY_SECONDS.to_string(),
+            &session_retry_seconds().to_string(),
         )],
     )
     .await?;
@@ -1318,8 +1380,8 @@ async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_ret
     assert_eq!(stub.state().refreshes, 1);
     stub.state().revoked = true;
 
-    let (id, post_id) = post_suggestion(&run, 1, LONG_LIFE_SECONDS).await?;
-    let post = run.posts_about(&id).await?.remove(0);
+    let (id, post) = post_unscripted_suggestion(&run, 1).await?;
+    let post_id = post.id.to_hex();
     assert_eq!(
         delivery_line_of(&post),
         delivery_unread_line(LANG, Unread::GatewayRefused),
@@ -1330,7 +1392,10 @@ async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_ret
         .await?;
     {
         // The read was made — one send, one refresh, both turned away —
-        // and it is what killed the session.
+        // and it is what killed the session. At least one refresh: the
+        // loop's first retry may already have added a second by now, and
+        // the exact count of refreshes is asserted once the session is
+        // back.
         let state = stub.state();
         assert_eq!(
             state.turned_away_on(harness::SUGGESTIONS_ROUTE),
@@ -1338,9 +1403,8 @@ async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_ret
             "{:?}",
             state.turned_away
         );
-        assert_eq!(
-            state.turned_away_on(harness::REFRESH_ROUTE),
-            1,
+        assert!(
+            state.turned_away_on(harness::REFRESH_ROUTE) >= 1,
             "{:?}",
             state.turned_away
         );
@@ -1412,9 +1476,77 @@ async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_ret
         SuggestionAnswer::new("approvable", "can_reach", "owner_joined"),
     )
     .await?;
-    assert_eq!(stub.state().reads_of(&second), 1);
+    let redeliveries = suggestion_redeliveries(&run).await;
+    assert_one_read_per_attempt(&stub.state(), std::slice::from_ref(&second), redeliveries);
     run.assert_metric("twalk_clerk_delivery_reads_total{outcome=\"found\"} 1")
         .await?;
+
+    run.shutdown().await?;
+    stub.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_suggestion_redelivered_after_its_approval_is_not_posted_again() -> Result<()> {
+    let stub = StubGateway::start(17416).await?;
+    let run = Run::start_with_write_half("redelivered-after-approval", &stub).await?;
+
+    // The ticket's own sequence: posted, approved from Buzz, gone — and
+    // then the same suggestion again from the bus, as a redelivery after
+    // an outage or a replay would hand it over. The Gateway now records
+    // it as approved, which is what the read is for.
+    let event = suggestion(&run.id, 1, LONG_LIFE_SECONDS)?;
+    let id = event["id"].as_str().unwrap().to_owned();
+    run.publish("persona.suggest.produced", &event).await?;
+    let post = run.wait_for_post(&id).await?;
+    run.react_as_owner(&post.id.to_hex(), "✅").await?;
+    run.wait_until_gone(&id, GONE_WITHIN).await?;
+    assert_eq!(stub.state().approvals.len(), 1);
+    assert_eq!(
+        stub.state().suggestions[&id].standing,
+        "approved",
+        "the stub's standing follows its approval, as the Gateway's does"
+    );
+
+    run.publish_again("persona.suggest.produced", &event)
+        .await?;
+    // A second suggestion's post is the proof the consumer went past the
+    // redelivery; only then is the first one's absence read.
+    let (second, _) = post_suggestion(&run, 2, LONG_LIFE_SECONDS).await?;
+    run.wait_for_ticks(2).await?;
+    assert!(
+        run.posts_about(&id).await?.is_empty(),
+        "an approved suggestion was posted again on its redelivery"
+    );
+    run.assert_metric("twalk_clerk_skipped_total{why=\"already_approved\"} 1")
+        .await?;
+    run.assert_metric("twalk_clerk_delivery_reads_total{outcome=\"already_approved\"} 1")
+        .await?;
+    run.assert_metric("twalk_clerk_delivery_reads_total{outcome=\"not_found\"} 2")
+        .await
+        .context("the two posts were read as unscripted, and the redelivery as approved")?;
+    run.assert_metric("twalk_clerk_posts_total{channel=\"approbations\"} 2")
+        .await?;
+    // Two reads of the first suggestion — one per post attempt, and the
+    // redelivery was an attempt — and one of the second.
+    let redeliveries = suggestion_redeliveries(&run).await;
+    {
+        let state = stub.state();
+        assert_eq!(state.reads_of(&id), 2, "{:?}", state.reads);
+        assert_eq!(state.reads_of(&second), 1, "{:?}", state.reads);
+        assert_eq!(state.reads.len(), 3 + redeliveries, "{:?}", state.reads);
+    }
+    // The redelivery said nothing in activite: no second "produced" line
+    // about a suggestion that was decided.
+    let activity = run.lines_in(&run.channels.activity).await?;
+    let produced_about_first = activity
+        .iter()
+        .filter(|line| {
+            line_references_event(line, &id) && line.content == activity_suggested(LANG, NETWORK)
+        })
+        .count();
+    assert_eq!(produced_about_first, 1, "{activity:?}");
+    assert_nothing_of_the_gateways_answer_reached_buzz(&run).await?;
 
     run.shutdown().await?;
     stub.stop().await;

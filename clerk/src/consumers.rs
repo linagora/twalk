@@ -126,8 +126,14 @@ pub const JOURNAL_CONSUMER: &str = "clerk-journal";
 pub const ACTIVITY_CONSUMER: &str = "clerk-activity";
 
 /// How long the bus waits for an ack before redelivering, and how many
-/// deliveries it makes before giving a message up. Sixty seconds covers a
-/// slow relay several times over ([`crate::relay::REQUEST_TIMEOUT`] is ten).
+/// deliveries it makes before giving a message up. Sixty seconds covers
+/// what handling one suggestion can spend when everything is slow at
+/// once: the own-posts query, the post and the activity line are each
+/// bounded by [`crate::relay::REQUEST_TIMEOUT`] (ten seconds), and the
+/// delivery read before the post by [`crate::gateway::REQUEST_TIMEOUT`]
+/// (ten, up to thirty on the `401` path — the send, a refresh, a retry).
+/// Forty to sixty seconds is the pathological sum, and a redelivery that
+/// lands in it is caught by the duplicate branch once the post is up.
 /// Sixty-four deliveries is sized to **the hour a suggestion lives by
 /// default** (`TWALK_SUGGESTION_TTL_SECONDS`): under [`nak_delay`] the
 /// first five retries are 2, 4, 8, 16 and 32 seconds apart and every one
@@ -586,12 +592,11 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
     let delivery_line = match read_before_post(clerk, id).await {
         BeforePost::Post(line) => line,
         BeforePost::AlreadyApproved => {
-            let total = clerk.metrics.record_skipped(Skipped::AlreadyApproved);
-            info!(
-                id,
-                why = Skipped::AlreadyApproved.as_str(),
-                total,
-                "a suggestion the Companion Gateway already records as approved is not posted"
+            skip(
+                clerk,
+                Skipped::AlreadyApproved,
+                "suggestion",
+                &format!("id={id}"),
             );
             return Ok(());
         }
@@ -645,10 +650,16 @@ enum BeforePost {
 /// posted at all. Without a device the line says so
 /// ([`refusals::Unread::NoDevice`]) and nothing is asked.
 ///
-/// The read is **one per suggestion, at posting time, and never per
+/// The read is **one per post attempt, at posting time, and never per
 /// tick**: a restart between this read and the next tick finds the post
 /// by its reference line and reads nothing again, so what the clerk knows
-/// of a suggestion is still only what the relay holds (ADR 0035). And it
+/// of a suggestion is still only what the relay holds (ADR 0035). The
+/// same rule is why it is per *attempt* and not strictly per suggestion:
+/// a post the relay refused transiently is `Nak`ed and redelivered
+/// ([`nak_delay`]), and nothing on the relay records a read that produced
+/// no post, so the redelivery reads again — a relay outage costs at most
+/// [`MAX_DELIVER`] reads for one suggestion, and a post that went up is
+/// never read for again. And it
 /// **never blocks the post**: bounded by the Gateway's request timeout,
 /// every way it can fail is a `warn` with the id and the status and code
 /// — never a body — and the matching "not read" line
@@ -922,8 +933,11 @@ async fn activity_line(clerk: &Clerk, line: &str, bus_event_id: &str) {
 /// reads from the beginning of the stream on purpose, so a first start
 /// against a real stream skips every suggestion that expired in ninety days
 /// of history, and that expected replay must not read as ninety days of
-/// warnings. The others are `warn`, because an unreadable message is a
-/// producer to look at and a duplicate is a redelivery to know about.
+/// warnings. So is one the Companion Gateway already records as approved
+/// (#300): decided from the screen before the clerk got to it, which is
+/// the product working. The others are `warn`, because an unreadable
+/// message is a producer to look at and a duplicate is a redelivery to
+/// know about.
 fn skip(clerk: &Clerk, why: Skipped, what: &str, detail: &str) {
     let total = clerk.metrics.record_skipped(why);
     match why {
