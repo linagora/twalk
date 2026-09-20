@@ -1,13 +1,13 @@
 //! The collector's consent state (issue #280): the shared cache
 //! (`twalk-consent-cache`, #273) fed the Sensor's way — the Companion
-//! Gateway's snapshot first, then the `consent.state.changed` stream from
+//! Companion Gateway's snapshot first, then the `consent.state.changed` stream from
 //! the sequence the snapshot hands over (ADR 0010). What the collector reads
 //! it for is one question: is this `mailto:` revoked on the mail connection?
 //! — the participant rule of `definitions/calendar-event.schema.json`.
 //!
 //! The consumer is not durable: the snapshot is the record, and a restart
 //! re-reads it and starts the stream again from where it says. A deployment
-//! with no Gateway has no snapshot and no decisions, and the cache stays
+//! with no Companion Gateway has no snapshot and no decisions, and the cache stays
 //! empty: nobody is withheld, because nobody was ever decided about.
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 use twalk_consent_cache::{ConsentCache, ConsentChange, Snapshot, CONSENT_CHANGED_TYPE};
 
-/// The cache, filled from the Gateway's snapshot document (the same one the
+/// The cache, filled from the Companion Gateway's snapshot document (the same one the
 /// registry is read off), and a task that keeps it current off the bus.
 pub async fn follow(
     jetstream: async_nats::jetstream::Context,

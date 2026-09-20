@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.twalk.dev/cloudevents/v1/definitions/calendar-event.schema.json",
   "title": "Calendar event",
-  "description": "What Twalk publishes about one event in the owner's own calendar (ADR 0033, #280): the meeting as the owner sees it in their agenda — when, what it is called, whether it stands, who is expected — and nothing of what was written inside it. Shared by `calendar.event.created.v1` and `calendar.event.changed.v1`, which carry the whole of it, and named by `calendar.event.removed.v1`, which carries the `uid` alone. Two things are deliberately absent and stay absent: the description, because a meeting's body is where people paste what they did not decide to share, and attachments, for the same reason with a file's name added. The participants are the one piece of third-party data inside an event that is about the owner — ADR 0028's quoted-excerpt situation — and the reduction rule below is theirs.",
+  "description": "What Twalk publishes about one event in the owner's own calendar (ADR 0033, #280): the meeting as the owner sees it in their agenda — when, what it is called, whether it stands, who is expected — and nothing of what was written inside it. Shared by `calendar.event.created.v1` and `calendar.event.changed.v1`, which carry the whole of it, and named by `calendar.event.removed.v1`, which carries the `uid` and the last published title. Two things are deliberately absent and stay absent: the description, because a meeting's body is where people paste what they did not decide to share, and attachments, for the same reason with a file's name added. The participants are the one piece of third-party data inside an event that is about the owner — ADR 0028's quoted-excerpt situation — and the reduction rule below is theirs.",
   "type": "object",
   "required": [
     "uid",
@@ -28,7 +28,7 @@
     "title": {
       "type": "string",
       "maxLength": 1024,
-      "description": "The SUMMARY, as the owner wrote or accepted it. The owner's own words about their own time, published to their own infrastructure. Empty when the event has none."
+      "description": "The SUMMARY, as the owner wrote or accepted it. The owner's own words about their own time, published to their own infrastructure — except that the title of an invitation is the organizer's words: when the organizer is withheld (see `organizer`), the title is withheld with them and is empty here. Empty too when the event has none."
     },
     "start": {
       "type": "string",
@@ -70,7 +70,7 @@
         { "type": "null" },
         { "$ref": "#/$defs/person" }
       ],
-      "description": "Who scheduled the event (ORGANIZER), or null when the source names none — a personal entry the owner made for themselves. A person, so the participant rule below applies to it: an organizer whose consent on the owner's mail connection is `revoked` is published as null and counted in `participants_withheld`."
+      "description": "Who scheduled the event (ORGANIZER), or null when the source names none — a personal entry the owner made for themselves. A person, so the participant rule below applies to it: an organizer whose consent on the owner's mail connection is `revoked` is published as null and counted in `participants_withheld`, and the event's `title` — their words — goes with them."
     },
     "participants": {
       "type": "array",

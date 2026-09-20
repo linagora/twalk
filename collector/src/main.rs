@@ -5,7 +5,7 @@
 //!
 //! What this binary does **not** do yet is collect anything: #276 (mail) and
 //! #280 (calendar) plug into the loop below with the access token it keeps
-//! fresh. What it does do is refuse to start on a connection the Gateway's
+//! fresh. What it does do is refuse to start on a connection the Companion Gateway's
 //! registry does not know, and refuse to publish anything when the grant
 //! turns out to be for another account — both said in words, once.
 
@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, warn};
+use twalk_collector::calendars::SideError;
 use twalk_collector::config::Config;
 use twalk_collector::metrics::Metrics;
 use twalk_collector::oidc::{Client, Grant, Identities, Renewal, ServiceRefusal};
@@ -171,7 +172,7 @@ async fn run(config: Config) -> Result<()> {
         tokio::spawn(serve_metrics(listener, metrics.clone()));
     }
 
-    // The registry: a connection this process holds must be one the Gateway
+    // The registry: a connection this process holds must be one the Companion Gateway
     // names, or every event it published would be about a perimeter no
     // decision governs (ADR 0033). Refused at start, in words.
     // The same document carries the consent state the participants of a
@@ -217,7 +218,7 @@ async fn run(config: Config) -> Result<()> {
                     .iter()
                     .find(|held| held.kind == "email")
                     .map(|held| held.id.clone()),
-                side: twalk_collector::caldav::Side::new(&config.services.caldav_url)?,
+                side: twalk_collector::calendars::Side::new(&config.services.caldav_url)?,
                 state_dir: config.state_dir.clone(),
                 consent,
             })
@@ -231,6 +232,9 @@ async fn run(config: Config) -> Result<()> {
         .map(|held| Tracker::new(&held.id, held.kind, &config.host))
         .collect();
     let mut grant = Grant::read(&config.oidc.grant_file)?;
+    // The calendars are polled on their own interval (#251: every 60 s),
+    // not on every health round.
+    let mut last_calendar_poll: Option<std::time::Instant> = None;
     let mut access: Option<twalk_collector::oidc::AccessToken> = None;
 
     loop {
@@ -343,13 +347,21 @@ async fn run(config: Config) -> Result<()> {
             }
         }
         // The calendars, on a round where the grant stands and the side
-        // service answered as the owner: what changed since the cursor is
-        // published, then the cursor moves. A poll that fails is said and
-        // retried next round; the connection's state stays what the whoami
-        // said, since the same token was just taken.
-        if let (Some(calendars), Some(token), Some(owner_id), true) =
-            (&calendars, &access, &caldav_owner_id, calendar_is_connected)
-        {
+        // service answered as the owner, once the poll interval is up: what
+        // changed since the cursor is published, then the cursor moves. A
+        // read the side service refuses is the calendar connection's state
+        // — the same words the whoami would have found — and a poll that
+        // fails otherwise is said and retried next time.
+        let poll_is_due =
+            last_calendar_poll.is_none_or(|last| last.elapsed() >= config.calendar_poll_interval);
+        if let (Some(calendars), Some(token), Some(owner_id), true, true) = (
+            &calendars,
+            &access,
+            &caldav_owner_id,
+            calendar_is_connected,
+            poll_is_due,
+        ) {
+            last_calendar_poll = Some(std::time::Instant::now());
             match calendars.poll(owner_id, &token.token, &occurred_at).await {
                 Ok(found) => {
                     debug!(
@@ -364,6 +376,23 @@ async fn run(config: Config) -> Result<()> {
                         error!(error = %format!("{error:#}"), "the calendar cursor could not be written; the next poll republishes");
                     }
                 }
+                Err(SideError::Refused { status }) => {
+                    let refused = Observation {
+                        state: State::PendingOperator,
+                        service: Some("caldav"),
+                        hint: Some(format!(
+                            "caldav refused a fresh token with {status} on a calendar read: the grant \
+                             stands, but the client lacks what caldav expects — an audience or a \
+                             scope the operator has to add to the client at the SSO"
+                        )),
+                    };
+                    for tracker in trackers.iter_mut().filter(|t| t.kind() == "calendar") {
+                        metrics.set_connection_state(tracker.connection(), refused.state);
+                        if let Some(envelope) = tracker.observe(&refused, &occurred_at) {
+                            publish(&jetstream, &envelope, &metrics).await;
+                        }
+                    }
+                }
                 Err(error) => warn!(%error, "the calendars could not be polled this round"),
             }
         } else {
@@ -372,6 +401,7 @@ async fn run(config: Config) -> Result<()> {
                 token = access.is_some(),
                 owner_id = ?caldav_owner_id,
                 calendar_is_connected,
+                poll_is_due,
                 "calendars not polled this round"
             );
         }
@@ -483,7 +513,7 @@ async fn publish(
     }
 }
 
-/// The Gateway's consent snapshot, the document the Sensor reads too
+/// The Companion Gateway's consent snapshot, the document the Sensor reads too
 /// (`GET /api/consent/snapshot`, as `companion-gateway/openapi.yaml`
 /// describes it), with the same service token: the registry is its
 /// `connections[]`, the decisions its `entries[]`.
@@ -502,7 +532,7 @@ async fn consent_snapshot(gateway_url: &str, service_token: &str) -> Result<serd
         .context("the Companion Gateway's snapshot is not JSON")
 }
 
-/// The ids of the Gateway's registry, off the snapshot's `connections[]`.
+/// The ids of the Companion Gateway's registry, off the snapshot's `connections[]`.
 fn registry_ids(document: &serde_json::Value) -> Vec<String> {
     document["connections"]
         .as_array()

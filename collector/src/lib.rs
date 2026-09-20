@@ -15,6 +15,7 @@ pub mod caldav;
 pub mod calendars;
 pub mod config;
 pub mod consent;
+pub mod fs;
 pub mod metrics;
 pub mod oidc;
 pub mod status;

@@ -1,19 +1,28 @@
-//! One poll of the owner's calendars (issue #280): the I/O the pure
-//! `caldav` module is wrapped in — the side service asked, the cursor per
-//! calendar read from and written to the state directory, the consent
-//! decision read on the mail connection — kept apart from publishing so the
-//! cursor moves only after the bus took the events. A poll that finds the
-//! CTag unchanged asks nothing further and publishes nothing.
+//! The owner's calendars, polled (issue #280): the I/O the pure `caldav`
+//! module is wrapped in — the three requests to the side service, the
+//! cursor per calendar read from and written to the state directory, the
+//! consent decision read on the mail connection — kept apart from
+//! publishing so the cursor moves only after the bus took the events.
+//!
+//! No backfill (#251): the first poll of a calendar takes it as it stands
+//! and publishes nothing of it; the cursor is filled so that a later change
+//! to an existing meeting is a `changed` with its `changed_fields`. After
+//! that, a poll whose CTag did not move asks nothing further — and the HAL
+//! list carries the CTag, so a calendar that did not move is not even
+//! listed.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use tracing::{info, warn};
 use twalk_consent_cache::{Consent, ConsentCache};
 
-use crate::caldav::{self, Cursor, Envelopes, Known, Side, SideError};
+use crate::caldav::{
+    self, calendars_in, multiget_body, parse_listing, parse_multiget, Calendar, Changes, Cursor,
+    Envelopes, Known, Listing, Resource, PROPFIND_BODY,
+};
 
 /// The calendar connection this process holds, and what publishing about it
 /// needs.
@@ -61,7 +70,7 @@ impl Calendars {
     /// the next poll republishes what the bus already deduplicates.
     pub fn commit(&self, cursors: &[(String, Cursor)]) -> Result<()> {
         for (calendar_id, cursor) in cursors {
-            write_json(&self.cursor_path(calendar_id), cursor)?;
+            crate::fs::write_json_private(&self.cursor_path(calendar_id), cursor)?;
         }
         Ok(())
     }
@@ -79,9 +88,7 @@ impl Calendars {
     /// and for the ones that moved the listing, the diff and the reads.
     pub async fn poll(&self, owner_id: &str, token: &str, now: &str) -> Result<Poll, SideError> {
         let mut poll = Poll::default();
-        let calendars = self.side.calendars(owner_id, token).await?;
-        for calendar in calendars {
-            let collection = caldav::collection_path(owner_id, &calendar.id);
+        for calendar in self.side.calendars(owner_id, token).await? {
             let cursor = match self.read_cursor(&calendar.id) {
                 Ok(cursor) => cursor,
                 Err(error) => {
@@ -91,140 +98,129 @@ impl Calendars {
                     continue;
                 }
             };
+            if calendar.ctag.is_some() && calendar.ctag == cursor.ctag {
+                continue;
+            }
+            let collection = caldav::collection_path(owner_id, &calendar.id);
             let listing = self.side.listing(&collection, token).await?;
             if listing.ctag.is_some() && listing.ctag == cursor.ctag {
                 continue;
             }
             let changes = caldav::diff(&cursor, &listing);
-            let envelopes = Envelopes::new(
-                &self.connection,
-                &self.owner_email,
-                &self.side.host(),
-                &collection,
-            );
-            let mut next = Cursor {
-                ctag: listing.ctag.clone(),
-                known: cursor.known.clone(),
-            };
             let resources = self
                 .side
                 .read(&collection, &changes.to_read(), token)
                 .await?;
-            let by_href: BTreeMap<&str, &caldav::Resource> = resources
-                .iter()
-                .map(|resource| (resource.href.as_str(), resource))
-                .collect();
-            for href in &changes.created {
-                let Some(resource) = by_href.get(href.as_str()) else {
-                    continue; // gone between the listing and the read
-                };
-                match self.publishable(resource) {
-                    Some(published) => {
-                        poll.envelopes.push(envelopes.created(
-                            href,
-                            &resource.etag,
-                            &published,
-                            now,
-                        ));
-                        next.known.insert(
-                            href.clone(),
-                            Known {
-                                etag: resource.etag.clone(),
-                                published,
-                            },
-                        );
-                    }
-                    None => {
-                        // Remembered as seen, so an unreadable resource is
-                        // not re-read at every poll; nothing published.
-                        next.known.insert(
-                            href.clone(),
-                            Known {
-                                etag: resource.etag.clone(),
-                                published: Value::Null,
-                            },
-                        );
-                    }
-                }
-            }
-            for href in &changes.changed {
-                let Some(resource) = by_href.get(href.as_str()) else {
-                    continue;
-                };
-                let before = cursor.known.get(href).map(|known| &known.published);
-                match self.publishable(resource) {
-                    Some(published) => {
-                        let fields = match before {
-                            Some(before) if !before.is_null() => {
-                                caldav::changed_fields(before, &published)
-                            }
-                            // Never published before (unreadable then): now
-                            // it is, and it is new to every consumer.
-                            _ => Vec::new(),
-                        };
-                        if before.is_some_and(|before| !before.is_null()) {
-                            if !fields.is_empty() {
-                                poll.envelopes.push(envelopes.changed(
-                                    href,
-                                    &resource.etag,
-                                    &published,
-                                    &fields,
-                                    now,
-                                ));
-                            } else {
-                                info!(
-                                    href,
-                                    "the resource changed in nothing the contract publishes"
-                                );
-                            }
-                        } else {
-                            poll.envelopes.push(envelopes.created(
-                                href,
-                                &resource.etag,
-                                &published,
-                                now,
-                            ));
-                        }
-                        next.known.insert(
-                            href.clone(),
-                            Known {
-                                etag: resource.etag.clone(),
-                                published,
-                            },
-                        );
-                    }
-                    None => {
-                        if let Some(known) = next.known.get_mut(href) {
-                            known.etag = resource.etag.clone();
-                        }
-                    }
-                }
-            }
-            for href in &changes.removed {
-                if let Some(known) = cursor.known.get(href) {
-                    if let (Some(uid), Some(title)) = (
-                        known.published.get("uid").and_then(Value::as_str),
-                        known.published.get("title").and_then(Value::as_str),
-                    ) {
-                        poll.envelopes.push(envelopes.removed(
-                            href,
-                            listing.ctag.as_deref().unwrap_or_default(),
-                            uid,
-                            title,
-                            now,
-                        ));
-                    }
-                }
-                next.known.remove(href);
+            let first_poll = cursor.ctag.is_none() && cursor.known.is_empty();
+            let (envelopes, next) = self.reconcile(
+                &calendar,
+                &collection,
+                &cursor,
+                &listing,
+                &changes,
+                &resources,
+                now,
+            );
+            if first_poll {
+                // No backfill: what the calendar already holds is taken as
+                // the state, published as nothing.
+                info!(calendar = %calendar.id, resources = next.known.len(), "calendar taken as it stands; nothing of it published");
+            } else {
+                poll.envelopes.extend(envelopes);
             }
             poll.cursors.push((calendar.id.clone(), next));
         }
         Ok(poll)
     }
 
+    /// The pure step of one calendar's poll: what the listing and the reads
+    /// say, as envelopes and as the cursor that follows.
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile(
+        &self,
+        calendar: &Calendar,
+        collection: &str,
+        cursor: &Cursor,
+        listing: &Listing,
+        changes: &Changes,
+        resources: &[Resource],
+        now: &str,
+    ) -> (Vec<Value>, Cursor) {
+        let envelopes = Envelopes::new(
+            &self.connection,
+            &self.owner_email,
+            &self.side.host(),
+            collection,
+        );
+        let by_href: BTreeMap<&str, &Resource> = resources
+            .iter()
+            .map(|resource| (resource.href.as_str(), resource))
+            .collect();
+        let mut out = Vec::new();
+        let mut next = Cursor {
+            ctag: listing.ctag.clone(),
+            known: cursor.known.clone(),
+        };
+        for href in changes.created.iter().chain(&changes.changed) {
+            // Gone between the listing and the read: the next listing
+            // reports the removal.
+            let Some(resource) = by_href.get(href.as_str()) else {
+                continue;
+            };
+            let before = cursor
+                .known
+                .get(href)
+                .map(|known| &known.published)
+                .filter(|published| !published.is_null());
+            let published = self.publishable(resource);
+            match (&published, before) {
+                (Some(published), Some(before)) => {
+                    let fields = caldav::changed_fields(before, published);
+                    if fields.is_empty() {
+                        info!(calendar = %calendar.id, href, "the resource changed in nothing the contract publishes");
+                    } else {
+                        out.push(envelopes.changed(href, &resource.etag, published, &fields, now));
+                    }
+                }
+                (Some(published), None) => {
+                    out.push(envelopes.created(href, &resource.etag, published, now));
+                }
+                (None, _) => {}
+            }
+            // Remembered either way — an unreadable resource as `null`, so
+            // it is not re-read at every poll and is new when it becomes
+            // readable.
+            next.known.insert(
+                href.clone(),
+                Known {
+                    etag: resource.etag.clone(),
+                    published: published.unwrap_or(Value::Null),
+                },
+            );
+        }
+        for href in &changes.removed {
+            if let Some(known) = cursor.known.get(href) {
+                if let (Some(uid), Some(title)) = (
+                    known.published.get("uid").and_then(Value::as_str),
+                    known.published.get("title").and_then(Value::as_str),
+                ) {
+                    out.push(envelopes.removed(
+                        href,
+                        listing.ctag.as_deref().unwrap_or_default(),
+                        uid,
+                        title,
+                        now,
+                    ));
+                }
+            }
+            next.known.remove(href);
+        }
+        (out, next)
+    }
+
     /// The resource as the contract publishes it, or `None` — said — for
     /// one that is not a VEVENT this collector can read.
-    fn publishable(&self, resource: &caldav::Resource) -> Option<Value> {
+    fn publishable(&self, resource: &Resource) -> Option<Value> {
         match caldav::parse_vevent(&resource.ics) {
             Ok(event) => Some(caldav::reduce(&event, &self.owner_email, |identity| {
                 self.decide(identity)
@@ -237,35 +233,149 @@ impl Calendars {
     }
 }
 
-/// A JSON file written by rename, mode 0600 in a 0700 directory, the way
-/// the grant is.
-fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let directory = path.parent().context("the cursor file has no parent")?;
-    std::fs::create_dir_all(directory)
-        .with_context(|| format!("failed to create {}", directory.display()))?;
-    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("failed to set the mode of {}", directory.display()))?;
-    let temporary = directory.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("cursor.json")
-    ));
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)
-            .with_context(|| format!("failed to open {}", temporary.display()))?;
-        file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
+/// Why a request to the side service did not answer with what was asked.
+#[derive(Debug)]
+pub enum SideError {
+    /// `401`/`403`: the token itself, or what the client lacks — the words
+    /// the status machinery already has (`ServiceRefusal`).
+    Refused { status: u16 },
+    /// No answer, another status, or an answer that is not what a CalDAV
+    /// server says.
+    Unreachable { detail: String },
+}
+
+impl std::fmt::Display for SideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused { status } => {
+                write!(f, "the side service refused the token with {status}")
+            }
+            Self::Unreachable { detail } => f.write_str(detail),
+        }
     }
-    std::fs::rename(&temporary, path)
-        .with_context(|| format!("failed to move {} into place", temporary.display()))?;
-    Ok(())
+}
+
+impl std::error::Error for SideError {}
+
+/// The side service, over HTTP: three requests and nothing else.
+#[derive(Debug, Clone)]
+pub struct Side {
+    http: reqwest::Client,
+    /// The root, without a trailing slash.
+    base: String,
+}
+
+impl Side {
+    pub fn new(caldav_url: &str) -> Result<Self> {
+        Ok(Self {
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?,
+            base: caldav_url.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    /// The side service's host, for `source`.
+    pub fn host(&self) -> String {
+        self.base
+            .split("://")
+            .nth(1)
+            .unwrap_or(&self.base)
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    pub async fn calendars(&self, owner_id: &str, token: &str) -> Result<Vec<Calendar>, SideError> {
+        let url = format!(
+            "{}/dav/calendars/{owner_id}.json?personal=true&sharedDelegationStatus=accepted",
+            self.base
+        );
+        let body = self
+            .send(
+                self.http.get(&url).header("accept", "application/json"),
+                token,
+            )
+            .await?;
+        let document: Value =
+            serde_json::from_str(&body).map_err(|error| SideError::Unreachable {
+                detail: format!("the calendar list at {url} is not JSON: {error}"),
+            })?;
+        Ok(calendars_in(&document))
+    }
+
+    pub async fn listing(&self, collection: &str, token: &str) -> Result<Listing, SideError> {
+        let method = reqwest::Method::from_bytes(b"PROPFIND").expect("a method name");
+        let body = self
+            .send(
+                self.http
+                    .request(method, format!("{}{collection}", self.base))
+                    .header("depth", "1")
+                    .header("content-type", "application/xml; charset=utf-8")
+                    .body(PROPFIND_BODY),
+                token,
+            )
+            .await?;
+        parse_listing(&body, collection).map_err(|error| SideError::Unreachable {
+            detail: format!("{error:#}"),
+        })
+    }
+
+    pub async fn read(
+        &self,
+        collection: &str,
+        hrefs: &[String],
+        token: &str,
+    ) -> Result<Vec<Resource>, SideError> {
+        if hrefs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let method = reqwest::Method::from_bytes(b"REPORT").expect("a method name");
+        let body = self
+            .send(
+                self.http
+                    .request(method, format!("{}{collection}", self.base))
+                    .header("depth", "1")
+                    .header("content-type", "application/xml; charset=utf-8")
+                    .body(multiget_body(hrefs)),
+                token,
+            )
+            .await?;
+        parse_multiget(&body).map_err(|error| SideError::Unreachable {
+            detail: format!("{error:#}"),
+        })
+    }
+
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        token: &str,
+    ) -> Result<String, SideError> {
+        let response =
+            request
+                .bearer_auth(token)
+                .send()
+                .await
+                .map_err(|error| SideError::Unreachable {
+                    detail: format!("the side service did not answer: {error}"),
+                })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(SideError::Refused {
+                status: status.as_u16(),
+            });
+        }
+        if !status.is_success() {
+            return Err(SideError::Unreachable {
+                detail: format!("the side service answered {status}"),
+            });
+        }
+        response
+            .text()
+            .await
+            .map_err(|error| SideError::Unreachable {
+                detail: format!("the side service's answer could not be read: {error}"),
+            })
+    }
 }

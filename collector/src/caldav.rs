@@ -1,8 +1,8 @@
 //! The owner's calendars, read through the side service (issue #280, ADR
 //! 0033): the pure half — what a listing says, what changed since the last
 //! one, what a VEVENT is worth publishing, who in it may be named — and the
-//! three envelopes. The I/O half is [`Side`], at the bottom, and it is thin
-//! on purpose: three requests, each answered by one of the parsers here.
+//! three envelopes. No I/O: the three requests live in `calendars.rs`,
+//! each answered by one of the parsers here.
 //!
 //! The cursor is the **CTag per calendar** and, under it, the ETag of every
 //! resource the collector has published (`Cursor`). A poll whose CTag did
@@ -10,10 +10,12 @@
 //! (`PROPFIND`, depth 1), diffs the ETags against the cursor, and reads
 //! only what is new or changed (`REPORT calendar-multiget`). No
 //! `sync-collection`: twaky measured that the proxy does not serve it, and
-//! the CTag is what every CalDAV server has. No backfill: a cursor that
-//! starts empty publishes the calendar as it stands, once, as `created`
-//! events — what the owner's agenda holds today is the state a consumer
-//! starts from, not a history.
+//! the CTag is what every CalDAV server has. No backfill (#251): a cursor
+//! that starts empty takes the calendar as it stands and publishes nothing
+//! of it — what the owner's agenda already holds is the past, and only what
+//! changes from then on is an event; the first poll's reads fill the cursor
+//! so that a later change to an existing meeting is a `changed` with its
+//! `changed_fields`, not a `created` out of nowhere.
 //!
 //! What is published is the event as the owner's agenda shows it
 //! (`definitions/calendar-event.schema.json`): never the description, never
@@ -30,8 +32,9 @@ use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, NaiveDate, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use twalk_consent_cache::Consent;
+
+use crate::status::sha256_hex;
 
 pub const CREATED_TYPE: &str = "fr.linagora.twalk.calendar.event.created.v1";
 pub const CHANGED_TYPE: &str = "fr.linagora.twalk.calendar.event.changed.v1";
@@ -45,6 +48,9 @@ pub struct Calendar {
     /// The calendar's id: the last segment of its HAL self link.
     pub id: String,
     pub name: String,
+    /// The CTag the list itself carried (`calendarserver:ctag`), when it
+    /// did: a calendar whose CTag the cursor already holds is not listed.
+    pub ctag: Option<String>,
 }
 
 /// The owner's calendars, off the HAL document
@@ -72,7 +78,12 @@ pub fn calendars_in(document: &Value) -> Vec<Calendar> {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_owned();
-                    Some(Calendar { id, name })
+                    let ctag = entry
+                        .get("calendarserver:ctag")
+                        .and_then(Value::as_str)
+                        .filter(|ctag| !ctag.is_empty())
+                        .map(str::to_owned);
+                    Some(Calendar { id, name, ctag })
                 })
                 .collect()
         })
@@ -129,7 +140,6 @@ pub fn parse_listing(xml: &str, collection: &str) -> Result<Listing> {
         let Some(href) = text_of(&response, DAV, "href") else {
             continue;
         };
-        let href = xml_unescape_href(&href);
         let ctag = text_of(&response, CALENDARSERVER, "getctag");
         let etag = text_of(&response, DAV, "getetag");
         if href.trim_end_matches('/') == collection.trim_end_matches('/') {
@@ -166,11 +176,7 @@ pub fn parse_multiget(xml: &str) -> Result<Vec<Resource>> {
         ) else {
             continue;
         };
-        resources.push(Resource {
-            href: xml_unescape_href(&href),
-            etag,
-            ics,
-        });
+        resources.push(Resource { href, etag, ics });
     }
     Ok(resources)
 }
@@ -185,13 +191,6 @@ fn text_of(node: &roxmltree::Node, namespace: &str, name: &str) -> Option<String
         .and_then(|child| child.text())
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
-}
-
-fn xml_unescape_href(href: &str) -> String {
-    // roxmltree already unescapes entities; what a server may still encode
-    // is percent-escaping in the path, which is left as the server's own
-    // spelling so the same href round-trips into the multiget.
-    href.to_owned()
 }
 
 fn xml_escape(text: &str) -> String {
@@ -271,21 +270,17 @@ pub fn parse_vevent(ics: &str) -> Result<Vevent> {
         .map(|line| unescape_text(&line.value))
         .unwrap_or_default();
     let dtstart = property("DTSTART").context("the VEVENT has no DTSTART")?;
-    let all_day = dtstart.param("VALUE").as_deref() == Some("DATE") || dtstart.value.len() == 8;
+    let all_day = dtstart.is_date();
     let timezone = dtstart.param("TZID").filter(|_| !all_day);
     let start = Moment::parse(&dtstart.value, timezone.as_deref(), all_day)
         .with_context(|| format!("DTSTART {:?} cannot be read", dtstart.value))?;
     let end = match (property("DTEND"), property("DURATION")) {
-        (Some(dtend), _) => {
-            let end_all_day =
-                dtend.param("VALUE").as_deref() == Some("DATE") || dtend.value.len() == 8;
-            Moment::parse(
-                &dtend.value,
-                dtend.param("TZID").or_else(|| timezone.clone()).as_deref(),
-                end_all_day,
-            )
-            .with_context(|| format!("DTEND {:?} cannot be read", dtend.value))?
-        }
+        (Some(dtend), _) => Moment::parse(
+            &dtend.value,
+            dtend.param("TZID").or_else(|| timezone.clone()).as_deref(),
+            dtend.is_date(),
+        )
+        .with_context(|| format!("DTEND {:?} cannot be read", dtend.value))?,
         (None, Some(duration)) => start.plus(
             parse_duration(&duration.value)
                 .with_context(|| format!("DURATION {:?} cannot be read", duration.value))?,
@@ -360,6 +355,18 @@ pub fn parse_vevent(ics: &str) -> Result<Vevent> {
         organizer,
         participants,
     })
+}
+
+/// The owner as the events spell people: `mailto:`, lower-cased — whether
+/// the caller passed the address or the URI.
+pub fn owner_mailto(owner: &str) -> String {
+    let address = owner.trim();
+    let address = address
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
+        .map(|_| &address[7..])
+        .unwrap_or(address);
+    format!("mailto:{}", address.trim().to_ascii_lowercase())
 }
 
 /// A `mailto:` value, lower-cased — one string for one person across the
@@ -450,6 +457,12 @@ impl ContentLine {
             params,
             value,
         })
+    }
+
+    /// A DATE rather than a DATE-TIME: said by `VALUE=DATE`, or by the
+    /// eight-digit shape a server writes it in without saying.
+    fn is_date(&self) -> bool {
+        self.param("VALUE").as_deref() == Some("DATE") || self.value.len() == 8
     }
 
     fn param(&self, name: &str) -> Option<String> {
@@ -582,16 +595,7 @@ fn parse_duration(value: &str) -> Result<ChronoDuration> {
 /// nothing about anybody, and `Consent::Pending` — labelled by nothing,
 /// reduced by nothing — is what such a closure answers.
 pub fn reduce(event: &Vevent, owner: &str, decide: impl Fn(&str) -> Consent) -> Value {
-    // The owner as the event spells people: `mailto:`, lower-cased —
-    // whether the caller passed the address or the URI.
-    let owner = format!(
-        "mailto:{}",
-        owner
-            .trim()
-            .trim_start_matches("mailto:")
-            .trim_start_matches("MAILTO:")
-            .to_ascii_lowercase()
-    );
+    let owner = owner_mailto(owner);
     let mut withheld = 0u64;
     let mut withhold = |identity: &str| -> bool {
         if identity == owner {
@@ -616,15 +620,19 @@ pub fn reduce(event: &Vevent, owner: &str, decide: impl Fn(&str) -> Consent) -> 
             })
         })
         .collect();
-    let organizer = match &event.organizer {
-        Some(person) if !withhold(&person.identity) => {
-            json!({ "identity": person.identity, "name": person.name })
-        }
-        _ => Value::Null,
+    // A withheld organizer's title goes with them: the title of an
+    // invitation is the organizer's words on the owner's agenda.
+    let (organizer, title) = match &event.organizer {
+        Some(person) if withhold(&person.identity) => (Value::Null, String::new()),
+        Some(person) => (
+            json!({ "identity": person.identity, "name": person.name }),
+            event.title.clone(),
+        ),
+        None => (Value::Null, event.title.clone()),
     };
     json!({
         "uid": event.uid,
-        "title": event.title,
+        "title": title,
         "start": event.start,
         "end": event.end,
         "all_day": event.all_day,
@@ -725,7 +733,7 @@ impl Envelopes {
     pub fn new(connection: &str, owner_email: &str, side_host: &str, collection: &str) -> Self {
         Self {
             connection: connection.to_owned(),
-            owner: format!("mailto:{}", owner_email.to_ascii_lowercase()),
+            owner: owner_mailto(owner_email),
             source: format!("caldav://{side_host}{collection}"),
         }
     }
@@ -787,160 +795,6 @@ impl Envelopes {
             "connection": self.connection,
             "data": data,
         })
-    }
-}
-
-fn sha256_hex(input: &str) -> String {
-    Sha256::digest(input.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-/// Why a request to the side service did not answer with what was asked.
-#[derive(Debug)]
-pub enum SideError {
-    /// `401`/`403`: the token itself, or what the client lacks — the words
-    /// the status machinery already has (`ServiceRefusal`).
-    Refused { status: u16 },
-    /// No answer, another status, or an answer that is not what a CalDAV
-    /// server says.
-    Unreachable { detail: String },
-}
-
-impl std::fmt::Display for SideError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refused { status } => {
-                write!(f, "the side service refused the token with {status}")
-            }
-            Self::Unreachable { detail } => f.write_str(detail),
-        }
-    }
-}
-
-impl std::error::Error for SideError {}
-
-/// The side service, over HTTP: three requests and nothing else.
-#[derive(Debug, Clone)]
-pub struct Side {
-    http: reqwest::Client,
-    /// The root, without a trailing slash.
-    base: String,
-}
-
-impl Side {
-    pub fn new(caldav_url: &str) -> Result<Self> {
-        Ok(Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()?,
-            base: caldav_url.trim_end_matches('/').to_owned(),
-        })
-    }
-
-    /// The side service's host, for `source`.
-    pub fn host(&self) -> String {
-        self.base
-            .split("://")
-            .nth(1)
-            .unwrap_or(&self.base)
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
-    }
-
-    pub async fn calendars(&self, owner_id: &str, token: &str) -> Result<Vec<Calendar>, SideError> {
-        let url = format!(
-            "{}/dav/calendars/{owner_id}.json?personal=true&sharedDelegationStatus=accepted",
-            self.base
-        );
-        let body = self
-            .send(
-                self.http.get(&url).header("accept", "application/json"),
-                token,
-            )
-            .await?;
-        let document: Value =
-            serde_json::from_str(&body).map_err(|error| SideError::Unreachable {
-                detail: format!("the calendar list at {url} is not JSON: {error}"),
-            })?;
-        Ok(calendars_in(&document))
-    }
-
-    pub async fn listing(&self, collection: &str, token: &str) -> Result<Listing, SideError> {
-        let method = reqwest::Method::from_bytes(b"PROPFIND").expect("a method name");
-        let body = self
-            .send(
-                self.http
-                    .request(method, format!("{}{collection}", self.base))
-                    .header("depth", "1")
-                    .header("content-type", "application/xml; charset=utf-8")
-                    .body(PROPFIND_BODY),
-                token,
-            )
-            .await?;
-        parse_listing(&body, collection).map_err(|error| SideError::Unreachable {
-            detail: format!("{error:#}"),
-        })
-    }
-
-    pub async fn read(
-        &self,
-        collection: &str,
-        hrefs: &[String],
-        token: &str,
-    ) -> Result<Vec<Resource>, SideError> {
-        if hrefs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let method = reqwest::Method::from_bytes(b"REPORT").expect("a method name");
-        let body = self
-            .send(
-                self.http
-                    .request(method, format!("{}{collection}", self.base))
-                    .header("depth", "1")
-                    .header("content-type", "application/xml; charset=utf-8")
-                    .body(multiget_body(hrefs)),
-                token,
-            )
-            .await?;
-        parse_multiget(&body).map_err(|error| SideError::Unreachable {
-            detail: format!("{error:#}"),
-        })
-    }
-
-    async fn send(
-        &self,
-        request: reqwest::RequestBuilder,
-        token: &str,
-    ) -> Result<String, SideError> {
-        let response =
-            request
-                .bearer_auth(token)
-                .send()
-                .await
-                .map_err(|error| SideError::Unreachable {
-                    detail: format!("the side service did not answer: {error}"),
-                })?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SideError::Refused {
-                status: status.as_u16(),
-            });
-        }
-        if !status.is_success() {
-            return Err(SideError::Unreachable {
-                detail: format!("the side service answered {status}"),
-            });
-        }
-        response
-            .text()
-            .await
-            .map_err(|error| SideError::Unreachable {
-                detail: format!("the side service's answer could not be read: {error}"),
-            })
     }
 }
 
@@ -1074,7 +928,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let hal = json!({
             "_embedded": { "dav:calendar": [
                 { "_links": { "self": { "href": "/dav/calendars/o/o.json" } }, "dav:name": "Mine" },
-                { "_links": { "self": { "href": "/dav/calendars/o/shared-1.json" } } },
+                { "_links": { "self": { "href": "/dav/calendars/o/shared-1.json" } }, "calendarserver:ctag": "http://sabre.io/ns/sync/9" },
                 { "dav:name": "no link" }
             ] }
         });
@@ -1084,10 +938,15 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             calendars[0],
             Calendar {
                 id: "o".to_owned(),
-                name: "Mine".to_owned()
+                name: "Mine".to_owned(),
+                ctag: None
             }
         );
         assert_eq!(calendars[1].id, "shared-1");
+        assert_eq!(
+            calendars[1].ctag.as_deref(),
+            Some("http://sabre.io/ns/sync/9")
+        );
         assert_eq!(
             collection_path("o", "shared-1"),
             "/dav/calendars/o/shared-1/"

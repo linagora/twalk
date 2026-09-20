@@ -52,6 +52,11 @@ pub struct Config {
     /// well (`COLLECTOR_HEALTH_INTERVAL_SECONDS`, 60 by default; a test sets
     /// 1). The access token is renewed ahead of its expiry regardless.
     pub health_interval: std::time::Duration,
+    /// How often the calendars are polled for a change
+    /// (`COLLECTOR_CALENDAR_POLL_SECONDS`, 60 by default — #251's "poll
+    /// every 60 s"; a test sets 1). Its own variable, because a health
+    /// check and a read of the owner's agenda are two things to tune.
+    pub calendar_poll_interval: std::time::Duration,
 }
 
 impl Config {
@@ -136,6 +141,14 @@ impl Config {
                     None => 60,
                 },
             ),
+            calendar_poll_interval: std::time::Duration::from_secs(
+                match optional_string("COLLECTOR_CALENDAR_POLL_SECONDS") {
+                    Some(value) => value.parse().with_context(|| {
+                        format!("COLLECTOR_CALENDAR_POLL_SECONDS is not a number: {value:?}")
+                    })?,
+                    None => 60,
+                },
+            ),
         })
     }
 
@@ -200,6 +213,7 @@ mod tests {
             metrics_listen: None,
             log_level: "info".to_owned(),
             health_interval: std::time::Duration::from_secs(60),
+            calendar_poll_interval: std::time::Duration::from_secs(60),
         }
     }
 

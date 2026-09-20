@@ -638,11 +638,13 @@ fn admit(name: &'static str, request: &RawRequest, guard: &State) -> Admission {
 /// the same service — so a token the side service refuses is refused on
 /// every one of its routes.
 fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> {
-    let account = match admit("caldav", request, guard) {
+    // The same admission as `/api/user`; whose account it is does not
+    // change what the calendar routes answer.
+    match admit("caldav", request, guard) {
         Admission::Silent => return None,
         Admission::Refused(status, body) => return Some(Response::json(status, body)),
-        Admission::Account(account) => account,
-    };
+        Admission::Account(_) => {}
+    }
     let not_found = || {
         Some(Response::json(
             "404 Not Found",
@@ -685,7 +687,6 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
         return not_found();
     };
     let collection = format!("/dav/calendars/{OWNER_ID}/{calendar_id}/");
-    let _ = account;
     match request.method.as_str() {
         "PROPFIND" => {
             let mut body = String::from(

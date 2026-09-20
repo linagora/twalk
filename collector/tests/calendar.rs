@@ -1,129 +1,57 @@
 //! The owner's calendars at the process boundary (issue #280): the collector
 //! started against the fake SSO, the fake side service and the test stack's
-//! bus — an event created, moved and removed in a calendar is the three
+//! bus — what the calendar already held is taken as the state and not
+//! published; an event created, moved and removed afterwards is the three
 //! contract types; an unchanged CTag publishes nothing; a participant the
 //! owner revoked on the mail connection is withheld, one never decided about
-//! is carried.
+//! is carried — and nothing of a description or a withheld person reaches
+//! the bus, the log, or the state directory.
 
-use std::process::Stdio;
+mod support;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
-use tokio::process::Command;
-use twalk_collector::oidc::{Client, Settings};
-use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
-use twalk_test_harness::{
-    ensure_stack, nats_url, poll_until, validate_against_contract, Bus, FakeSso,
-};
+use support::{sha256_hex, Run, OWNER, STREAM};
+use twalk_test_harness::{ensure_stack, poll_until, validate_against_contract, Bus};
 
-const OWNER: &str = "michel@example.com";
-const STREAM: &str = "twalk";
 const CONSENT_SUBJECT: &str = "twalk.consent.state.changed.v1";
+const DESCRIPTION: &str = "Notes nobody decided to share";
 
 const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-weekly\r\nSUMMARY:Weekly sync\r\nDESCRIPTION:Notes nobody decided to share\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:michel@example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=Alice Martin;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
-struct Run {
-    sso: FakeSso,
-    dir: tempfile::TempDir,
-    mail: String,
-    calendar: String,
-    /// The bus's head when the run was prepared: what this run publishes is
-    /// after it, and the shared bus's history is not walked.
-    since: u64,
+/// A standing meeting the calendar already held before the collector ever
+/// ran: the past, which is not published.
+const STANDING: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:standing-1\r\nSUMMARY:Standing meeting\r\nDTSTART;TZID=Europe/Paris:20261001T140000\r\nDTEND;TZID=Europe/Paris:20261001T150000\r\nATTENDEE;CN=Carol:mailto:carol@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+/// The Companion Gateway's snapshot, as the fake stands in for it: both connections
+/// in the registry, the decisions given, the stream to be followed from
+/// just past its current head.
+async fn serve_snapshot(run: &Run, bus: &Bus, entries: Vec<Value>) -> Result<()> {
+    let head = bus.last_sequence(STREAM, CONSENT_SUBJECT).await?;
+    run.sso.serve_gateway_snapshot(json!({
+        "stream": STREAM,
+        "subject": CONSENT_SUBJECT,
+        "stream_sequence": head,
+        "next_stream_sequence": head + 1,
+        "decision_sequence": entries.len(),
+        "connections": [
+            { "id": run.mail, "kind": "email", "network": "email" },
+            { "id": run.calendar, "kind": "calendar" },
+        ],
+        "entries": entries,
+    }));
+    Ok(())
 }
 
-impl Run {
-    async fn prepare(name: &str, bus: &Bus) -> Result<Self> {
-        let since = bus.head(STREAM).await?;
-        let sso = FakeSso::start(OWNER).await?;
-        let dir = tempfile::tempdir()?;
-        write_client_secret(dir.path())?;
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos();
-        Ok(Self {
-            sso,
-            dir,
-            mail: format!("mail-{name}-{unique}"),
-            calendar: format!("cal-{name}-{unique}"),
-            since,
-        })
-    }
-
-    async fn authorize(&self) -> Result<()> {
-        let client = Client::discover(Settings {
-            issuer: self.sso.issuer(),
-            client_id: CLIENT_ID.to_owned(),
-            client_secret_file: self.dir.path().join("client-secret"),
-            redirect_uri: "http://localhost:1/callback".to_owned(),
-            scopes: vec!["openid".to_owned(), "offline_access".to_owned()],
-            grant_file: self.dir.path().join("oidc").join("grant.json"),
-        })
-        .await?;
-        let started = client.begin_authorization()?;
-        let callback = self.sso.sign_in(&started.authorization_url)?;
-        client.complete_authorization(&started, &callback).await?;
-        Ok(())
-    }
-
-    /// The Gateway's snapshot, as this fake stands in for it: both
-    /// connections in the registry, the decisions given, the stream to be
-    /// followed from just past its current head.
-    async fn serve_snapshot(&self, bus: &Bus, entries: Vec<Value>) -> Result<()> {
-        let head = bus.last_sequence(STREAM, CONSENT_SUBJECT).await?;
-        self.sso.serve_gateway_snapshot(json!({
-            "stream": STREAM,
-            "subject": CONSENT_SUBJECT,
-            "stream_sequence": head,
-            "next_stream_sequence": head + 1,
-            "decision_sequence": entries.len(),
-            "connections": [
-                { "id": self.mail, "kind": "email", "network": "email" },
-                { "id": self.calendar, "kind": "calendar" },
-            ],
-            "entries": entries,
-        }));
-        Ok(())
-    }
-
-    fn revoked_on_mail(&self, identity: &str) -> Value {
-        json!({
-            "subject": { "type": "contact", "id": identity },
-            "connection": self.mail,
-            "network": "email",
-            "state": "revoked",
-            "decided_at": "2026-09-20T10:00:00.000Z",
-            "decision_sequence": 1
-        })
-    }
-
-    fn start(&self) -> Result<tokio::process::Child> {
-        Command::new(env!("CARGO_BIN_EXE_twalk-collector"))
-            .env("COLLECTOR_STATE_DIR", self.dir.path())
-            .env("COLLECTOR_OIDC_ISSUER", self.sso.issuer())
-            .env("COLLECTOR_OIDC_CLIENT_ID", CLIENT_ID)
-            .env(
-                "COLLECTOR_OIDC_CLIENT_SECRET_FILE",
-                self.dir.path().join("client-secret"),
-            )
-            .env("COLLECTOR_OIDC_REDIRECT_URI", "http://localhost:1/callback")
-            .env("COLLECTOR_JMAP_SESSION_URL", self.sso.jmap_session_url())
-            .env("COLLECTOR_CALDAV_URL", self.sso.caldav_url())
-            .env("COLLECTOR_OWNER_EMAIL", OWNER)
-            .env("COLLECTOR_MAIL_CONNECTION", &self.mail)
-            .env("COLLECTOR_CALENDAR_CONNECTION", &self.calendar)
-            .env("COLLECTOR_GATEWAY_URL", self.sso.issuer())
-            .env("COLLECTOR_GATEWAY_SERVICE_TOKEN", "test-service-token")
-            .env("COLLECTOR_NATS_URL", nats_url())
-            .env("COLLECTOR_HOST", "collector.test")
-            .env("COLLECTOR_HEALTH_INTERVAL_SECONDS", "1")
-            .env("COLLECTOR_LOG_LEVEL", "info,twalk_collector=debug")
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("failed to start the collector binary")
-    }
+fn revoked_on_mail(run: &Run, identity: &str) -> Value {
+    json!({
+        "subject": { "type": "contact", "id": identity },
+        "connection": run.mail,
+        "network": "email",
+        "state": "revoked",
+        "decided_at": "2026-09-20T10:00:00.000Z",
+        "decision_sequence": 1
+    })
 }
 
 /// The calendar events this run's connection published, of one type, in order.
@@ -153,21 +81,31 @@ async fn wait_for(bus: &Bus, run: &Run, kind: &str, at_least: usize) -> Result<V
 }
 
 #[tokio::test]
-async fn create_change_and_remove_are_the_three_types_and_an_unchanged_ctag_publishes_nothing(
+async fn what_the_calendar_held_is_not_published_and_create_change_remove_are_the_three_types(
 ) -> Result<()> {
     ensure_stack().await?;
     let bus = Bus::connect().await?;
-    let run = Run::prepare("three", &bus).await?;
+    let run = Run::prepare("three").await?;
     run.authorize().await?;
-    run.serve_snapshot(&bus, Vec::new()).await?;
+    serve_snapshot(&run, &bus, Vec::new()).await?;
     // The calendar's id on the side service is this run's own, so two runs
     // on the shared bus never produce one href — and so one id.
     let collection = run.sso.create_calendar(&run.calendar, "Mine");
-    let first_etag = run.sso.put_event(&run.calendar, "weekly", WEEKLY);
-    let _collector = run.start()?;
+    run.sso.put_event(&run.calendar, "standing", STANDING);
+    let collector = run.start_with_gateway()?;
 
-    // Created: the event whole, as the fixture has it, and nothing of the
-    // description.
+    // The first poll takes the calendar as it stands: nothing published,
+    // and said. Two more polls with the same CTag: nothing read, nothing
+    // published.
+    collector
+        .wait_logged("calendar taken as it stands", 1)
+        .await?;
+    collector.wait_logged("calendars polled", 3).await?;
+    assert!(events_of(&bus, &run, "created").await?.is_empty());
+
+    // Created, after the collector was watching: the event whole, and
+    // nothing of the description.
+    let first_etag = run.sso.put_event(&run.calendar, "weekly", WEEKLY);
     let created = wait_for(&bus, &run, "created", 1).await?;
     let created = &created[0];
     validate_against_contract(created, "calendar.event.created")?;
@@ -188,34 +126,55 @@ async fn create_change_and_remove_are_the_three_types_and_an_unchanged_ctag_publ
     assert_eq!(created["data"]["start"], "2026-10-05T09:00:00+02:00");
     assert_eq!(created["data"]["participants"].as_array().unwrap().len(), 3);
     assert_eq!(created["data"]["participants_withheld"], 0);
-    assert!(!created.to_string().contains("Notes nobody"), "{created}");
+    assert!(!created.to_string().contains(DESCRIPTION), "{created}");
     assert_eq!(
         created["id"],
         sha256_hex(&format!("caldav:{collection}weekly.ics:{first_etag}"))
     );
+    assert_eq!(
+        events_of(&bus, &run, "created").await?.len(),
+        1,
+        "the standing meeting was never published"
+    );
 
-    // Polled again with the same CTag: nothing more.
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    assert_eq!(events_of(&bus, &run, "created").await?.len(), 1);
-    assert!(events_of(&bus, &run, "changed").await?.is_empty());
-
-    // Moved by an hour: one `changed`, naming start and end.
+    // Moved by an hour: one `changed`, naming start and end. A standing
+    // meeting renamed is a `changed` too — the cursor knew it.
     let moved = WEEKLY
         .replace("20261005T090000", "20261005T100000")
         .replace("20261005T093000", "20261005T103000");
     let second_etag = run.sso.put_event(&run.calendar, "weekly", &moved);
-    let changed = wait_for(&bus, &run, "changed", 1).await?;
-    let changed = &changed[0];
-    validate_against_contract(changed, "calendar.event.changed")?;
-    assert_eq!(changed["data"]["changed_fields"], json!(["start", "end"]));
+    run.sso.put_event(
+        &run.calendar,
+        "standing",
+        &STANDING.replace(
+            "SUMMARY:Standing meeting",
+            "SUMMARY:Standing meeting, renamed",
+        ),
+    );
+    let changed = wait_for(&bus, &run, "changed", 2).await?;
+    let weekly = changed
+        .iter()
+        .find(|event| event["data"]["event"]["uid"] == "8f3a2b1c-weekly")
+        .expect("the weekly's change");
+    validate_against_contract(weekly, "calendar.event.changed")?;
+    assert_eq!(weekly["data"]["changed_fields"], json!(["start", "end"]));
     assert_eq!(
-        changed["data"]["event"]["start"],
+        weekly["data"]["event"]["start"],
         "2026-10-05T10:00:00+02:00"
     );
-    assert_eq!(changed["data"]["event"]["uid"], "8f3a2b1c-weekly");
     assert_eq!(
-        changed["id"],
+        weekly["id"],
         sha256_hex(&format!("caldav:{collection}weekly.ics:{second_etag}"))
+    );
+    let standing = changed
+        .iter()
+        .find(|event| event["data"]["event"]["uid"] == "standing-1")
+        .expect("the standing meeting's change");
+    assert_eq!(standing["data"]["changed_fields"], json!(["title"]));
+    assert_eq!(
+        events_of(&bus, &run, "created").await?.len(),
+        1,
+        "a standing meeting that changes is not created out of nowhere"
     );
 
     // Removed: the uid and the last title, and nobody in it.
@@ -232,6 +191,19 @@ async fn create_change_and_remove_are_the_three_types_and_an_unchanged_ctag_publ
         sha256_hex(&format!("caldav:{collection}weekly.ics:removed:{ctag}"))
     );
     assert!(!removed.to_string().contains("alice"), "{removed}");
+
+    // The description is in no log line and in no stored byte.
+    collector.assert_never_logged(&[DESCRIPTION]).await;
+    let stored = run.stored_bytes()?;
+    assert!(
+        !stored.contains(DESCRIPTION),
+        "the description reached the state directory"
+    );
+    assert!(
+        stored.contains("standing-1") && stored.contains("Standing meeting, renamed"),
+        "the cursor holds the event as published"
+    );
+    collector.stop().await;
     Ok(())
 }
 
@@ -240,15 +212,22 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
 ) -> Result<()> {
     ensure_stack().await?;
     let bus = Bus::connect().await?;
-    let run = Run::prepare("withheld", &bus).await?;
+    let run = Run::prepare("withheld").await?;
     run.authorize().await?;
     // Bob was revoked on the mail connection before the collector started:
     // the snapshot says so. Alice was never decided about.
-    run.serve_snapshot(&bus, vec![run.revoked_on_mail("mailto:bob@example.org")])
-        .await?;
+    serve_snapshot(
+        &run,
+        &bus,
+        vec![revoked_on_mail(&run, "mailto:bob@example.org")],
+    )
+    .await?;
     run.sso.create_calendar(&run.calendar, "Mine");
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("calendar taken as it stands", 1)
+        .await?;
     run.sso.put_event(&run.calendar, "weekly", WEEKLY);
-    let _collector = run.start()?;
 
     let created = wait_for(&bus, &run, "created", 1).await?;
     let created = &created[0];
@@ -265,8 +244,8 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
     assert!(!created.to_string().contains("bob"), "{created}");
 
     // Then the owner revokes Alice, on the mail connection, while the
-    // collector runs: the decision arrives over the stream, and the next
-    // version of the event carries her no more.
+    // collector runs: the decision arrives over the stream — applied, the
+    // log says — and the next version of the event carries her no more.
     let occurred_at = "2026-09-20T11:00:00Z";
     let decision = json!({
         "specversion": "1.0",
@@ -287,7 +266,7 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
         }
     });
     bus.publish_event(CONSENT_SUBJECT, &decision).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    collector.wait_logged("applied a consent change", 1).await?;
     let renamed = WEEKLY.replace("SUMMARY:Weekly sync", "SUMMARY:Weekly sync (moved room)");
     run.sso.put_event(&run.calendar, "weekly", &renamed);
     let changed = wait_for(&bus, &run, "changed", 1).await?;
@@ -302,13 +281,18 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
         fields.contains(&json!("title")) && fields.contains(&json!("participants")),
         "{changed}"
     );
-    Ok(())
-}
 
-fn sha256_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(input.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    // Bob — withheld from the first publication — is in no log line and
+    // in no stored byte; the description neither.
+    collector
+        .assert_never_logged(&["bob@example.org", DESCRIPTION])
+        .await;
+    let stored = run.stored_bytes()?;
+    assert!(
+        !stored.contains("bob@example.org"),
+        "a withheld participant reached the state directory"
+    );
+    assert!(!stored.contains(DESCRIPTION));
+    collector.stop().await;
+    Ok(())
 }

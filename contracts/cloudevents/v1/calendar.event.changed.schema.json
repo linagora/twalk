@@ -108,7 +108,7 @@
               "participants"
             ]
           },
-          "description": "Which of the event's published fields differ from what the collector last published for this UID, by name — `start` and `end` for a moved slot, `status` for a cancellation, `participants` for an answer or a new invitee (a withheld participant's answer moves `participants_withheld` and is not named here: the change is not the consumer's to know). At least one, because a resource whose ETag changed without any published field changing (a description edited, an alarm added) is not published at all — nothing a consumer can see moved. The collector compares against its own cursor, so a change made while it was down is reported against the last state it published, not the last state that existed."
+          "description": "Which of the event's published fields differ from what the collector last published — or, for a meeting the calendar already held when the collector first ran, last read — for this resource, by name — `start` and `end` for a moved slot, `status` for a cancellation, `participants` for an answer or a new invitee (a withheld participant's answer moves `participants_withheld` and is not named here: the change is not the consumer's to know). At least one, because a resource whose ETag changed without any published field changing (a description edited, an alarm added) is not published at all — nothing a consumer can see moved. The collector compares against its own cursor, so a change made while it was down is reported against the last state it published, not the last state that existed."
         }
       }
     }

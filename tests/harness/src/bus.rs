@@ -148,7 +148,7 @@ impl Bus {
     }
 
     /// The stream sequence of the last message stored on a subject, or `0`
-    /// when none was: what a Gateway that has published every decision it
+    /// when none was: what a Companion Gateway that has published every decision it
     /// holds would name as its position, read from the stream's index
     /// rather than by replaying the subject.
     pub async fn last_sequence(&self, stream: &str, subject: &str) -> Result<u64> {

@@ -43,7 +43,6 @@
 //! (`COLLECTOR_OIDC_CLIENT_SECRET_FILE`) — never argv, where `ps` shows it
 //! (the lesson of #239), never a bare variable a `docker inspect` prints.
 
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -123,35 +122,7 @@ impl Grant {
     /// mid-write leaves either the old grant or the new one and never half
     /// of one. The directory is created 0700 when missing.
     pub fn write(&self, path: &Path) -> Result<()> {
-        let directory = path
-            .parent()
-            .context("the grant file has no parent directory")?;
-        std::fs::create_dir_all(directory)
-            .with_context(|| format!("failed to create {}", directory.display()))?;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("failed to set the mode of {}", directory.display()))?;
-        let temporary = directory.join(format!(
-            ".{}.tmp",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("grant.json")
-        ));
-        {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .with_context(|| format!("failed to open {}", temporary.display()))?;
-            file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-            file.write_all(b"\n")?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, path)
-            .with_context(|| format!("failed to move the grant into {}", path.display()))?;
-        Ok(())
+        crate::fs::write_json_private(path, self)
     }
 }
 
