@@ -1292,3 +1292,131 @@ async fn a_suggestion_the_gateway_records_as_approved_is_not_posted() -> Result<
     stub.stop().await;
     Ok(())
 }
+
+/// The session retry in the test that watches it: seconds, where a
+/// deployment has an hour (`CLERK_SESSION_RETRY_SECONDS`). Long enough
+/// that the breaker can be asserted across two ticks before a retry lands
+/// a refresh on the stub, short enough that the revival is watched inside
+/// one log poll.
+const SESSION_RETRY_SECONDS: u64 = 8;
+
+#[tokio::test]
+async fn a_read_meeting_a_revoked_device_posts_as_refused_and_the_session_is_retried() -> Result<()>
+{
+    let stub = StubGateway::start(17415).await?;
+    let run = Run::start_with_write_half_and(
+        "revoked-before-the-read",
+        &stub,
+        &[(
+            "CLERK_SESSION_RETRY_SECONDS",
+            &SESSION_RETRY_SECONDS.to_string(),
+        )],
+    )
+    .await?;
+    // Signed in at startup, then revoked from the dashboard **before** the
+    // first suggestion: the read is what meets the 401, not the loop.
+    assert_eq!(stub.state().refreshes, 1);
+    stub.state().revoked = true;
+
+    let (id, post_id) = post_suggestion(&run, 1, LONG_LIFE_SECONDS).await?;
+    let post = run.posts_about(&id).await?.remove(0);
+    assert_eq!(
+        delivery_line_of(&post),
+        delivery_unread_line(LANG, Unread::GatewayRefused),
+        "{}",
+        post.content
+    );
+    run.assert_metric("twalk_clerk_delivery_reads_total{outcome=\"refused\"} 1")
+        .await?;
+    {
+        // The read was made — one send, one refresh, both turned away —
+        // and it is what killed the session.
+        let state = stub.state();
+        assert_eq!(
+            state.turned_away_on(harness::SUGGESTIONS_ROUTE),
+            1,
+            "{:?}",
+            state.turned_away
+        );
+        assert_eq!(
+            state.turned_away_on(harness::REFRESH_ROUTE),
+            1,
+            "{:?}",
+            state.turned_away
+        );
+        assert!(
+            state.reads.is_empty(),
+            "nothing got past the door: {:?}",
+            state.reads
+        );
+    }
+    run.clerk
+        .wait_for_log("provision-clerk-device.sh")
+        .await
+        .context("the read's warning names the script")?;
+
+    // The breaker crosses tasks: the loop, seeing the session the read
+    // killed, makes no approval call on the owner's ✅ — told once in the
+    // thread — and two ticks later nothing on the approvals route has been
+    // turned away. (A refresh may have been retried meanwhile; that is the
+    // retry, and it is asserted below.)
+    let check = run.react_as_owner(&post_id, "✅").await?;
+    let told = run
+        .wait_for_thread_line(&post_id, &thread_revoked(LANG))
+        .await?;
+    assert!(answers_gesture(&told, &check.id.to_hex()));
+    run.wait_for_ticks(2).await?;
+    {
+        let state = stub.state();
+        assert_eq!(
+            state.turned_away_on(harness::APPROVALS_ROUTE),
+            0,
+            "{:?}",
+            state.turned_away
+        );
+        assert!(state.approvals.is_empty(), "{:?}", state.approvals);
+    }
+    assert_eq!(run.clerk_thread_of(&post_id).await?.len(), 1, "told once");
+    assert_eq!(run.posts_about(&id).await?.len(), 1, "the post waits");
+
+    // The operator signs the device in again — no restart. The loop's
+    // retry, brought forward to CLERK_SESSION_RETRY_SECONDS by the death
+    // the read caused, finds the new token in the file, and the ✅ still
+    // on the relay is carried on that tick.
+    run.provision_device(&stub).await?;
+    run.clerk
+        .wait_for_log("the clerk's session is back")
+        .await
+        .context("the retry found the re-provisioned device without a restart")?;
+    run.wait_until_gone(&id, GONE_WITHIN).await?;
+    {
+        let state = stub.state();
+        assert_eq!(state.approvals.len(), 1, "{:?}", state.approvals);
+        assert_eq!(state.approvals[0].suggestion_id, id);
+        assert_eq!(state.refreshes, 2, "the retry's refresh, and no other");
+    }
+    run.assert_metric(&approvals_sample("approved", 1)).await?;
+    run.wait_for_line(
+        &run.channels.activity,
+        &activity_approved(LANG, NETWORK, false),
+    )
+    .await?;
+    let thread = run.clerk_thread_of(&post_id).await?;
+    assert_eq!(thread.len(), 1, "the revoked line stays: {thread:?}");
+
+    // And the next suggestion is read as the device again.
+    let (second, _) = post_scripted_suggestion(
+        &run,
+        &stub,
+        2,
+        SuggestionAnswer::new("approvable", "can_reach", "owner_joined"),
+    )
+    .await?;
+    assert_eq!(stub.state().reads_of(&second), 1);
+    run.assert_metric("twalk_clerk_delivery_reads_total{outcome=\"found\"} 1")
+        .await?;
+
+    run.shutdown().await?;
+    stub.stop().await;
+    Ok(())
+}

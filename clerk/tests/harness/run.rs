@@ -84,6 +84,10 @@ const TICK_LINE: &str = "decisions tick";
 struct WriteHalfSetup {
     gateway_url: String,
     refresh_token: String,
+    /// Variables added to the clerk's environment after the write half's
+    /// own — `CLERK_SESSION_RETRY_SECONDS` for a test that watches the
+    /// session retry.
+    extra: Vec<(String, String)>,
 }
 
 /// One run: the stack, the bus, the relay, the channels and the clerk.
@@ -137,6 +141,30 @@ impl Run {
             .await
     }
 
+    /// [`start_with_write_half`](Self::start_with_write_half) with
+    /// `extra` variables in the clerk's environment on top of the write
+    /// half's own — `CLERK_SESSION_RETRY_SECONDS` in seconds, for a test
+    /// that watches a dead session being retried without a restart.
+    pub async fn start_with_write_half_and(
+        test_name: &str,
+        stub: &StubGateway,
+        extra: &[(&str, &str)],
+    ) -> Result<Self> {
+        Self::start_configured(
+            test_name,
+            "fr",
+            Some(WriteHalfSetup {
+                gateway_url: stub.base_url.clone(),
+                refresh_token: stub.initial_refresh_token(),
+                extra: extra
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                    .collect(),
+            }),
+        )
+        .await
+    }
+
     /// [`start_with_write_half`](Self::start_with_write_half) at any
     /// origin — [`super::gateway::UNREACHABLE_GATEWAY_URL`] for a Gateway
     /// that is not there — with `refresh_token` in the session file.
@@ -151,6 +179,7 @@ impl Run {
             Some(WriteHalfSetup {
                 gateway_url: gateway_url.to_owned(),
                 refresh_token: refresh_token.to_owned(),
+                extra: Vec::new(),
             }),
         )
         .await
@@ -193,6 +222,7 @@ impl Run {
                     "CLERK_DECISION_SECONDS".to_owned(),
                     DECISION_SECONDS.to_string(),
                 ));
+                env.extend(write.extra);
                 // Every tick's line, so a test can wait for one to have
                 // happened; the rest of the clerk stays at `info`.
                 set_env(

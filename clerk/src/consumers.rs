@@ -167,12 +167,13 @@ const BUS_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// How long the decisions loop lets the session it holds on the Companion
 /// Gateway go without a refresh of its own: a day, well inside the thirty
-/// the Gateway keeps an unused refresh token for, and after one that
-/// failed, an hour — often enough that a device signed in again is picked
-/// up within the hour without an approval, rarely enough that a revoked
-/// one is not a hot loop of refusals.
+/// the Gateway keeps an unused refresh token for. After one that failed,
+/// and for as long as the session is dead however it died, the retry is
+/// `WriteHalf::session_retry` (`CLERK_SESSION_RETRY_SECONDS`, an hour by
+/// default) — often enough that a device signed in again is picked up
+/// within the hour without an approval, rarely enough that a revoked one
+/// is not a hot loop of refusals.
 pub const SESSION_REFRESH_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
-pub const SESSION_REFRESH_RETRY: Duration = Duration::from_secs(60 * 60);
 
 /// Everything a consumer needs, built once by the binary and shared by
 /// every task: the configuration, the relay, the counters, the language
@@ -1149,12 +1150,13 @@ pub async fn decisions(clerk: Arc<Clerk>) {
     // At startup, so a session that died while the clerk was away is an
     // ERROR now, naming the script, and not a surprise in a thread on the
     // first ✅ a month later.
-    let mut next_refresh = Instant::now() + refresh_session(&clerk, gateway).await;
+    let mut next_refresh = Instant::now() + refresh_session(&clerk, gateway, write).await;
     info!(
         every_seconds = write.decision.as_secs(),
         gateway = %gateway.base(),
         owner = %write.owner_pubkey,
         session = ?clerk.session(),
+        session_retry_seconds = write.session_retry.as_secs(),
         "decisions loop running"
     );
     let mut ticker = tokio::time::interval(write.decision);
@@ -1162,9 +1164,17 @@ pub async fn decisions(clerk: Arc<Clerk>) {
     loop {
         ticker.tick().await;
         if Instant::now() >= next_refresh {
-            next_refresh = Instant::now() + refresh_session(&clerk, gateway).await;
+            next_refresh = Instant::now() + refresh_session(&clerk, gateway, write).await;
         }
         let tick = decisions_once(&clerk).await;
+        // A session that died since the last refresh — on a ✅ in this
+        // tick, or on a suggestion's read in the other task — is retried on
+        // the retry schedule and not the daily one: `refresh_session` only
+        // shortens the wait for a death it saw itself, and a session killed
+        // an hour after a successful daily refresh would otherwise wait
+        // twenty-three hours for the retry the operator's script promises,
+        // with every ✅ meanwhile told to wait for it.
+        next_refresh = next_refresh_for(next_refresh, Instant::now(), clerk.session(), write);
         if tick.happened() {
             info!(
                 posts = tick.posts,
@@ -1186,15 +1196,35 @@ pub async fn decisions(clerk: Arc<Clerk>) {
     }
 }
 
+/// When the loop's next refresh of its own is due, given when it was
+/// scheduled and what the session is **now**: a dead session brings it
+/// forward to at most `session_retry` from now, an alive one leaves it.
+/// `min`, not an assignment, so that a retry already nearer — scheduled
+/// by the refresh that saw the death — is not pushed out by a tick, and
+/// so that the tick after the clamp finds the same instant rather than a
+/// retry that slides forward a tick at a time and never comes.
+pub fn next_refresh_for(
+    scheduled: Instant,
+    now: Instant,
+    session: Session,
+    write: &WriteHalf,
+) -> Instant {
+    match session {
+        Session::Dead => scheduled.min(now + write.session_retry),
+        Session::Alive => scheduled,
+    }
+}
+
 /// One refresh of the session on the Companion Gateway, and how long to
 /// wait before the next one of the loop's own: a day after one that
-/// succeeded, an hour after one that did not. A `401` is the session dead
-/// — an `error` naming the script that issues a new one, and no approval
-/// call until a later refresh succeeds; a Gateway that gave no usable
-/// answer leaves the session as it was and is a warning, because the next
-/// approval refreshes again anyway ([`Gateway::approve`]) and the loop
-/// must start without it.
-async fn refresh_session(clerk: &Clerk, gateway: &Gateway) -> Duration {
+/// succeeded, `WriteHalf::session_retry` after one that did not. A `401`
+/// is the session dead — an `error` naming the script that issues a new
+/// one, and no approval call until a later refresh succeeds; a Gateway
+/// that gave no usable answer leaves the session as it was and is a
+/// warning, because the next approval refreshes again anyway
+/// ([`Gateway::approve`]) and the loop must start without it.
+async fn refresh_session(clerk: &Clerk, gateway: &Gateway, write: &WriteHalf) -> Duration {
+    let retry = write.session_retry;
     match gateway.refresh().await {
         Ok(()) => {
             if clerk.session() == Session::Dead {
@@ -1213,9 +1243,9 @@ async fn refresh_session(clerk: &Clerk, gateway: &Gateway) -> Duration {
                 "the Companion Gateway will not have the clerk's session: the Buzz device was \
                  revoked or its refresh token died; a ✅ on Buzz is told so in its thread and \
                  carried once an operator runs provision-clerk-device.sh (tried again in {}s)",
-                SESSION_REFRESH_RETRY.as_secs()
+                retry.as_secs()
             );
-            SESSION_REFRESH_RETRY
+            retry
         }
         Err(error) if error.is_transient() => {
             warn!(
@@ -1223,9 +1253,9 @@ async fn refresh_session(clerk: &Clerk, gateway: &Gateway) -> Duration {
                 gateway = %gateway.base(),
                 "the clerk's session could not be refreshed; the loop starts anyway and tries \
                  again in {}s and on the next approval",
-                SESSION_REFRESH_RETRY.as_secs()
+                retry.as_secs()
             );
-            SESSION_REFRESH_RETRY
+            retry
         }
         Err(error) => {
             error!(
@@ -1233,9 +1263,9 @@ async fn refresh_session(clerk: &Clerk, gateway: &Gateway) -> Duration {
                 gateway = %gateway.base(),
                 "the clerk's session could not be refreshed; the loop starts anyway and tries \
                  again in {}s and on the next approval",
-                SESSION_REFRESH_RETRY.as_secs()
+                retry.as_secs()
             );
-            SESSION_REFRESH_RETRY
+            retry
         }
     }
 }
@@ -1916,6 +1946,49 @@ mod tests {
         EventBuilder::new(Kind::Custom(KIND_FORUM_POST), content)
             .sign_with_keys(&Keys::generate())
             .unwrap()
+    }
+
+    fn write_half(session_retry: Duration) -> WriteHalf {
+        WriteHalf {
+            owner_pubkey: OTHER.to_owned(),
+            gateway_url: "http://127.0.0.1:8080".to_owned(),
+            session_file: std::path::PathBuf::from("/nonexistent/session"),
+            decision: Duration::from_secs(5),
+            session_retry,
+        }
+    }
+
+    #[test]
+    fn a_dead_session_brings_the_next_refresh_forward_to_the_retry_and_no_further() {
+        let retry = Duration::from_secs(60 * 60);
+        let write = write_half(retry);
+        let now = Instant::now();
+        let daily = now + SESSION_REFRESH_PERIOD;
+
+        // Alive: the daily schedule stands.
+        assert_eq!(next_refresh_for(daily, now, Session::Alive, &write), daily);
+        // Dead after a successful daily refresh: the retry from now, not
+        // the day.
+        let clamped = next_refresh_for(daily, now, Session::Dead, &write);
+        assert_eq!(clamped, now + retry);
+        // Still dead a tick later: the same instant, not one that slides.
+        let later = now + Duration::from_secs(5);
+        assert_eq!(
+            next_refresh_for(clamped, later, Session::Dead, &write),
+            clamped
+        );
+        // A retry already nearer — the refresh that saw the death scheduled
+        // it — is not pushed out.
+        let sooner = now + Duration::from_secs(10);
+        assert_eq!(
+            next_refresh_for(sooner, later, Session::Dead, &write),
+            sooner
+        );
+        // Back alive: whatever the refresh that revived it scheduled stands.
+        assert_eq!(
+            next_refresh_for(daily, later, Session::Alive, &write),
+            daily
+        );
     }
 
     #[test]

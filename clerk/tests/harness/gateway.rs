@@ -92,6 +92,14 @@ pub const DEVICE_COOKIE: &str = "twalk_device";
 /// The Companion Gateway's refresh-token cookie (`REFRESH_COOKIE`).
 pub const REFRESH_COOKIE: &str = "twalk_refresh";
 
+/// The routes, as [`State::turned_away`] names them: the id of a
+/// suggestion read is not part of the name, so one refused read and the
+/// next are the same entry.
+pub const REFRESH_ROUTE: &str = "POST /api/session/refresh";
+pub const APPROVALS_ROUTE: &str = "POST /api/approvals";
+pub const SUGGESTIONS_ROUTE: &str = "GET /api/suggestions/{id}";
+pub const DEVICES_ROUTE: &str = "GET /api/devices";
+
 /// The refresh token the stub starts with — what `provision-clerk-device.sh`
 /// would have written into the session file.
 pub const INITIAL_REFRESH_TOKEN: &str = "R0";
@@ -220,6 +228,11 @@ pub struct State {
     pub refreshes: u32,
     /// How many requests, on any route, were answered `401`.
     pub unauthenticated: u32,
+    /// The same, by route and in order ([`REFRESH_ROUTE`],
+    /// [`APPROVALS_ROUTE`], [`SUGGESTIONS_ROUTE`], [`DEVICES_ROUTE`]):
+    /// for a test that must tell the loop's retried refresh from an
+    /// approval or a read the clerk should not have attempted.
+    pub turned_away: Vec<String>,
     /// How many tokens `reissue` minted (`P<n>`), so each is new.
     pub reissued: u32,
 }
@@ -237,6 +250,7 @@ impl State {
             reads: Vec::new(),
             refreshes: 0,
             unauthenticated: 0,
+            turned_away: Vec::new(),
             reissued: 0,
         }
     }
@@ -263,6 +277,11 @@ impl State {
     /// Scripts what `GET /api/suggestions/{id}` says of `suggestion_id`.
     pub fn suggestion(&mut self, suggestion_id: &str, answer: SuggestionAnswer) {
         self.suggestions.insert(suggestion_id.to_owned(), answer);
+    }
+
+    /// How many requests on `route` were turned away with `401`.
+    pub fn turned_away_on(&self, route: &str) -> usize {
+        self.turned_away.iter().filter(|r| *r == route).count()
     }
 
     /// How many times `suggestion_id` was read through the door.
@@ -411,8 +430,12 @@ fn respond(status: u16, body: Value) -> Response<Body> {
 
 /// The Gateway's own refusal of a session it will not have: the same body
 /// for a missing, unknown, stale or revoked token (`session_http.rs`).
-fn unauthenticated(state: &mut State) -> Response<Body> {
+/// Counted, and the route recorded ([`State::turned_away`]), so a test can
+/// tell a refresh the loop retried from an approval it should not have
+/// attempted.
+fn unauthenticated(state: &mut State, route: &str) -> Response<Body> {
     state.unauthenticated += 1;
+    state.turned_away.push(route.to_owned());
     respond(
         401,
         json!({
@@ -463,7 +486,7 @@ async fn refresh_route(Shared(state): Shared<Locked>, headers: HeaderMap) -> Res
         .expect("the stub Gateway mutex is never poisoned");
     let presented = cookie(&headers, REFRESH_COOKIE);
     if state.revoked || presented.as_deref() != Some(state.refresh_token.as_str()) {
-        return unauthenticated(&mut state);
+        return unauthenticated(&mut state, REFRESH_ROUTE);
     }
     state.refreshes += 1;
     let n = state.refreshes;
@@ -513,7 +536,7 @@ async fn approvals_route(
         .lock()
         .expect("the stub Gateway mutex is never poisoned");
     let Some(device_token) = as_device(&state, &headers) else {
-        return unauthenticated(&mut state);
+        return unauthenticated(&mut state, APPROVALS_ROUTE);
     };
     let request: Value = match serde_json::from_str(&body) {
         Ok(value) => value,
@@ -625,7 +648,7 @@ async fn suggestion_route(
         .lock()
         .expect("the stub Gateway mutex is never poisoned");
     if as_device(&state, &headers).is_none() {
-        return unauthenticated(&mut state);
+        return unauthenticated(&mut state, SUGGESTIONS_ROUTE);
     }
     state.reads.push(id.clone());
     match state.suggestions.get(&id) {
@@ -646,7 +669,7 @@ async fn devices_route(Shared(state): Shared<Locked>, headers: HeaderMap) -> Res
         .lock()
         .expect("the stub Gateway mutex is never poisoned");
     if as_device(&state, &headers).is_none() {
-        return unauthenticated(&mut state);
+        return unauthenticated(&mut state, DEVICES_ROUTE);
     }
     respond(200, json!({ "devices": [device_json()] }))
 }
