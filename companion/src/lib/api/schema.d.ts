@@ -590,6 +590,16 @@ export interface paths {
          *
          *     The Companion draws a card per connection and decides per connection
          *     (#272); `network` on a card is its kind.
+         *
+         *     Since #275 an entry carries `status` when the connection's own
+         *     collector has said what state it is in (`connection.status.changed.v1`,
+         *     read off the bus): one of the contract's four states, when it was
+         *     observed, the service it is about and the operator's hint — the
+         *     Companion's card shows the state as one of four sentences, never one.
+         *     A connection nobody has spoken for (a bridge's, whose state is
+         *     `GET /api/bridges`'s; a collector that has not run) has no `status`.
+         *     `transitions` lists the most recent state changes, newest first, for
+         *     the dashboard's activity feed.
          */
         get: operations["listConnections"];
         put?: never;
@@ -2096,6 +2106,7 @@ export interface components {
             kind: components["schemas"]["Kind"];
             /** @description For a person to read; a bridge's instance id by default. */
             label: string;
+            status?: components["schemas"]["ConnectionStatus"];
         };
         /**
          * @description The id of a connection (ADR 0033): the one shape, copied from the
@@ -2103,6 +2114,53 @@ export interface components {
          *     it. Every member that names a connection references this schema.
          */
         ConnectionId: string;
+        /**
+         * @description The contract's four states of a connection
+         *     (`connection.status.changed.schema.json`, `data.to_state`): `connected`;
+         *     `unreachable`, a service did not answer and the collector retries;
+         *     `reconnect_required`, the SSO refused the grant and the operator has
+         *     to authorize again; `pending_operator`, a service refused a fresh
+         *     token and the operator has to change the client. Copied from the
+         *     contract and tested against it; four sentences in the Companion, never one.
+         * @enum {string}
+         */
+        ConnectionState: "connected" | "unreachable" | "reconnect_required" | "pending_operator";
+        /**
+         * @description What the connection's collector last said about it (#275,
+         *     `connection.status.changed.v1`). Present only on a connection that
+         *     spoke for itself.
+         */
+        ConnectionStatus: {
+            /** @description The operator's next step, in one sentence, as the collector said it. The Companion shows it beside the state; it never names a token. */
+            hint?: string | null;
+            /**
+             * Format: date-time
+             * @description When the collector observed the transition into this state.
+             */
+            occurred_at: string;
+            /**
+             * @description Which service the state is about, when one is; absent or null on `connected`.
+             * @enum {string|null}
+             */
+            service?: "sso" | "jmap" | "caldav" | null;
+            state: components["schemas"]["ConnectionState"];
+        };
+        /** @description One recorded state change of a connection, for the dashboard's feed. */
+        ConnectionTransition: {
+            connection: components["schemas"]["ConnectionId"];
+            /**
+             * @description The state before; `unknown` on the first publication of a collector's run.
+             * @enum {string}
+             */
+            from_state: "unknown" | "connected" | "unreachable" | "reconnect_required" | "pending_operator";
+            hint?: string | null;
+            kind: components["schemas"]["Kind"];
+            /** Format: date-time */
+            occurred_at: string;
+            /** @enum {string|null} */
+            service?: "sso" | "jmap" | "caldav" | null;
+            to_state: components["schemas"]["ConnectionState"];
+        };
         /** @description One decision the owner asks the Gateway to record. */
         ConsentDecisionRequest: {
             new_state: components["schemas"]["ConsentState_State"];
@@ -4401,6 +4459,13 @@ export interface operations {
              *     - `trigger_has_no_room` - the message the suggestion answers
              *       does not name a portal room, so there is nowhere to send the
              *       reply.
+             *     - `connection_not_connected` - the connection the reply would
+             *       leave by last said it cannot send (#275): its collector
+             *       published `reconnect_required`, `pending_operator` or
+             *       `unreachable`, so the reply would sit on the bus for a sender
+             *       that will not take it. The detail carries the state and the
+             *       operator's own hint. A connection that never said anything
+             *       is not refused on this ground.
              *     - `suggestion_unreadable` - the suggestion is on the bus and
              *       this build cannot read it (an unknown network, an unknown
              *       consent state, a content type the contract does not name).
@@ -4413,7 +4478,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "suggestion_expired" | "consent_revoked" | "consent_pending" | "suggestion_was_never_consented" | "already_approved" | "trigger_has_no_room" | "suggestion_unreadable";
+                        error?: "suggestion_expired" | "consent_revoked" | "consent_pending" | "suggestion_was_never_consented" | "already_approved" | "trigger_has_no_room" | "connection_not_connected" | "suggestion_unreadable";
                     };
                 };
             };
@@ -5163,10 +5228,24 @@ export interface operations {
                 content: {
                     "application/json": {
                         connections: components["schemas"]["Connection"][];
+                        /** @description The most recent connection state changes, newest first; empty when none was ever recorded. */
+                        transitions: components["schemas"]["ConnectionTransition"][];
                     };
                 };
             };
             401: components["responses"]["Unauthenticated"];
+            /** @description The Gateway's store could not be read. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
         };
     };
     recordConsentDecision: {

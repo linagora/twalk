@@ -463,6 +463,46 @@ pub fn connection_of(
         })
 }
 
+/// Whether a connection can take a reply (#275): it last said it was
+/// `connected`; or it is a bridge's, which says nothing on the status
+/// subject and is not refused here — its reach is #216's `.posted` report. A
+/// collector's connection (kind `email` or `calendar`) that never spoke
+/// cannot: no collector is holding it, and the reply would sit on the bus
+/// for nobody.
+pub fn connection_can_send(
+    store: &Store,
+    connections: &crate::connections::Registry,
+    connection: &str,
+) -> Result<(), Refusal> {
+    match store.connection_status(connection) {
+        Ok(Some(current)) if !current.is_connected() => Err(Refusal::ConnectionNotConnected {
+            connection: connection.to_owned(),
+            state: current.state,
+            hint: current.hint,
+        }),
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => {
+            let a_collectors = connections
+                .get(connection)
+                .is_some_and(|known| matches!(known.kind.as_str(), "email" | "calendar"));
+            if a_collectors {
+                Err(Refusal::ConnectionNotConnected {
+                    connection: connection.to_owned(),
+                    state: "unknown".to_owned(),
+                    hint: Some(
+                        "No collector has reported this connection yet: start the collector \
+                         that holds it, or check its log"
+                            .to_owned(),
+                    ),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) => Err(Refusal::StoreUnavailable(format!("{error:#}"))),
+    }
+}
+
 /// The room id out of an inbound event's `source`
 /// (`matrix://<homeserver>/!room:server`), or `None` when the source is not
 /// one.
@@ -730,6 +770,16 @@ pub enum Refusal {
     /// "not yet". A different sentence for the user from a revocation, so a
     /// different code.
     ConsentPending { contact: String, network: Network },
+    /// The connection the reply would leave by last said it cannot send
+    /// (#275): the collector holding it published `reconnect_required`,
+    /// `pending_operator` or `unreachable`, and an approval published now
+    /// would sit on the bus for a sender that will not take it. The state
+    /// and the operator's own hint travel in the detail.
+    ConnectionNotConnected {
+        connection: String,
+        state: String,
+        hint: Option<String>,
+    },
     /// This suggestion has already been approved by this person. The answer
     /// carries the first approval, so a client that lost the first response
     /// learns where the reply went rather than being told to try again.
@@ -761,6 +811,7 @@ impl Refusal {
             Refusal::NeverConsented { .. } => "suggestion_was_never_consented",
             Refusal::ConsentRevoked { .. } => "consent_revoked",
             Refusal::ConsentPending { .. } => "consent_pending",
+            Refusal::ConnectionNotConnected { .. } => "connection_not_connected",
             Refusal::AlreadyApproved(_) => "already_approved",
             Refusal::BusUnreachable(_) => "bus_unreachable",
             Refusal::StoreUnavailable(_) => "store_unavailable",
@@ -795,7 +846,9 @@ impl Refusal {
             Refusal::SuggestionUnreadable(_) => StatusCode::CONFLICT,
             Refusal::Expired { .. } => StatusCode::CONFLICT,
             Refusal::NeverConsented { .. } => StatusCode::CONFLICT,
-            Refusal::ConsentRevoked { .. } | Refusal::ConsentPending { .. } => StatusCode::CONFLICT,
+            Refusal::ConsentRevoked { .. }
+            | Refusal::ConsentPending { .. }
+            | Refusal::ConnectionNotConnected { .. } => StatusCode::CONFLICT,
             Refusal::AlreadyApproved(_) => StatusCode::CONFLICT,
             Refusal::BusUnreachable(_) => StatusCode::BAD_GATEWAY,
             Refusal::StoreUnavailable(_) | Refusal::Unrecorded(_) => {
@@ -862,6 +915,17 @@ impl Refusal {
                 "consent for {contact} on {} is pending: nothing may be sent to a contact the \
                  user has not granted. Decide about this contact first",
                 network.as_str()
+            ),
+            Refusal::ConnectionNotConnected {
+                connection,
+                state,
+                hint,
+            } => format!(
+                "the connection {connection} is {state}, not connected: the reply would sit on \
+                 the bus for a sender that cannot take it, so nothing was published. {}",
+                hint.as_deref().unwrap_or(
+                    "The collector holding the connection says what to do next in its log"
+                )
             ),
             Refusal::AlreadyApproved(approval) => format!(
                 "this suggestion was already approved by {} at {}, and published on the bus as \
@@ -1282,6 +1346,15 @@ impl Approvals {
                 return Err(Refusal::StoreUnavailable(format!("{error:#}")));
             }
         }
+        // And the connection itself (#275): a collector that said its
+        // connection cannot send is believed, before anything is published —
+        // after the store's answer, so a second click on a reply that
+        // already left while the connection was up is told where it went
+        // rather than that the connection is down now. A bridge's connection
+        // says nothing here and is not refused; its reach is #216's
+        // `.posted` report. A collector's connection that has never spoken
+        // is refused too: nothing is holding it.
+        self.connection_can_send(&approval.trigger.connection)?;
 
         let envelope = approval.envelope(&now);
         // Recorded first, unpublished, so that a crash between the write and
@@ -1506,6 +1579,12 @@ impl Approvals {
             network,
             target,
         })
+    }
+
+    /// Whether the connection can take a reply (#275); see
+    /// [`connection_can_send`].
+    fn connection_can_send(&self, connection: &str) -> Result<(), Refusal> {
+        connection_can_send(&self.store, &self.connections, connection)
     }
 
     /// Reads one subject from `start` forward, for at most the window, and
@@ -1769,6 +1848,71 @@ mod tests {
         // And it carries no clock, so the same approval given twice is one
         // event on the bus.
         assert_eq!(approval.event_id(), approval.event_id());
+    }
+
+    #[test]
+    fn a_connection_can_send_when_it_said_connected_or_is_a_bridges_and_not_otherwise() {
+        // #275: three connections in a registry — a bridge's, which never
+        // speaks on the status subject, and two of the collector's kinds, one
+        // that said `reconnect_required` and one that never spoke.
+        let dir = std::env::temp_dir().join(format!(
+            "gateway-approval-connection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let owner = Arc::new(crate::owner::Owner::new("@michel:example.com", []));
+        let store = Store::open(&dir, owner).unwrap();
+        let registry = crate::connections::Registry::from_config(
+            Some("whatsapp=whatsapp,mail-linagora=email,agenda-linagora=calendar"),
+            &[],
+            "example.com",
+        )
+        .unwrap();
+        let mut down = crate::connection_status::Change {
+            event_id: "e1".to_owned(),
+            connection: "mail-linagora".to_owned(),
+            kind: "email".to_owned(),
+            from_state: "connected".to_owned(),
+            to_state: "reconnect_required".to_owned(),
+            occurred_at: "2026-09-20T09:00:00Z".to_owned(),
+            service: Some("sso".to_owned()),
+            hint: Some("Run `twalk-collector authorize --renew`.".to_owned()),
+        };
+        store
+            .record_connection_status_change(&down, "2026-09-20T09:00:01Z")
+            .unwrap();
+
+        assert!(
+            connection_can_send(&store, &registry, "whatsapp").is_ok(),
+            "a bridge's says nothing here"
+        );
+        match connection_can_send(&store, &registry, "mail-linagora") {
+            Err(Refusal::ConnectionNotConnected { state, hint, .. }) => {
+                assert_eq!(state, "reconnect_required");
+                assert!(hint.unwrap().contains("authorize --renew"));
+            }
+            other => panic!("a connection that said it cannot send is refused: {other:?}"),
+        }
+        match connection_can_send(&store, &registry, "agenda-linagora") {
+            Err(Refusal::ConnectionNotConnected { state, hint, .. }) => {
+                assert_eq!(state, "unknown");
+                assert!(hint.unwrap().contains("No collector has reported"));
+            }
+            other => panic!("a collector's connection nobody spoke for is refused: {other:?}"),
+        }
+        down.event_id = "e2".to_owned();
+        down.from_state = "reconnect_required".to_owned();
+        down.to_state = "connected".to_owned();
+        down.occurred_at = "2026-09-20T10:00:00Z".to_owned();
+        store
+            .record_connection_status_change(&down, "2026-09-20T10:00:01Z")
+            .unwrap();
+        assert!(connection_can_send(&store, &registry, "mail-linagora").is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

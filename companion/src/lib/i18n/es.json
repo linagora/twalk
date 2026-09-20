@@ -862,5 +862,18 @@
 	"conversations.bridgeAskedNothing": "{bridge} respondió, y la cuenta con la que preguntó tu servidor Twalk ({account}) no está en ninguna conversación. O esta red aún no ha construido ninguna, o tu servidor está preguntando con la cuenta equivocada — lo segundo es un problema de configuración y los registros nombran el ajuste.",
 	"api.trouble.unreachable": "No se pudo contactar con tu servidor Twalk: nada respondió. Comprueba que está en marcha, y comprueba tu conexión.",
 	"api.trouble.sessionRefused": "Tu servidor Twalk respondió, y no aceptó esta sesión. Inicia sesión de nuevo para continuar — nada más está mal.",
-	"api.trouble.refused": "Tu servidor Twalk respondió, pero no pudo hacer esto. Vuelve a intentarlo, y abre el diagnóstico si persiste."
+	"api.trouble.refused": "Tu servidor Twalk respondió, pero no pudo hacer esto. Vuelve a intentarlo, y abre el diagnóstico si persiste.",
+	"network.email.name": "Buzón",
+	"network.email.subtitle": "Tu propio buzón, leído por el colector con el acceso que diste",
+	"network.calendar.name": "Agenda",
+	"network.calendar.subtitle": "Tus propias agendas, leídas por el colector con el mismo acceso",
+	"networks.card.noCollector": "No hay ningún colector configurado para esta cuenta en tu servidor Twalk.",
+	"networks.collector.unreachable": "Inaccesible — reintentando",
+	"networks.collector.reconnectRequired": "Vuelve a iniciar sesión en el servidor",
+	"networks.collector.pendingOperator": "Requiere al operador",
+	"dashboard.feed.connection.connected": "La conexión {connection} vuelve a estar conectada",
+	"dashboard.feed.connection.unreachable": "La conexión {connection} no alcanza su servicio; el colector reintenta",
+	"dashboard.feed.connection.reconnect_required": "La conexión {connection} espera a que el operador vuelva a iniciar sesión en el servidor",
+	"dashboard.feed.connection.pending_operator": "La conexión {connection} espera a que el operador cambie su cliente",
+	"approvals.refusal.connection_not_connected": "La cuenta desde la que saldría esta respuesta no está conectada ahora mismo, así que no se envió nada. El operador debe reconectarla en el servidor; la respuesta se queda aquí."
 }
