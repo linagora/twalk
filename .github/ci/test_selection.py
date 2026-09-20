@@ -224,7 +224,7 @@ class TheRuleTheRedMainIncidentsTaught(unittest.TestCase):
     def test_the_two_incidents_by_name(self):
         """The two cases that actually turned `main` red, spelled out."""
         harness = self.components_selected_by("tests/harness/src/stack.rs")
-        for consumer in ("sensor", "hermes", "companion-gateway"):
+        for consumer in ("sensor", "hermes", "companion-gateway", "clerk"):
             self.assertIn(
                 consumer,
                 harness,
@@ -234,7 +234,7 @@ class TheRuleTheRedMainIncidentsTaught(unittest.TestCase):
         contract = self.components_selected_by(
             "contracts/cloudevents/v1/inbound.message.received.schema.json"
         )
-        for consumer in ("sensor", "hermes", "companion-gateway", "sdk", "tests"):
+        for consumer in ("sensor", "hermes", "companion-gateway", "clerk", "sdk", "tests"):
             self.assertIn(
                 consumer,
                 contract,
@@ -285,7 +285,7 @@ class EveryTestIsClaimed(unittest.TestCase):
         cls.table = selection.load()
 
     def test_every_rust_test_target_is_run_exactly_once(self):
-        for component in ("sensor", "hermes", "companion-gateway"):
+        for component in ("sensor", "hermes", "companion-gateway", "clerk"):
             on_disk = {
                 path.stem for path in sorted((REPO / component / "tests").glob("*.rs"))
             }
@@ -326,7 +326,7 @@ class EveryTestIsClaimed(unittest.TestCase):
         silently dropped every one of them. `--lib` puts them back, on exactly
         one suite per component so they are not run twice.
         """
-        for component in ("sensor", "hermes", "companion-gateway"):
+        for component in ("sensor", "hermes", "companion-gateway", "clerk"):
             carriers = [
                 name
                 for name, suite in self.table["suites"].items()
