@@ -78,7 +78,10 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import { locale, t } from '$lib/i18n';
 	import { networkNameKey, relativeTime } from '$lib/dashboard/format';
+	import { gateway } from '$lib/api/client';
 	import { approve, loadSuggestions } from '$lib/approvals/api';
+	import { personaRows } from '$lib/dashboard/model';
+	import { emptyApprovalsKey, readRuntime, UNKNOWN, type Runtime } from '$lib/runtime/presence';
 	import { dismiss, dismissed, restoreAll } from '$lib/approvals/dismissed';
 	import type { Explained } from '$lib/approvals/refusal';
 	import {
@@ -113,9 +116,33 @@
 
 	let ticker: ReturnType<typeof setInterval> | null = null;
 
+	/**
+	 * The two facts the empty state needs to say *why* it is empty (#177):
+	 * whether an agent runtime is here at all (#189), and whether the user has
+	 * activated any assistant — a read of the consent state this screen never
+	 * made, although the dashboard makes it. Neither is a value that means
+	 * "still working": `unknown` and `null` are rendered as not knowing.
+	 */
+	let runtime = $state<Runtime>(UNKNOWN);
+	let anyPersonaActive = $state<boolean | null>(null);
+
 	onMount(() => {
 		hidden = dismissed();
 		void refresh();
+		void readRuntime().then((read) => {
+			runtime = read;
+		});
+		void gateway
+			.GET('/api/consent/state')
+			.then((answer) => {
+				anyPersonaActive =
+					answer.data === undefined
+						? null
+						: personaRows(answer.data.entries).some((row) => row.active);
+			})
+			.catch(() => {
+				anyPersonaActive = null;
+			});
 		// The relative times, and the staleness warning. No polling: this
 		// screen re-reads when the user asks, because a list that reordered
 		// itself under a finger about to press approve is the last thing an
@@ -306,13 +333,18 @@
 	{/if}
 
 	{#if loaded && problem === null && rows.length === 0}
-		<div class="card" data-testid="approvals-empty">
+		{@const why = emptyApprovalsKey(runtime, anyPersonaActive)}
+		<div class="card" data-testid="approvals-empty" data-why={why.slice('approvals.empty.'.length)}>
 			<p class="card__title">
 				<Icon name="persona" size="dense" />
 				{$t('approvals.empty.title')}
 			</p>
 			<p class="small">{$t('approvals.empty.body')}</p>
-			<p class="small muted">{$t('approvals.empty.noRuntime')}</p>
+			<!-- Three situations, three sentences (#177): no runtime to propose
+			     anything; a runtime and nothing activated; an active assistant
+			     that proposed nothing — the common case, and the one a single
+			     sentence for all three used to bury. -->
+			<p class="small muted" data-testid="approvals-empty-why">{$t(why)}</p>
 		</div>
 	{/if}
 

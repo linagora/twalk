@@ -15,9 +15,11 @@
 	Three things this screen refuses to imply, because they are not true of the
 	deployment as it stands:
 
-	  - an **active agent produces nothing** today. Hermes is not implemented
-	    (#21–#25) — only its test harness landed — so the persona rows carry
-	    that, and pausing one is explained as *starved, not stopped* (ADR 0013).
+	  - whether an **active agent produces anything** is read from the
+	    deployment, never assumed (#177): the Gateway says whether a runtime
+	    is hosting personas here (`GET /api/runtime`, #189), and the persona
+	    section says that in its own words, one sentence per state. Pausing
+	    one is explained as *starved, not stopped* (ADR 0013).
 	  - the bridge dots read the **last login** each bridge holds, not a
 	    heartbeat, and nothing reports the time of the last message. #56 has
 	    landed the producer — bridges push their state and the Gateway
@@ -56,6 +58,7 @@
 	import { decideOnPersona } from '$lib/personas/activation';
 	import { loadDashboard, revokeDevice, EMPTY, type Snapshot } from '$lib/dashboard/load';
 	import { relativeTime } from '$lib/dashboard/format';
+	import { runtimeCopyKey } from '$lib/runtime/presence';
 	import {
 		activityFeed,
 		bridgeRows,
@@ -390,7 +393,17 @@
 			variant="text"
 		/>
 		<p class="small muted" data-testid="pause-meaning">{$t('dashboard.persona.pausedMeaning')}</p>
-		<p class="small muted" data-testid="no-runtime">{$t('dashboard.persona.noRuntime')}</p>
+		<!-- Whether a runtime is here is read from the deployment (#177, #189),
+		     never assumed: the sentence that used to sit here said no runtime
+		     was deployed while one had been producing suggestions for a day. -->
+		<p
+			class="small"
+			class:muted={snapshot.runtime.state !== 'present'}
+			data-testid="runtime-state"
+			data-presence={snapshot.runtime.state}
+		>
+			{$t(runtimeCopyKey(snapshot.runtime.state), { count: snapshot.runtime.hosting })}
+		</p>
 	</section>
 
 	<section class="card" data-testid="activity">

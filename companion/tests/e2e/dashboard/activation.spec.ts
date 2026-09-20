@@ -86,9 +86,16 @@ test('the assistant is activated on exactly the networks that are connected, and
 		await expect(page.getByTestId('scope-whatsapp').getByRole('checkbox')).toBeChecked();
 		await expect(page.getByTestId('scope-matrix').getByRole('checkbox')).not.toBeChecked();
 
-		// And the screen does not pretend an activated assistant will do
-		// anything today: Hermes is not implemented.
-		await expect(page.getByTestId('no-runtime')).toBeVisible();
+		// And the screen says what is true of *this* deployment about the
+		// runtime, read from it rather than assumed (#177, #189): this stack
+		// runs a bus and no runtime, so no persona consumer has ever been live
+		// on it — `never`, or `gone` if another run left a consumer behind.
+		// Either is "nothing runs on your decision", and neither is a claim
+		// the screen made up.
+		await expect(page.getByTestId('runtime-state')).toHaveAttribute(
+			'data-presence',
+			/^(never|gone)$/
+		);
 
 		await page.getByTestId('activate').click();
 		await expect(page.getByTestId('activated')).toBeVisible();
@@ -190,3 +197,69 @@ test('a live link with no login process behind it is still a network to activate
 
 	await bridge.reset();
 });
+
+test('a running runtime is said as such, and the empty approval queue says why it is empty', async ({
+	page
+}) => {
+	// The other direction (#177): a screen that is right only on the machine it
+	// was written on is what produced the defect, so the runtime's presence is
+	// staged here rather than waited for — the Gateway's own three-state read
+	// against a real consumer is `companion-gateway/tests/runtime.rs`'s. The
+	// answer staged is the Gateway's exact shape for a runtime hosting one
+	// active persona.
+	const present = {
+		presence: 'present',
+		personas: [
+			{
+				persona_id: 'assistant',
+				consumer: 'persona-assistant',
+				liveness: 'live',
+				activation: 'active',
+				waiting_pulls: 1,
+				ack_pending: 0
+			}
+		]
+	};
+	await page.route('**/api/runtime', (route) =>
+		route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify(present)
+		})
+	);
+
+	await page.goto('/dashboard');
+	const state = page.getByTestId('runtime-state');
+	await expect(state).toHaveAttribute('data-presence', 'present');
+	// Neither screen may claim that nothing is deployed while one is.
+	await expect(page.getByTestId('screen-dashboard')).not.toContainText(
+		/No agent runtime|Aucun moteur d’agents/
+	);
+
+	await page.goto('/personas');
+	await expect(page.getByTestId('runtime-state')).toHaveAttribute('data-presence', 'present');
+	await expect(page.getByTestId('runtime-state')).not.toContainText(
+		/not deployed|n’est pas encore déployé/
+	);
+
+	// The approval queue is empty on this stack, and the previous journeys
+	// left the assistant *paused*: with a runtime here, that is "nothing
+	// activated" — one of three sentences, and not the one that says no
+	// runtime exists.
+	await page.goto('/approvals');
+	const empty = page.getByTestId('approvals-empty');
+	await expect(empty).toBeVisible();
+	await expect(empty).toHaveAttribute('data-why', 'notActivated');
+	await expect(empty).not.toContainText(/No agent runtime|Aucun moteur d’agents/);
+});
+
+test('without a runtime, the empty approval queue says that and not "nothing activated"', async ({
+	page
+}) => {
+	// The real read, on a stack that runs no runtime.
+	await page.goto('/approvals');
+	const empty = page.getByTestId('approvals-empty');
+	await expect(empty).toBeVisible();
+	await expect(empty).toHaveAttribute('data-why', 'noRuntime');
+});
+

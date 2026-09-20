@@ -21,11 +21,14 @@
 	could not be written as that one decision — see `$lib/personas/catalogue.ts`
 	for why the two remaining rows are locked.
 
-	It also says plainly that no agent runtime is deployed yet. Activating the
-	assistant today records and publishes the decision and produces no
-	suggestions, because Hermes is not implemented (#21–#25). A screen that
-	animated a waking assistant over an empty deployment would be the kind of
-	hopeful story this product cannot afford to tell.
+	It also says plainly whether an agent runtime is here to act on the
+	decision — read from the deployment (`GET /api/runtime`, #189), not
+	assumed. The sentence that used to sit here said no runtime was deployed
+	yet, and stayed on screen for a day after one started producing
+	suggestions (#177). A screen that animated a waking assistant over an
+	empty deployment would be the kind of hopeful story this product cannot
+	afford to tell; one that denied a running assistant is the same story
+	told backwards.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -38,6 +41,7 @@
 	import { cardFor } from '$lib/networks/catalogue';
 	import { PERSONA_CARDS, ASSISTANT, type PersonaCard } from '$lib/personas/catalogue';
 	import { activatePersona, type ActivationFailure } from '$lib/personas/activation';
+	import { readRuntime, runtimeCopyKey, UNKNOWN, type Runtime } from '$lib/runtime/presence';
 	import {
 		defaultSelection,
 		scopeOptions,
@@ -67,8 +71,19 @@
 	let failure = $state<ActivationFailure | null>(null);
 	let activatedOn = $state<string[]>([]);
 
+	/**
+	 * Whether an agent runtime is here to read the decision this screen
+	 * records (#177, #189). Read from the deployment, because the sentence
+	 * that used to sit on this screen said the runtime was not deployed yet
+	 * while one had been producing suggestions for a day.
+	 */
+	let runtime = $state<Runtime>(UNKNOWN);
+
 	onMount(() => {
 		void readScope();
+		void readRuntime().then((read) => {
+			runtime = read;
+		});
 	});
 
 	async function readScope() {
@@ -154,6 +169,9 @@
 			<p>{$t('persona.activated.body')}</p>
 			<p class="small muted" data-testid="activated-networks" data-networks={activatedOn.join(',')}>
 				{$t('persona.runtime.body')}
+			</p>
+			<p class="small muted" data-testid="runtime-state" data-presence={runtime.state}>
+				{$t(runtimeCopyKey(runtime.state), { count: runtime.hosting })}
 			</p>
 			<p>
 				<a class="button button--primary" href="/dashboard" data-testid="to-dashboard">
@@ -278,12 +296,21 @@
 			</ul>
 		</div>
 
-		<div class="card card--warning" data-testid="no-runtime">
+		<!-- Warning when nothing runs on the decision yet, plain when something
+		     does: the card's tone follows the deployment, not the ticket that
+		     wrote it (#177). -->
+		<div
+			class="card"
+			class:card--warning={runtime.state !== 'present'}
+			data-testid="runtime-state"
+			data-presence={runtime.state}
+		>
 			<p class="card__title">
-				<Icon name="warning" size="dense" />
+				<Icon name={runtime.state === 'present' ? 'info' : 'warning'} size="dense" />
 				{$t('persona.runtime.title')}
 			</p>
 			<p class="small">{$t('persona.runtime.body')}</p>
+			<p class="small">{$t(runtimeCopyKey(runtime.state), { count: runtime.hosting })}</p>
 			<p class="small">{$t('persona.pause.meaning')}</p>
 		</div>
 

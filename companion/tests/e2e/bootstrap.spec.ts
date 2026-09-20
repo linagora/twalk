@@ -394,8 +394,12 @@ test.describe.serial('the bootstrap journey', () => {
 		await page.getByTestId('to-dashboard').click();
 		await expect(page.getByTestId('screen-dashboard')).toBeVisible();
 		await expect(page.getByTestId('persona-assistant')).toHaveAttribute('data-active', 'yes');
-		// Honest on arrival: the decision is recorded and nothing runs on it.
-		await expect(page.getByTestId('no-runtime')).toBeVisible();
+		// Honest on arrival: the decision is recorded and nothing runs on it —
+		// read from the deployment, which runs a bus and no runtime (#177).
+		await expect(page.getByTestId('runtime-state')).toHaveAttribute(
+			'data-presence',
+			/^(never|gone)$/
+		);
 	});
 
 	test('a reload stays signed in', async () => {
