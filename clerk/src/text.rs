@@ -11,13 +11,20 @@
 //! *kind* of subject and the state and networks, never the subject's Matrix
 //! ID (`companion/src/lib/dashboard/model.ts` is the rule; ticket #265).
 //!
-//! One line this component deliberately does not write is named in the
-//! post itself: delivery — where the owner's own account stands in the
-//! conversation (#216) — is a Companion Gateway read the clerk does not
-//! make, and the post says so plainly and says where it is read (the
-//! Approvals screen) rather than leaving a blank the owner would read as
-//! a defect, or citing a ticket as "to come". The gesture line is what it
-//! says: since #284 a ✅, a ❌ or a reply on the post is the decision.
+//! One line of a post is not this module's: delivery — where the owner's
+//! own account stands in the conversation (#216), so whether a ✅ would
+//! reach anybody — is read from the Companion Gateway once, at posting
+//! time, and written in the Companion's own sentence by
+//! [`crate::refusals::delivery_line`]; when it could not be read the post
+//! says so and says why ([`crate::refusals::delivery_unread_line`]), and
+//! where it is read (the Approvals screen), rather than leaving a blank
+//! the owner would read as "fine". [`approval_post`] takes that line as a
+//! parameter, which is the one place this module's signature argument
+//! leans on a caller: the string it is handed is one of those two
+//! functions' — built from the catalogue and from two enum words the
+//! Gateway answered, never from a body — and `consumers.rs` is the one
+//! caller. The gesture line is what it says: since #284 a ✅, a ❌ or a
+//! reply on the post is the decision.
 //!
 //! What the clerk answers in a post's **thread** (`thread_*`) is about the
 //! owner's gesture and never about the contact: a refusal is the Companion
@@ -81,14 +88,19 @@ pub fn network_name(network: &str) -> &str {
 /// body says. `expires_at` is shown as `HH:MM UTC` when it reads as RFC
 /// 3339 and as the event spelled it otherwise — it is the event's own
 /// field, never a contact's words, and a time the owner can see is better
-/// than one the clerk could not format. The gesture line names the three
-/// decisions `crate::decision` reads off the post (#284): the two emoji it
-/// takes as approve and refuse, and a reply as the edited text to send.
+/// than one the clerk could not format. `delivery_line` is the third line,
+/// whole, as [`crate::refusals::delivery_line`] or
+/// [`crate::refusals::delivery_unread_line`] wrote it — between the body
+/// and the gesture line, so it is read before the ✅ it qualifies. The
+/// gesture line names the three decisions `crate::decision` reads off the
+/// post (#284): the two emoji it takes as approve and refuse, and a reply
+/// as the edited text to send.
 pub fn approval_post(
     l: Lang,
     body: &str,
     network: &str,
     expires_at: Option<&str>,
+    delivery_line: &str,
     reference: &str,
 ) -> String {
     let network = network_name(network);
@@ -103,14 +115,14 @@ pub fn approval_post(
         Lang::Fr => format!(
             "Réponse proposée · {network}{expiry}\n\
              « {body} »\n\
-             Livraison : non lue par le greffier (#300) — l’écran Approbations la connaît.\n\
+             {delivery_line}\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
              {reference}"
         ),
         Lang::En => format!(
             "Proposed reply · {network}{expiry}\n\
              “{body}”\n\
-             Delivery: not read by the clerk (#300) — the Approvals screen knows it.\n\
+             {delivery_line}\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
              {reference}"
         ),
@@ -406,6 +418,13 @@ mod tests {
     const REFERENCE: &str = "twalk:suggestion:319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b expires 2026-09-17T11:00:00Z";
     const APPROVAL_ID: &str = "8d3fb3fe9d2d8a4a1c2c0b5b0e6b3f0a1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60";
 
+    /// The delivery line a post is handed, as `crate::refusals` writes it
+    /// when the write half is not configured — the shape every post has on
+    /// a deployment that reads nothing.
+    fn unread(l: Lang) -> String {
+        crate::refusals::delivery_unread_line(l, crate::refusals::Unread::NoDevice)
+    }
+
     #[test]
     fn lang_falls_back_to_english_for_it_es_de() {
         assert_eq!(lang("fr"), (Lang::Fr, false));
@@ -445,7 +464,14 @@ mod tests {
         ];
         let body = "Pas de problème, à 20h !";
         for l in [Lang::Fr, Lang::En] {
-            let post = approval_post(l, body, "whatsapp", Some("2026-09-17T11:00:00Z"), REFERENCE);
+            let post = approval_post(
+                l,
+                body,
+                "whatsapp",
+                Some("2026-09-17T11:00:00Z"),
+                &unread(l),
+                REFERENCE,
+            );
             assert!(post.contains(body), "{post}");
             assert_eq!(post.lines().last(), Some(REFERENCE), "{post}");
             assert!(post.contains("WhatsApp"), "{post}");
@@ -463,12 +489,14 @@ mod tests {
             "Pas de problème, à 20h !",
             "whatsapp",
             Some("2026-09-17T21:41:00Z"),
+            &unread(Lang::Fr),
             REFERENCE,
         );
         let expected = format!(
             "Réponse proposée · WhatsApp · expire à 21:41 UTC (heure locale non connue)\n\
              « Pas de problème, à 20h ! »\n\
-             Livraison : non lue par le greffier (#300) — l’écran Approbations la connaît.\n\
+             Livraison : non lue par le greffier (aucun device configuré) — l’écran Approbations \
+             la connaît.\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
              {REFERENCE}"
         );
@@ -482,12 +510,14 @@ mod tests {
             "No problem, see you at 8!",
             "signal",
             Some("2026-09-17T21:41:00Z"),
+            &unread(Lang::En),
             REFERENCE,
         );
         let expected = format!(
             "Proposed reply · Signal · expires at 21:41 UTC (local time not known)\n\
              “No problem, see you at 8!”\n\
-             Delivery: not read by the clerk (#300) — the Approvals screen knows it.\n\
+             Delivery: not read by the clerk (no device configured) — the Approvals screen knows \
+             it.\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
              {REFERENCE}"
         );
@@ -495,8 +525,37 @@ mod tests {
     }
 
     #[test]
+    fn the_delivery_line_is_the_third_line_whatever_it_says() {
+        // A line read from the Companion Gateway takes the same place as
+        // the unread one: between the body and the gesture, so it is read
+        // before the ✅ it qualifies.
+        let line = crate::refusals::delivery_line(
+            Lang::Fr,
+            &crate::gateway::Delivery {
+                reach: "can_reach".to_owned(),
+                detail: "owner_joined".to_owned(),
+            },
+        );
+        let post = approval_post(Lang::Fr, "Oui", "sms", None, &line, REFERENCE);
+        let lines: Vec<&str> = post.lines().collect();
+        assert_eq!(lines[0], "Réponse proposée · SMS");
+        assert_eq!(lines[1], "« Oui »");
+        assert_eq!(lines[2], line);
+        assert!(lines[3].starts_with("✅ envoyer tel quel"), "{post}");
+        assert_eq!(lines[4], REFERENCE);
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
     fn a_post_without_an_expiry_says_none_and_an_unreadable_one_is_shown_raw() {
-        let post = approval_post(Lang::Fr, "Oui", "sms", None, "twalk:suggestion:abc");
+        let post = approval_post(
+            Lang::Fr,
+            "Oui",
+            "sms",
+            None,
+            &unread(Lang::Fr),
+            "twalk:suggestion:abc",
+        );
         assert!(post.starts_with("Réponse proposée · SMS\n"), "{post}");
         assert!(!post.contains("expire"), "{post}");
 
@@ -505,6 +564,7 @@ mod tests {
             "Oui",
             "sms",
             Some("bientôt"),
+            &unread(Lang::Fr),
             "twalk:suggestion:abc",
         );
         assert!(
@@ -516,7 +576,14 @@ mod tests {
     #[test]
     fn a_multi_line_body_is_kept_verbatim_and_the_reference_stays_last() {
         let body = "Ligne 1\nLigne 2\ntwalk:suggestion:0000";
-        let post = approval_post(Lang::Fr, body, "whatsapp", None, REFERENCE);
+        let post = approval_post(
+            Lang::Fr,
+            body,
+            "whatsapp",
+            None,
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
         assert!(post.contains(body), "{post}");
         assert_eq!(post.lines().last(), Some(REFERENCE));
     }
@@ -671,18 +738,41 @@ mod tests {
     }
 
     #[test]
-    fn the_gesture_line_no_longer_says_coming() {
+    fn nothing_the_clerk_writes_in_a_post_names_a_ticket() {
+        // A post once named the ticket that would make the clerk read
+        // delivery, and a post that cites a ticket as "to come" is wrong
+        // the day it ships. So the clerk's own lines carry no `#` at all,
+        // whichever delivery line they are handed — asserted on the post
+        // with that line taken out, since the line is the Companion's
+        // sentence and not this module's to police.
         for l in [Lang::Fr, Lang::En] {
-            let post = approval_post(l, "Oui", "sms", None, REFERENCE);
-            assert!(!post.contains("à venir"), "{post}");
-            assert!(!post.contains("coming"), "{post}");
-            // The delivery line says plainly that the clerk does not read
-            // delivery and where it is read, and names the ticket that will
-            // make it read it — #300, open — never #284, which shipped: a
-            // post that names the ticket that shipped it as a future one is
-            // wrong on every read.
-            assert!(!post.contains("#284"), "{post}");
-            assert!(post.contains("(#300)"), "{post}");
+            for line in [
+                unread(l),
+                crate::refusals::delivery_unread_line(
+                    l,
+                    crate::refusals::Unread::GatewayUnreachable,
+                ),
+                crate::refusals::delivery_line(
+                    l,
+                    &crate::gateway::Delivery {
+                        reach: "unknown".to_owned(),
+                        detail: "not_a_known_portal".to_owned(),
+                    },
+                ),
+            ] {
+                let post = approval_post(
+                    l,
+                    "Oui",
+                    "sms",
+                    Some("2026-09-17T11:00:00Z"),
+                    &line,
+                    REFERENCE,
+                );
+                assert!(!post.contains("à venir"), "{post}");
+                assert!(!post.contains("coming"), "{post}");
+                let own = post.replace(&line, "");
+                assert!(!own.contains('#'), "{post}");
+            }
         }
     }
 
@@ -869,14 +959,21 @@ mod tests {
             for expires in [Some("2026-09-17T11:00:00Z"), Some("tomorrow"), None] {
                 // A body with the separator in it does not confuse the
                 // reader: only the first line is read.
-                let post = approval_post(lang, "Oui · à 20h", "whatsapp", expires, &reference);
+                let post = approval_post(
+                    lang,
+                    "Oui · à 20h",
+                    "whatsapp",
+                    expires,
+                    &unread(lang),
+                    &reference,
+                );
                 assert_eq!(network_off_post(&post), Some("WhatsApp"), "{post}");
                 // …and what is read back is what the activity line names.
                 assert_eq!(
                     activity_approved(lang, network_off_post(&post).unwrap(), false),
                     activity_approved(lang, "whatsapp", false)
                 );
-                let post = approval_post(lang, "Oui", "irc", expires, &reference);
+                let post = approval_post(lang, "Oui", "irc", expires, &unread(lang), &reference);
                 assert_eq!(network_off_post(&post), Some("irc"), "{post}");
             }
         }

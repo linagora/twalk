@@ -547,6 +547,7 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         &suggestion.data.suggestion.body,
         &suggestion.network,
         suggestion.data.expires_at.as_deref(),
+        &refusals::delivery_unread_line(clerk.lang, refusals::Unread::NoDevice),
         &reference,
     );
     let published = clerk.relay.forum_post(approvals, &post).await?;
