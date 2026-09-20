@@ -78,6 +78,17 @@
 			"triggers_note": "The Companion's catalogues are in here because `clerk/src/refusals.rs` embeds `companion/src/lib/i18n/{fr,en}.json` with `include_str!` — a Gateway refusal is answered on Buzz with the sentence the approval screen would show — and its unit test checks those sentences against `companion-gateway/openapi.yaml`'s refusal codes in both directions, the way `companion/src/lib/approvals/refusal.test.ts` does. `test_selection.py` derives both dependencies from the repository, so removing either line fails the routing check rather than going unnoticed."
 		},
 
+		"clerk-deployment": {
+			"what": "The clerk inside the reference deployment (#284): the deployed Companion Gateway, the clerk's own compose service really started, and the operator's own provision-clerk-device.sh — a ✅ on the owner's relay is one row in the deployed Gateway's approval table through the device named Buzz, the container's environment holds no credential, and a device revoked from the dashboard is answered in the thread and restored by the script.",
+			"component": "clerk",
+			"workdir": "clerk",
+			"run": "cargo test --test deployment",
+			"targets": ["deployment"],
+			"needs": ["rust", "docker", "deployment"],
+			"tier": "advisory",
+			"triggers": ["clerk/", "deploy/docker-compose/"]
+		},
+
 		"sdk-python": {
 			"what": "The Python persona SDK's pure half: the consent gate, the deterministic ids, the envelopes, the completion reader, the language list — stdlib only, against the contract's own fixtures.",
 			"component": "sdk",

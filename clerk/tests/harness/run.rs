@@ -833,8 +833,10 @@ pub async fn seed(
 
 /// A fresh key made a member of the relay and of the run's three channels,
 /// by the owner: the run's [`Run::reader`], four requests of the owner's
-/// quota that spare it every read the run makes afterwards.
-async fn reader_in(stack: &RelayStack, channels: &Channels) -> Result<Keys> {
+/// quota that spare it every read the run makes afterwards. Public for the
+/// deployment suite, which seeds the same channels for a clerk it does not
+/// start itself and reads them on the same terms.
+pub async fn reader_in(stack: &RelayStack, channels: &Channels) -> Result<Keys> {
     let keys = Keys::generate();
     let pubkey = keys.public_key().to_hex();
     stack.add_member(&pubkey).await?;
