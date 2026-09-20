@@ -630,8 +630,12 @@ fn open_consent(
         warn!(
             connection = %id,
             "the store holds a connection the registry does not name: the decisions scoped to \
-             it govern no live connection until GATEWAY_CONNECTIONS names it again (a store \
-             migrated across #270 attached every earlier decision to its network's name)"
+             it govern no live connection. A store migrated across #270 attached every earlier \
+             decision to its network's name, so a deployment that declared other ids in \
+             GATEWAY_CONNECTIONS at the same upgrade has left those decisions behind — the \
+             remedy is to declare the id the decisions are on for the connection they were \
+             about (a second connection of one kind cannot simply be added under this name), \
+             or to take the decisions again from the Companion"
         );
     }
     info!(

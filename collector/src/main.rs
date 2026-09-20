@@ -95,8 +95,13 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
 
     // The two whoamis: the grant must be the owner's, or the collector will
     // refuse to publish anything from it.
-    let Renewal::Renewed { access, .. } = client.renew(&grant).await? else {
-        anyhow::bail!("the grant just obtained could not be renewed: the SSO refused it");
+    let access = match client.renew(&grant).await? {
+        Renewal::Renewed { access, .. } => access,
+        Renewal::ReconnectRequired { detail }
+        | Renewal::PendingOperator { detail }
+        | Renewal::Unreachable { detail } => {
+            anyhow::bail!("the grant just obtained could not be renewed: {detail}");
+        }
     };
     let identities = config.services.whoami(&access).await?;
     let mut unanswered = Vec::new();
@@ -256,6 +261,10 @@ async fn run(config: Config) -> Result<()> {
     let mut last_calendar_poll: Option<std::time::Instant> = None;
     let mut last_mail_poll: Option<std::time::Instant> = None;
     let mut access: Option<twalk_collector::oidc::AccessToken> = None;
+    // Why the SSO last refused to renew, when it did: the grant's fault
+    // (`reconnect_required`) or the client's (`pending_operator`) are two
+    // different sentences to the operator.
+    let mut sso_refusal: Option<Observation> = None;
 
     loop {
         let now = SystemTime::now();
@@ -285,11 +294,19 @@ async fn run(config: Config) -> Result<()> {
                             grant = Some(rotated);
                             access = Some(fresh);
                             renewed_this_round = true;
+                            sso_refusal = None;
                         }
                         Renewal::ReconnectRequired { detail } => {
                             metrics.record_renewal("reconnect_required", unix_seconds(now));
                             access = None;
+                            sso_refusal = Some(reconnect_required(&config));
                             warn!(%detail, "the grant could not be renewed");
+                        }
+                        Renewal::PendingOperator { detail } => {
+                            metrics.record_renewal("pending_operator", unix_seconds(now));
+                            access = None;
+                            sso_refusal = Some(client_refused(&detail));
+                            warn!(%detail, "the SSO refused the client");
                         }
                         Renewal::Unreachable { detail } => {
                             metrics.record_renewal("unreachable", unix_seconds(now));
@@ -298,7 +315,9 @@ async fn run(config: Config) -> Result<()> {
                     }
                 }
                 match &access {
-                    None if grant.is_some() => reconnect_required(&config),
+                    None if grant.is_some() => sso_refusal
+                        .clone()
+                        .unwrap_or_else(|| reconnect_required(&config)),
                     None => Observation {
                         state: State::Unreachable,
                         service: Some("sso"),
@@ -328,7 +347,15 @@ async fn run(config: Config) -> Result<()> {
                                     metrics.record_renewal("reconnect_required", unix_seconds(now));
                                     warn!(%detail, "a service refused the token and the SSO refused to renew the grant");
                                     access = None;
+                                    sso_refusal = Some(reconnect_required(&config));
                                     identities = Err(anyhow::anyhow!("revoked"));
+                                }
+                                Renewal::PendingOperator { detail } => {
+                                    metrics.record_renewal("pending_operator", unix_seconds(now));
+                                    warn!(%detail, "a service refused the token and the SSO refused the client");
+                                    access = None;
+                                    sso_refusal = Some(client_refused(&detail));
+                                    identities = Err(anyhow::anyhow!("client refused"));
                                 }
                                 Renewal::Unreachable { detail } => {
                                     metrics.record_renewal("unreachable", unix_seconds(now));
@@ -337,7 +364,9 @@ async fn run(config: Config) -> Result<()> {
                             }
                         }
                         match (&access, identities) {
-                            (None, _) => reconnect_required(&config),
+                            (None, _) => sso_refusal
+                                .clone()
+                                .unwrap_or_else(|| reconnect_required(&config)),
                             (Some(_), Ok(identities)) => {
                                 caldav_owner_id = identities.caldav_owner_id.clone();
                                 observe_services(&config, &identities)
@@ -495,6 +524,15 @@ fn reconnect_required(config: &Config) -> Observation {
     }
 }
 
+/// The SSO refused the client, not the grant: the operator's, at the SSO.
+fn client_refused(detail: &str) -> Observation {
+    Observation {
+        state: State::PendingOperator,
+        service: Some("sso"),
+        hint: Some(detail.to_owned()),
+    }
+}
+
 /// What the services said about a token the SSO just issued: whose grant
 /// this is and whether each service takes it — the observation that becomes
 /// each connection's state.
@@ -605,14 +643,19 @@ async fn consent_snapshot(gateway_url: &str, service_token: &str) -> Result<serd
         .context("the Companion Gateway's snapshot is not JSON")
 }
 
-/// The ids of the Companion Gateway's registry, off the snapshot's `connections[]`.
-fn registry_ids(document: &serde_json::Value) -> Vec<String> {
+/// The Companion Gateway's registry as `(id, kind)`, off the snapshot's `connections[]`.
+fn registry_ids(document: &serde_json::Value) -> Vec<(String, String)> {
     document["connections"]
         .as_array()
         .map(|entries| {
             entries
                 .iter()
-                .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+                .filter_map(|entry| {
+                    Some((
+                        entry["id"].as_str()?.to_owned(),
+                        entry["kind"].as_str().unwrap_or_default().to_owned(),
+                    ))
+                })
                 .collect()
         })
         .unwrap_or_default()

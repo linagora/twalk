@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
         metrics,
         lang,
         gateway,
+        session: std::sync::Mutex::new(consumers::Session::Alive),
     });
     // The decisions task's handle is kept: the loop never returns by
     // design, so if it ends the write half is dead — a panic in a spawned

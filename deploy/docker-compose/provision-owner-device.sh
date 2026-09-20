@@ -40,7 +40,11 @@ DISPLAY_NAME="${TWALK_OWNER_DEVICE_NAME:-Twalk}"
 [ -f "$ENV_FILE" ] || { echo "env file not found: $ENV_FILE" >&2; exit 1; }
 umask 077
 
-env_value() { grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2-; }
+# `grep` answers 1 for "no such line", and under `set -eo pipefail` that ended the
+# script at the first optional variable it looked up — silently, at line 45,
+# before the fallback to GATEWAY_OWNER could run. The `|| true` is what makes
+# "absent" an empty answer rather than an exit (the clerk's script was born with it).
+env_value() { { grep -E "^$1=" "$ENV_FILE" || true; } | tail -1 | cut -d= -f2-; }
 
 owner="$(env_value SENSOR_OWNER)"
 [ -n "$owner" ] || owner="$(env_value GATEWAY_OWNER)"
