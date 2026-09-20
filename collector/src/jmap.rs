@@ -105,10 +105,31 @@ pub const EMAIL_PROPERTIES: &[&str] = &[
     "header:Precedence:asText",
 ];
 
-/// One JMAP request, RFC 8620 §3.3: the `using` list and the calls.
+pub const SUBMISSION_CAPABILITY: &str = "urn:ietf:params:jmap:submission";
+
+/// One JMAP request, RFC 8620 §3.3: the `using` list — the mail capability
+/// alone for a read — and the calls.
 pub fn request(calls: Vec<(&str, Value)>) -> Value {
+    request_using(&["urn:ietf:params:jmap:core", MAIL_CAPABILITY], calls)
+}
+
+/// A request that submits (#278): the submission capability as well, asked
+/// for only when a call needs it, so a server without it still serves the
+/// reads.
+pub fn submission_request(calls: Vec<(&str, Value)>) -> Value {
+    request_using(
+        &[
+            "urn:ietf:params:jmap:core",
+            MAIL_CAPABILITY,
+            SUBMISSION_CAPABILITY,
+        ],
+        calls,
+    )
+}
+
+fn request_using(using: &[&str], calls: Vec<(&str, Value)>) -> Value {
     json!({
-        "using": ["urn:ietf:params:jmap:core", MAIL_CAPABILITY, crate::outbound::SUBMISSION_CAPABILITY],
+        "using": using,
         "methodCalls": calls
             .into_iter()
             .enumerate()
@@ -387,8 +408,10 @@ pub struct Mail {
     pub body: String,
     pub message_id: Option<String>,
     pub in_reply_to: Option<String>,
-    /// The first Message-ID of References: the thread's root.
-    pub thread_root: Option<String>,
+    /// The References header, every Message-ID in order (RFC 5322 §3.6.4);
+    /// its first is the thread's root, and a reply continues the whole of
+    /// it.
+    pub references: Vec<String>,
     pub attachments: Vec<Attachment>,
     pub auto_submitted: Option<String>,
     pub list_id: Option<String>,
@@ -535,7 +558,7 @@ impl Mail {
             body,
             message_id: message_ids("messageId").into_iter().next(),
             in_reply_to: message_ids("inReplyTo").into_iter().next(),
-            thread_root: message_ids("references").into_iter().next(),
+            references: message_ids("references"),
             attachments,
             auto_submitted: header("Auto-Submitted"),
             list_id: header("List-Id"),
@@ -795,7 +818,7 @@ impl Envelopes {
         if let Some(message_id) = &mail.message_id {
             data["message_id"] = json!(message_id);
         }
-        if let Some(root) = &mail.thread_root {
+        if let Some(root) = mail.references.first() {
             data["thread_root"] = json!(root);
         }
         if !reduced {

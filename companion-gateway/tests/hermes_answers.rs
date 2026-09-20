@@ -213,9 +213,8 @@ impl Running {
             post_hermes_answer(&self.base, Some(&hermes_signature(&push)), &push).await?;
         let status = response.status().as_u16();
         let text = response.text().await?;
-        let body = serde_json::from_str(&text).with_context(|| {
-            format!("the answer webhook answered {status} with non-JSON: {text}")
-        })?;
+        let body = serde_json::from_str(&text)
+            .with_context(|| format!("the answer webhook answered {status} with non-JSON: {text}"))?;
         Ok((status, body))
     }
 }
@@ -421,10 +420,7 @@ async fn a_contact_revoked_while_hermes_was_reasoning_gets_no_suggestion() -> Re
         Some("consent_revoked"),
         "the same code POST /api/approvals gives for the same fact: {body}"
     );
-    assert!(
-        nothing_about(watch, &trigger_id).await,
-        "a suggestion was published anyway"
-    );
+    assert!(nothing_about(watch, &trigger_id).await, "a suggestion was published anyway");
     Ok(())
 }
 
@@ -447,10 +443,7 @@ async fn a_contact_nobody_decided_about_gets_no_suggestion() -> Result<()> {
     let (status, body) = running.answer(&reference, Some(LANGUAGE)).await?;
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"].as_str(), Some("consent_pending"), "{body}");
-    assert!(
-        nothing_about(watch, &trigger_id).await,
-        "a suggestion was published anyway"
-    );
+    assert!(nothing_about(watch, &trigger_id).await, "a suggestion was published anyway");
     Ok(())
 }
 
@@ -526,11 +519,7 @@ async fn a_message_the_read_did_not_reach_is_a_410_and_not_a_404() -> Result<()>
         status, 410,
         "\"I did not look that far\" is not \"it is not there\": {body}"
     );
-    assert_eq!(
-        body["error"].as_str(),
-        Some("trigger_out_of_reach"),
-        "{body}"
-    );
+    assert_eq!(body["error"].as_str(), Some("trigger_out_of_reach"), "{body}");
     Ok(())
 }
 

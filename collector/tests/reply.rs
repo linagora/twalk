@@ -170,6 +170,19 @@ async fn an_approved_reply_leaves_from_the_owners_mailbox_to_the_sender_alone_an
     assert_eq!(sent.identity_id, IDENTITY_ID, "the owner's own identity");
     assert_eq!(sent.from, [OWNER]);
     assert_eq!(sent.to, ["alice@example.org"], "the sender alone");
+    assert_eq!(sent.envelope_from, OWNER);
+    assert_eq!(
+        sent.envelope_to,
+        ["alice@example.org"],
+        "the server is told to deliver to the sender alone, whatever the headers"
+    );
+    assert!(
+        sent.headers
+            .iter()
+            .any(|(name, value)| name == "X-Twalk-Approval" && value == event_id),
+        "the approval's id travels in the mail: {:?}",
+        sent.headers
+    );
     assert!(
         sent.cc.is_empty(),
         "reply-all is a decision the owner did not take: {sent:?}"
@@ -188,6 +201,7 @@ async fn an_approved_reply_leaves_from_the_owners_mailbox_to_the_sender_alone_an
         "a copy in Sent, and gone from Drafts"
     );
     assert!(!sent.keywords_after.iter().any(|k| k == "$draft"));
+    assert!(sent.keywords_after.iter().any(|k| k == "$seen"));
 
     // A room target is the Sensor's: acknowledged, nothing sent, nothing
     // dead-lettered.
@@ -232,26 +246,41 @@ async fn a_refused_submission_is_dead_lettered_and_an_unanswering_server_is_retr
     run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
         .await?;
 
-    // Refused by the server: permanent, dead-lettered at once, the reason
-    // in a header, no report.
+    // Refused by the server (`forbiddenFrom`, a policy that may clear):
+    // retried with a growing delay, then dead-lettered with the refusal's
+    // type — and only its type — in a header; no report; the draft each
+    // attempt wrote is not left behind.
     run.sso.refuse_submissions(true);
     let refused = approval(&run, &message_id, "Non.", "refused");
     bus.publish_event(APPROVED_SUBJECT, &refused).await?;
     let dead = wait_for_copy(&bus, &run, DEAD_SUBJECT, refused["id"].as_str().unwrap()).await?;
+    let reason = dead.header("reason").unwrap_or_default();
     assert!(
-        dead.header("reason")
-            .unwrap_or_default()
-            .contains("refused the submission"),
-        "{:?}",
-        dead.header("reason")
+        reason.contains("refused the submission: forbiddenFrom"),
+        "{reason:?}"
+    );
+    assert!(
+        !reason.contains("the fake was told"),
+        "the server's description is not repeated: {reason:?}"
     );
     assert_eq!(dead.payload, refused);
+    assert_eq!(dead.header("connection"), Some(run.mail.as_str()));
+    assert_eq!(dead.header("network"), Some("email"));
     assert!(
         copies_of(&bus, &run, POSTED_SUBJECT, refused["id"].as_str().unwrap())
             .await?
             .is_empty()
     );
+    assert!(
+        collector.count_logged("could not be sent; retrying").await >= 2,
+        "a refusal is retried before being given up on"
+    );
+    assert!(
+        run.sso.mails_in(DRAFTS_ID).is_empty(),
+        "no draft of the refused reply is left on the server"
+    );
     run.sso.refuse_submissions(false);
+    let retries_so_far = collector.count_logged("could not be sent; retrying").await;
 
     // Not answering: transient, retried with a growing delay, then
     // dead-lettered after the last allowed attempt.
@@ -267,10 +296,10 @@ async fn a_refused_submission_is_dead_lettered_and_an_unanswering_server_is_retr
         dead.header("reason")
     );
     assert!(
-        collector.count_logged("could not be sent; retrying").await >= 2,
+        collector.count_logged("could not be sent; retrying").await >= retries_so_far + 2,
         "retried before being given up on"
     );
-    assert_eq!(collector.count_logged("exhausted its retries").await, 1);
+    assert_eq!(collector.count_logged("exhausted its retries").await, 2);
     collector.stop().await;
     Ok(())
 }

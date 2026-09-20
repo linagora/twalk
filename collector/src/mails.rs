@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use twalk_consent_cache::ConsentCache;
 
 use crate::jmap::{self, Changes, Dropped, Envelopes, Mail, Session};
-use crate::outbound::{ApprovedReply, SendError};
+use crate::outbound::{self, ApprovedReply, SendError};
 use crate::side::{self, SideError};
 
 /// The mail connection this process holds, and what publishing about it
@@ -234,13 +234,16 @@ impl Mailbox {
         Ok(poll)
     }
 
-    /// Sends an approved reply from the owner's mailbox (#278): the mail
+    /// Sends an approved reply from the owner's mailbox (#278). The mailbox
+    /// is first asked for a reply already carrying this approval's id — a
+    /// redelivery after a lost response sends nothing twice — then the mail
     /// answered is found again by its Message-ID, the owner's identity and
-    /// the Sent and Drafts mailboxes looked up, then `Email/set` and
-    /// `EmailSubmission/set` in one request. What a retry may fix is
-    /// `Transient`; what it cannot — the original gone, the submission
-    /// refused, no identity of the owner's — is `Permanent`.
-    pub async fn send_reply(&self, reply: &ApprovedReply, token: &str) -> Result<(), SendError> {
+    /// the Sent and Drafts mailboxes looked up, and `Email/set` +
+    /// `EmailSubmission/set` go in one request. What a retry may fix is
+    /// `Transient`; what it cannot — the original gone, an address the
+    /// server calls invalid, no identity of the owner's — is `Permanent`. A
+    /// draft the submission left behind is destroyed on either.
+    pub async fn send_reply(&self, reply: &ApprovedReply, token: &str) -> Result<Sent, SendError> {
         let transient = |error: SideError| SendError::Transient(error.to_string());
         let session = Session::parse(
             &self
@@ -257,6 +260,7 @@ impl Mailbox {
                 &session.api_url,
                 token,
                 vec![
+                    outbound::reply_already_sent(account, &reply.event_id),
                     jmap::mailbox_get(account),
                     jmap::identity_get(account),
                     jmap::email_by_message_id(account, &reply.in_reply_to),
@@ -264,32 +268,27 @@ impl Mailbox {
             )
             .await
             .map_err(transient)?;
-        let mailboxes = method(&response, 0).map_err(transient)?;
+        if first_id(&send_result(&response, 0)?).is_some() {
+            return Ok(Sent { already_sent: true });
+        }
+        let mailboxes = send_result(&response, 1)?;
         let sent_id = jmap::mailbox_with_role(&mailboxes, "sent").ok_or_else(|| {
             SendError::Permanent("the JMAP server lists no Sent mailbox".to_owned())
         })?;
         let drafts_id =
             jmap::mailbox_with_role(&mailboxes, "drafts").unwrap_or_else(|| sent_id.clone());
-        let identity_id = jmap::identity_for(&method(&response, 1).map_err(transient)?, &self.owner_email)
+        let identity_id = jmap::identity_for(&send_result(&response, 2)?, &self.owner_email)
             .ok_or_else(|| {
                 SendError::Permanent(format!(
                     "the JMAP server offers no sending identity for {}: the reply cannot leave as the owner",
                     self.owner_email
                 ))
             })?;
-        let found = method(&response, 2).map_err(transient)?;
-        let original_id = found
-            .get("ids")
-            .and_then(Value::as_array)
-            .and_then(|ids| ids.first())
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                SendError::Permanent(format!(
-                    "the mail {} the reply answers is no longer in the mailbox",
-                    reply.in_reply_to
-                ))
-            })?
-            .to_owned();
+        let original_id = first_id(&send_result(&response, 3)?).ok_or_else(|| {
+            SendError::Permanent(
+                "the mail the reply answers is no longer in the mailbox".to_owned(),
+            )
+        })?;
         let response = self
             .call(
                 &session.api_url,
@@ -298,8 +297,7 @@ impl Mailbox {
             )
             .await
             .map_err(transient)?;
-        let original = method(&response, 0)
-            .map_err(transient)?
+        let original = send_result(&response, 0)?
             .get("list")
             .and_then(Value::as_array)
             .and_then(|list| list.first())
@@ -311,40 +309,83 @@ impl Mailbox {
             .ok_or_else(|| {
                 SendError::Permanent("the mail answered could not be read back".to_owned())
             })?;
-        let calls = crate::outbound::reply_calls(
-            reply,
-            &original,
-            account,
-            &identity_id,
-            &self.owner_email,
-            &drafts_id,
-            &sent_id,
-        );
+        let sender = outbound::Sender {
+            account_id: account.to_owned(),
+            identity_id,
+            owner_email: self.owner_email.clone(),
+            drafts_id,
+            sent_id,
+        };
+        let calls = outbound::reply_calls(reply, &original, &sender);
         let response = self
-            .call(&session.api_url, token, calls)
+            .submit(&session.api_url, token, calls)
             .await
             .map_err(transient)?;
-        let created = method(&response, 0).map_err(transient)?;
-        if created.pointer("/created/reply").is_none() {
+        let created = send_result(&response, 0)?;
+        let Some(draft_id) = created
+            .pointer("/created/reply/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
             return Err(SendError::Permanent(format!(
                 "the JMAP server did not create the reply: {}",
-                created.get("notCreated").cloned().unwrap_or(Value::Null)
+                refusal_type(created.pointer("/notCreated/reply"))
             )));
+        };
+        let submitted = send_result(&response, 1)?;
+        if submitted.pointer("/created/submission").is_some() {
+            return Ok(Sent {
+                already_sent: false,
+            });
         }
-        let submitted = method(&response, 1).map_err(transient)?;
-        if submitted.pointer("/created/submission").is_none() {
-            return Err(SendError::Permanent(format!(
-                "the JMAP server refused the submission: {}",
-                submitted.get("notCreated").cloned().unwrap_or(Value::Null)
-            )));
+        // The submission was refused: the draft is not left behind, and the
+        // refusal is retried unless its type says a retry cannot change it
+        // (RFC 8621 §7.5) — the Sensor's rule for a forbidden post, run on
+        // the mail side: a rate limit or a policy clears, an invalid address
+        // does not.
+        let kind = refusal_type(submitted.pointer("/notCreated/submission"));
+        if let Err(error) = self
+            .call(
+                &session.api_url,
+                token,
+                vec![outbound::destroy_draft(account, &draft_id)],
+            )
+            .await
+        {
+            warn!(%error, "the draft of a refused reply could not be destroyed");
         }
-        Ok(())
+        let why = format!("the JMAP server refused the submission: {kind}");
+        Err(if REFUSALS_A_RETRY_CANNOT_CHANGE.contains(&kind.as_str()) {
+            SendError::Permanent(why)
+        } else {
+            SendError::Transient(why)
+        })
     }
 
     async fn get(&self, url: &str, token: &str) -> Result<Value, SideError> {
         json_of(
             side::send(
                 self.http.get(url).header("accept", "application/json"),
+                token,
+                "jmap",
+            )
+            .await?,
+        )
+        .await
+    }
+
+    /// A request that submits: the submission capability asked for.
+    async fn submit(
+        &self,
+        api_url: &str,
+        token: &str,
+        calls: Vec<(&str, Value)>,
+    ) -> Result<Value, SideError> {
+        json_of(
+            side::send(
+                self.http
+                    .post(api_url)
+                    .json(&jmap::submission_request(calls)),
                 token,
                 "jmap",
             )
@@ -384,4 +425,72 @@ async fn json_of(response: reqwest::Response) -> Result<Value, SideError> {
         .map_err(|error| SideError::Unreachable {
             detail: format!("the JMAP server's answer is not JSON: {error}"),
         })
+}
+
+/// What `send_reply` came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sent {
+    /// The mailbox already held a reply for this approval: nothing was sent
+    /// again, and the report says it reached the contact all the same.
+    pub already_sent: bool,
+}
+
+/// `EmailSubmission/set` refusal types (RFC 8621 §7.5) a retry cannot
+/// change. Everything else — `rateLimit`, `forbiddenFrom`, `tooManyRecipients`
+/// on a policy that may relax, a server error — is retried and then given
+/// up on.
+const REFUSALS_A_RETRY_CANNOT_CHANGE: &[&str] = &[
+    "invalidEmail",
+    "invalidProperties",
+    "invalidRecipients",
+    "noRecipients",
+    "tooLarge",
+    "emailNotFound",
+];
+
+/// JMAP method error types (RFC 8620 §3.6.2) a retry cannot change: the
+/// request itself is wrong. The server's own failures are transient.
+const METHOD_ERRORS_A_RETRY_CANNOT_CHANGE: &[&str] = &[
+    "invalidArguments",
+    "invalidResultReference",
+    "forbidden",
+    "accountNotFound",
+    "accountNotSupportedByMethod",
+    "accountReadOnly",
+    "unknownMethod",
+    "requestTooLarge",
+];
+
+/// A method's result on the send path, the error classed for the retry
+/// policy — and, since a method error's `description` may quote what the
+/// server did not like, the type alone is what the reason carries.
+fn send_result(response: &Value, index: usize) -> Result<Value, SendError> {
+    jmap::method_result(response, index).map_err(|error| {
+        let why = format!("the JMAP server answered {}", error.kind);
+        if METHOD_ERRORS_A_RETRY_CANNOT_CHANGE.contains(&error.kind.as_str()) {
+            SendError::Permanent(why)
+        } else {
+            SendError::Transient(why)
+        }
+    })
+}
+
+/// The `type` of a `notCreated` refusal, and nothing else of it: its
+/// `description` may echo an address.
+fn refusal_type(refusal: Option<&Value>) -> String {
+    refusal
+        .and_then(|refusal| refusal.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned()
+}
+
+/// The first id an `Email/query` answered.
+fn first_id(query: &Value) -> Option<String> {
+    query
+        .get("ids")
+        .and_then(Value::as_array)
+        .and_then(|ids| ids.first())
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }

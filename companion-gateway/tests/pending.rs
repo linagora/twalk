@@ -377,13 +377,7 @@ async fn a_gateway_started_against_a_stream_with_history_builds_its_list_from_it
     members.sort();
     assert_eq!(
         members,
-        vec![
-            "connection",
-            "contact",
-            "first_seen",
-            "last_seen",
-            "network"
-        ],
+        vec!["connection", "contact", "first_seen", "last_seen", "network"],
         "a pending contact is an ID, a perimeter and its kind, and two instants: {entry}"
     );
 

@@ -357,17 +357,7 @@ pub fn parse_vevent(ics: &str) -> Result<Vevent> {
     })
 }
 
-/// The owner as the events spell people: `mailto:`, lower-cased — whether
-/// the caller passed the address or the URI.
-pub fn owner_mailto(owner: &str) -> String {
-    let address = owner.trim();
-    let address = address
-        .get(..7)
-        .filter(|prefix| prefix.eq_ignore_ascii_case("mailto:"))
-        .map(|_| &address[7..])
-        .unwrap_or(address);
-    format!("mailto:{}", address.trim().to_ascii_lowercase())
-}
+pub use crate::side::owner_mailto;
 
 /// A `mailto:` value, lower-cased — one string for one person across the
 /// mail and calendar connections — or `None` for any other URI.

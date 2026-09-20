@@ -121,6 +121,9 @@ mod tests {
         // reads the source for a literal; this is what keeps them from
         // drifting, which would leave the guard's table classifying a path the
         // router does not serve.
-        assert_eq!(crate::hermes_answer::ANSWER_PATH, "/_twalk/hermes/answers");
+        assert_eq!(
+            crate::hermes_answer::ANSWER_PATH,
+            "/_twalk/hermes/answers"
+        );
     }
 }

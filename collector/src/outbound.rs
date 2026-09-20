@@ -2,8 +2,9 @@
 //! #278, ADR 0037): the pure half — which approvals on the bus are this
 //! collector's, the reply as a JMAP `Email/set` creation and its
 //! `EmailSubmission/set`, the subjects and ids of the retry policy the
-//! Sensor already has (`sensor/src/outbound.rs`, copied here because the
-//! two binaries share no crate for it and the policy is four lines).
+//! Sensor already has (`sensor/src/outbound.rs`, copied: the two binaries
+//! share no crate for it yet — the consent cache is the precedent for one,
+//! and a third consumer of these names would be the moment to extract it).
 //!
 //! Two components consume one subject. The Sensor sends a target that is a
 //! room; the collector sends one that is a mail connection it holds; each
@@ -40,7 +41,13 @@ pub const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 pub const EVENT_ID_HEADER: &str = "event-id";
 pub const POSTED_REACH_HEADER: &str = "reach";
 pub const POSTED_AS_HEADER: &str = "posted-as";
-pub const SUBMISSION_CAPABILITY: &str = "urn:ietf:params:jmap:submission";
+/// The header a dead letter says why on: the collector's own, since a
+/// mailbox refuses in words a room does not.
+pub const REASON_HEADER: &str = "reason";
+/// The mail header every reply carries the approval's id in: what makes a
+/// redelivered approval find its reply already in Sent rather than send it
+/// twice — JMAP has no transaction id to deduplicate on.
+pub const APPROVAL_HEADER: &str = "X-Twalk-Approval";
 
 pub fn dead_letter_subject() -> String {
     format!("{}.dead", crate::status::bus_subject(REPLY_APPROVED_TYPE))
@@ -58,14 +65,30 @@ pub fn dead_letter_msg_id(event_id: &str) -> String {
     format!("{event_id}:dead-letter")
 }
 
-/// Whose an approval is.
+/// Whose an approval is — the Sensor's two cases, seen from the other side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parsed {
     /// A mail target on one of this process's connections.
     Ours(ApprovedReply),
     /// A room target (the Sensor's), or a mail connection another process
     /// holds.
-    NotOurs { why: String },
+    AnotherComponents { why: Whose },
+}
+
+/// Why an approval is another component's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    TheSensors,
+    AnotherCollectors,
+}
+
+impl Whose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TheSensors => "a portal room: the Sensor's",
+            Self::AnotherCollectors => "a mail connection this collector does not hold",
+        }
+    }
 }
 
 /// An approved reply to send.
@@ -106,8 +129,8 @@ impl ApprovedReply {
             .context("persona.reply.approved event has no data")?;
         let target = data.get("target").context("the approval names no target")?;
         if target.get("room_id").is_some() {
-            return Ok(Parsed::NotOurs {
-                why: "a portal room: the Sensor's".to_owned(),
+            return Ok(Parsed::AnotherComponents {
+                why: Whose::TheSensors,
             });
         }
         let connection = target
@@ -116,8 +139,8 @@ impl ApprovedReply {
             .context("the approval's target names neither a room nor a connection")?
             .to_owned();
         if !held.iter().any(|id| id == &connection) {
-            return Ok(Parsed::NotOurs {
-                why: format!("the connection {connection}, which this collector does not hold"),
+            return Ok(Parsed::AnotherComponents {
+                why: Whose::AnotherCollectors,
             });
         }
         Ok(Parsed::Ours(Self {
@@ -146,6 +169,18 @@ impl ApprovedReply {
     }
 }
 
+/// Where a reply is written from and lands: the account, the owner's
+/// sending identity, and the two mailboxes, as `Mailbox/get` and
+/// `Identity/get` named them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sender {
+    pub account_id: String,
+    pub identity_id: String,
+    pub owner_email: String,
+    pub drafts_id: String,
+    pub sent_id: String,
+}
+
 /// The reply, as the two JMAP calls that send it: `Email/set` creating the
 /// mail in Drafts under the creation id `#reply`, and `EmailSubmission/set`
 /// submitting it from the owner's identity, moving it to Sent and clearing
@@ -154,12 +189,15 @@ impl ApprovedReply {
 pub fn reply_calls(
     reply: &ApprovedReply,
     original: &Mail,
-    account_id: &str,
-    identity_id: &str,
-    owner_email: &str,
-    drafts_id: &str,
-    sent_id: &str,
+    sender: &Sender,
 ) -> Vec<(&'static str, Value)> {
+    let Sender {
+        account_id,
+        identity_id,
+        owner_email,
+        drafts_id,
+        sent_id,
+    } = sender;
     let subject = if original
         .subject
         .trim_start()
@@ -170,11 +208,14 @@ pub fn reply_calls(
     } else {
         format!("Re: {}", original.subject)
     };
-    // References: the original's, then the original itself (RFC 5322 §3.6.4).
-    let mut references: Vec<String> = Vec::new();
-    if let Some(root) = &original.thread_root {
-        references.push(root.clone());
-    }
+    // References (RFC 5322 §3.6.4): the original's References whole — or,
+    // when it has none, its own In-Reply-To — then the original itself,
+    // once.
+    let mut references: Vec<String> = if original.references.is_empty() {
+        original.in_reply_to.iter().cloned().collect()
+    } else {
+        original.references.clone()
+    };
     if !references.iter().any(|id| id == &reply.in_reply_to) {
         references.push(reply.in_reply_to.clone());
     }
@@ -188,7 +229,8 @@ pub fn reply_calls(
         "inReplyTo": [bare(&reply.in_reply_to)],
         "references": references.iter().map(|id| bare(id)).collect::<Vec<_>>(),
         "bodyStructure": { "partId": "1", "type": "text/plain", "charset": "utf-8" },
-        "bodyValues": { "1": { "value": reply.body, "isTruncated": false } }
+        "bodyValues": { "1": { "value": reply.body, "isTruncated": false } },
+        format!("header:{APPROVAL_HEADER}:asText"): reply.event_id
     });
     vec![
         (
@@ -219,6 +261,27 @@ pub fn reply_calls(
             }),
         ),
     ]
+}
+
+/// `Email/query` for the reply already sent for an approval: the mail in
+/// the mailbox carrying its id in `X-Twalk-Approval`, if any.
+pub fn reply_already_sent(account_id: &str, event_id: &str) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "header": [APPROVAL_HEADER, event_id] },
+            "limit": 1
+        }),
+    )
+}
+
+/// `Email/set` destroying the draft a failed submission left behind.
+pub fn destroy_draft(account_id: &str, email_id: &str) -> (&'static str, Value) {
+    (
+        "Email/set",
+        json!({ "accountId": account_id, "destroy": [email_id] }),
+    )
 }
 
 /// The delay before the next redelivery: the base doubling with each
@@ -274,8 +337,11 @@ mod tests {
             subject: "Point hebdo".to_owned(),
             body: "never sent back".to_owned(),
             message_id: Some("<9b8c7d6e-1@example.org>".to_owned()),
-            in_reply_to: None,
-            thread_root: Some("<c9d8e7f6@example.org>".to_owned()),
+            in_reply_to: Some("<mid-2@example.org>".to_owned()),
+            references: vec![
+                "<c9d8e7f6@example.org>".to_owned(),
+                "<mid-2@example.org>".to_owned(),
+            ],
             attachments: vec![Attachment {
                 kind: "file",
                 mime_type: "application/pdf".to_owned(),
@@ -303,14 +369,18 @@ mod tests {
             "../../contracts/cloudevents/v1/fixtures/persona.reply.approved.json"
         ))
         .unwrap();
-        assert!(matches!(
+        assert_eq!(
             ApprovedReply::parse(&room, &held).unwrap(),
-            Parsed::NotOurs { .. }
-        ));
-        assert!(matches!(
+            Parsed::AnotherComponents {
+                why: Whose::TheSensors
+            }
+        );
+        assert_eq!(
             ApprovedReply::parse(&approval(), &["mail-other".to_owned()]).unwrap(),
-            Parsed::NotOurs { .. }
-        ));
+            Parsed::AnotherComponents {
+                why: Whose::AnotherCollectors
+            }
+        );
         let mut malformed = approval();
         malformed["data"]["target"] = json!({ "connection": "mail-linagora" });
         assert!(ApprovedReply::parse(&malformed, &held).is_err());
@@ -322,15 +392,14 @@ mod tests {
         let Parsed::Ours(reply) = ApprovedReply::parse(&approval(), &held).unwrap() else {
             panic!()
         };
-        let calls = reply_calls(
-            &reply,
-            &original(),
-            "u1",
-            "id-owner",
-            "michel@example.com",
-            "drafts-1",
-            "sent-1",
-        );
+        let sender = Sender {
+            account_id: "u1".to_owned(),
+            identity_id: "id-owner".to_owned(),
+            owner_email: "michel@example.com".to_owned(),
+            drafts_id: "drafts-1".to_owned(),
+            sent_id: "sent-1".to_owned(),
+        };
+        let calls = reply_calls(&reply, &original(), &sender);
         let (name, set) = &calls[0];
         assert_eq!(*name, "Email/set");
         let email = &set["create"]["reply"];
@@ -344,9 +413,27 @@ mod tests {
         assert_eq!(email["inReplyTo"], json!(["9b8c7d6e-1@example.org"]));
         assert_eq!(
             email["references"],
-            json!(["c9d8e7f6@example.org", "9b8c7d6e-1@example.org"])
+            json!([
+                "c9d8e7f6@example.org",
+                "mid-2@example.org",
+                "9b8c7d6e-1@example.org"
+            ]),
+            "the original's References whole, then the original"
+        );
+        // An original with no References but an In-Reply-To: that is the
+        // thread, per RFC 5322's fallback.
+        let mut sparse = original();
+        sparse.references.clear();
+        let calls = reply_calls(&reply, &sparse, &sender);
+        assert_eq!(
+            calls[0].1["create"]["reply"]["references"],
+            json!(["mid-2@example.org", "9b8c7d6e-1@example.org"])
         );
         assert_eq!(email["mailboxIds"], json!({ "drafts-1": true }));
+        assert_eq!(
+            email["header:X-Twalk-Approval:asText"], reply.event_id,
+            "the approval's id travels in the mail, so a redelivery finds it"
+        );
         assert!(
             !set.to_string().contains("never sent back"),
             "the original's words stay put"
@@ -368,7 +455,7 @@ mod tests {
         // A subject already answered is not answered twice.
         let mut again = original();
         again.subject = "RE: Point hebdo".to_owned();
-        let calls = reply_calls(&reply, &again, "u1", "i", "o@x", "d", "s");
+        let calls = reply_calls(&reply, &again, &sender);
         assert_eq!(calls[0].1["create"]["reply"]["subject"], "RE: Point hebdo");
     }
 

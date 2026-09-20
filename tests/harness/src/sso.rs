@@ -333,6 +333,11 @@ impl FakeSso {
         self.lock().mails.submissions()
     }
 
+    /// The Email ids in one mailbox of the fake JMAP server.
+    pub fn mails_in(&self, mailbox: &str) -> Vec<String> {
+        self.lock().mails.mails_in(mailbox)
+    }
+
     /// Makes `EmailSubmission/set` refuse every submission — or stops.
     pub fn refuse_submissions(&self, refuse: bool) {
         self.lock().mails.refuse_submissions(refuse);
