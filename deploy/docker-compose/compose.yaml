@@ -211,6 +211,17 @@ services:
       # this stack's; setting one without the other is refused on startup.
       SENSOR_GATEWAY_URL: ${SENSOR_GATEWAY_URL:-${GATEWAY_SERVICE_TOKEN:+http://companion-gateway:8080}}
       SENSOR_GATEWAY_SERVICE_TOKEN: ${SENSOR_GATEWAY_SERVICE_TOKEN:-${GATEWAY_SERVICE_TOKEN:-}}
+      # The bus's retention policy (issue #174, ADR 0037): how long the twalk
+      # stream keeps an event, how large it may grow before the oldest go,
+      # and how long it remembers a Nats-Msg-Id. The stream holds contacts'
+      # messages in cleartext, so the first is a personal-data decision and
+      # the operator's; see the .env.example entry. Empty: ninety days, two
+      # GiB, a day — the Sensor's own defaults. The Sensor reconciles an
+      # existing stream onto the policy in place at every start and logs
+      # each field it changed; it never deletes or recreates the stream.
+      SENSOR_BUS_MAX_AGE_DAYS: ${SENSOR_BUS_MAX_AGE_DAYS:-90}
+      SENSOR_BUS_MAX_BYTES: ${SENSOR_BUS_MAX_BYTES:-2147483648}
+      SENSOR_BUS_DUPLICATE_WINDOW_SECONDS: ${SENSOR_BUS_DUPLICATE_WINDOW_SECONDS:-86400}
     volumes:
       # Session, sync token and crypto store: a restart resumes the sync
       # instead of re-syncing (and re-emitting) recent traffic.
@@ -812,6 +823,10 @@ services:
       CLERK_GATEWAY_SESSION_FILE: ${CLERK_GATEWAY_SESSION_DIR:+/var/lib/clerk/session}
       # How often the clerk reads the gestures on its own posts.
       CLERK_DECISION_SECONDS: ${CLERK_DECISION_SECONDS:-5}
+      # How long a session the Gateway would not have waits before the
+      # clerk tries its refresh again — the hourly retry
+      # provision-clerk-device.sh promises.
+      CLERK_SESSION_RETRY_SECONDS: ${CLERK_SESSION_RETRY_SECONDS:-3600}
       # /health and /metrics, on the host's loopback since this is the
       # host's namespace: the port is the operator's to choose, the
       # interface is not.

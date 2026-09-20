@@ -12,7 +12,12 @@
 //! device revoked from the dashboard is answered in the thread and restored
 //! by running the script again — as root this time, because the container
 //! has taken the session directory over, which is the route the script's
-//! own message names.
+//! own message names. And (#300) that the delivery line a post carries is
+//! what the **real** `GET /api/suggestions/{id}` answers for that
+//! suggestion — asserted as equality with the Gateway's own answer, never
+//! as a literal, because on this stack no bridge runs and what the
+//! Gateway says of a room no bridge marked is the Gateway's to say — read
+//! once per suggestion and not again across a restart.
 //!
 //! # What is real and what is not
 //!
@@ -71,6 +76,8 @@ use harness::{
 use nostr::{Event, Keys};
 use serde_json::{json, Value};
 use tokio::process::Command;
+use twalk_clerk::gateway::Delivery;
+use twalk_clerk::refusals::{delivery_line, delivery_unread_line, Unread};
 use twalk_clerk::text::{activity_approved, thread_revoked, Lang};
 
 /// The Matrix server name this deployment answers for: not the test
@@ -584,6 +591,29 @@ impl Deployment {
     /// as much an answer as a `200` here.
     async fn approval(&self, suggestion_id: &str) -> Result<(reqwest::StatusCode, Value)> {
         self.get(&format!("/api/approvals/{suggestion_id}")).await
+    }
+
+    /// `GET /api/suggestions/{id}` with the test's own device — the read
+    /// the clerk makes as its device before a post (#300), made here by a
+    /// second device of the same owner so that the post can be compared
+    /// with what the Gateway itself says.
+    async fn suggestion(&self, suggestion_id: &str) -> Result<Value> {
+        let (status, body) = self
+            .get(&format!("/api/suggestions/{suggestion_id}"))
+            .await?;
+        anyhow::ensure!(
+            status == reqwest::StatusCode::OK,
+            "GET /api/suggestions/{suggestion_id} answered {status}: {body}"
+        );
+        Ok(body)
+    }
+
+    /// The `delivery` the Gateway answers for a suggestion, as the clerk
+    /// deserialises it.
+    async fn delivery_of(&self, suggestion_id: &str) -> Result<Delivery> {
+        let answer = self.suggestion(suggestion_id).await?;
+        serde_json::from_value(answer["delivery"].clone())
+            .with_context(|| format!("the answer carries a delivery: {answer}"))
     }
 
     /// Polls the approval table until it holds a row for this suggestion.
@@ -1119,6 +1149,10 @@ fn write_env_file(
     let (gateway_port, clerk_port) = (gateway_port(), clerk_port());
     let (gateway_image, clerk_image) = (gateway_image(), clerk_image());
     let key_file = key_file.display();
+    // The registry of connections (#269, #270): a Gateway derives one per
+    // bridge, and this deployment runs no bridge, so the one network the
+    // scenarios decide on is declared, named after itself — the id every
+    // existing decision was migrated onto, and the Gateway suite's own shape.
     let session_dir = dir.join("session");
     let session_dir = session_dir.display();
     let contents = format!(
@@ -1139,6 +1173,7 @@ fn write_env_file(
          GATEWAY_STATE_DIR=/data\n\
          GATEWAY_REGISTRATION_SHARED_SECRET={REGISTRATION_SHARED_SECRET}\n\
          GATEWAY_SENSOR_USER_ID=@sensor:{DEPLOY_SERVER_NAME}\n\
+         GATEWAY_CONNECTIONS={NETWORK}={NETWORK}\n\
          CLERK_RELAY_URL={relay_url}\n\
          CLERK_NOSTR_KEY_FILE={key_file}\n\
          CLERK_CHANNEL_APPROVALS={}\n\
@@ -1185,6 +1220,21 @@ where
 /// One `twalk_clerk_approvals_total` sample line, as `/metrics` renders it.
 fn approvals_sample(outcome: &str, total: u64) -> String {
     format!("twalk_clerk_approvals_total{{outcome=\"{outcome}\"}} {total}")
+}
+
+/// One `twalk_clerk_delivery_reads_total` sample line (#300).
+fn delivery_reads_sample(outcome: &str, total: u64) -> String {
+    format!("twalk_clerk_delivery_reads_total{{outcome=\"{outcome}\"}} {total}")
+}
+
+/// The delivery line of one `approbations` post: the third line, where
+/// `text::approval_post` puts it (the staged body is one line).
+fn delivery_line_of(post: &Event) -> Result<String> {
+    post.content
+        .lines()
+        .nth(2)
+        .map(str::to_owned)
+        .with_context(|| format!("a post has at least three lines:\n{}", post.content))
 }
 
 #[tokio::test]
@@ -1319,6 +1369,29 @@ async fn the_owners_check_is_one_row_in_the_gateways_approval_table_through_the_
         "nothing is approved before the owner decides"
     );
 
+    // The post says whether the reply can reach the contact, in the
+    // Companion's words, and it is what the deployed Gateway itself
+    // answers for this suggestion (#300): equality with that answer, read
+    // with the test's own device, and not a literal — on this stack no
+    // bridge runs, and what the Gateway says of the trigger's room is the
+    // Gateway's to say.
+    let delivery = stack.delivery_of(talk.suggestion_id()).await?;
+    eprintln!(
+        "    the deployed Gateway answers delivery reach={} detail={}",
+        delivery.reach, delivery.detail
+    );
+    anyhow::ensure!(
+        delivery_line_of(&post)? == delivery_line(LANG, &delivery),
+        "the post's delivery line is the Companion's sentence for what the Gateway answers \
+         ({delivery:?}):\n{}",
+        post.content
+    );
+    // Read once, and counted as such: the read is the only way the line
+    // above could hold what the Gateway said.
+    stack
+        .wait_for_metric(&delivery_reads_sample("found", 1))
+        .await?;
+
     // The owner's ✅, as the relay owner's key.
     let post_id = post.id.to_hex();
     stack.react_as_owner(&post_id, "✅").await?;
@@ -1389,6 +1462,17 @@ async fn revoking_buzz_on_the_dashboard_makes_the_next_check_a_thread_answer_and
 
     let talk = stack.stage("second").await?;
     let post = stack.wait_for_post(talk.suggestion_id()).await?;
+    // The read before this post met the revoked device: the post still
+    // went up in the same tick, saying the delivery was not read and why,
+    // and the read is counted under that reason (#300).
+    anyhow::ensure!(
+        delivery_line_of(&post)? == delivery_unread_line(LANG, Unread::GatewayRefused),
+        "a post made while the device is revoked says its delivery was not read:\n{}",
+        post.content
+    );
+    stack
+        .wait_for_metric(&delivery_reads_sample("refused", 1))
+        .await?;
     let post_id = post.id.to_hex();
     let check = stack.react_as_owner(&post_id, "✅").await?;
 
@@ -1456,5 +1540,18 @@ async fn revoking_buzz_on_the_dashboard_makes_the_next_check_a_thread_answer_and
         thread.len() == 1 && thread[0].content == thread_revoked(LANG),
         "the revoked line stays and nothing is added: {thread:?}"
     );
+    // The restarted clerk found both posts by their reference lines and
+    // read neither suggestion again: one read per suggestion, at posting
+    // time, and the relay is the memory (ADR 0035). A restart resets the
+    // counters, so the proof is that both stand at zero.
+    let metrics = stack.clerk_metrics().await?;
+    for outcome in ["found", "refused"] {
+        anyhow::ensure!(
+            metrics
+                .lines()
+                .any(|line| line == delivery_reads_sample(outcome, 0)),
+            "the restarted clerk read no suggestion again ({outcome}); /metrics was:\n{metrics}"
+        );
+    }
     Ok(())
 }
