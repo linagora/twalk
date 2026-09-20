@@ -148,11 +148,28 @@ pub struct Correspondent {
     pub at: String,
 }
 
+/// Why an inbound event is not a sighting. Two of these are the projection
+/// working as designed and are logged at `debug`; the third is a deployment
+/// that cannot place a contact who wrote, which is a contact the dashboard
+/// will never say is waiting — so it is warned about, once per cause, and
+/// counted (`twalk_companion_gateway_contacts_unplaced_total`), because a
+/// sighting silently not recorded is the class of failure this product has
+/// shipped most often without noticing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotASighting {
+    /// The owner's own message, or one with no sender at all.
+    NotAContact,
+    /// A network this build does not know, or an instant that is not RFC 3339.
+    Unreadable(String),
+    /// The registry could not place the event's connection (#270).
+    Unplaced(crate::connections::Unresolved),
+}
+
 impl Correspondent {
-    /// Reads a sighting out of an event header, or `None` when this event is
-    /// not one.
+    /// Reads a sighting out of an event header, or says why this event is not
+    /// one.
     ///
-    /// Three reasons to refuse, all of them silent:
+    /// Four reasons to refuse:
     ///
     /// - **the sender is the owner** — any of their identities, not only their
     ///   Matrix ID (ticket #149). The user's own messages travel through the
@@ -181,24 +198,29 @@ impl Correspondent {
         header: &InboundHeader,
         owner: &Owner,
         registry: &crate::connections::Registry,
-    ) -> Option<Self> {
-        if owner.is_owner(&header.subject) {
-            return None;
+    ) -> Result<Self, NotASighting> {
+        if owner.is_owner(&header.subject) || header.subject.is_empty() {
+            return Err(NotASighting::NotAContact);
         }
-        if header.subject.is_empty() {
-            return None;
-        }
-        let network = Network::parse(&header.network)?;
+        let network = Network::parse(&header.network).ok_or_else(|| {
+            NotASighting::Unreadable(format!(
+                "the network {:?} is not the contract's",
+                header.network
+            ))
+        })?;
         let connection = registry
             .resolve(header.connection.as_deref(), network.as_str())
-            .ok()?
+            .map_err(NotASighting::Unplaced)?
             .id
             .clone();
-        Some(Self {
+        let at = canonical_instant(&header.time).ok_or_else(|| {
+            NotASighting::Unreadable(format!("the time {:?} is not RFC 3339", header.time))
+        })?;
+        Ok(Self {
             contact: header.subject.clone(),
             connection,
             network,
-            at: canonical_instant(&header.time)?,
+            at,
         })
     }
 }
@@ -245,6 +267,10 @@ pub struct Contacts {
     owner: Arc<Owner>,
     /// The registry a sighting's connection is looked up in (#270).
     connections: Arc<crate::connections::Registry>,
+    /// The causes an unplaced sighting has already been warned about, so a
+    /// history of thousands of events under one misconfiguration is one line
+    /// and a counter, not a log of thousands.
+    unplaced_said: std::sync::Mutex<std::collections::BTreeSet<String>>,
     nats_url: String,
     consumer_name: String,
     /// The bus connection, made on first need and shared by the projection
@@ -267,6 +293,7 @@ impl Contacts {
             metrics,
             owner,
             connections,
+            unplaced_said: std::sync::Mutex::new(std::collections::BTreeSet::new()),
             nats_url,
             consumer_name,
             bus: tokio::sync::OnceCell::new(),
@@ -541,19 +568,50 @@ async fn drain(
         match serde_json::from_slice::<InboundHeader>(&message.payload) {
             Ok(header) => {
                 match Correspondent::read(&header, &contacts.owner, &contacts.connections) {
-                    Some(correspondent) => sightings.push((
+                    Ok(correspondent) => sightings.push((
                         correspondent.contact,
                         correspondent.connection,
                         correspondent.at,
                     )),
-                    // The owner's own message, an unknown network or connection,
-                    // an unreadable instant: nothing to record, and nothing to
+                    // The owner's own message, an unknown network, an
+                    // unreadable instant: nothing to record, and nothing to
                     // redeliver either.
-                    None => debug!(
+                    Err(NotASighting::NotAContact) => debug!(
                         subject = %header.subject,
                         network = %header.network,
                         "an inbound event is not a correspondent's: not recorded"
                     ),
+                    Err(NotASighting::Unreadable(why)) => debug!(
+                        subject = %header.subject,
+                        network = %header.network,
+                        "an inbound event could not be read as a sighting ({why}): not recorded"
+                    ),
+                    // A contact who wrote and cannot be placed under a
+                    // connection: not recorded either — a row under a guessed
+                    // perimeter would be a decision offered about the wrong
+                    // account — but this one is a deployment's fault and not
+                    // the projection's design, so it is counted and said,
+                    // once per cause.
+                    Err(NotASighting::Unplaced(why)) => {
+                        contacts.metrics.record_contact_unplaced();
+                        let first_time = contacts
+                            .unplaced_said
+                            .lock()
+                            .expect("the unplaced-causes set is never poisoned")
+                            .insert(why.to_string());
+                        if first_time {
+                            warn!(
+                                network = %header.network,
+                                connection = header.connection.as_deref().unwrap_or("none"),
+                                "an inbound event's connection cannot be placed in the registry \
+                                 ({why}): its sender is not recorded as waiting for a decision, \
+                                 and will not be until GATEWAY_CONNECTIONS names a connection the \
+                                 registry can place it under. Said once per cause; every event \
+                                 it happens to is counted in \
+                                 twalk_companion_gateway_contacts_unplaced_total"
+                            );
+                        }
+                    }
                 }
             }
             Err(error) => warn!(%error, "an inbound event could not be read; skipping it"),
@@ -697,7 +755,7 @@ mod tests {
             event["subject"] = json!(identity);
             assert_eq!(
                 Correspondent::read(&header(&event), &owner(), &registry()),
-                None,
+                Err(NotASighting::NotAContact),
                 "the user's own messages travel through the same rooms; they are not \
                  decisions the user has to take about themselves ({identity})"
             );
@@ -706,7 +764,7 @@ mod tests {
         // and is still recorded as one.
         let mut somebody_else = full_event();
         somebody_else["subject"] = json!("@whatsapp_lid-115332874281145:example.com");
-        assert!(Correspondent::read(&header(&somebody_else), &owner(), &registry()).is_some());
+        assert!(Correspondent::read(&header(&somebody_else), &owner(), &registry()).is_ok());
     }
 
     #[test]
@@ -730,11 +788,18 @@ mod tests {
                 .connection,
             "whatsapp"
         );
+        // Both are the registry's failure to place the event, said as such —
+        // `drain` warns and counts these, unlike the owner's own message.
         let mut old_sms = full_event();
         old_sms["network"] = json!("sms");
         assert_eq!(
             Correspondent::read(&header(&old_sms), &owner(), &registry()),
-            None,
+            Err(NotASighting::Unplaced(
+                crate::connections::Unresolved::SeveralOfKind {
+                    kind: "sms".to_owned(),
+                    ids: vec!["sms".to_owned(), "sms-work".to_owned()],
+                }
+            )),
             "two SMS connections and an event naming neither"
         );
         // A connection the registry does not know is not a row either.
@@ -742,7 +807,9 @@ mod tests {
         unknown["connection"] = json!("wa-home");
         assert_eq!(
             Correspondent::read(&header(&unknown), &owner(), &registry()),
-            None
+            Err(NotASighting::Unplaced(
+                crate::connections::Unresolved::UnknownId("wa-home".to_owned())
+            ))
         );
     }
 
@@ -752,26 +819,26 @@ mod tests {
         // not implement, not a row to guess at.
         let mut unknown_network = full_event();
         unknown_network["network"] = json!("gmessages");
-        assert_eq!(
+        assert!(matches!(
             Correspondent::read(&header(&unknown_network), &owner(), &registry()),
-            None
-        );
+            Err(NotASighting::Unreadable(_))
+        ));
 
         // An instant that is not RFC 3339: the instant is half of what the
         // projection records, so there is nothing to substitute for it.
         let mut bad_time = full_event();
         bad_time["time"] = json!("last tuesday");
-        assert_eq!(
+        assert!(matches!(
             Correspondent::read(&header(&bad_time), &owner(), &registry()),
-            None
-        );
+            Err(NotASighting::Unreadable(_))
+        ));
 
         // And an event with no sender at all.
         let mut no_subject = full_event();
         no_subject["subject"] = json!("");
         assert_eq!(
             Correspondent::read(&header(&no_subject), &owner(), &registry()),
-            None
+            Err(NotASighting::NotAContact)
         );
     }
 

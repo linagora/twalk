@@ -296,9 +296,11 @@ async fn main() -> Result<()> {
     let replaced_rooms: Arc<Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>> =
         Arc::new(Mutex::new(HashSet::new()));
     // The registry of connections every event is stamped with (ADR 0033,
-    // #269): the Gateway's, read off the consent snapshot below, or the
-    // implicit one until then. Rooms whose connection could not be resolved
-    // are said once each.
+    // #269): the Gateway's, read off the consent snapshot below — which
+    // `bring_up_consent` waits for before the sync loop starts, so the
+    // implicit one here is only ever stamped with on a deployment that has no
+    // Gateway at all. Rooms whose connection could not be resolved are said
+    // once each.
     let registry: Arc<std::sync::RwLock<connection::Registry>> =
         Arc::new(std::sync::RwLock::new(connection::Registry::implicit()));
     let unresolved_rooms: Arc<Mutex<HashSet<matrix_sdk::ruma::OwnedRoomId>>> =
@@ -357,14 +359,17 @@ async fn main() -> Result<()> {
         Some((url, token)) => Some(consent::GatewaySnapshot::new(url, token)?),
         None => None,
     };
-    bring_up_consent(
+    if !bring_up_consent(
         jetstream.clone(),
         consent_cache.clone(),
         snapshot_source,
         registry.clone(),
         metrics.clone(),
     )
-    .await;
+    .await
+    {
+        return Ok(());
+    }
 
     let own_user = client.user_id().unwrap().to_owned();
 
@@ -2568,23 +2573,37 @@ const SNAPSHOT_RETRY_MAX: Duration = Duration::from_secs(60);
 /// the snapshot. `run_consent_consumer` acks and skips those, so the boundary
 /// holds on both paths and a decision is applied from exactly one of the two.
 ///
-/// Startup is never blocked. One snapshot read is attempted here, before the
-/// sync loop starts, so a healthy deployment has no window at all in which a
-/// granted contact labels `pending`. If it fails, the Sensor carries on
-/// anyway and retries in the background: a Sensor that waits for its Gateway
-/// loses inbound events, which is worse than a degraded label. The stream
-/// consumer is created only once a snapshot has been applied — that is what
-/// keeps the ordering exact, and it costs nothing, because the Gateway is the
-/// single writer of consent state (ADR 0006): while it is unreachable there
-/// are no new decisions on the stream to miss, and the durable consumer holds
-/// its place for the ones taken before.
+/// The snapshot is read **before the sync loop starts**, and the Sensor waits
+/// for it. A healthy deployment therefore has no window at all in which a
+/// granted contact labels `pending`, and — since #269 — none in which an
+/// event is stamped with a connection the Gateway did not name: the registry
+/// of connections arrives on the same snapshot, and an event stamped from a
+/// guess is one the wrong decisions govern, for ever, on the bus. An earlier
+/// version started anyway and retried in the background, on the premise that
+/// a Sensor which waits for its Gateway loses inbound events. It does not:
+/// the sync token is not advanced while nothing syncs, so Synapse holds what
+/// arrives and delivers it when the loop starts — messages received during
+/// the wait are delivered late, and none is lost or mislabelled. The cost is
+/// stated rather than hidden: a Gateway that is down keeps this Sensor from
+/// reading Matrix until it is back, which the log, the failure counter and
+/// the sync-age gauge all say; and the retry answers a shutdown signal, so a
+/// Sensor waiting on a Gateway that never comes still stops when asked. The
+/// stream consumer is created only once a snapshot has been applied — that is
+/// what keeps the ordering exact, and it costs nothing, because the Gateway
+/// is the single writer of consent state (ADR 0006): while it is unreachable
+/// there are no new decisions on the stream to miss, and the durable consumer
+/// holds its place for the ones taken before.
+///
+/// Returns whether the Sensor should go on to read Matrix: `false` is a
+/// shutdown signal received while waiting.
 async fn bring_up_consent<S>(
     jetstream: async_nats::jetstream::Context,
     consent_cache: ConsentCache,
     source: Option<S>,
     registry: Arc<std::sync::RwLock<connection::Registry>>,
     metrics: Arc<Metrics>,
-) where
+) -> bool
+where
     S: ConsentSnapshotSource + 'static,
 {
     let Some(source) = source else {
@@ -2600,34 +2619,39 @@ async fn bring_up_consent<S>(
             None,
             metrics,
         ));
-        return;
+        return true;
     };
-    match source.fetch_snapshot().await {
-        Ok(snapshot) => {
-            let start = apply_consent_snapshot(&consent_cache, &snapshot, &registry, &metrics);
-            tokio::spawn(consume_consent_changes(
-                jetstream,
-                consent_cache,
-                Some(start),
-                metrics,
-            ));
-        }
+    let snapshot = match source.fetch_snapshot().await {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             let failures = metrics.record_consent_snapshot_failure();
             error!(
                 %error,
                 failures,
-                "could not read the Companion Gateway's consent snapshot: the Sensor starts \
-                 anyway and labels every sender pending — including contacts the user granted \
-                 — until it can; retrying in the background"
+                "could not read the Companion Gateway's consent snapshot: the Sensor waits for \
+                 it and reads nothing from Matrix until then — the snapshot carries every \
+                 granted contact and the registry of connections every event is stamped with, \
+                 and an event published without them would be mislabelled or misattributed for \
+                 ever. Nothing is lost meanwhile: the homeserver holds what arrives and delivers \
+                 it once the sync starts. Retrying with backoff; check the Gateway at that URL"
             );
-            tokio::spawn(async move {
-                let snapshot = retry_consent_snapshot(&source, &metrics).await;
-                let start = apply_consent_snapshot(&consent_cache, &snapshot, &registry, &metrics);
-                consume_consent_changes(jetstream, consent_cache, Some(start), metrics).await;
-            });
+            tokio::select! {
+                snapshot = retry_consent_snapshot(&source, &metrics) => snapshot,
+                _ = shutdown_signal() => {
+                    info!("shutdown signal received while waiting for the consent snapshot");
+                    return false;
+                }
+            }
         }
-    }
+    };
+    let start = apply_consent_snapshot(&consent_cache, &snapshot, &registry, &metrics);
+    tokio::spawn(consume_consent_changes(
+        jetstream,
+        consent_cache,
+        Some(start),
+        metrics,
+    ));
+    true
 }
 
 /// Applies a snapshot and returns the stream sequence the consumer starts at.
@@ -2678,8 +2702,9 @@ fn apply_consent_snapshot(
 }
 
 /// Retries the snapshot until it answers, doubling the delay up to a ceiling.
-/// Never gives up: giving up would leave the Sensor labelling `pending`
-/// forever with nothing left to say so.
+/// Never gives up: giving up would leave the Sensor observing nothing for
+/// ever with nothing left to say so; the caller's shutdown signal is what
+/// ends it.
 async fn retry_consent_snapshot<S: ConsentSnapshotSource>(
     source: &S,
     metrics: &Metrics,
@@ -2699,8 +2724,8 @@ async fn retry_consent_snapshot<S: ConsentSnapshotSource>(
                     %error,
                     failures,
                     retry_in_seconds = delay.as_secs(),
-                    "the Companion Gateway's consent snapshot is still unreadable; senders \
-                     keep labelling pending"
+                    "the Companion Gateway's consent snapshot is still unreadable; the Sensor \
+                     is not reading Matrix until it is"
                 );
             }
         }
