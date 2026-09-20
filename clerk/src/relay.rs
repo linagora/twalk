@@ -43,10 +43,25 @@
 //! because the relay refuses a `created_at` more than fifteen minutes from
 //! its own clock (`buzz-relay`'s ingest, `MAX_TIMESTAMP_DRIFT_SECS`), so a
 //! line cannot be made to hash to one Nostr id across a redelivery by dating
-//! it from the bus event's `time`. And it **knows no kinds beyond the four
+//! it from the bus event's `time`. And it **knows no kinds beyond the six
 //! the clerk uses** — a forum post, a stream message, a delete and its own
-//! posts back — so a fifth would be a decision made here, in the open,
-//! rather than a tag list assembled somewhere else.
+//! posts back, and since ticket #284 the two the owner answers a post with:
+//! a reaction (kind 7) and a thread reply (kind 45003), which the clerk
+//! reads off its own posts ([`Relay::gestures_on`]) and answers in the
+//! post's thread ([`Relay::comment`]), because the write half of the loop
+//! runs on Buzz and Buzz's word for "decided" is a gesture on the post —
+//! so a seventh would be a decision made here, in the open, rather than a
+//! tag list assembled somewhere else. Two facts about the relay are load-
+//! bearing there and are spelled out once, in the readers rather than in a
+//! caller: Buzz resolves a reaction's target from the **last** `e` tag of
+//! the event ([`targets`]), and a direct reply to a post carries **one** `e`
+//! tag, marked `reply`, while a nested reply carries two, the first marked
+//! `root` ([`is_direct_reply`]) — a nested reply is a conversation under the
+//! post, not a decision on it. And what the clerk already answered it
+//! finds the way it finds everything else, by reading the relay back: each
+//! of its replies carries the gesture it answers as a tag
+//! (`["r", "twalk:gesture:<id>"]`, [`answered_gesture`]), so a redelivery
+//! and a restart are one read ([`Relay::own_comments_on`]).
 
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
@@ -70,6 +85,24 @@ pub const KIND_FORUM_POST: u16 = 45001;
 pub const KIND_STREAM_MESSAGE: u16 = 9;
 /// A Buzz deletion of one of one's own events in a channel.
 pub const KIND_DELETE: u16 = 9005;
+/// A reaction (NIP-25): the owner's tick or cross on one of the clerk's
+/// posts. Buzz's own shape is one `["e", post_id]` tag and the emoji as the
+/// content — no `h`, the channel is the post's.
+pub const KIND_REACTION: u16 = 7;
+/// A Buzz forum comment: a reply in a post's thread, the owner's or the
+/// clerk's own.
+pub const KIND_FORUM_COMMENT: u16 = 45003;
+
+/// What every clerk reply's `r` tag starts with: the gesture it answers,
+/// `twalk:gesture:<event id>` ([`gesture_reference`]) — the reply's
+/// counterpart of a stream message's [`EVENT_REFERENCE_PREFIX`].
+pub const GESTURE_PREFIX: &str = "twalk:gesture:";
+
+/// How many post ids one `#e` filter names. The relay pushes `#e` down to
+/// its index whatever the count, so the bound is on the request and not on
+/// the answer: a clerk with a year of posts behind it must not put every
+/// id it ever wrote into one body, and one filter's `limit` is per filter.
+pub const GESTURE_QUERY_IDS: usize = 100;
 
 /// How long one request may take, end to end. The relay is on the same host
 /// or the same private network as the clerk on the reference deployment, and
@@ -220,6 +253,78 @@ pub fn references_event(event: &Event, bus_event_id: &str) -> bool {
         .any(|tag| tag.len() >= 2 && tag[0] == "r" && tag[1] == wanted)
 }
 
+/// The value of a clerk reply's `r` tag for the gesture `gesture_id`: what
+/// [`answered_gesture`] reads back, and what makes a redelivery of the bus
+/// event that carried the gesture's outcome a reply already written.
+pub fn gesture_reference(gesture_id: &str) -> String {
+    format!("{GESTURE_PREFIX}{gesture_id}")
+}
+
+/// Whether `event`, a reaction or a thread reply, targets `post_id`: the
+/// second element of its **last** `e` tag is `post_id`. The last one,
+/// because that is where Buzz's ingest reads a reaction's target from
+/// (`.tags.iter().rev().find_map(…)`), and a reader that took the first
+/// would count a reaction whose client quoted another post as a decision
+/// on that other post. For a direct reply the one `e` tag is the last; for
+/// a nested reply the last is the parent comment, so a nested reply never
+/// targets the post itself — which is right, it answers a comment.
+///
+/// A kind that is not a gesture — a delete names its target in an `e` tag
+/// too — targets nothing, whatever its tags say.
+pub fn targets(event: &Event, post_id: &str) -> bool {
+    let kind = event.kind.as_u16();
+    if kind != KIND_REACTION && kind != KIND_FORUM_COMMENT {
+        return false;
+    }
+    e_tags(event).last().is_some_and(|tag| tag[1] == post_id)
+}
+
+/// Whether `event` is a **direct** reply to `post_id`: a thread reply
+/// (kind 45003) with exactly one `e` tag, `["e", post_id, "", "reply"]` as
+/// Buzz's own builder writes it or `["e", post_id]` as a client that writes
+/// no marker does. A nested reply carries two `e` tags (the root and the
+/// parent), and one `e` tag marked `root` is the shape of a reply whose
+/// parent was left out — neither is a reply *to the post*, and only a reply
+/// to the post is the owner deciding on it.
+pub fn is_direct_reply(event: &Event, post_id: &str) -> bool {
+    if event.kind.as_u16() != KIND_FORUM_COMMENT {
+        return false;
+    }
+    let tags = e_tags(event);
+    let [tag] = tags.as_slice() else {
+        return false;
+    };
+    tag[1] == post_id
+        && matches!(
+            tag.get(3).map(String::as_str),
+            None | Some("") | Some("reply")
+        )
+}
+
+/// The gesture a clerk reply answers, read from its `r` tag
+/// (`twalk:gesture:<id>`), if it carries one. An `r` tag of another prefix
+/// — a stream message's bus event — is not a gesture, and a content that
+/// spells the reference is not a tag.
+pub fn answered_gesture(event: &Event) -> Option<&str> {
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|tag| tag.len() >= 2 && tag[0] == "r")
+        .find_map(|tag| tag[1].strip_prefix(GESTURE_PREFIX))
+        .filter(|id| !id.is_empty())
+}
+
+/// The `e` tags of `event`, in order, each with at least the id cell.
+fn e_tags(event: &Event) -> Vec<&[String]> {
+    event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice())
+        .filter(|tag| tag.len() >= 2 && tag[0] == "e")
+        .collect()
+}
+
 /// A Buzz relay, reached over HTTP under the clerk's own key.
 pub struct Relay {
     /// The URL the relay announces, with no trailing slash, so `{base}/events`
@@ -336,6 +441,76 @@ impl Relay {
             .await
     }
 
+    /// A reply (kind 45003) in the thread of `post_id`, one of the clerk's
+    /// own posts in `channel`, answering the gesture `gesture_id` — the
+    /// owner's reaction or reply that the answer is about. A **direct**
+    /// reply to the post, the way Buzz's own builder writes one
+    /// (`["e", post_id, "", "reply"]`, one `e` tag), so the owner reads it
+    /// under the post and not under their own comment; and tagged with the
+    /// gesture ([`gesture_reference`]) so [`Relay::own_comments_on`] finds
+    /// it again on a redelivery.
+    pub async fn comment(
+        &self,
+        channel: &str,
+        post_id: &str,
+        gesture_id: &str,
+        content: &str,
+    ) -> Result<Published, RelayError> {
+        self.publish(
+            KIND_FORUM_COMMENT,
+            comment_tags(channel, post_id, gesture_id),
+            content,
+        )
+        .await
+    }
+
+    /// The reactions (kind 7) and thread replies (kind 45003) on any of
+    /// `post_ids`, by anyone — the owner's gestures on the clerk's posts —
+    /// newest first, at most `limit` per query, one query per
+    /// [`GESTURE_QUERY_IDS`] ids ([`gestures_filters`]). No ids is no
+    /// query. Each event is answered once even when two of its `e` tags
+    /// name two of the ids (a nested reply names its root and its parent),
+    /// because a caller counts what it is given; and which post an event
+    /// is *on* is [`targets`]'s to say, never the filter's.
+    pub async fn gestures_on(
+        &self,
+        post_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<Event>, RelayError> {
+        self.query_each(gestures_filters(post_ids, limit)).await
+    }
+
+    /// The clerk's own thread replies (kind 45003) on any of `post_ids`:
+    /// the relay as the clerk's memory of which gestures it has answered
+    /// ([`answered_gesture`] on each), chunked like [`Relay::gestures_on`].
+    pub async fn own_comments_on(
+        &self,
+        post_ids: &[String],
+        limit: u32,
+    ) -> Result<Vec<Event>, RelayError> {
+        self.query_each(own_comments_filters(
+            &self.public_key_hex(),
+            post_ids,
+            limit,
+        ))
+        .await
+    }
+
+    /// One `POST /query` per filter, the answers concatenated and each
+    /// event kept once by id.
+    async fn query_each(&self, filters: Vec<Value>) -> Result<Vec<Event>, RelayError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut events = Vec::new();
+        for filter in filters {
+            for event in self.query(vec![filter]).await? {
+                if seen.insert(event.id) {
+                    events.push(event);
+                }
+            }
+        }
+        Ok(events)
+    }
+
     /// The clerk's own events of `kind` in `channel`, newest first, at most
     /// `limit`: the relay as the clerk's memory (ADR 0035).
     pub async fn own_posts(
@@ -429,6 +604,59 @@ pub fn own_lines_filter(pubkey_hex: &str, channel: &str, bus_event_id: &str, lim
         "authors": [pubkey_hex],
         "limit": limit,
     })
+}
+
+/// The filters that find the gestures on `post_ids`, by anyone: one per
+/// [`GESTURE_QUERY_IDS`] ids, each
+/// `{"kinds":[7,45003],"#e":[…],"limit":limit}` — no `authors`, because
+/// the reactor is the owner and not the clerk, and no `#h`, because a
+/// reaction carries no `h` tag at all (the relay derives its channel from
+/// the post). Empty for no ids: an empty `#e` would ask the relay for
+/// whatever it takes that to mean.
+pub fn gestures_filters(post_ids: &[String], limit: u32) -> Vec<Value> {
+    post_ids
+        .chunks(GESTURE_QUERY_IDS)
+        .map(|ids| {
+            serde_json::json!({
+                "kinds": [KIND_REACTION, KIND_FORUM_COMMENT],
+                "#e": ids,
+                "limit": limit,
+            })
+        })
+        .collect()
+}
+
+/// The filters that find the clerk's own thread replies on `post_ids`:
+/// [`gestures_filters`]'s shape for kind 45003 alone, by `pubkey_hex`.
+pub fn own_comments_filters(pubkey_hex: &str, post_ids: &[String], limit: u32) -> Vec<Value> {
+    post_ids
+        .chunks(GESTURE_QUERY_IDS)
+        .map(|ids| {
+            serde_json::json!({
+                "kinds": [KIND_FORUM_COMMENT],
+                "authors": [pubkey_hex],
+                "#e": ids,
+                "limit": limit,
+            })
+        })
+        .collect()
+}
+
+/// The tags of a clerk reply in the thread of `post_id`, answering
+/// `gesture_id`: `["h", channel]`, `["e", post_id, "", "reply"]` — Buzz's
+/// own direct-reply shape, root and parent being the same event — and
+/// `["r", "twalk:gesture:<gesture_id>"]`.
+fn comment_tags(channel: &str, post_id: &str, gesture_id: &str) -> Vec<Vec<String>> {
+    vec![
+        tag("h", channel),
+        vec![
+            "e".to_owned(),
+            post_id.to_owned(),
+            String::new(),
+            "reply".to_owned(),
+        ],
+        tag("r", &gesture_reference(gesture_id)),
+    ]
 }
 
 /// The `Authorization` header value for one `POST` of `body` to `url`:
@@ -836,6 +1064,251 @@ mod tests {
         assert!(!references_event(&about_other, id));
         assert!(references_event(&about_other, other));
         assert!(!references_event(&untagged, id));
+    }
+
+    /// Sixty-four hex characters that differ in their last two: a post id
+    /// the `nostr` crate standardises as an `e` tag, which is what the relay
+    /// will be handed.
+    fn post_id(n: usize) -> String {
+        format!("{:0>64x}", n + 1)
+    }
+
+    /// A signed event of `kind` with `tags`, for the pure readers below —
+    /// signed because [`Event`] cannot be built any other way, by a key
+    /// that is nobody's.
+    fn event_of(kind: u16, tags: Vec<Vec<String>>, content: &str) -> Event {
+        EventBuilder::new(Kind::Custom(kind), content)
+            .tags(
+                tags.iter()
+                    .map(|t| Tag::parse(t.iter().map(String::as_str)).unwrap()),
+            )
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    #[test]
+    fn gestures_filter_names_both_kinds_and_every_id() {
+        let ids = vec![post_id(0), post_id(1), post_id(2)];
+        let filters = gestures_filters(&ids, 500);
+        assert_eq!(
+            filters,
+            vec![serde_json::json!({
+                "kinds": [7, 45003],
+                "#e": [post_id(0), post_id(1), post_id(2)],
+                "limit": 500,
+            })]
+        );
+
+        // The clerk's own replies: the same `#e`, one kind, and its key.
+        let own = own_comments_filters(
+            "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d",
+            &ids,
+            500,
+        );
+        assert_eq!(
+            own,
+            vec![serde_json::json!({
+                "kinds": [45003],
+                "authors": ["3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"],
+                "#e": [post_id(0), post_id(1), post_id(2)],
+                "limit": 500,
+            })]
+        );
+
+        // No ids is no filter at all, never a filter with an empty `#e`,
+        // whose meaning is the relay's to choose.
+        assert!(gestures_filters(&[], 500).is_empty());
+        assert!(own_comments_filters("ab", &[], 500).is_empty());
+    }
+
+    #[test]
+    fn gestures_are_queried_in_chunks_of_100() {
+        let ids: Vec<String> = (0..250).map(post_id).collect();
+        let filters = gestures_filters(&ids, 1000);
+        assert_eq!(filters.len(), 3, "{filters:?}");
+        let sizes: Vec<usize> = filters
+            .iter()
+            .map(|f| f["#e"].as_array().unwrap().len())
+            .collect();
+        assert_eq!(sizes, vec![100, 100, 50]);
+        // Every id, once, in order; every filter both kinds and the limit.
+        let named: Vec<String> = filters
+            .iter()
+            .flat_map(|f| f["#e"].as_array().unwrap().iter())
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(named, ids);
+        for filter in &filters {
+            assert_eq!(filter["kinds"], serde_json::json!([7, 45003]));
+            assert_eq!(filter["limit"], serde_json::json!(1000));
+        }
+        // Exactly 100 is one chunk, 101 is two.
+        assert_eq!(gestures_filters(&ids[..100], 10).len(), 1);
+        assert_eq!(gestures_filters(&ids[..101], 10).len(), 2);
+    }
+
+    #[test]
+    fn comment_tags_are_h_e_reply_r() {
+        let tags = comment_tags(
+            "9b1ba94a-38c3-49fe-9eb0-ffaafa62571a",
+            &post_id(0),
+            &post_id(7),
+        );
+        assert_eq!(
+            tags,
+            vec![
+                vec![
+                    "h".to_owned(),
+                    "9b1ba94a-38c3-49fe-9eb0-ffaafa62571a".to_owned()
+                ],
+                vec![
+                    "e".to_owned(),
+                    post_id(0),
+                    String::new(),
+                    "reply".to_owned()
+                ],
+                vec!["r".to_owned(), format!("twalk:gesture:{}", post_id(7))],
+            ]
+        );
+        // What the tags say, read back by the same module's readers: a
+        // direct reply to the post, answering that gesture.
+        let comment = event_of(KIND_FORUM_COMMENT, tags, "Envoyé.");
+        assert!(is_direct_reply(&comment, &post_id(0)));
+        assert!(targets(&comment, &post_id(0)));
+        assert_eq!(answered_gesture(&comment), Some(post_id(7).as_str()));
+    }
+
+    #[test]
+    fn targets_reads_the_last_e_tag() {
+        let post = post_id(0);
+        let other = post_id(1);
+        let reaction = event_of(KIND_REACTION, vec![tag("e", &post)], "✅");
+        assert!(targets(&reaction, &post));
+        assert!(!targets(&reaction, &other));
+
+        // A reaction carrying two `e` tags (a client quoting what it reacts
+        // to): Buzz resolves the target from the last one, so this module
+        // does the same, or the two would disagree about which post was
+        // reacted to.
+        let two = event_of(KIND_REACTION, vec![tag("e", &other), tag("e", &post)], "✅");
+        assert!(targets(&two, &post));
+        assert!(!targets(&two, &other));
+
+        // A nested reply's last `e` is its parent, marked `reply`; its first
+        // is the root. The reply targets the parent.
+        let nested = event_of(
+            KIND_FORUM_COMMENT,
+            vec![
+                tag("h", "chan"),
+                vec![
+                    "e".to_owned(),
+                    post.clone(),
+                    String::new(),
+                    "root".to_owned(),
+                ],
+                vec![
+                    "e".to_owned(),
+                    other.clone(),
+                    String::new(),
+                    "reply".to_owned(),
+                ],
+            ],
+            "…",
+        );
+        assert!(targets(&nested, &other));
+        assert!(!targets(&nested, &post));
+
+        // No `e` tag targets nothing; and a kind that is not a gesture — a
+        // delete names a post in an `e` tag too — is not one.
+        let untagged = event_of(KIND_REACTION, vec![], "✅");
+        assert!(!targets(&untagged, &post));
+        let delete = event_of(KIND_DELETE, vec![tag("h", "chan"), tag("e", &post)], "");
+        assert!(!targets(&delete, &post));
+    }
+
+    #[test]
+    fn is_direct_reply_refuses_a_nested_reply() {
+        let post = post_id(0);
+        let parent = post_id(1);
+        let e = |id: &str, marker: &str| {
+            vec![
+                "e".to_owned(),
+                id.to_owned(),
+                String::new(),
+                marker.to_owned(),
+            ]
+        };
+        let direct = event_of(
+            KIND_FORUM_COMMENT,
+            vec![tag("h", "chan"), e(&post, "reply")],
+            "…",
+        );
+        assert!(is_direct_reply(&direct, &post));
+        assert!(!is_direct_reply(&direct, &parent));
+
+        // The bare shape a client that writes no marker produces.
+        let bare = event_of(
+            KIND_FORUM_COMMENT,
+            vec![tag("h", "chan"), tag("e", &post)],
+            "…",
+        );
+        assert!(is_direct_reply(&bare, &post));
+
+        // A nested reply under the post — root marked, parent marked — is
+        // a reply to the parent, not to the post, and not "direct" to
+        // either: two `e` tags.
+        let nested = event_of(
+            KIND_FORUM_COMMENT,
+            vec![tag("h", "chan"), e(&post, "root"), e(&parent, "reply")],
+            "…",
+        );
+        assert!(!is_direct_reply(&nested, &post));
+        assert!(!is_direct_reply(&nested, &parent));
+
+        // One `e` tag marked `root` alone is not a direct reply either.
+        let rooted = event_of(
+            KIND_FORUM_COMMENT,
+            vec![tag("h", "chan"), e(&post, "root")],
+            "…",
+        );
+        assert!(!is_direct_reply(&rooted, &post));
+
+        // A reaction with the very tag a bare reply has is not a reply.
+        let reaction = event_of(KIND_REACTION, vec![tag("e", &post)], "✅");
+        assert!(!is_direct_reply(&reaction, &post));
+    }
+
+    #[test]
+    fn answered_gesture_reads_the_r_tag() {
+        let gesture = post_id(7);
+        let answer = event_of(
+            KIND_FORUM_COMMENT,
+            comment_tags("chan", &post_id(0), &gesture),
+            "…",
+        );
+        assert_eq!(answered_gesture(&answer), Some(gesture.as_str()));
+
+        // The owner's own reply carries no `r` tag; a line about a bus
+        // event carries an `r` tag of another prefix; a content that
+        // spells the reference is not a tag.
+        let owner = event_of(
+            KIND_FORUM_COMMENT,
+            vec![tag("h", "chan"), tag("e", &post_id(0))],
+            &format!("twalk:gesture:{gesture}"),
+        );
+        assert_eq!(answered_gesture(&owner), None);
+        let line = event_of(
+            KIND_STREAM_MESSAGE,
+            vec![tag("h", "chan"), tag("r", &event_reference(&gesture))],
+            "…",
+        );
+        assert_eq!(answered_gesture(&line), None);
+        let empty = event_of(
+            KIND_FORUM_COMMENT,
+            vec![tag("h", "chan"), tag("r", GESTURE_PREFIX)],
+            "…",
+        );
+        assert_eq!(answered_gesture(&empty), None);
     }
 
     #[test]
