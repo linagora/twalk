@@ -164,7 +164,7 @@ LINAGORA's personal messaging interface; renders the user's conversations. Built
 Block's open-source, self-hostable workspace on the Nostr protocol, where humans and agents share channels and every message is a signed event on a relay the operator owns. Built outside this repo and not by LINAGORA, which this entry claimed until ADR 0032. It is where the user talks to Hermes and where approvals surface — a **surface** for approval and never its authority, since the Companion Gateway remains the single writer (ADR 0022).
 
 **Clerk**:
-The Twalk component that writes onto Buzz what the bus says and carries to the Companion Gateway what the owner decides there. A surface and never an authority (ADR 0032): it holds no consent snapshot, no store, no key of Hermes's, and no credential the Gateway would take for anyone but the owner's own device. Called *le greffier* in French.
+The Twalk component that writes onto Buzz what the bus says and carries the owner's ✅ to the Companion Gateway **as a device of theirs** (ADR 0036): signed in like a phone, named `Buzz` on the dashboard, revoked there like one. A surface and never an authority (ADR 0032): it holds no consent snapshot, no store, no key of Hermes's, and no credential the Gateway would take for anyone but the owner's own device — one refresh token, never the service token. Called *le greffier* in French.
 _Avoid_: "Buzz bot", "the Twalk agent", "herald"
 
 **Twake**:

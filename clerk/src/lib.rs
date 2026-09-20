@@ -11,8 +11,11 @@
 
 pub mod config;
 pub mod consumers;
+pub mod decision;
 pub mod events;
+pub mod gateway;
 pub mod metrics;
 pub mod reference;
+pub mod refusals;
 pub mod relay;
 pub mod text;

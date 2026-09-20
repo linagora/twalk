@@ -51,6 +51,7 @@ projects=(
   twalk-ci-nobridges
   twalk-ci-portals
   twalk-ci-loop
+  twalk-ci-clerk-deploy
 )
 
 echo '--- the per-run deployment projects'
@@ -78,7 +79,7 @@ echo '--- per-stack images'
 # Tagged per compose project (#38) so parallel worktrees never overwrite each
 # other's build. The operator's own `:local` tags are never touched.
 for project in "${projects[@]}"; do
-  for image in twalk/sensor twalk/companion-gateway twalk/hermes twalk/persona-assistant; do
+  for image in twalk/sensor twalk/companion-gateway twalk/hermes twalk/persona-assistant twalk/clerk; do
     docker image rm "$image:$project" >/dev/null 2>&1 || true
   done
 done
