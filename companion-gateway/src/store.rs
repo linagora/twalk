@@ -1770,6 +1770,55 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Every `network IN (…)` a migration ever wrote, as the set it admits.
+    fn admitted_by_the_checks() -> Vec<(usize, Vec<String>)> {
+        let mut checks = Vec::new();
+        for (version, migration) in MIGRATIONS.iter().enumerate() {
+            let mut rest = *migration;
+            while let Some(at) = rest.find("network IN (") {
+                let after = &rest[at + "network IN (".len()..];
+                let close = after.find(')').expect("a closed IN list");
+                let values: Vec<String> = after[..close]
+                    .split(',')
+                    .map(|value| value.trim().trim_matches('\'').to_owned())
+                    .collect();
+                checks.push((version + 1, values));
+                rest = &after[close..];
+            }
+        }
+        checks
+    }
+
+    /// The contract is the one authority for the network values (ADR 0033,
+    /// #268), and the store's `CHECK` constraints are copies of it — frozen
+    /// ones, since a migration is never edited in place. So this test says
+    /// exactly what they admit: the contract's values **minus `email`**,
+    /// which #270 is the migration to admit, by rebuilding the constrained
+    /// tables. When that lands, this test's expectation moves with it; until
+    /// then it is the one place the lag is written down.
+    #[test]
+    fn the_checks_admit_the_contracts_networks_except_the_one_the_next_migration_adds() {
+        let authority = twalk_test_harness::contract_definition_values("network")
+            .expect("the contract's network definition");
+        let not_yet_admitted = ["email"];
+        let expected: Vec<String> = authority
+            .iter()
+            .filter(|value| !not_yet_admitted.contains(&value.as_str()))
+            .cloned()
+            .collect();
+        let checks = admitted_by_the_checks();
+        assert!(
+            !checks.is_empty(),
+            "the migrations constrain network somewhere"
+        );
+        for (version, admitted) in checks {
+            assert_eq!(
+                admitted, expected,
+                "migration v{version}'s CHECK disagrees with the contract (minus what #270 admits)"
+            );
+        }
+    }
+
     const OWNER: &str = "@michel:example.com";
     const DOMAIN: &str = "example.com";
 

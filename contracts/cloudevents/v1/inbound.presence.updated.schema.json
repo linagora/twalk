@@ -74,8 +74,7 @@
       "description": "Optional W3C Trace Context traceparent header. Enables distributed tracing across Sensor, NATS, Hermes and downstream services without mandating a specific tracing backend."
     },
     "network": {
-      "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Identifies the network the SUBJECT is on, as the user experiences it; transport bridges (e.g. mautrix-gmessages) are never network values. Unlike every other event type, this one is not about traffic in a room, so the value is derived from something that identifies the subject — a bridge ghost's localpart, or the fact that they share a room no bridge marked — and never from an ordering over the rooms they happen to be in (ADR 0027). The value matrix is a native Matrix account, reached through the user's own homeserver instead of through a bridge (ADR 0009); a native Matrix contact who is also a member of a bridged portal room is still matrix, because that membership is an invitation and not an identity on that network. A subject the Sensor cannot attribute to exactly one network produces no event at all rather than an event under a guessed network, since consent is looked up by (subject, network)."
     },
     "consent": {

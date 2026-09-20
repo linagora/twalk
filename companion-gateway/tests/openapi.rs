@@ -1003,6 +1003,36 @@ fn mentions_call(arguments: &str, name: &str) -> bool {
     false
 }
 
+/// The contract is the one authority for the network values (ADR 0033, #268),
+/// and this description's `Network` schema is a copy: tested against what it
+/// copies, order included, so a network added to the contract fails here
+/// until the description — and the Companion's generated client behind it —
+/// knows it.
+#[test]
+fn the_networks_the_description_names_are_the_contracts() -> Result<()> {
+    let description = Description::load()?;
+    let authority = twalk_test_harness::contract_definition_values("network")?;
+    let copy: Vec<String> = description.doc["components"]["schemas"]["Network"]["enum"]
+        .as_array()
+        .context("components.schemas.Network.enum")?
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        copy, authority,
+        "openapi.yaml's Network schema disagrees with the contract"
+    );
+    // And no other inline copy of the list anywhere in the description: one
+    // schema, `$ref`'d — a second list is a second authority.
+    let text = std::fs::read_to_string(Description::path())?;
+    assert_eq!(
+        text.matches("enum: [whatsapp").count(),
+        1,
+        "openapi.yaml repeats the network list instead of referencing Network"
+    );
+    Ok(())
+}
+
 #[test]
 fn every_route_the_router_registers_is_described() -> Result<()> {
     let description = Description::load()?;

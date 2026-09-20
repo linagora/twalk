@@ -25,7 +25,9 @@ pub fn validate_against_contract(event: &Value, type_name: &str) -> Result<()> {
         &std::fs::read(&schema_path)
             .with_context(|| format!("failed to read schema {}", schema_path.display()))?,
     )?;
-    let validator = jsonschema::validator_for(&schema)
+    let validator = jsonschema::options()
+        .with_retriever(ContractRetriever)
+        .build(&schema)
         .map_err(|e| anyhow!("invalid schema {type_name}: {e}"))?;
     let errors = validator
         .iter_errors(event)
@@ -38,6 +40,64 @@ pub fn validate_against_contract(event: &Value, type_name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The base every contract schema's `$id` starts with. A `$ref` inside a
+/// schema resolves against it — `definitions/network.schema.json` becomes
+/// `https://schemas.twalk.dev/cloudevents/v1/definitions/network.schema.json`
+/// — and this is where the retriever below maps it back to the file.
+const SCHEMA_BASE: &str = "https://schemas.twalk.dev/cloudevents/v1/";
+
+/// Resolves a `$ref` between contract schemas from the contract directory,
+/// never from the network: the schemas are published under their `$id`, but
+/// a test that reached for the published copy would test the copy and not
+/// the repository, and would need a network to run at all.
+struct ContractRetriever;
+
+impl jsonschema::Retrieve for ContractRetriever {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let uri = uri.as_str();
+        let Some(relative) = uri.strip_prefix(SCHEMA_BASE) else {
+            return Err(format!(
+                "a contract schema references {uri}, which is not under {SCHEMA_BASE}: \
+                 contract schemas refer only to one another"
+            )
+            .into());
+        };
+        let path = contract_dir().join(relative);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("cannot read {} for {uri}: {error}", path.display()))?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+}
+
+/// One of the contract's shared definitions (`definitions/<name>.schema.json`),
+/// the authority a component's own copy of an enumeration is tested against.
+pub fn contract_definition(name: &str) -> Result<Value> {
+    let path = contract_dir()
+        .join("definitions")
+        .join(format!("{name}.schema.json"));
+    Ok(serde_json::from_slice(
+        &std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
+    )?)
+}
+
+/// The values a shared definition enumerates, in the contract's order.
+pub fn contract_definition_values(name: &str) -> Result<Vec<String>> {
+    contract_definition(name)?["enum"]
+        .as_array()
+        .context("the definition has no enum")?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .context("an enum value that is not a string")
+        })
+        .collect()
 }
 
 /// Loads one of the contract fixtures by type name.

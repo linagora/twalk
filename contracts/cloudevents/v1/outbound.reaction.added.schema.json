@@ -76,8 +76,7 @@
       ]
     },
     "network": {
-      "type": "string",
-      "enum": ["whatsapp", "telegram", "signal", "discord", "sms", "matrix"],
+      "$ref": "definitions/network.schema.json",
       "description": "Twalk extension. Identifies the network the user reacted on, as they experience it; transport bridges (e.g. mautrix-gmessages) are never network values. The value matrix is native Matrix traffic, sent from the user's own Matrix account (see ADR 0009). Enables server-side filtering on NATS without deserializing the data payload."
     },
     "data": {

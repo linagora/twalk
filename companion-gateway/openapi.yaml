@@ -4123,8 +4123,7 @@ components:
           type: string
           description: The persona that proposed the reply.
         network:
-          type: string
-          enum: [whatsapp, telegram, signal, discord, sms, matrix]
+          $ref: "#/components/schemas/Network"
           description: The network the reply goes out on.
         contact:
           type: string
@@ -4225,8 +4224,7 @@ components:
           type: string
           description: The persona that proposed it.
         network:
-          type: string
-          enum: [whatsapp, telegram, signal, discord, sms, matrix]
+          $ref: "#/components/schemas/Network"
           description: The network the message it answers arrived on.
         consent:
           type: string
@@ -5033,8 +5031,10 @@ components:
       description: |
         A messaging network as the user experiences it, and `matrix` for
         native rooms (ADR 0005, ADR 0009). The contract's own `network`
-        enum, exactly: a bridge id (`gmessages`) is never a network.
-      enum: [whatsapp, telegram, signal, discord, sms, matrix]
+        definition, exactly (`contracts/cloudevents/v1/definitions/network.schema.json`,
+        the one authority — `tests/openapi.rs` compares): a bridge id
+        (`gmessages`) is never a network; `email` is one (ADR 0033).
+      enum: [whatsapp, telegram, signal, discord, sms, matrix, email]
 
     ConsentState_State:
       type: string

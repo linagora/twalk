@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.twalk.dev/cloudevents/v1/definitions/network.schema.json",
+  "title": "Network",
+  "description": "The kind of messaging network a connection is of, as the user experiences it (ADR 0005: a transport bridge such as mautrix-gmessages is never a network value). This file is the ONE authority for the list (ADR 0033): every schema under contracts/ $refs it, and every component that holds a copy — the Sensor's and the Gateway's Rust enums, the store's SQL CHECK constraints, the Gateway's OpenAPI, the Companion's catalogue — has a conformance test that reads this file and fails on divergence. Add a value here first; the tests then name every copy to update. `email` is a network (ADR 0033: a mail is a message — a person, a body, a time, a thread), whatever transport carries it.",
+  "type": "string",
+  "enum": [
+    "whatsapp",
+    "telegram",
+    "signal",
+    "discord",
+    "sms",
+    "matrix",
+    "email"
+  ]
+}
