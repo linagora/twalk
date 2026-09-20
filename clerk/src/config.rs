@@ -25,6 +25,9 @@ pub const DEFAULT_STREAM: &str = "twalk";
 pub const DEFAULT_SUBJECT_PREFIX: &str = "twalk";
 pub const DEFAULT_NATS_URL: &str = "nats://localhost:4222";
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8084";
+/// How long a dead session waits before its refresh is tried again: an
+/// hour (`WriteHalf::session_retry`).
+pub const DEFAULT_SESSION_RETRY_SECONDS: u64 = 60 * 60;
 
 /// The interface languages the Companion ships, which are the five the
 /// Companion Gateway stores a preference among
@@ -105,6 +108,14 @@ pub struct WriteHalf {
     /// How often the clerk looks at the gestures on its posts (default
     /// 5 s).
     pub decision: Duration,
+    /// How long a session the Companion Gateway would not have waits
+    /// before the clerk tries its refresh again (`CLERK_SESSION_RETRY_SECONDS`,
+    /// default an hour): the retry `provision-clerk-device.sh` promises
+    /// will find a device signed in again without a restart. An hour is
+    /// often enough that a re-provisioned device is picked up within the
+    /// hour, rarely enough that a revoked one is not a hot loop of
+    /// refusals; a test sets seconds so that the retry can be watched.
+    pub session_retry: Duration,
 }
 
 impl Config {
@@ -202,6 +213,17 @@ impl Config {
                  for no reason"
             );
         }
+        if self
+            .write_half
+            .as_ref()
+            .is_some_and(|write| write.session_retry < Duration::from_secs(1))
+        {
+            bail!(
+                "CLERK_SESSION_RETRY_SECONDS must be at least 1: it is how long a session the \
+                 Companion Gateway would not have waits before its refresh is tried again, and \
+                 zero would be the hot loop of refusals the retry exists to avoid"
+            );
+        }
         Ok(())
     }
 }
@@ -245,6 +267,11 @@ fn build_write_half(vars: &dyn Fn(&str) -> Option<String>) -> Result<Option<Writ
                 gateway_url,
                 session_file: PathBuf::from(session_file),
                 decision: Duration::from_secs(number(vars, "CLERK_DECISION_SECONDS", 5)?),
+                session_retry: Duration::from_secs(number(
+                    vars,
+                    "CLERK_SESSION_RETRY_SECONDS",
+                    DEFAULT_SESSION_RETRY_SECONDS,
+                )?),
             }))
         }
         (owner_pubkey, gateway_url, session_file) => {
@@ -517,6 +544,30 @@ mod tests {
         v.extend_from_slice(WRITE_HALF);
         let c = Config::from_vars(&vars(&v)).unwrap();
         assert_eq!(c.write_half().unwrap().decision, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn session_retry_defaults_to_an_hour_and_is_at_least_a_second() {
+        let mut v = FULL.to_vec();
+        v.extend_from_slice(WRITE_HALF);
+        let c = Config::from_vars(&vars(&v)).unwrap();
+        assert_eq!(
+            c.write_half().unwrap().session_retry,
+            Duration::from_secs(3600)
+        );
+        v.push(("CLERK_SESSION_RETRY_SECONDS", "5"));
+        let c = Config::from_vars(&vars(&v)).unwrap();
+        assert_eq!(
+            c.write_half().unwrap().session_retry,
+            Duration::from_secs(5)
+        );
+        let mut v = FULL.to_vec();
+        v.extend_from_slice(WRITE_HALF);
+        v.push(("CLERK_SESSION_RETRY_SECONDS", "0"));
+        assert!(Config::from_vars(&vars(&v))
+            .unwrap_err()
+            .to_string()
+            .contains("CLERK_SESSION_RETRY_SECONDS"));
     }
 
     #[test]
