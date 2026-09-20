@@ -1236,10 +1236,15 @@ async fn answer_stranger(
 /// `POST /api/approvals` as the owner's device, and then, by what the
 /// Companion Gateway answered:
 ///
-/// - accepted, already recorded, or published-but-not-recorded
-///   ([`refusals::sent`]): the reply went out — the post deleted, a line in
-///   `activite` saying edited or not, the outcome counted (the last under
-///   its own code, so the number says what happened);
+/// - accepted, or published-but-not-recorded ([`refusals::sent`]): the
+///   reply went out — the post deleted, a line in `activite` saying edited
+///   or not, the outcome counted (the last under its own code, so the
+///   number says what happened);
+/// - already recorded (`409 already_approved`): the post deleted and
+///   `already_approved` counted, but **no** `activite` line — the decision
+///   was taken elsewhere (the approval screen, or an earlier tick whose
+///   line already exists) and "approved from Buzz" would misattribute it;
+///   the journal line from the `.posted` report records what went out;
 /// - refused with a code whose remedy is *retry* ([`Remedy::Retry`]: the
 ///   bus or the store behind the Gateway was out): tried again next tick,
 ///   like a Gateway that did not answer — an answer in the thread would
@@ -1350,7 +1355,13 @@ async fn carry(
                 total,
                 "the Companion Gateway accepted an approval from Buzz"
             );
-            went_out(clerk, tick, &post_id, suggestion_id, network, edited).await;
+            // An approval the Gateway already held was decided elsewhere —
+            // the approval screen, or an earlier tick whose line exists —
+            // so no "approved from Buzz" line: it would attribute the
+            // decision to this gesture. The journal line from the `.posted`
+            // report still records what went out.
+            let line = (!already).then(|| text::activity_approved(clerk.lang, network, edited));
+            went_out(clerk, tick, &post_id, suggestion_id, line.as_deref()).await;
         }
         Ok(Outcome::Refused { status, code }) if refusals::sent(&code) => {
             // The reply went out and the Companion Gateway could not write that down:
@@ -1365,7 +1376,8 @@ async fn carry(
                 total,
                 "the reply went out but the Companion Gateway could not record the approval"
             );
-            went_out(clerk, tick, &post_id, suggestion_id, network, edited).await;
+            let line = text::activity_approved(clerk.lang, network, edited);
+            went_out(clerk, tick, &post_id, suggestion_id, Some(&line)).await;
         }
         Ok(Outcome::Refused { status, code }) if refusals::remedy(&code) == Remedy::Retry => {
             let total = clerk
@@ -1485,27 +1497,31 @@ async fn session_revoked(
     .await;
 }
 
-/// An approval that went out: the post deleted, and — once it is — a line
-/// in `activite` saying so and whether the text was the owner's. The line
-/// follows the deletion, not the Companion Gateway's answer, so that a deletion the
-/// relay refused (tried again next tick, when the Gateway answers
-/// `already_approved`) does not put two lines in the feed.
+/// An approval that went out: the post deleted, and — once it is — `line`
+/// in `activite`, when there is one to write (`None` for an approval the
+/// Companion Gateway already held: decided elsewhere, not "from Buzz").
+/// The line follows the deletion, not the Gateway's answer. That rule has
+/// an accepted cost, and it is **zero lines rather than two**: a `201`
+/// whose deletion the relay refuses is carried again next tick, answered
+/// `409 already_approved`, deleted, and asked for no line — so an approval
+/// this clerk made a tick ago goes unannounced in `activite`. The clerk
+/// cannot tell its own last-tick approval from the screen's, because the
+/// `Approval` record carries no device id; and a line written on the
+/// Gateway's answer instead would be doubled whenever the deletion failed
+/// and misattributed whenever the screen approved first. The `.posted`
+/// journal line is the record of what went out either way.
 async fn went_out(
     clerk: &Clerk,
     tick: &mut DecisionsTick,
     post_id: &str,
     suggestion_id: &str,
-    network: &str,
-    edited: bool,
+    line: Option<&str>,
 ) {
     if delete_post(clerk, tick, post_id, suggestion_id, "approved").await {
         tick.approved += 1;
-        activity_line(
-            clerk,
-            &text::activity_approved(clerk.lang, network, edited),
-            suggestion_id,
-        )
-        .await;
+        if let Some(line) = line {
+            activity_line(clerk, line, suggestion_id).await;
+        }
     }
 }
 
