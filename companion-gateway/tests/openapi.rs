@@ -1495,6 +1495,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/portals/observation",
             "/api/portals/observation",
         ),
+        (Method::GET, "/api/runtime", "/api/runtime"),
         (Method::POST, "/api/approvals", "/api/approvals"),
         (
             Method::GET,
@@ -1731,6 +1732,20 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         None,
         503,
         Some("suggestions_not_configured"),
+    )
+    .await?;
+    // And whether a runtime is present (#189) is read off the same bus:
+    // with none, the answer is a refusal naming the variable and never
+    // `never`, which would claim that no runtime has ever been here.
+    call.check(
+        Method::GET,
+        &base,
+        "/api/runtime",
+        "/api/runtime",
+        &consent_cookie,
+        None,
+        503,
+        Some("runtime_not_configured"),
     )
     .await?;
     // The snapshot answers the same way, to the service token this Gateway
@@ -2976,6 +2991,28 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             None,
         )
         .await?;
+    // Whether a runtime is present (#189), on the same bus. Nothing in this
+    // suite runs a runtime or creates a persona consumer, so the honest
+    // answer is `never` with an empty list — the three states against real
+    // consumers are `tests/runtime.rs`'s.
+    let runtime = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/runtime",
+            "/api/runtime",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        runtime.body["presence"].as_str(),
+        Some("never"),
+        "no runtime has ever hosted a persona on this suite's bus: {}",
+        runtime.body
+    );
     assert!(
         listing.body["suggestions"]
             .as_array()
@@ -3164,6 +3201,19 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         &busless_base,
         "/api/suggestions/{suggestion_event_id}",
         &format!("/api/suggestions/{suggestion_id}"),
+        &[("twalk_device", busless_device.as_str())],
+        None,
+        502,
+        Some("bus_unreachable"),
+    )
+    .await?;
+    // The runtime read (#189) on a bus that does not answer is a 502 and not
+    // `never`: unknown is not absent.
+    call.check(
+        Method::GET,
+        &busless_base,
+        "/api/runtime",
+        "/api/runtime",
         &[("twalk_device", busless_device.as_str())],
         None,
         502,

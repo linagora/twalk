@@ -1,0 +1,98 @@
+# A real Buzz relay for the clerk's suite: the seam's other side (ticket
+# #265), the way the shared test stack is a real Synapse and a real NATS.
+#
+# Three containers and nothing else. The relay's only boot-time call to an
+# object store is the git conformance probe, and `BUZZ_GIT_CONFORMANCE_PROBE`
+# turns it off, so there is no MinIO here; Postgres keeps its data on tmpfs,
+# because nothing in this stack is worth keeping across a `down`.
+#
+# The relay is multi-tenant by host: at boot it seeds one community for the
+# authority of `RELAY_URL` and makes `RELAY_OWNER_PUBKEY` its owner. Every
+# NIP-98 request is then bound to that same host — the URL a client signs
+# must be `http://127.0.0.1:<port>/…`, and `localhost` would be a different
+# tenant that does not exist — which is why the harness and the clerk under
+# test are both handed `http://127.0.0.1:${TWALK_CLERK_TEST_RELAY_PORT}`
+# and nothing else.
+#
+# `BUZZ_REQUIRE_AUTH_TOKEN=true` closes the `X-Pubkey` dev shortcut: the
+# harness signs its own requests as the owner, and the clerk under test has
+# to sign its own, exactly as it would against the owner's real relay.
+#
+# The owner and relay keys below are test-only, on a relay that listens on
+# loopback: the owner's secret is the secp256k1 scalar 1 (the harness signs
+# with it, `harness::TEST_OWNER_SECRET_HEX`), and its public key is the
+# well-known generator point. Never reuse either anywhere.
+#
+# Lifecycle: the harness brings this up with `up -d --wait` under the
+# project `TWALK_CLERK_TEST_STACK` (default `twalk-clerk-test`), and it
+# persists across runs like the shared stack does. It goes with
+#
+#     docker compose -p twalk-clerk-test -f clerk/tests/compose.relay.yaml down -v
+
+name: ${TWALK_CLERK_TEST_STACK:-twalk-clerk-test}
+
+services:
+  relay:
+    image: ghcr.io/block/buzz@sha256:dffaf6695e5a243a0826ff1ca4b682536a1f92b285b55bfd912a5b8570bef560
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TWALK_CLERK_TEST_RELAY_PORT:-17800}:3000"
+    environment:
+      DATABASE_URL: postgres://buzz:test-only@postgres:5432/buzz
+      REDIS_URL: redis://redis:6379
+      # The community's host is 127.0.0.1:<port>: the port is part of it.
+      RELAY_URL: http://127.0.0.1:${TWALK_CLERK_TEST_RELAY_PORT:-17800}
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      # The public key of secret key 1 (`harness::TEST_OWNER_SECRET_HEX`).
+      RELAY_OWNER_PUBKEY: "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+      # The relay's own signing key: test-only. Quoted, because YAML reads an
+      # unquoted run of digits as a number and compose would hand the relay
+      # a float.
+      BUZZ_RELAY_PRIVATE_KEY: "2222222222222222222222222222222222222222222222222222222222222222"
+      BUZZ_REQUIRE_RELAY_MEMBERSHIP: "true"
+      # The clerk must sign; there is no X-Pubkey shortcut in tests.
+      BUZZ_REQUIRE_AUTH_TOKEN: "true"
+      BUZZ_ALLOW_NIP_OA_AUTH: "false"
+      BUZZ_AUTO_MIGRATE: "true"
+      # No MinIO: this is the only boot-time S3 call.
+      BUZZ_GIT_CONFORMANCE_PROBE: "false"
+      BUZZ_STORAGE_METRICS: "off"
+      BUZZ_AUDIT_ENABLED: "false"
+      RUST_LOG: buzz_relay=info
+    healthcheck:
+      # The image ships bash and no curl; `/_readiness` is on the health-only
+      # listener (8080), which is never published.
+      test: ["CMD", "bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080; printf 'GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    mem_limit: 256m
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: buzz
+      POSTGRES_PASSWORD: test-only
+      POSTGRES_DB: buzz
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U buzz -d buzz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    mem_limit: 256m
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    mem_limit: 64m

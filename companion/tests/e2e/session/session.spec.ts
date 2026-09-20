@@ -198,9 +198,10 @@ test('a token that died while nothing was refreshing is repaired centrally, once
 	await expect(page.getByTestId('scope-unknown')).toHaveCount(0);
 	await expect(page.getByTestId('session-expired')).toHaveCount(0);
 
-	// Once, centrally: one refusal, one refresh, and the call replayed. Not one
-	// refresh per screen, and not one per failed call — the refresh rotates
-	// both tokens, so a second one racing the first would destroy it.
+	// Once, centrally: however many calls were refused together, one refresh,
+	// and each call replayed. Not one refresh per screen, and not one per
+	// failed call — the refresh rotates both tokens, so a second one racing
+	// the first would destroy it.
 	//
 	// Polled rather than read once: a response the page has already acted on
 	// can still be on its way to this process, and a screen that rendered is
@@ -210,7 +211,16 @@ test('a token that died while nothing was refreshing is repaired centrally, once
 			message: 'exactly one refresh repaired the refusal'
 		})
 		.toBe(1);
-	expect(traffic.refusals.map((entry) => entry.url)).toEqual(['/api/bridges']);
+	// The screen reads two things on mount — its perimeter and whether a
+	// runtime is here (#177) — and both were issued with the dead token, so
+	// both were refused; the point above is that one refresh repaired both.
+	// Every refusal is one of those reads, and there is at least one.
+	const refused = traffic.refusals.map((entry) => entry.url);
+	expect(refused.length).toBeGreaterThan(0);
+	expect(new Set(refused).size).toBe(refused.length);
+	for (const url of refused) {
+		expect(['/api/bridges', '/api/runtime']).toContain(url);
+	}
 });
 
 test('a tab that slept through its refresh catches up when it wakes', async ({

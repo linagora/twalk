@@ -69,6 +69,30 @@ impl Resolver {
         &self.root
     }
 
+    /// The build id of the Companion this directory holds, or `None`.
+    ///
+    /// SvelteKit writes it as `_app/version.json` (`{"version": "…"}`), the
+    /// same value the running app carries as `$app/environment`'s `version`
+    /// and the service worker as `$service-worker`'s. Served in `/health` as
+    /// `companion_build` (#222), so a browser can tell the build it *runs*
+    /// from the build the Gateway *ships* — the difference nothing could name
+    /// while an owner reloaded a fixed screen five times and saw the old one.
+    ///
+    /// Read from disk on every call rather than once at startup: the file is
+    /// small, the read is a `/health` poll, and the export is baked into the
+    /// image so it does not change under a running process — but a directory
+    /// mounted from the host does, and a stale value would be exactly the
+    /// lie this is meant to end.
+    pub fn build_id(&self) -> Option<String> {
+        let path = self.root.join("_app").join("version.json");
+        let text = std::fs::read_to_string(path).ok()?;
+        let document: serde_json::Value = serde_json::from_str(&text).ok()?;
+        document["version"]
+            .as_str()
+            .filter(|version| !version.is_empty())
+            .map(str::to_owned)
+    }
+
     /// Resolves a request path (still percent-encoded, as it arrives on the
     /// wire).
     pub async fn resolve(&self, request_path: &str) -> Resolution {

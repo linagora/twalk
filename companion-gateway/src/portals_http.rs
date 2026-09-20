@@ -166,6 +166,10 @@ fn register_json(register: &Register, crowd_threshold: u64) -> serde_json::Value
                 "network_conversation_id": portal.network_conversation_id,
                 "members": portal.members,
                 "observation": portal.observation.label(),
+                // Where the owner's own account stands: the fact that decides
+                // whether an approved reply into this conversation can be
+                // delivered at all (#216), read here and never guessed.
+                "owner_membership": portal.owner.map(|owner| owner.label()),
                 "moved_from": portal.moved_from,
                 "unreadable": portal.unreadable,
             }))
@@ -221,7 +225,7 @@ fn api_error(status: StatusCode, code: &str, detail: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::portals::{BridgeReading, Portal};
+    use crate::portals::{BridgeReading, OwnerMembership, Portal};
 
     fn portal(room_id: &str, name: &str, members: u64, observation: Observation) -> Portal {
         Portal {
@@ -232,6 +236,7 @@ mod tests {
             network_conversation_id: None,
             members,
             observation,
+            owner: Some(OwnerMembership::Invited),
             moved_from: None,
             unreadable: None,
             replaced_by: None,

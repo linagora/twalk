@@ -475,6 +475,31 @@ The other kind — a reply that reached the bus and that the Sensor could not po
 into the room — is **not visible from this origin at all**: nothing publishes an
 event for it and no route reports it. The screen does not invent a row for it.
 
+### Published is not delivered, and the screen never says "sent" (#216)
+
+The first human approval on the reference deployment was true in every word on
+the screen — approved by the owner, published at position 2581, posted into the
+room — and the contact received nothing: the owner's account was not in the
+portal room, and a bridge relays only what the logged-in user's own account
+sends. So the screen has two sentences where it had one, and neither is "sent".
+
+**Before the button**, `delivery` — the Gateway's read of where the owner's own
+account stands in the trigger's room, asked of the homeserver as the bridge's
+bot. `cannot_reach` is a certainty and is drawn as a warning: approving would
+publish a reply nobody receives, and the copy names #123 (the device that acts
+in the owner's name has to have joined the conversation) so a reader knows it is
+a known gap in the mechanism and not a fault in their setup. `can_reach` is the
+register's best reading. `unknown` is a room no bridge bot can read, with its
+reason, and the honest word for it — never `can_reach` on a guess. The button
+stays whatever the answer: the Gateway is the authority on refusing an approval,
+and a screen that hid it would be a second, disagreeing one.
+
+**After it**, `posted` — the Sensor's own report of what the reply reached once
+it posted it (`contact` or `nobody`, and by which account), or "not yet" while
+there is none. `postedCopy` in `rows.ts` is what decides the sentence and it
+never reads `approval.publication` (`rows.test.ts` pins that): "published on
+your event stream" is the approval's own sentence, and delivery is the next one.
+
 ### The dashboard gets a count and a link, and not a word of the text
 
 The same reasoning as the pending chip, one screen further out: the home screen

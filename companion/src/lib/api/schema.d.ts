@@ -906,10 +906,16 @@ export interface paths {
          *     account and discovered on submit that one existed, a network screen
          *     that rendered an expired session as "your server could not be reached".
          *
-         *     `bootstrapped` is whether this deployment has its one account. It is
-         *     the same fact the registration relay refuses on, so this publishes
-         *     nothing a registration attempt would not reveal. `homeserver` is the
-         *     server name, which is in the deployment's own DNS.
+         *     `bootstrapped` is whether this deployment has its one account — on the
+         *     homeserver, whoever created it. The Gateway's own memory of the
+         *     registration relay succeeding settles it when that row exists; when it
+         *     does not (an account provisioned by hand, a state directory recreated
+         *     or restored from before onboarding), the homeserver is asked, because
+         *     a working deployment whose owner is told it has no account and shown
+         *     no way in is the failure this operation exists to end (ticket #133).
+         *     It is the same fact the registration relay refuses on, so this
+         *     publishes nothing a registration attempt would not reveal.
+         *     `homeserver` is the server name, which is in the deployment's own DNS.
          *
          *     Absent by design: the owner's Matrix ID. Naming the human who owns a
          *     deployment to anyone who can reach it is a different disclosure, and no
@@ -1086,6 +1092,61 @@ export interface paths {
          *     decisions the user made.
          */
         post: operations["setPortalObservation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/runtime": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether a persona runtime is hosting personas here.
+         * @description A projection of the bus's consumer list, stored nowhere. The runtime
+         *     creates one durable consumer per persona it hosts (`persona-<id>`)
+         *     and the persona pulls from it in a loop; that consumer is the one
+         *     thing a runtime leaves behind, and it outlives the process that made
+         *     it — so existence alone would say "a runtime was once here", and this
+         *     read says more.
+         *
+         *     `presence` is one of three words, distinguishable by the caller and
+         *     not only in the Gateway's log:
+         *
+         *     - `never` — no persona consumer on the stream: no runtime configured
+         *       with a persona has ever run against this bus;
+         *     - `gone` — consumers exist and none is live: a runtime was here and
+         *       is not now;
+         *     - `present` — at least one consumer has a pull outstanding or a
+         *       message delivered and awaiting its ack: a runtime is here, hosting
+         *       personas.
+         *
+         *     A consumer is **live** when a process is on the other end right now:
+         *     a pull request waiting (`waiting_pulls`), or a message taken and not
+         *     yet acknowledged (`ack_pending`, which is what a persona in a model
+         *     call looks like between two fetches). The persona's loop leaves a gap
+         *     of milliseconds between one pull expiring and the next, so the read
+         *     samples the list more than once before calling a consumer idle. The
+         *     one residual is stated: a persona that crashed mid-message reads as
+         *     live until the bus redelivers, which is the consumer's `ack_wait`.
+         *
+         *     Not read: whether a `hermes` container or process is up. The
+         *     reference deployment deliberately keeps an unconfigured runtime
+         *     running and hosting nothing (ADR 0015, ADR 0023), so presence of the
+         *     process would be the wrong fact.
+         *
+         *     Each persona is listed with the counters its verdict was read from,
+         *     and with `activation` — the filter subject the runtime set on the
+         *     consumer (ADR 0013): `active`, or `paused`, which is a runtime that
+         *     is here and a persona that receives nothing.
+         */
+        get: operations["readRuntimePresence"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1583,6 +1644,17 @@ export interface components {
             network: components["schemas"]["Network"];
             /** @description The persona that proposed the reply. */
             persona_id: string;
+            /**
+             * @description The Sensor's own report of what the reply reached once it posted
+             *     it, or `null` while there is none (issue #216). Present on
+             *     `GET /api/approvals/{id}` and on a suggestion's `approval`; never
+             *     on the `POST` answer, because at that moment the reply has been
+             *     published and not yet posted — which is the whole distinction:
+             *     `publication` says the reply reached the bus, `posted` says what
+             *     it reached from there. A client must never render one as the
+             *     other.
+             */
+            posted?: null | components["schemas"]["PostedReport"];
             /**
              * @description Whether the reply reached the bus. Both values are terminal and
              *     neither is "in flight": an approval is published inside its own
@@ -2228,6 +2300,41 @@ export interface components {
             user_id: string;
         };
         /**
+         * @description Whether an approved reply could reach the contact, as far as this
+         *     Gateway can tell **before** it is sent (issue #216). Read from the
+         *     room the trigger arrived in — its *envelope*, never its body — and
+         *     from where the owner's own account stands in that room, asked of the
+         *     homeserver as the bridge's bot.
+         *
+         *     Three answers, and the third is honest rather than optimistic.
+         *     `cannot_reach` is a certainty: the room is a portal of a configured
+         *     bridge and the owner's account is not joined to it, so nothing posted
+         *     there is relayed, whatever else is true — the mechanism that changes
+         *     it is #123 (a device of the owner's account, joined on the bridge
+         *     bot's invitation). `can_reach` is the register's best reading: the
+         *     owner is joined, which is what a bridge relays from. `unknown` is a
+         *     room no bridge bot of this deployment can read — native Matrix
+         *     (ADR 0009), which reaches its reader with no bridge in the way, or a
+         *     portal of a bridge with no token — and the Sensor's own report
+         *     (`posted`) is the answer there, after the fact.
+         */
+        Delivery: {
+            /**
+             * @description The one word behind the answer. `owner_invited` is the common
+             *     `cannot_reach`: the bridge invited the owner into the
+             *     conversation and no device of theirs has accepted — every portal,
+             *     on a deployment with no owner device configured; that room, on one
+             *     whose device could not join it (#237). `trigger_out_of_reach` is
+             *     the message this suggestion answers lying beyond the read window,
+             *     so its room could not be read; `lookup_failed` is the bus not
+             *     answering that second read.
+             * @enum {string}
+             */
+            detail: "owner_joined" | "owner_invited" | "owner_absent" | "not_a_known_portal" | "portal_unreadable" | "no_portal_register" | "no_owner_configured" | "trigger_out_of_reach" | "lookup_failed";
+            /** @enum {string} */
+            reach: "can_reach" | "cannot_reach" | "unknown";
+        };
+        /**
          * @description One device in the list. Dates are seconds since the epoch: the
          *     Gateway carries no date library, and a client renders local time
          *     from a number as readily as from a string.
@@ -2337,6 +2444,16 @@ export interface components {
             path?: string;
         };
         Health: {
+            /**
+             * @description The build id of the Companion this origin serves, read from the
+             *     export's own `_app/version.json` — the value the running app
+             *     carries as its own build. The Companion compares the two (#222):
+             *     a browser running a build the Gateway no longer ships is holding
+             *     a stale shell, and reloads once, then says so — the version-skew
+             *     that used to be invisible while the server reported itself
+             *     current. `null` when the export carries no id.
+             */
+            companion_build: string | null;
             /**
              * @description The revision the binary was built from, or `unknown`.
              *     Provenance, not part of the handshake.
@@ -2691,6 +2808,36 @@ export interface components {
              */
             total: number;
         };
+        /** @description One persona the runtime created a consumer for. */
+        PersonaPresence: {
+            /** @description Messages delivered and not yet acknowledged at the last sample. */
+            ack_pending: number;
+            /**
+             * @description What the runtime set the consumer's filter subject to: the
+             *     inbound subject (`active`) or the paused subject nothing
+             *     publishes on (`paused`, ADR 0013).
+             * @enum {string}
+             */
+            activation: "active" | "paused";
+            /**
+             * @description The consumer's durable name on the stream.
+             * @example persona-assistant
+             */
+            consumer: string;
+            /**
+             * @description `live` - a pull is outstanding or a delivered message awaits its
+             *     ack; `idle` - neither, across every sample.
+             * @enum {string}
+             */
+            liveness: "live" | "idle";
+            /**
+             * @description The persona's id, as its consumer's name carries it.
+             * @example assistant
+             */
+            persona_id: string;
+            /** @description Pull requests outstanding at the last sample. */
+            waiting_pulls: number;
+        };
         /** @description One conversation, as the homeserver answers about it now. */
         Portal: {
             /**
@@ -2759,6 +2906,20 @@ export interface components {
              * @enum {string}
              */
             observation: "observing" | "invited" | "absent" | "moved";
+            /**
+             * @description Where the **owner's own account** stands in this room — the fact
+             *     that decides whether an approved reply into this conversation can
+             *     be delivered at all (issue #216, ADR 0025). A bridge relays only
+             *     what the logged-in user's own account sends, so `join` is what a
+             *     reply needs; `invite` is the bridge having asked and no device of
+             *     the owner's having accepted — every portal on a deployment with
+             *     no owner device (#123), or a room that device could not join
+             *     (#237); `absent` is not in the room and not asked. `null` when
+             *     this register was built with no owner to ask about, or for a
+             *     successor it could not read.
+             * @enum {string|null}
+             */
+            owner_membership: "join" | "invite" | "absent" | null;
             /**
              * @description The portal room on this deployment's homeserver — the room that
              *     is **alive**. A room replaced by another (`m.room.tombstone`) is
@@ -2933,6 +3094,32 @@ export interface components {
              */
             total: number;
         };
+        /**
+         * @description What the Sensor said one approved reply reached, once it posted it
+         *     (issue #216, ADR 0025). The Sensor republishes the approval unchanged
+         *     on `twalk.persona.reply.approved.v1.posted` with two headers, and this
+         *     is those headers. Published on the good case as well as the bad one:
+         *     a report that existed only when something failed would make success a
+         *     silence.
+         */
+        PostedReport: {
+            /** @description The Matrix ID the reply was posted by. */
+            posted_as: string;
+            /**
+             * @description `contact` — the reply was posted by a device of the owner's own
+             *     account into a room the owner is a joined member of, which is what
+             *     a bridge relays; or the room is native Matrix (ADR 0009) with no
+             *     bridge in the way.
+             *     `nobody` — the reply was posted as `@sensor:` into a portal room.
+             *     Synapse accepted it and the bridge ignored it, because a bridge
+             *     relays only the logged-in user's own account (#123): the message
+             *     exists in a room the contact cannot see.
+             * @enum {string}
+             */
+            reach: "contact" | "nobody";
+            /** @description Where on the bus the report landed. */
+            stream_sequence: number;
+        };
         /** @description A decision as the journal holds it. */
         RecordedConsentDecision: {
             /**
@@ -3011,6 +3198,23 @@ export interface components {
             credential_source: "file" | "companion" | null;
             model: string;
             params: Record<string, unknown> | null;
+        };
+        /**
+         * @description Whether a persona runtime is present, read off the bus's consumer
+         *     list (ticket #189), and the evidence per persona.
+         */
+        RuntimePresence: {
+            /**
+             * @description One row per consumer the runtime created, live or not, in
+             *     consumer-name order. Empty exactly when `presence` is `never`.
+             */
+            personas: components["schemas"]["PersonaPresence"][];
+            /**
+             * @description `never` - no persona consumer exists; `gone` - consumers exist
+             *     and none is live; `present` - at least one is live.
+             * @enum {string}
+             */
+            presence: "never" | "gone" | "present";
         };
         /**
          * @description Everything the Hermes runtime injects into a persona's environment.
@@ -3145,6 +3349,7 @@ export interface components {
              * @enum {string}
              */
             consent: "granted" | "pending" | "revoked";
+            delivery: components["schemas"]["Delivery"];
             /**
              * @description The CloudEvents id of the `persona.suggest.produced.v1`. This is
              *     what `POST /api/approvals` takes as `suggestion_event_id`.
@@ -3161,6 +3366,14 @@ export interface components {
             network: components["schemas"]["Network"];
             /** @description The persona that proposed it. */
             persona_id: string;
+            /**
+             * @description The Sensor's report of what the approved reply reached, once it
+             *     posted it, or `null` while there is none — before the approval,
+             *     while the Sensor has not posted it yet, or when the report lies
+             *     beyond the read window. Never the same fact as
+             *     `approval.publication` (#216).
+             */
+            posted: null | components["schemas"]["PostedReport"];
             /**
              * Format: date-time
              * @description When the persona produced the suggestion.
@@ -5302,11 +5515,14 @@ export interface operations {
                 };
             };
             /**
-             * @description `sign_in_not_configured` — this deployment has no owner at all — or
-             *     `store_unreadable`, when the Gateway's store could not be read. A
-             *     store that cannot answer is never reported as "no account yet":
-             *     that would send a returning user back to the account form, which is
-             *     the journey this operation exists to end.
+             * @description `sign_in_not_configured` — this deployment has no owner at all;
+             *     `store_unreadable`, when the Gateway's store could not be read and
+             *     the homeserver could not answer either; or
+             *     `homeserver_unreachable`, when the store has no row and the
+             *     homeserver could not be asked. A source that cannot answer is never
+             *     reported as "no account yet": that would send a returning user back
+             *     to the account form, which is the journey this operation exists to
+             *     end.
              */
             503: {
                 headers: {
@@ -5315,7 +5531,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "sign_in_not_configured" | "store_unreadable";
+                        error?: "sign_in_not_configured" | "store_unreadable" | "homeserver_unreachable";
                     };
                 };
             };
@@ -5489,6 +5705,63 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             503: components["responses"]["PortalsNotConfigured"];
+        };
+    };
+    readRuntimePresence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The read, as the bus answers about it right now. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuntimePresence"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `bus_unreachable` - the bus is configured and did not answer, so
+             *     whether a runtime is present is unknown. Never `never`: a bus that
+             *     cannot be asked and a bus with no runtime on it are two
+             *     situations, and the screen must be able to tell them apart.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "bus_unreachable";
+                    };
+                };
+            };
+            /**
+             * @description `runtime_not_configured` - this Gateway has no bus
+             *     (`GATEWAY_NATS_URL`), so there is nothing to read a runtime's
+             *     presence from. A refusal rather than `never`: "no runtime has
+             *     ever been here" and "this Gateway is not watching the bus" are
+             *     different claims, and only the first is about the runtime.
+             *     `sign_in_not_configured` when the whole API is closed.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "runtime_not_configured" | "sign_in_not_configured";
+                    };
+                };
+            };
         };
     };
     getSession: {

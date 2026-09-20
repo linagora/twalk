@@ -50,10 +50,11 @@
 	be false. That is the same rule as the cards below, one level up.
 -->
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 
 	import { gateway } from '$lib/api/client';
 	import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
+	import { rereadWhileUnsettled, type Rereader } from '$lib/networks/reread';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t, type MessageKey } from '$lib/i18n';
 	import {
@@ -63,6 +64,7 @@
 		type BridgeRow,
 		type CardState
 	} from '$lib/networks/catalogue';
+	import { connectionOf } from '$lib/networks/connection';
 
 	let bridges = $state<BridgeRow[]>([]);
 	let bridgesKnown = $state(false);
@@ -71,14 +73,41 @@
 	let loaded = $state(false);
 	let ios = $state(false);
 
-	onMount(async () => {
+	let rereader: Rereader | null = null;
+
+	onMount(() => {
 		ios = looksLikeIos(navigator.userAgent, navigator.maxTouchPoints, navigator.platform);
+		// Read now, and again while the answer is transient (#148): a Gateway
+		// that did not answer, or one that answered and could not ask a bridge
+		// at that instant, is a card that would otherwise read *unknown* for
+		// as long as this page is open. A refusal is not re-asked — a `401` is
+		// repaired centrally (#111), and a `4xx` is an answer.
+		rereader = rereadWhileUnsettled(readBridges, () => loaded && transient);
+	});
+
+	onDestroy(() => {
+		rereader?.stop();
+	});
+
+	async function readBridges() {
 		const listed = await gateway.GET('/api/bridges').catch(() => null);
 		bridgesKnown = listed !== null && listed.error === undefined;
 		bridgesTrouble = bridgesKnown ? null : troubleOf(listed);
 		bridges = listed?.data?.bridges ?? [];
 		loaded = true;
-	});
+	}
+
+	/**
+	 * Whether the last read is worth asking again: the list could not be read
+	 * for a reason that is not a refusal, or it could and some bridge could not
+	 * be asked (`connection.state === 'unknown'`, the `whoami` that did not
+	 * answer). Both are the Gateway's word for "not now", and neither is the
+	 * Gateway's word for "no".
+	 */
+	const transient = $derived(
+		(!bridgesKnown && bridgesTrouble === 'unreachable') ||
+			(bridgesKnown && bridges.some((bridge) => connectionOf(bridge).state === 'unknown'))
+	);
 
 	const grid = $derived<CardState[]>(gridFor({ bridges, bridgesKnown, ios }));
 

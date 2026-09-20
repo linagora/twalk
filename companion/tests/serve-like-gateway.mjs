@@ -67,6 +67,16 @@ const OPENAPI = resolve(join(here, '..', '..', 'companion-gateway', 'openapi.yam
  * started by hand.
  */
 const BUILD_ID = process.env.TWALK_TEST_BUILD_ID ?? buildId(ROOT);
+
+/** SvelteKit's build id from the export, as the Gateway reads it (#222). */
+function companionBuild() {
+	try {
+		const parsed = JSON.parse(readFileSync(join(ROOT, '_app', 'version.json'), 'utf8'));
+		return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : null;
+	} catch {
+		return null;
+	}
+}
 /** When this process started, so a leftover can say how old it is. */
 const STARTED_AT = new Date().toISOString();
 /**
@@ -322,7 +332,12 @@ const server = createServer((request, response) => {
 			json(response, 200, {
 				status: 'ok',
 				version: GATEWAY_VERSION,
-				revision: GATEWAY_REVISION
+				revision: GATEWAY_REVISION,
+				// What the Gateway reads off the export's own `_app/version.json`
+				// (#222): the build this server ships, for the browser to compare
+				// with the one it runs. `null` when the export carries none, as
+				// the Gateway answers.
+				companion_build: companionBuild()
 			});
 			return;
 		}

@@ -432,6 +432,30 @@ pub fn room_from_source(source: &str) -> Option<String> {
     Some(room.to_owned())
 }
 
+/// What the Sensor said one approved reply reached, once it posted it
+/// (issue #216): its report is the approval event republished unchanged on
+/// `twalk.persona.reply.approved.v1.posted`, and what it says is in two
+/// headers. `contact` means a bridge relays it — posted by the owner's own
+/// account into a portal, or native Matrix with no bridge in the way;
+/// `nobody` means it was posted as `@sensor:` into a portal, which the
+/// bridge ignores (#123).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Posted {
+    pub reach: String,
+    pub posted_as: String,
+    pub stream_sequence: u64,
+}
+
+/// The two headers of a posted report, as `sensor/src/outbound.rs` names them.
+pub const POSTED_REACH_HEADER: &str = "reach";
+pub const POSTED_AS_HEADER: &str = "posted-as";
+
+/// The report's envelope: the approval's own id, and nothing else read.
+#[derive(Debug, Deserialize)]
+struct PostedEnvelope {
+    id: String,
+}
+
 /// What the Gateway reads of a suggestion event.
 #[derive(Debug, Deserialize)]
 struct SuggestionDocument {
@@ -888,8 +912,9 @@ impl Approvals {
                 jetstream,
                 &bus_subject(crate::contacts::INBOUND_MESSAGE_TYPE),
                 None,
-                |payload| {
-                    let document: TriggerEnvelopeDocument = serde_json::from_slice(payload).ok()?;
+                |message| {
+                    let document: TriggerEnvelopeDocument =
+                        serde_json::from_slice(&message.payload).ok()?;
                     (document.id == wanted).then_some(document)
                 },
             )
@@ -1009,6 +1034,55 @@ impl Approvals {
 
     /// One approval this Gateway recorded, or `None` when this suggestion was
     /// never approved. The answer to "did my reply go out?".
+    /// What the Sensor said one published reply reached, when it has said
+    /// (issue #216): the approval republished unchanged on the `.posted`
+    /// sibling subject, with `reach` and `posted-as` as headers. Read from
+    /// the publication's own position forward, since the report follows the
+    /// reply. `None` when the Sensor has not posted it yet, or when the
+    /// report lies beyond the window — and the bus being unreachable is
+    /// `None` too, logged, because this is a fact *about* a record that was
+    /// already read and must not turn that read into a refusal.
+    pub async fn posted(&self, recorded: &RecordedApproval) -> Option<Posted> {
+        let sequence = recorded.stream_sequence?;
+        let jetstream = match self.jetstream().await {
+            Ok(jetstream) => jetstream,
+            Err(error) => {
+                warn!(%error, "the bus did not answer a read of the Sensor's posted reports");
+                return None;
+            }
+        };
+        let wanted = recorded.event_id.clone();
+        let found = self
+            .scan_forward(
+                jetstream,
+                &format!("{}.posted", bus_subject(REPLY_APPROVED_TYPE)),
+                sequence,
+                |message| {
+                    let envelope: PostedEnvelope = serde_json::from_slice(&message.payload).ok()?;
+                    if envelope.id != wanted {
+                        return None;
+                    }
+                    let headers = message.headers.as_ref()?;
+                    let header =
+                        |name: &str| headers.get(name).map(|value| value.as_str().to_owned());
+                    let stream_sequence = message.info().map(|info| info.stream_sequence).ok()?;
+                    Some(Posted {
+                        reach: header(POSTED_REACH_HEADER)?,
+                        posted_as: header(POSTED_AS_HEADER)?,
+                        stream_sequence,
+                    })
+                },
+            )
+            .await;
+        match found {
+            Ok(posted) => posted,
+            Err(error) => {
+                warn!(%error, "the Sensor's posted reports could not be read");
+                None
+            }
+        }
+    }
+
     pub fn recorded(&self, suggestion_event_id: &str) -> Result<Option<RecordedApproval>> {
         self.store.approval(suggestion_event_id)
     }
@@ -1229,8 +1303,9 @@ impl Approvals {
                 jetstream,
                 &bus_subject(SUGGEST_PRODUCED_TYPE),
                 None,
-                |payload| {
-                    let document: SuggestionDocument = serde_json::from_slice(payload).ok()?;
+                |message| {
+                    let document: SuggestionDocument =
+                        serde_json::from_slice(&message.payload).ok()?;
                     (document.id == event_id).then_some(document)
                 },
             )
@@ -1300,8 +1375,9 @@ impl Approvals {
                 jetstream,
                 &bus_subject(crate::contacts::INBOUND_MESSAGE_TYPE),
                 Some(suggestion.stream_sequence),
-                |payload| {
-                    let document: TriggerDocument = serde_json::from_slice(payload).ok()?;
+                |message| {
+                    let document: TriggerDocument =
+                        serde_json::from_slice(&message.payload).ok()?;
                     (document.id == trigger_event_id).then_some(document)
                 },
             )
@@ -1336,6 +1412,81 @@ impl Approvals {
         })
     }
 
+    /// Reads one subject from `start` forward, for at most the window, and
+    /// returns the first message a predicate accepts. The report of a posted
+    /// reply follows the reply, so this reads the other way from [`Self::scan`].
+    async fn scan_forward<T>(
+        &self,
+        jetstream: &async_nats::jetstream::Context,
+        filter_subject: &str,
+        start: u64,
+        mut matches: impl FnMut(&async_nats::jetstream::Message) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let mut stream = jetstream
+            .get_stream(STREAM_NAME)
+            .await
+            .context("failed to reach the bus stream")?;
+        let last_sequence = stream
+            .info()
+            .await
+            .context("failed to read the bus stream's state")?
+            .state
+            .last_sequence;
+        if last_sequence < start {
+            return Ok(None);
+        }
+        let ceiling = start.saturating_add(self.lookup_window).min(last_sequence);
+        let name = format!(
+            "gateway-posted-lookup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or_default()
+        );
+        let consumer = stream
+            .create_consumer(async_nats::jetstream::consumer::pull::Config {
+                name: Some(name.clone()),
+                filter_subject: filter_subject.to_owned(),
+                deliver_policy: async_nats::jetstream::consumer::DeliverPolicy::ByStartSequence {
+                    start_sequence: start,
+                },
+                ack_policy: async_nats::jetstream::consumer::AckPolicy::None,
+                inactive_threshold: LOOKUP_CONSUMER_IDLE,
+                ..Default::default()
+            })
+            .await
+            .context("failed to open a read of the bus")?;
+        let mut batch = consumer
+            .fetch()
+            .max_messages(usize::try_from(ceiling - start + 1).unwrap_or(usize::MAX))
+            .messages()
+            .await
+            .context("failed to read from the bus")?;
+        let mut found = None;
+        {
+            use futures::StreamExt;
+            while let Some(message) = batch.next().await {
+                let Ok(message) = message else { break };
+                let sequence = message
+                    .info()
+                    .map(|info| info.stream_sequence)
+                    .unwrap_or_default();
+                if sequence > ceiling {
+                    break;
+                }
+                if let Some(hit) = matches(&message) {
+                    found = Some(hit);
+                    break;
+                }
+            }
+        }
+        if let Err(error) = stream.delete_consumer(&name).await {
+            debug!(%error, "failed to delete the posted lookup's consumer");
+        }
+        Ok(found)
+    }
+
     /// Reads the tail of one subject, newest window first, and returns the
     /// first message a predicate accepts.
     ///
@@ -1349,7 +1500,7 @@ impl Approvals {
         jetstream: &async_nats::jetstream::Context,
         filter_subject: &str,
         anchor: Option<u64>,
-        mut matches: impl FnMut(&[u8]) -> Option<T>,
+        mut matches: impl FnMut(&async_nats::jetstream::Message) -> Option<T>,
     ) -> Result<Found<T>> {
         let mut stream = jetstream
             .get_stream(STREAM_NAME)
@@ -1410,7 +1561,7 @@ impl Approvals {
                 if sequence > ceiling {
                     break;
                 }
-                if let Some(hit) = matches(&message.payload) {
+                if let Some(hit) = matches(&message) {
                     // Newest wins: the loop keeps going only until a match,
                     // and the contract's ids are unique, so the first match
                     // is the only one.
