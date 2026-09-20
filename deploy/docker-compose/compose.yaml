@@ -715,6 +715,17 @@ services:
   # Empty on CLERK_RELAY_URL, the key file or any of the three channels, the
   # container starts, says which are missing and hosts nothing (see
   # clerk-entrypoint.sh): a stack without Buzz still comes up.
+  #
+  # Its write half (ticket #284, ADR 0036) is the owner's ✅ on Buzz carried
+  # to the Companion Gateway as an approval — made as **a device of the
+  # owner** named `Buzz`, the way a phone is, and revocable from the
+  # dashboard like one. The only credential that takes is a refresh token,
+  # in a file the clerk owns and rotates, on a host directory mounted below;
+  # none of it is in this environment, and the Gateway's service token in
+  # particular is not — `clerk/src/config.rs` reads this block and fails on
+  # any variable that names a credential. Empty on CLERK_OWNER_PUBKEY and
+  # CLERK_GATEWAY_SESSION_DIR, the clerk runs its read half alone and says
+  # at startup that a ✅ decides nothing.
   clerk:
     build:
       # The repository root, for the same reason as the Sensor's and the
@@ -735,6 +746,17 @@ services:
       # that does not exist, so a typo shows up as the entrypoint refusing
       # to start and naming the variable, not as a clerk that signs nothing.
       - ${CLERK_NOSTR_KEY_FILE:-/dev/null}:/run/secrets/clerk.key:ro
+      # The clerk's session on the Companion Gateway (#284): a *directory*
+      # on the host, mounted read-write, holding the one file
+      # `provision-clerk-device.sh` writes and the clerk rewrites on every
+      # refresh — atomically, a temporary file beside it renamed over, which
+      # is why the mount is the directory and never the file: a bind-mounted
+      # file cannot be renamed over from inside. Unset, /dev/null is mounted
+      # here, which is not a directory, and the entrypoint turns the write
+      # half off (or refuses, when CLERK_OWNER_PUBKEY is set and this is
+      # not). The entrypoint hands the directory and the file to the
+      # unprivileged `clerk` account before dropping to it.
+      - ${CLERK_GATEWAY_SESSION_DIR:-/dev/null}:/var/lib/clerk
     tmpfs:
       # Where the entrypoint installs its copy of the key, owned by the
       # unprivileged `clerk` account, for the binary to read (see
@@ -759,12 +781,34 @@ services:
       # The language the clerk writes its own sentences in — never a
       # contact's words, which it never quotes. Set it here explicitly: on
       # the reference deployment the personas take their language from the
-      # Companion's own settings (#184), which the clerk cannot read — it
-      # holds no Gateway credential, by design — so HERMES_USER_LANGUAGE is
-      # typically empty and falling through to it would not reach what the
-      # user actually chose. Unset means English, and the clerk warns at
-      # startup that it is unset.
+      # Companion's own settings (#184), which the clerk cannot read — that
+      # read takes the Gateway's service token, which the clerk holds no
+      # copy of, by design — so HERMES_USER_LANGUAGE is typically empty and
+      # falling through to it would not reach what the user actually chose.
+      # Unset means English, and the clerk warns at startup that it is
+      # unset. Since #284 this is also the language a Gateway refusal is
+      # answered in, in a post's thread, with the Companion's own sentence.
       CLERK_USER_LANGUAGE: ${CLERK_USER_LANGUAGE:-${HERMES_USER_LANGUAGE:-}}
+      # The write half (#284, ADR 0036): the owner's Nostr public key, the
+      # one key whose ✅ is an approval — from configuration, never read off
+      # the relay, because a relay that could name a second approver would
+      # be an authority (ADR 0032). 64 hex characters, as .env holds it.
+      CLERK_OWNER_PUBKEY: ${CLERK_OWNER_PUBKEY:-}
+      # The Companion Gateway as the clerk reaches it, from the host's
+      # network namespace: this stack's published port on loopback unless
+      # the operator names another. The default exists only when the owner's
+      # key is set, because the clerk refuses a write half with some of its
+      # variables and not all — an empty CLERK_OWNER_PUBKEY must leave this
+      # empty too.
+      CLERK_GATEWAY_URL: ${CLERK_GATEWAY_URL:-${CLERK_OWNER_PUBKEY:+http://127.0.0.1:${GATEWAY_HTTP_PORT:-8080}}}
+      # The container's side of the session directory mounted above; set
+      # only when the host directory is, for the same reason as the URL.
+      # What the file holds is the refresh token of the owner's `Buzz`
+      # device — the write half's whole credential, and the reason nothing
+      # in this block is one.
+      CLERK_GATEWAY_SESSION_FILE: ${CLERK_GATEWAY_SESSION_DIR:+/var/lib/clerk/session}
+      # How often the clerk reads the gestures on its own posts.
+      CLERK_DECISION_SECONDS: ${CLERK_DECISION_SECONDS:-5}
       # /health and /metrics, on the host's loopback since this is the
       # host's namespace: the port is the operator's to choose, the
       # interface is not.
