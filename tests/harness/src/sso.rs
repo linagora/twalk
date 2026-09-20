@@ -1,5 +1,5 @@
 //! A fake SSO, and the two services a grant from it opens (issue #274, ADR
-//! 0033): what the collector's `oidc` module and its `consent` command are
+//! 0033): what the collector's `oidc` module and its `authorize` command are
 //! tested against, so that no test needs `sso.linagora.com`, a real client
 //! secret, or a browser.
 //!
@@ -43,9 +43,20 @@ use tokio::net::{TcpListener, TcpStream};
 /// The client the fake knows, as the deployment would configure it.
 pub const CLIENT_ID: &str = "twalk-collector-test";
 pub const CLIENT_SECRET: &str = "test-only-client-secret";
-/// How long an access token lives, in seconds — short, so a test that waits
-/// for a renewal does not wait long.
+/// How long an access token lives, in seconds: an hour, what a real SSO
+/// issues. A test that wants a renewal asks for one (a stale token, a
+/// revocation) rather than waiting.
 pub const ACCESS_TOKEN_SECONDS: u64 = 3600;
+
+/// Writes `CLIENT_SECRET` into `dir/client-secret` at mode 0600 — the shape
+/// the collector accepts a secret file in — and returns the path.
+pub fn write_client_secret(dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("client-secret");
+    std::fs::write(&path, format!("{CLIENT_SECRET}\n"))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(path)
+}
 
 #[derive(Default)]
 struct State {
@@ -68,10 +79,9 @@ struct State {
     /// The listener's port: the issuer discovery names has to be this fake.
     port: u16,
     /// What happened, for the assertions: every token request's grant type,
-    /// every refresh token presented, every access token a service saw.
+    /// every refresh token presented.
     token_requests: Vec<String>,
     refresh_tokens_presented: Vec<String>,
-    service_bearers: Vec<(&'static str, String)>,
     counter: u64,
 }
 
@@ -176,12 +186,15 @@ impl FakeSso {
         Ok(format!("{redirect_uri}?code={code}&state={state}"))
     }
 
-    /// Kills the grant: the next renewal answers `invalid_grant`, which is
+    /// Kills the grant, as an SSO's revocation does: the access tokens it
+    /// issued die with it, so a service answers 401 to the next request, and
+    /// the renewal that must follow answers `invalid_grant` — which is
     /// `reconnect_required`.
     pub fn revoke(&self) {
         let mut guard = self.lock();
         guard.revoked = true;
         guard.refresh_token = None;
+        guard.access_tokens.clear();
     }
 
     /// Makes one service (`"jmap"` or `"caldav"`) refuse every token with
@@ -216,11 +229,6 @@ impl FakeSso {
     /// Every token request's grant type, in order.
     pub fn token_requests(&self) -> Vec<String> {
         self.lock().token_requests.clone()
-    }
-
-    /// Every bearer a service saw, with the service's name.
-    pub fn service_bearers(&self) -> Vec<(&'static str, String)> {
-        self.lock().service_bearers.clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -449,9 +457,6 @@ fn service(
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
         .map(|(_, token)| token.trim().to_owned());
-    if let Some(token) = &bearer {
-        guard.service_bearers.push((name, token.clone()));
-    }
     if guard.refusing.contains(&name) {
         return Some((
             "403 Forbidden",
@@ -513,7 +518,7 @@ fn percent_decode(value: &str) -> String {
 }
 
 /// PKCE S256: base64url, no padding, of the SHA-256 of the verifier.
-pub fn s256(verifier: &str) -> String {
+fn s256(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     base64url(&digest)
 }

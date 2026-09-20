@@ -65,7 +65,7 @@ impl Config {
             client_secret_file: PathBuf::from(required("COLLECTOR_OIDC_CLIENT_SECRET_FILE")?),
             redirect_uri: required("COLLECTOR_OIDC_REDIRECT_URI")?,
             scopes: optional_string("COLLECTOR_OIDC_SCOPES")
-                .unwrap_or_else(|| "openid email offline_access".to_owned())
+                .unwrap_or_else(|| "openid profile email offline_access".to_owned())
                 .split_whitespace()
                 .map(str::to_owned)
                 .collect(),
@@ -91,6 +91,23 @@ impl Config {
             "the collector holds no connection: set COLLECTOR_MAIL_CONNECTION and/or \
              COLLECTOR_CALENDAR_CONNECTION to the ids GATEWAY_CONNECTIONS declares"
         );
+        let gateway_url = optional_string("COLLECTOR_GATEWAY_URL");
+        let gateway_service_token = optional_string("COLLECTOR_GATEWAY_SERVICE_TOKEN");
+        // The Gateway's two variables go together, as the Sensor's do
+        // (`sensor/src/config.rs`): half a configuration would skip the
+        // registry check exactly like none, but silently.
+        match (&gateway_url, &gateway_service_token) {
+            (Some(_), None) => anyhow::bail!(
+                "COLLECTOR_GATEWAY_URL is set without COLLECTOR_GATEWAY_SERVICE_TOKEN: the \
+                 registry is read with the Companion Gateway's service token (its own \
+                 GATEWAY_SERVICE_TOKEN)"
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "COLLECTOR_GATEWAY_SERVICE_TOKEN is set without COLLECTOR_GATEWAY_URL: there is \
+                 no Companion Gateway to read the registry from"
+            ),
+            _ => {}
+        }
         Ok(Self {
             oidc,
             services: Services {
@@ -99,8 +116,8 @@ impl Config {
             },
             owner_email: required("COLLECTOR_OWNER_EMAIL")?,
             connections,
-            gateway_url: optional_string("COLLECTOR_GATEWAY_URL"),
-            gateway_service_token: optional_string("COLLECTOR_GATEWAY_SERVICE_TOKEN"),
+            gateway_url,
+            gateway_service_token,
             nats_url: required("COLLECTOR_NATS_URL")?,
             host: optional_string("COLLECTOR_HOST").unwrap_or_else(|| "collector".to_owned()),
             state_dir,

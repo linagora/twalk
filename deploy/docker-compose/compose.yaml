@@ -843,7 +843,7 @@ services:
   # it needs an OIDC client at the deployment's SSO, a client secret as a
   # file, and a grant the owner gives at the terminal (#274) — none of which
   # a fresh deployment has. `docker compose --profile collector run --rm
-  # collector consent` is the one interactive step; `docker compose
+  # collector authorize` is the one interactive step; `docker compose
   # --profile collector up -d collector` afterwards. One process per grant:
   # the mail connection and the calendar connection of one SSO account are
   # two connections in GATEWAY_CONNECTIONS and one container here.
@@ -861,7 +861,7 @@ services:
       # at a fixed path; the entrypoint copies it for the collector's account
       # and refuses a file readable by others (see collector-entrypoint.sh).
       - ${COLLECTOR_OIDC_CLIENT_SECRET_FILE:-/dev/null}:/run/secrets/collector-client-secret:ro
-      # The grant (`oidc/grant.json`, mode 0600), written by `consent` and
+      # The grant (`oidc/grant.json`, mode 0600), written by `authorize` and
       # rewritten on every renewal — atomically, a temporary file beside it
       # renamed over, which is why the mount is a volume and never a file.
       - collector-data:/data
@@ -876,7 +876,7 @@ services:
       COLLECTOR_OIDC_ISSUER: ${COLLECTOR_OIDC_ISSUER:-}
       COLLECTOR_OIDC_CLIENT_ID: ${COLLECTOR_OIDC_CLIENT_ID:-}
       COLLECTOR_OIDC_REDIRECT_URI: ${COLLECTOR_OIDC_REDIRECT_URI:-}
-      COLLECTOR_OIDC_SCOPES: ${COLLECTOR_OIDC_SCOPES:-openid email offline_access}
+      COLLECTOR_OIDC_SCOPES: ${COLLECTOR_OIDC_SCOPES:-openid profile email offline_access}
       COLLECTOR_JMAP_SESSION_URL: ${COLLECTOR_JMAP_SESSION_URL:-}
       COLLECTOR_CALDAV_URL: ${COLLECTOR_CALDAV_URL:-}
       COLLECTOR_OWNER_EMAIL: ${COLLECTOR_OWNER_EMAIL:-}

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::process::Command;
 use twalk_collector::oidc::{Client, Settings};
-use twalk_test_harness::sso::{CLIENT_ID, CLIENT_SECRET};
+use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
 use twalk_test_harness::{
     ensure_stack, nats_url, poll_until, validate_against_contract, Bus, FakeSso,
 };
@@ -32,14 +32,12 @@ impl Run {
     async fn prepare(name: &str) -> Result<Self> {
         let sso = FakeSso::start(OWNER).await?;
         let dir = tempfile::tempdir()?;
-        std::fs::write(
-            dir.path().join("client-secret"),
-            format!("{CLIENT_SECRET}\n"),
-        )?;
+        write_client_secret(dir.path())?;
+        // Nanoseconds since the epoch: runs on the shared bus must not read
+        // each other's events, and the id stays within the contract's 64.
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-            % 1_000_000;
+            .as_nanos();
         Ok(Self {
             sso,
             dir,
@@ -59,12 +57,12 @@ impl Run {
         }
     }
 
-    /// The operator's consent, done through the library the binary uses.
-    async fn consent(&self) -> Result<()> {
+    /// The operator's authorization, done through the library the binary uses.
+    async fn authorize(&self) -> Result<()> {
         let client = Client::discover(self.settings()).await?;
-        let started = client.begin_consent()?;
+        let started = client.begin_authorization()?;
         let callback = self.sso.sign_in(&started.authorization_url)?;
-        client.complete_consent(&started, &callback).await?;
+        client.complete_authorization(&started, &callback).await?;
         Ok(())
     }
 
@@ -195,7 +193,7 @@ async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_r
     ensure_stack().await?;
     let bus = Bus::connect().await?;
     let run = Run::prepare("revoked").await?;
-    run.consent().await?;
+    run.authorize().await?;
     let collector = run.start()?;
 
     let connected = wait_for_state(&bus, &run.mail, "connected").await?;
@@ -214,25 +212,26 @@ async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_r
     let calendar = wait_for_state(&bus, &run.calendar, "connected").await?;
     assert_eq!(calendar["data"]["kind"], "calendar");
 
-    // The SSO revokes the grant; the access token is still fresh, so the
-    // collector learns it at its next renewal — forced here by a short
-    // token life in the fake? No: the fake's tokens live an hour, so the
-    // collector is told by the services instead. Both roads lead to the same
-    // word once the token is gone; a revocation the services notice first
-    // reads as pending_operator until the SSO refuses the renewal. So the
-    // test revokes, then restarts the collector, which renews at start.
+    // The SSO revokes the grant while the collector's access token is
+    // still fresh by its own clock. A service answers 401 to it; the
+    // collector does not take a service's word for `pending_operator` on a
+    // token it has not just renewed — it renews first, the SSO answers
+    // `invalid_grant`, and that is `reconnect_required`, from `connected`,
+    // in the same run, without a restart.
     run.sso.revoke();
-    collector.stop().await;
-    let collector = run.start()?;
     let refused = wait_for_state(&bus, &run.mail, "reconnect_required").await?;
     validate_against_contract(&refused, "connection.status.changed")?;
-    assert_eq!(
-        refused["data"]["from_state"], "unknown",
-        "a new run starts from unknown"
+    assert_eq!(refused["data"]["from_state"], "connected");
+    assert!(
+        states_of(&bus, &run.mail)
+            .await?
+            .iter()
+            .all(|event| event["data"]["to_state"] != "pending_operator"),
+        "a revocation is never reported as the operator's misconfiguration"
     );
     assert_eq!(refused["data"]["service"], "sso");
     let hint = refused["data"]["hint"].as_str().unwrap_or_default();
-    assert!(hint.contains("consent --renew"), "{hint}");
+    assert!(hint.contains("authorize --renew"), "{hint}");
     for line in collector.logs().await {
         assert!(
             !line.contains("refresh-") && !line.contains("access-"),
@@ -249,7 +248,7 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
     ensure_stack().await?;
     let bus = Bus::connect().await?;
     let run = Run::prepare("refusing").await?;
-    run.consent().await?;
+    run.authorize().await?;
     run.sso.refuse("caldav");
     let collector = run.start()?;
 
@@ -292,7 +291,7 @@ async fn a_grant_for_another_account_publishes_nothing_and_names_the_account() -
     let mut run = Run::prepare("stranger").await?;
     // The grant is obtained at an SSO whose account is not the owner's.
     run.sso = FakeSso::start("somebody@example.com").await?;
-    run.consent().await?;
+    run.authorize().await?;
     let collector = run.start()?;
 
     let pending = wait_for_state(&bus, &run.mail, "pending_operator").await?;
@@ -317,10 +316,10 @@ async fn a_grant_for_another_account_publishes_nothing_and_names_the_account() -
 }
 
 #[tokio::test]
-async fn a_connection_the_registry_does_not_know_is_refused_at_start() -> Result<()> {
+async fn a_registry_that_cannot_be_read_is_refused_at_start() -> Result<()> {
     ensure_stack().await?;
     let run = Run::prepare("unregistered").await?;
-    run.consent().await?;
+    run.authorize().await?;
     // A Gateway that answers a registry without this connection: the fake
     // SSO stands in for the Gateway's snapshot route with an empty registry
     // — it answers 404 there, which the collector reads as a refusal to

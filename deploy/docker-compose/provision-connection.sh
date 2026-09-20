@@ -7,7 +7,7 @@
 #
 # This is the operator route, in the shape of provision-owner-device.sh:
 # the one interactive step a deployment of the collector has. It runs the
-# collector's own `consent` command inside the collector's container, with
+# collector's own `authorize` command inside the collector's container, with
 # the stack's .env, so the grant lands where the running collector reads it
 # (the collector-data volume, `oidc/grant.json`, mode 0600) and nothing has
 # to be copied afterwards.
@@ -56,8 +56,8 @@ if [ ! -s "$secret_file" ]; then
   exit 1
 fi
 
-# The collector's own consent command, in its own container, with the
+# The collector's own authorize command, in its own container, with the
 # stack's .env and stdin attached for the one line you paste. No token is
 # printed by it, and none is passed on a command line here.
 cd "$DEPLOY_DIR"
-exec docker compose --env-file "$ENV_FILE" --profile collector run --rm -i collector consent $RENEW
+exec docker compose --env-file "$ENV_FILE" --profile collector run --rm -i collector authorize $RENEW

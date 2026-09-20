@@ -29,8 +29,8 @@
 //! expects: an audience, a scope, a client the service was not told about.
 //! The operator changes the *client*, not the grant, so this is
 //! [`ServiceRefusal::pending_operator`], named per service. Folding the two
-//! into one "unauthorized" would send the operator to re-consent for a
-//! problem consent cannot fix, or to reconfigure a client for a grant that is
+//! into one "unauthorized" would send the operator to re-authorize for a
+//! problem authorizing again cannot fix, or to reconfigure a client for a grant that is
 //! simply gone.
 //!
 //! # What is never printed
@@ -81,7 +81,9 @@ struct Discovery {
 }
 
 /// The grant on disk: the one thing the collector persists about the SSO.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Its `Debug` names everything but the token, so a `{:?}` in a log line
+/// cannot be the leak.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
     pub issuer: String,
     pub client_id: String,
@@ -89,6 +91,17 @@ pub struct Grant {
     /// When this refresh token was obtained — for the operator reading the
     /// file, not for any decision here.
     pub obtained_at: String,
+}
+
+impl std::fmt::Debug for Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Grant")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("refresh_token", &"<redacted>")
+            .field("obtained_at", &self.obtained_at)
+            .finish()
+    }
 }
 
 impl Grant {
@@ -144,11 +157,21 @@ impl Grant {
 
 use std::os::unix::fs::PermissionsExt;
 
-/// A short-lived access token, held in memory only.
-#[derive(Debug, Clone)]
+/// A short-lived access token, held in memory only. `Debug` shows when it
+/// expires and never what it is.
+#[derive(Clone)]
 pub struct AccessToken {
     pub token: String,
     pub expires_at: SystemTime,
+}
+
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccessToken")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl AccessToken {
@@ -175,10 +198,10 @@ pub enum Renewal {
     Unreachable { detail: String },
 }
 
-/// A consent flow the operator is in the middle of: the link they open, and
+/// An authorization the operator is in the middle of: the link they open, and
 /// what the callback must match.
 #[derive(Debug, Clone)]
-pub struct StartedConsent {
+pub struct StartedAuthorization {
     pub authorization_url: String,
     state: String,
     verifier: String,
@@ -234,10 +257,10 @@ impl Client {
         &self.settings
     }
 
-    /// The first half of consent: the link the operator opens in a browser.
+    /// The first half of the authorization: the link the operator opens in a browser.
     /// PKCE S256 and a random `state`, both minted here and both checked when
     /// the callback comes back.
-    pub fn begin_consent(&self) -> Result<StartedConsent> {
+    pub fn begin_authorization(&self) -> Result<StartedAuthorization> {
         let verifier = random_token(32);
         let state = random_token(16);
         let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
@@ -250,7 +273,7 @@ impl Client {
             ("code_challenge", &challenge),
             ("code_challenge_method", "S256"),
         ]);
-        Ok(StartedConsent {
+        Ok(StartedAuthorization {
             authorization_url: format!("{}?{query}", self.discovery.authorization_endpoint),
             state,
             verifier,
@@ -262,9 +285,9 @@ impl Client {
     /// verifier; a grant with no refresh token is refused, because a
     /// collector that cannot renew is one that stops working in an hour.
     /// The grant is on disk when this returns.
-    pub async fn complete_consent(
+    pub async fn complete_authorization(
         &self,
-        started: &StartedConsent,
+        started: &StartedAuthorization,
         callback: &str,
     ) -> Result<Grant> {
         let (_, query) = callback
@@ -273,7 +296,7 @@ impl Client {
         let params = parse_form(query);
         anyhow::ensure!(
             params.get("state").map(String::as_str) == Some(started.state.as_str()),
-            "the callback's state is not the one this consent started with: paste the \
+            "the callback's state is not the one this authorization started with: paste the \
              address the SSO redirected to, from this run and not an earlier one"
         );
         if let Some(error) = params.get("error") {
@@ -379,15 +402,16 @@ impl Client {
                 ),
             });
         }
-        let tokens: TokenResponse =
-            match serde_json::from_value(body) {
-                Ok(tokens) => tokens,
-                Err(error) => return Ok(Renewal::Unreachable {
+        let tokens: TokenResponse = match serde_json::from_value(body) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                return Ok(Renewal::Unreachable {
                     detail: format!(
                         "the SSO's token response is missing what a token response has: {error}"
                     ),
-                }),
-            };
+                })
+            }
+        };
         // The rotated token, on disk first. An SSO that did not rotate hands
         // the same token back, and writing it again costs nothing.
         let rotated = Grant {
@@ -409,14 +433,34 @@ impl Client {
         })
     }
 
+    /// The client secret, read at each use so a rotated file is the next
+    /// request's secret. Refused when the file is readable by anyone but its
+    /// owner, the way the clerk refuses its key (`clerk/src/relay.rs`): the
+    /// entrypoint checks the same thing, and the binary run outside it
+    /// deserves the same refusal.
     fn client_secret(&self) -> Result<String> {
-        let text =
-            std::fs::read_to_string(&self.settings.client_secret_file).with_context(|| {
+        let path = &self.settings.client_secret_file;
+        let mode = std::fs::metadata(path)
+            .with_context(|| {
                 format!(
                     "failed to read the client secret from {} (COLLECTOR_OIDC_CLIENT_SECRET_FILE)",
-                    self.settings.client_secret_file.display()
+                    path.display()
                 )
-            })?;
+            })?
+            .permissions()
+            .mode()
+            & 0o777;
+        anyhow::ensure!(
+            mode & 0o077 == 0,
+            "the client secret file {} is readable by group or others (mode {mode:o}): chmod 0600 it",
+            path.display()
+        );
+        let text = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "failed to read the client secret from {} (COLLECTOR_OIDC_CLIENT_SECRET_FILE)",
+                path.display()
+            )
+        })?;
         let secret = text.trim().to_owned();
         anyhow::ensure!(
             !secret.is_empty(),
@@ -496,9 +540,27 @@ impl Identities {
     /// The services whose account is not `owner`, with what they said: a
     /// grant for another account is nothing to publish from, and the log
     /// names the account so the operator sees whose it was.
+    /// The two answers, each with the service's name, in the order they
+    /// are reported.
+    pub fn by_service(&self) -> [(&'static str, &Result<String, ServiceRefusal>); 2] {
+        [("jmap", &self.jmap), ("caldav", &self.caldav)]
+    }
+
+    /// Whether a service answered `401` — the token itself refused, which
+    /// is what a revocation looks like from the service's side — as opposed
+    /// to `403`, the client lacking what the service wants.
+    pub fn unauthenticated(&self) -> bool {
+        self.by_service().iter().any(|(_, identity)| {
+            matches!(
+                identity,
+                Err(ServiceRefusal::PendingOperator { status: 401, .. })
+            )
+        })
+    }
+
     pub fn owner_mismatch(&self, owner: &str) -> Vec<(&'static str, String)> {
         let mut mismatched = Vec::new();
-        for (service, identity) in [("jmap", &self.jmap), ("caldav", &self.caldav)] {
+        for (service, identity) in self.by_service() {
             if let Ok(account) = identity {
                 if !account.eq_ignore_ascii_case(owner) {
                     mismatched.push((service, account.clone()));
@@ -708,16 +770,8 @@ mod tests {
 
     #[test]
     fn a_grant_file_that_is_not_one_is_an_error_and_a_missing_one_is_none() {
-        let dir = std::env::temp_dir().join(format!(
-            "twalk-collector-grant-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("grant.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grant.json");
         assert!(Grant::read(&path).unwrap().is_none());
         std::fs::write(&path, "not json").unwrap();
         assert!(Grant::read(&path).is_err());
@@ -734,7 +788,7 @@ mod tests {
             0o600
         );
         assert!(
-            !dir.join(".grant.json.tmp").exists(),
+            !dir.path().join(".grant.json.tmp").exists(),
             "the temporary file was renamed away"
         );
     }

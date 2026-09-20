@@ -1,18 +1,17 @@
-//! The collector's OIDC grant against the fake SSO (issue #274): consent,
+//! The collector's OIDC grant against the fake SSO (issue #274): the authorization,
 //! renewal with rotation, and the two refusals that are never one.
 
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::Result;
 use twalk_collector::oidc::{Client, Grant, Renewal, Settings};
-use twalk_test_harness::sso::{CLIENT_ID, CLIENT_SECRET};
+use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
 use twalk_test_harness::FakeSso;
 
 const OWNER: &str = "michel@example.com";
 
 fn settings(sso: &FakeSso, state_dir: &std::path::Path) -> Result<Settings> {
-    let secret_file = state_dir.join("client-secret");
-    std::fs::write(&secret_file, format!("{CLIENT_SECRET}\n"))?;
+    let secret_file = write_client_secret(state_dir)?;
     Ok(Settings {
         issuer: sso.issuer(),
         client_id: CLIENT_ID.to_owned(),
@@ -29,20 +28,20 @@ fn settings(sso: &FakeSso, state_dir: &std::path::Path) -> Result<Settings> {
 
 /// Plays the operator: asks for the link, signs in at the fake, pastes the
 /// callback back. Returns the grant the collector wrote.
-async fn consent(client: &Client, sso: &FakeSso) -> Result<Grant> {
-    let started = client.begin_consent()?;
+async fn authorize(client: &Client, sso: &FakeSso) -> Result<Grant> {
+    let started = client.begin_authorization()?;
     let callback = sso.sign_in(&started.authorization_url)?;
-    client.complete_consent(&started, &callback).await
+    client.complete_authorization(&started, &callback).await
 }
 
 #[tokio::test]
-async fn consent_ends_with_a_grant_on_disk_at_0600_and_a_second_run_leaves_it_alone() -> Result<()>
+async fn authorize_ends_with_a_grant_on_disk_at_0600_and_a_second_run_leaves_it_alone() -> Result<()>
 {
     let sso = FakeSso::start(OWNER).await?;
     let dir = tempfile::tempdir()?;
     let client = Client::discover(settings(&sso, dir.path())?).await?;
 
-    let grant = consent(&client, &sso).await?;
+    let grant = authorize(&client, &sso).await?;
     assert!(!grant.refresh_token.is_empty());
     let path = dir.path().join("oidc").join("grant.json");
     let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
@@ -59,7 +58,7 @@ async fn consent_ends_with_a_grant_on_disk_at_0600_and_a_second_run_leaves_it_al
     );
     assert_eq!(on_disk["issuer"].as_str(), Some(sso.issuer().as_str()));
 
-    // The code was spent, and no second consent started: the grant already
+    // The code was spent, and no second authorization started: the grant already
     // there is the answer.
     assert_eq!(sso.token_requests(), ["authorization_code"]);
     let reloaded = Grant::read(&path)?.expect("the grant reads back");
@@ -73,7 +72,7 @@ async fn a_renewal_rotates_the_refresh_token_and_the_new_one_is_on_disk_before_t
     let sso = FakeSso::start(OWNER).await?;
     let dir = tempfile::tempdir()?;
     let client = Client::discover(settings(&sso, dir.path())?).await?;
-    let first = consent(&client, &sso).await?;
+    let first = authorize(&client, &sso).await?;
 
     let renewed = client.renew(&first).await?;
     let Renewal::Renewed { grant, access } = renewed else {
@@ -120,7 +119,7 @@ async fn a_revoked_grant_is_reconnect_required_and_a_refusing_service_is_pending
     let sso = FakeSso::start(OWNER).await?;
     let dir = tempfile::tempdir()?;
     let client = Client::discover(settings(&sso, dir.path())?).await?;
-    let grant = consent(&client, &sso).await?;
+    let grant = authorize(&client, &sso).await?;
 
     // The SSO revoked the grant: only the operator can give a new one.
     sso.revoke();
@@ -140,7 +139,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
     let sso = FakeSso::start(OWNER).await?;
     let dir = tempfile::tempdir()?;
     let client = Client::discover(settings(&sso, dir.path())?).await?;
-    let grant = consent(&client, &sso).await?;
+    let grant = authorize(&client, &sso).await?;
     let Renewal::Renewed { access, .. } = client.renew(&grant).await? else {
         panic!("renews");
     };
@@ -169,7 +168,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
     let other = FakeSso::start("somebody@example.com").await?;
     let other_dir = tempfile::tempdir()?;
     let other_client = Client::discover(settings(&other, other_dir.path())?).await?;
-    let other_grant = consent(&other_client, &other).await?;
+    let other_grant = authorize(&other_client, &other).await?;
     let Renewal::Renewed { access, .. } = other_client.renew(&other_grant).await? else {
         panic!("renews");
     };

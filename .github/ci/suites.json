@@ -64,11 +64,11 @@
 		},
 
 		"collector": {
-			"what": "The collector's pure half and its OIDC seam (#274), against a fake SSO the harness runs in-process: the operator's consent with PKCE, the grant written at 0600 and left alone by a second run, the refresh token rotated on disk before the access token serves, a revoked grant read as reconnect_required and a refusing service as pending_operator, the two whoamis against the owner. No Docker, no stack.",
+			"what": "The collector's pure half and its OIDC seam (#274), against a fake SSO the harness runs in-process: the operator's authorization with PKCE — through the library and through the binary's `authorize` command with the callback pasted on stdin, its output searched for a token —, the grant written at 0600 and left alone by a second run, a stranger's grant refused and not kept, the refresh token rotated on disk before the access token serves, a revoked grant read as reconnect_required and a refusing service as pending_operator, the two whoamis against the owner. No Docker, no stack.",
 			"component": "collector",
 			"workdir": "collector",
-			"run": "cargo test --lib --test oidc",
-			"targets": ["oidc"],
+			"run": "cargo test --lib --test oidc --test authorize",
+			"targets": ["authorize", "oidc"],
 			"needs": ["rust"],
 			"tier": "required",
 			"triggers": ["collector/", "contracts/", "tests/harness/", "companion-gateway/openapi.yaml"],

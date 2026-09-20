@@ -1,4 +1,4 @@
-//! The collector's binary (issue #274): `twalk-collector consent [--renew]`
+//! The collector's binary (issue #274): `twalk-collector authorize [--renew]`
 //! gives it an OIDC grant with the operator in the loop; `twalk-collector`
 //! alone runs — renews the grant, checks whose it is, and says what state
 //! each connection is in on the bus.
@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 use twalk_collector::config::Config;
 use twalk_collector::metrics::Metrics;
-use twalk_collector::oidc::{Client, Grant, Renewal, ServiceRefusal};
+use twalk_collector::oidc::{Client, Grant, Identities, Renewal, ServiceRefusal};
 use twalk_collector::status::{self, Observation, State, Tracker};
 
 /// Renew when the access token has less than this left.
@@ -31,12 +31,12 @@ async fn main() -> Result<()> {
         .init();
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("consent") => {
+        Some("authorize") => {
             let renew = args.any(|arg| arg == "--renew");
-            consent(&config, renew).await
+            authorize(&config, renew).await
         }
         Some(other) => {
-            anyhow::bail!("unknown command {other:?}: twalk-collector [consent [--renew]]")
+            anyhow::bail!("unknown command {other:?}: twalk-collector [authorize [--renew]]")
         }
         None => run(config).await,
     }
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 /// disk is left alone unless `--renew` says to replace it. Prints the link
 /// to open and reads the callback URL from stdin; prints the two `whoami`s
 /// and never a token.
-async fn consent(config: &Config, renew: bool) -> Result<()> {
+async fn authorize(config: &Config, renew: bool) -> Result<()> {
     let client = Client::discover(config.oidc.clone()).await?;
     if let Some(existing) = Grant::read(&config.oidc.grant_file)? {
         if !renew {
@@ -64,7 +64,7 @@ async fn consent(config: &Config, renew: bool) -> Result<()> {
             config.oidc.grant_file.display()
         );
     }
-    let started = client.begin_consent()?;
+    let started = client.begin_authorization()?;
     eprintln!();
     eprintln!(
         "1. Open this link in a browser and sign in as {}:",
@@ -83,7 +83,9 @@ async fn consent(config: &Config, renew: bool) -> Result<()> {
     std::io::stdin()
         .read_line(&mut callback)
         .context("failed to read the callback URL from stdin")?;
-    let grant = client.complete_consent(&started, callback.trim()).await?;
+    let grant = client
+        .complete_authorization(&started, callback.trim())
+        .await?;
     eprintln!();
     eprintln!(
         "Grant written to {} (mode 0600).",
@@ -96,29 +98,63 @@ async fn consent(config: &Config, renew: bool) -> Result<()> {
         anyhow::bail!("the grant just obtained could not be renewed: the SSO refused it");
     };
     let identities = config.services.whoami(&access).await?;
-    for (service, identity) in [("jmap", &identities.jmap), ("caldav", &identities.caldav)] {
+    let mut unanswered = Vec::new();
+    for (service, identity) in identities.by_service() {
         match identity {
             Ok(account) => eprintln!("   {service} answers as {account}"),
-            Err(refusal) => eprintln!("   {service}: {}", refusal.detail()),
+            Err(refusal) => {
+                eprintln!("   {service}: {}", refusal.detail());
+                unanswered.push((service, refusal));
+            }
         }
     }
     let mismatched = identities.owner_mismatch(&config.owner_email);
     if !mismatched.is_empty() {
+        // Not kept: a stranger's grant on disk would be protected by the
+        // next run's idempotence, and would be renewed for as long as the
+        // collector ran. The SSO still holds it until its owner revokes it.
+        std::fs::remove_file(&config.oidc.grant_file).with_context(|| {
+            format!(
+                "failed to remove the refused grant {}",
+                config.oidc.grant_file.display()
+            )
+        })?;
         anyhow::bail!(
-            "the grant is not {}'s: {} — the collector will publish nothing from it. Sign in \
-             as the owner and run consent --renew.",
+            "the grant is not {}'s: {} — the collector would publish nothing from it, so it was \
+             not kept ({} removed; the SSO still holds the grant until that account revokes \
+             it). Sign in as the owner and run authorize again.",
             config.owner_email,
             mismatched
                 .iter()
                 .map(|(service, account)| format!("{service} answers as {account}"))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            config.oidc.grant_file.display()
         );
     }
-    eprintln!(
-        "Both services answer as {}. The collector can start.",
-        config.owner_email
-    );
+    if unanswered.is_empty() {
+        eprintln!(
+            "Both services answer as {}. The collector can start.",
+            config.owner_email
+        );
+    } else {
+        // The grant is the owner's as far as anyone answered; what did not
+        // answer is said, with the state the collector will report for it.
+        for (service, refusal) in &unanswered {
+            let state = if refusal.pending_operator() {
+                State::PendingOperator
+            } else {
+                State::Unreachable
+            };
+            eprintln!(
+                "   The collector will report the {service} connection as {} until {service} \
+                 answers as {}.",
+                state.as_str(),
+                config.owner_email
+            );
+        }
+        eprintln!("The collector can start.");
+    }
     Ok(())
 }
 
@@ -169,12 +205,13 @@ async fn run(config: Config) -> Result<()> {
 
     loop {
         let now = SystemTime::now();
+        let mut renewed_this_round = false;
         let observation = match &grant {
             None => Observation {
                 state: State::ReconnectRequired,
                 service: Some("sso"),
                 hint: Some(format!(
-                    "No grant in {}. Run `twalk-collector consent` on the host and sign in as {}.",
+                    "No grant in {}. Run `twalk-collector authorize` on the host and sign in as {}.",
                     config.oidc.grant_file.display(),
                     config.owner_email
                 )),
@@ -192,6 +229,7 @@ async fn run(config: Config) -> Result<()> {
                             metrics.record_renewal("renewed", unix_seconds(now));
                             grant = Some(rotated);
                             access = Some(fresh);
+                            renewed_this_round = true;
                         }
                         Renewal::ReconnectRequired { detail } => {
                             metrics.record_renewal("reconnect_required", unix_seconds(now));
@@ -205,21 +243,54 @@ async fn run(config: Config) -> Result<()> {
                     }
                 }
                 match &access {
-                    None if grant.is_some() => Observation {
-                        state: State::ReconnectRequired,
-                        service: Some("sso"),
-                        hint: Some(format!(
-                            "The SSO refused to renew the grant. Run `twalk-collector consent --renew` \
-                             on the host and sign in again as {}; nothing is published until then.",
-                            config.owner_email
-                        )),
-                    },
+                    None if grant.is_some() => reconnect_required(&config),
                     None => Observation {
                         state: State::Unreachable,
                         service: Some("sso"),
                         hint: Some("The SSO did not answer; the collector retries on its own.".to_owned()),
                     },
-                    Some(token) => observe_services(&config, token).await,
+                    Some(token) => {
+                        let mut identities = config.services.whoami(token).await;
+                        // A 401 on a token this process believes fresh is
+                        // not yet the operator's problem: the SSO may have
+                        // revoked the grant under it. Renew first; the SSO's
+                        // refusal is `reconnect_required`, and only a
+                        // service refusing a token the SSO just issued is
+                        // `pending_operator` (issue #274: two refusals).
+                        let stale = matches!(&identities, Ok(ids) if ids.unauthenticated() && !renewed_this_round);
+                        if stale {
+                            match client.renew(grant.as_ref().expect("a token comes from a grant")).await? {
+                                Renewal::Renewed {
+                                    grant: rotated,
+                                    access: fresh,
+                                } => {
+                                    metrics.record_renewal("renewed", unix_seconds(now));
+                                    identities = config.services.whoami(&fresh).await;
+                                    grant = Some(rotated);
+                                    access = Some(fresh);
+                                }
+                                Renewal::ReconnectRequired { detail } => {
+                                    metrics.record_renewal("reconnect_required", unix_seconds(now));
+                                    warn!(%detail, "a service refused the token and the SSO refused to renew the grant");
+                                    access = None;
+                                    identities = Err(anyhow::anyhow!("revoked"));
+                                }
+                                Renewal::Unreachable { detail } => {
+                                    metrics.record_renewal("unreachable", unix_seconds(now));
+                                    warn!(%detail, "a service refused the token and the SSO could not be reached");
+                                }
+                            }
+                        }
+                        match (&access, identities) {
+                            (None, _) => reconnect_required(&config),
+                            (Some(_), Ok(identities)) => observe_services(&config, &identities),
+                            (Some(_), Err(error)) => Observation {
+                                state: State::Unreachable,
+                                service: None,
+                                hint: Some(format!("the services could not be asked: {error:#}")),
+                            },
+                        }
+                    }
                 }
             }
         };
@@ -227,7 +298,7 @@ async fn run(config: Config) -> Result<()> {
         // a calendar connection whose service refused gets its own words.
         let occurred_at = twalk_collector::oidc::now_rfc3339();
         for tracker in &mut trackers {
-            let per_connection = per_connection(&observation, tracker.connection(), &config);
+            let per_connection = per_connection(&observation, tracker.kind());
             metrics.set_connection_state(tracker.connection(), per_connection.state);
             if let Some(envelope) = tracker.observe(&per_connection, &occurred_at) {
                 publish(&jetstream, &envelope, &metrics).await;
@@ -237,22 +308,23 @@ async fn run(config: Config) -> Result<()> {
     }
 }
 
-/// With a fresh token, whose grant this is and whether each service takes
-/// it: the observation that becomes each connection's state.
-async fn observe_services(
-    config: &Config,
-    access: &twalk_collector::oidc::AccessToken,
-) -> Observation {
-    let identities = match config.services.whoami(access).await {
-        Ok(identities) => identities,
-        Err(error) => {
-            return Observation {
-                state: State::Unreachable,
-                service: None,
-                hint: Some(format!("the services could not be asked: {error:#}")),
-            }
-        }
-    };
+/// The SSO refused the grant: only the operator can give a new one.
+fn reconnect_required(config: &Config) -> Observation {
+    Observation {
+        state: State::ReconnectRequired,
+        service: Some("sso"),
+        hint: Some(format!(
+            "The SSO refused to renew the grant. Run `twalk-collector authorize --renew` \
+             on the host and sign in again as {}; nothing is published until then.",
+            config.owner_email
+        )),
+    }
+}
+
+/// What the services said about a token the SSO just issued: whose grant
+/// this is and whether each service takes it — the observation that becomes
+/// each connection's state.
+fn observe_services(config: &Config, identities: &Identities) -> Observation {
     let mismatched = identities.owner_mismatch(&config.owner_email);
     if !mismatched.is_empty() {
         // Named in the log — the account, not a token — and nothing
@@ -269,15 +341,15 @@ async fn observe_services(
             state: State::PendingOperator,
             service: mismatched.first().map(|(service, _)| *service),
             hint: Some(format!(
-                "The grant belongs to another account, not {}. Run `twalk-collector consent --renew` \
+                "The grant belongs to another account, not {}. Run `twalk-collector authorize --renew` \
                  and sign in as the owner.",
                 config.owner_email
             )),
         };
     }
     // Per service, in the order a refusal is reported: the first service
-    // that refused names the state; the loop below re-labels per connection.
-    for (service, identity) in [("jmap", &identities.jmap), ("caldav", &identities.caldav)] {
+    // that refused names the state; `per_connection` re-labels per kind.
+    for (service, identity) in identities.by_service() {
         if let Err(refusal) = identity {
             let state = match refusal {
                 ServiceRefusal::PendingOperator { .. } => State::PendingOperator,
@@ -296,13 +368,7 @@ async fn observe_services(
 /// The observation as one connection experiences it: a service's refusal is
 /// that service's connection's state and not the other's — the mail
 /// connection is `connected` while the calendar's side service refuses.
-fn per_connection(observation: &Observation, connection: &str, config: &Config) -> Observation {
-    let kind = config
-        .connections
-        .iter()
-        .find(|held| held.id == connection)
-        .map(|held| held.kind)
-        .unwrap_or("email");
+fn per_connection(observation: &Observation, kind: &str) -> Observation {
     match observation.service {
         Some("jmap") if kind != "email" => Observation::connected(),
         Some("caldav") if kind != "calendar" => Observation::connected(),

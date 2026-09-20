@@ -93,6 +93,10 @@ impl Tracker {
         &self.connection
     }
 
+    pub fn kind(&self) -> &'static str {
+        self.kind
+    }
+
     /// The envelope to publish for this observation, or `None` when the
     /// state did not change — the same answer twice is silence.
     pub fn observe(&mut self, observation: &Observation, occurred_at: &str) -> Option<Value> {
@@ -171,7 +175,7 @@ mod tests {
                 &Observation {
                     state: State::ReconnectRequired,
                     service: Some("sso"),
-                    hint: Some("Run `twalk-collector consent --renew`.".to_owned()),
+                    hint: Some("Run `twalk-collector authorize --renew`.".to_owned()),
                 },
                 "2026-09-20T09:02:00Z",
             )

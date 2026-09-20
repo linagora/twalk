@@ -1,8 +1,8 @@
 #!/bin/sh
 # The collector's entrypoint (#274): hands the binary the client secret and
 # the grant directory as its own account, then runs it — or, with
-# `consent` as the first argument, runs the consent command that gives the
-# collector its grant (`docker compose run --rm collector consent`).
+# `authorize` as the first argument, runs the authorize command that gives the
+# collector its grant (`docker compose run --rm collector authorize`).
 #
 # The client secret is a bind mount of a host file the operator's own
 # account owns, mode 0600 — the collector refuses anything looser, since
@@ -12,7 +12,8 @@
 # `collector` account, and everything after that line runs as that account.
 set -eu
 
-mount="${COLLECTOR_OIDC_CLIENT_SECRET_MOUNT:-/run/secrets/collector-client-secret}"
+# Where compose.yaml mounts the host file; one place, on both sides.
+mount=/run/secrets/collector-client-secret
 if [ -d "$mount" ]; then
 	echo "collector refuses to start: $mount is a directory. The host path" >&2
 	echo "COLLECTOR_OIDC_CLIENT_SECRET_FILE names in .env does not exist, so Docker created a" >&2
