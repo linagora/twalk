@@ -30,16 +30,33 @@
 //! invented, and the persona says at startup what will happen to a message
 //! whose language it cannot tell. The preference's own case is
 //! `language_fallback.rs`.
+//!
+//! Since ADR 0031 (issue #121) a suggestion also carries the **disclosure**:
+//! the contract's sentence for the language the reply is written in, which
+//! the Companion Gateway appends to the reply at approval so the contact
+//! reads that it was drafted with an AI assistant. The persona selects the
+//! sentence and never writes it, and the language is the model's answer to
+//! one more question — so the granted case asserts the second completion
+//! request and its shape, and a case of its own asserts what happens when
+//! the model answers a language the contract has no sentence for: no
+//! suggestion, one `ERROR` line naming the tag, and the delivery terminated
+//! rather than retried, the shape `reasoning_budget.rs` set.
 
 mod harness;
 
 use anyhow::Result;
 use harness::{
-    contract_fixture, contract_variant_fixture, sha256_hex, trace_id, traceparent_for,
-    validate_against_contract, PersonaRun, HERMES_DOMAIN, INBOUND_TYPE, LLM_API_KEY, MODEL,
-    OUTBOUND_TYPE, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
+    contract_fixture, contract_variant_fixture, poll_until, sha256_hex, trace_id, traceparent_for,
+    validate_against_contract, PersonaRun, HERMES_DOMAIN, INBOUND_TYPE, LANGUAGE_ASK_MARK,
+    LLM_API_KEY, MODEL, OUTBOUND_TYPE, PERSONA_ID, SUGGEST_TYPE, THINKING_TYPE,
 };
 use serde_json::{json, Value};
+
+/// The contract's French sentence (`contracts/disclosure/v1/sentences.json`),
+/// which is what the stub's default language answer selects. Spelled out
+/// rather than read from the file: the assertion is that *this* sentence
+/// reached the bus, verbatim.
+const FRENCH_DISCLOSURE: &str = "Rédigé avec mon assistant IA.";
 
 /// The `inbound.message.received` fixture, re-keyed onto a trigger of this
 /// run and labelled with a consent state. The body carries the run's marker
@@ -174,6 +191,17 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
         "a suggestion ages out rather than staying approvable for ever; what \
          the window is, and where it is measured from, is `suggestion.rs` (#22)"
     );
+    // The disclosure (ADR 0031, #121): the contract's own sentence for the
+    // language the reply is written in, selected by the persona and never
+    // composed by it, carried as a member of its own so the Gateway can
+    // append it at approval without reading the body. The stub answered
+    // `fr` to the language ask below, so this is the French sentence and
+    // not a translation of anything.
+    assert_eq!(
+        event["data"]["disclosure"],
+        json!(FRENCH_DISCLOSURE),
+        "the suggestion carries the contract's sentence for its language: {event}"
+    );
 
     assert!(
         thinking.sequence < suggest.sequence,
@@ -183,12 +211,16 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
         suggest.sequence
     );
 
-    // 3. what the persona asked the model.
+    // 3. what the persona asked the model: two requests per message since
+    //    ADR 0031 — the reply, then the language ask about the reply. Only
+    //    the first mentions the message, because the ask is about what the
+    //    persona wrote and not about what the contact did.
     let requests = run.llm_requests_mentioning(&marker);
     assert_eq!(
         requests.len(),
         1,
-        "one message, one completion request (v0.1 is a single completion)"
+        "one message, one completion request about it; the language ask is \
+         about the reply and is asserted below"
     );
     let request = &requests[0];
     assert_eq!(
@@ -255,6 +287,214 @@ async fn a_granted_message_produces_thinking_then_a_schema_valid_suggestion() ->
         request.body.get("temperature").is_none(),
         "a parameter set to null removes a field the provider rejects, got {}",
         request.body
+    );
+
+    // 4. the language ask (ADR 0031): the second and last request, shaped
+    //    for one token, about the reply and nothing else — it carries no
+    //    word the contact wrote, which is what makes it cheap to send to a
+    //    model at all.
+    let all = run.llm.requests();
+    assert_eq!(
+        all.len(),
+        2,
+        "one message, two completion requests: the reply and the language ask, \
+         got {}",
+        all.len()
+    );
+    let ask = &all[1];
+    assert!(
+        ask.is_language_ask(),
+        "the second request is the language ask and the first is the reply: {}",
+        ask.body
+    );
+    assert!(
+        !all[0].is_language_ask(),
+        "the reply is drafted before its language is asked: {}",
+        all[0].body
+    );
+    assert_eq!(
+        ask.last_message_content(),
+        Some(REPLY),
+        "the persona asks which language the reply it drafted is in, and sends \
+         the reply alone: {}",
+        ask.body
+    );
+    assert!(
+        !ask.body.to_string().contains(&marker),
+        "the language ask carries nothing the contact wrote: {}",
+        ask.body
+    );
+    assert_eq!(
+        ask.body["max_tokens"],
+        json!(5),
+        "the ask is shaped for one token, because that is all it needs back: {}",
+        ask.body
+    );
+    let ask_prompt = ask.body["messages"][0]["content"]
+        .as_str()
+        .expect("the ask has a system prompt");
+    assert!(
+        ask_prompt.contains(LANGUAGE_ASK_MARK),
+        "the ask is the SDK's own wording, which the stub recognises by it: {ask_prompt}"
+    );
+    assert!(
+        ask_prompt.contains("en, fr, it, es, de") && ask_prompt.contains("other"),
+        "the ask names the five languages the contract has a sentence for, and the \
+         one answer that is none of them: {ask_prompt}"
+    );
+    assert_eq!(
+        ask.body["model"],
+        json!(MODEL),
+        "the same model answers the ask: no second endpoint, no detection library"
+    );
+    // And the persona says which language it selected the sentence for, and
+    // who said so — the model, here — naming the trigger and not the contact.
+    let logs = run.logs().await?;
+    let disclosed = logs
+        .lines()
+        .find(|line| line.contains("disclosure language=") && line.contains(&trigger_id))
+        .unwrap_or_else(|| panic!("no disclosure line names this trigger; the logs were:\n{logs}"));
+    assert!(
+        disclosed.contains("language=fr") && disclosed.contains("declared_by=model"),
+        "the log says which language and whose answer it was: {disclosed}"
+    );
+
+    run.shutdown().await
+}
+
+/// Waits for a line in the persona's logs, so a failure carries the logs
+/// rather than a timeout.
+async fn wait_for_log(run: &PersonaRun, needle: &str) -> Result<String> {
+    let found = poll_until(
+        || async {
+            let logs = run.logs().await.ok()?;
+            logs.contains(needle).then_some(logs)
+        },
+        &format!("the persona to log {needle:?}"),
+    )
+    .await;
+    match found {
+        Ok(logs) => Ok(logs),
+        Err(error) => anyhow::bail!(
+            "{error}; the persona's logs were:\n{}",
+            run.logs().await.unwrap_or_default()
+        ),
+    }
+}
+
+/// ADR 0031's refusal, at the process boundary: the model answers a
+/// language the contract has no sentence for, and there is no suggestion.
+///
+/// Not a fallback to English, and not to the user's language: a disclosure
+/// the contact cannot read is one nobody reads. And not a retry either — the
+/// model would answer the same language to the same reply, and each ask is
+/// billed — so the shape is `reasoning_budget.rs`'s: asked once, one `ERROR`
+/// line naming the tag and the remedy, the delivery terminated, and the bus
+/// asked (not the persona) that nothing is left in flight.
+#[tokio::test]
+async fn a_reply_in_a_language_with_no_sentence_is_refused_once_and_never_suggested() -> Result<()>
+{
+    // The reply is the stub's and its language is the stub's word for it:
+    // what the persona does with the answer is the whole test.
+    const REPLY: &str = "了解です、20時で大丈夫です。";
+    let run = PersonaRun::start("no-sentence", REPLY).await?;
+    run.llm.set_language_answer("ja");
+
+    let marker = format!("no-sentence-{}", run.prefix);
+    let trigger = inbound_message(&marker, "granted", "On décale à 20h ?")?;
+    let trigger_id = event_id(&trigger);
+    run.publish_inbound(&trigger).await?;
+
+    // The persona did start on it: `thinking` is published before the model
+    // is asked anything, so oversight sees the activity.
+    let thinking = run.wait_for(THINKING_TYPE, &trigger_id).await?;
+    validate_against_contract(&thinking.payload, "persona.thinking.emitted")?;
+
+    // The refusal, by name: the tag the model answered, and where the
+    // sentences are — a contribution request an operator can act on.
+    let logs = wait_for_log(&run, "and no retry").await?;
+    let refusal = logs
+        .lines()
+        .find(|line| line.contains("and no retry") && line.contains(&trigger_id))
+        .unwrap_or_else(|| panic!("no refusal names this trigger; the logs were:\n{logs}"))
+        .to_owned();
+    assert!(
+        refusal.contains("ERROR"),
+        "a suggestion that will never exist is an error, not a note: {refusal}"
+    );
+    assert!(
+        refusal.contains("disclosure has no sentence for the language the model answered: ja"),
+        "the refusal names the language the model answered, as it answered it: {refusal}"
+    );
+    assert!(
+        refusal.contains("contracts/disclosure/v1/sentences.json"),
+        "and where a sentence for it would go: {refusal}"
+    );
+    assert!(
+        !refusal.contains(&marker) && !refusal.contains(REPLY),
+        "the line names the trigger and nothing the contact or the persona wrote: {refusal}"
+    );
+
+    // Asked once for the reply and once for its language — and then never
+    // again. The persona's own retry delay is five seconds, so this waits
+    // past it before counting.
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    assert_eq!(
+        run.llm_requests_mentioning(&marker).len(),
+        1,
+        "the reply was drafted once; a retry cannot change which language it is in"
+    );
+    let all = run.llm.requests();
+    assert_eq!(
+        all.len(),
+        2,
+        "the reply and its language ask, once each, got {}",
+        all.len()
+    );
+    assert!(
+        all[1].is_language_ask() && all[1].last_message_content() == Some(REPLY),
+        "the second request asked the language of the reply: {}",
+        all[1].body
+    );
+
+    // No suggestion. The absence is the promise: a reply the contact cannot
+    // be told was drafted with an AI assistant is no suggestion at all.
+    let suggestions: Vec<u64> = run
+        .published(SUGGEST_TYPE)
+        .await?
+        .into_iter()
+        .map(|message| message.sequence)
+        .collect();
+    assert!(
+        suggestions.is_empty(),
+        "a reply with no disclosure must never be offered to the user, found {suggestions:?}"
+    );
+
+    // And the trigger is not left in flight. The bus's own account: nothing
+    // pending, nothing awaiting an ack, nothing redelivered.
+    let state = run.consumer_state().await?;
+    assert_eq!(
+        (state.pending, state.awaiting_ack, state.redelivered),
+        (0, 0, 0),
+        "the delivery must be terminated rather than left apparently unprocessed \
+         or handed over again: {state:?}"
+    );
+
+    // The refusal is about *this* reply and not about the persona: the next
+    // message, whose reply the model calls French, is suggested with the
+    // sentence — so an operator reading one refusal knows the persona is
+    // still running and what to contribute.
+    run.llm.set_reply("Pas de souci, à 20h !");
+    run.llm.set_language_answer("fr");
+    let next = inbound_message(&format!("next-{}", run.prefix), "granted", "Et 20h ?")?;
+    let next_id = event_id(&next);
+    run.publish_inbound(&next).await?;
+    let suggest = run.wait_for(SUGGEST_TYPE, &next_id).await?;
+    validate_against_contract(&suggest.payload, "persona.suggest.produced")?;
+    assert_eq!(
+        suggest.payload["data"]["disclosure"],
+        json!(FRENCH_DISCLOSURE),
+        "the persona goes on suggesting, with the sentence, once the language has one"
     );
 
     run.shutdown().await
@@ -364,24 +604,32 @@ async fn the_users_own_traffic_never_triggers_a_persona() -> Result<()> {
 
     // And the model was never asked about any of them: the gate runs before
     // the handler and before the LLM client is touched, so no word the user
-    // wrote was ever sent anywhere.
+    // wrote was ever sent anywhere. Two requests, both the fence's: its
+    // reply, and the language ask about that reply (ADR 0031).
     let requests = run.llm.requests();
     assert_eq!(
         requests.len(),
-        1,
+        2,
         "five events, one of them a persona's business: the model must have been asked \
-         exactly once, got {} requests",
+         about exactly one — its reply and its language — got {} requests",
         requests.len()
     );
     assert!(
         requests[0].body.to_string().contains(&fence_marker),
-        "the one completion request must be the inbound message's"
+        "the one reply request must be the inbound message's"
     );
-    for marker in ["own-subject-", "misrouted-", "wearing-", "own-reaction-"] {
-        assert!(
-            !requests[0].body.to_string().contains(marker),
-            "nothing the user wrote themselves reached the model: {marker}"
-        );
+    assert!(
+        requests[1].is_language_ask(),
+        "and the other is the language ask about its reply: {}",
+        requests[1].body
+    );
+    for request in &requests {
+        for marker in ["own-subject-", "misrouted-", "wearing-", "own-reaction-"] {
+            assert!(
+                !request.body.to_string().contains(marker),
+                "nothing the user wrote themselves reached the model: {marker}"
+            );
+        }
     }
 
     // Nothing the persona published in this run is about anything but the
@@ -460,19 +708,34 @@ async fn a_pending_or_revoked_message_produces_no_event_and_no_llm_call() -> Res
     }
 
     // And the model was never asked: the gate runs before any persona code,
-    // so nothing about those two messages was ever sent anywhere.
+    // so nothing about those two messages was ever sent anywhere. Two
+    // requests, both the fence's: its reply and the language ask about it.
     let requests = run.llm.requests();
     assert_eq!(
         requests.len(),
-        1,
-        "three messages, one granted: the model must have been asked exactly once, \
-         got {} requests",
+        2,
+        "three messages, one granted: the model must have been asked about exactly \
+         one — its reply and its language — got {} requests",
         requests.len()
     );
     assert!(
         requests[0].body.to_string().contains(&fence_marker),
-        "the one completion request must be the granted message's"
+        "the one reply request must be the granted message's"
     );
+    assert!(
+        requests[1].is_language_ask(),
+        "and the other is the language ask about its reply: {}",
+        requests[1].body
+    );
+    for request in &requests {
+        for marker in ["pending-", "revoked-"] {
+            assert!(
+                !request.body.to_string().contains(marker),
+                "nothing a {marker} message carried reached the model: {}",
+                request.body
+            );
+        }
+    }
 
     // Every event the persona did publish in this run is about the fence.
     for event_type in [THINKING_TYPE, SUGGEST_TYPE] {
@@ -524,8 +787,9 @@ async fn a_message_with_no_text_is_skipped_without_a_suggestion() -> Result<()> 
     );
     assert_eq!(
         run.llm.request_count(),
-        1,
-        "the model is not asked to reply to nothing"
+        2,
+        "the model is not asked to reply to nothing, nor which language nothing is \
+         in: the fence's reply and its language ask are the only requests"
     );
 
     run.shutdown().await

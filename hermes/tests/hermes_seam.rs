@@ -198,6 +198,18 @@ async fn a_granted_message_wakes_hermes_with_a_narrow_template_and_nothing_else(
         "the persona also asked the model: two brains, one message, and \
          whichever answered first wins"
     );
+    // Not the language ask either (ADR 0031): the disclosure on this path is
+    // the Companion Gateway's to select from the language Hermes declares in
+    // its answer, so a persona that handed the message on has no reply to
+    // ask the language of — and a request here would be a request made,
+    // about text this process never drafted.
+    assert_eq!(
+        run.llm.request_count(),
+        0,
+        "the persona sent the model nothing at all, not a reply and not a language \
+         ask: {:?}",
+        run.llm.requests()
+    );
     let logs = run.logs().await?;
     assert!(
         logs.contains("handed to hermes") && logs.contains(&trigger_id),

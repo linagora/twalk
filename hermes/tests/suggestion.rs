@@ -247,7 +247,9 @@ async fn a_redelivered_trigger_is_one_suggestion_and_never_a_second_attempt() ->
     let run = PersonaRun::start("replay", "no further draft was expected").await?;
     // Two different answers, so that a second suggestion would be visibly a
     // second one rather than an identical copy the bus could absorb by
-    // accident.
+    // accident. Scripted for the two *reply* requests: the language ask the
+    // persona makes after each draft (ADR 0031) is answered from the stub's
+    // own lane and consumes neither.
     run.llm.push_reply(FIRST_DRAFT);
     run.llm.push_reply(SECOND_DRAFT);
 
@@ -357,6 +359,36 @@ async fn a_redelivered_trigger_is_one_suggestion_and_never_a_second_attempt() ->
         2,
         "the redelivery re-asks the model; what it must not do is publish \
          the answer as a second suggestion"
+    );
+    // The same for the language ask (ADR 0031): a redelivery drafts again
+    // and asks again, so three drafts in this run — two deliveries and the
+    // fence — are three asks, each about the draft it follows and none
+    // about the message. The second draft was asked about too, which is
+    // what proves the scripted drafts went to the reply requests and not
+    // to the asks.
+    let requests = run.llm.requests();
+    let asks: Vec<String> = requests
+        .iter()
+        .filter(|request| request.is_language_ask())
+        .map(|request| {
+            request
+                .last_message_content()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        asks.len(),
+        3,
+        "one language ask per draft, deliveries and fence included: {asks:?}"
+    );
+    assert!(
+        asks.contains(&FIRST_DRAFT.to_owned()) && asks.contains(&SECOND_DRAFT.to_owned()),
+        "each ask is about the draft it follows: {asks:?}"
+    );
+    assert!(
+        asks.iter().all(|ask| !ask.contains(&marker)),
+        "and none carries the message: {asks:?}"
     );
 
     // And the persona says so, which is how an operator reading its logs
