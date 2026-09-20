@@ -1032,7 +1032,28 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
             *value = format!("{value},mail-linagora=email");
         }
     }
+    // The collector holding the mail connection has said it is connected
+    // (#275): a collector's connection that never spoke takes no reply.
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &connection_status_event_of_kind("mail-linagora", "email", "unknown", "connected", ""),
+    )
+    .await?;
     let running = Running::start_with(static_dir, env).await?;
+    poll_until(
+        || async {
+            let (_, body) = running.get("/api/connections").await.ok()?;
+            body["connections"]
+                .as_array()?
+                .iter()
+                .find(|entry| entry["id"] == "mail-linagora")?
+                .pointer("/status/state")
+                .is_some()
+                .then_some(())
+        },
+        "the mail connection's status to be read off the bus",
+    )
+    .await?;
     let sender = format!("{}@example.org", unique("alice"));
     let (status, body) = running
         .post(
@@ -1079,6 +1100,16 @@ async fn an_approval_of_a_reply_to_a_mail_targets_the_mail_connection() -> Resul
 /// about a connection this deployment declares — the state a connection
 /// last said it was in is what #275 refuses an approval on.
 fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -> Value {
+    connection_status_event_of_kind(connection, "whatsapp", from, to, hint)
+}
+
+fn connection_status_event_of_kind(
+    connection: &str,
+    kind: &str,
+    from: &str,
+    to: &str,
+    hint: &str,
+) -> Value {
     let at = in_seconds(-30);
     let event = json!({
         "specversion": "1.0",
@@ -1091,7 +1122,7 @@ fn connection_status_event(connection: &str, from: &str, to: &str, hint: &str) -
         "connection": connection,
         "data": {
             "connection": connection,
-            "kind": "whatsapp",
+            "kind": kind,
             "from_state": from,
             "to_state": to,
             "occurred_at": at,
