@@ -735,6 +735,13 @@ services:
       # that does not exist, so a typo shows up as the entrypoint refusing
       # to start and naming the variable, not as a clerk that signs nothing.
       - ${CLERK_NOSTR_KEY_FILE:-/dev/null}:/run/secrets/clerk.key:ro
+    tmpfs:
+      # Where the entrypoint installs its copy of the key, owned by the
+      # unprivileged `clerk` account, for the binary to read (see
+      # clerk-entrypoint.sh): a tmpfs rather than the image's writable
+      # layer, so the copy the entrypoint makes never lands on disk — only
+      # in memory, and gone the moment the container stops.
+      - /run/clerk
     environment:
       # This stack's bus, through the port it publishes on loopback: the
       # clerk is in the host's network namespace.
@@ -750,9 +757,13 @@ services:
       CLERK_CHANNEL_ACTIVITY: ${CLERK_CHANNEL_ACTIVITY:-}
       CLERK_CHANNEL_JOURNAL: ${CLERK_CHANNEL_JOURNAL:-}
       # The language the clerk writes its own sentences in — never a
-      # contact's words, which it never quotes. Empty falls through to the
-      # language the personas were given, so one preference set in .env
-      # reaches both; empty there too is the clerk's default, English.
+      # contact's words, which it never quotes. Set it here explicitly: on
+      # the reference deployment the personas take their language from the
+      # Companion's own settings (#184), which the clerk cannot read — it
+      # holds no Gateway credential, by design — so HERMES_USER_LANGUAGE is
+      # typically empty and falling through to it would not reach what the
+      # user actually chose. Unset means English, and the clerk warns at
+      # startup that it is unset.
       CLERK_USER_LANGUAGE: ${CLERK_USER_LANGUAGE:-${HERMES_USER_LANGUAGE:-}}
       # /health and /metrics, on the host's loopback since this is the
       # host's namespace: the port is the operator's to choose, the

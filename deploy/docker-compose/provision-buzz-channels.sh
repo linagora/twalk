@@ -237,25 +237,35 @@ done
 
 joined="$(IFS=,; echo "${UUIDS[*]}")"
 home="${UUIDS[2]}"
-umask 077
-[ -f "$ENV_FILE" ] || { mkdir -p "$(dirname "$ENV_FILE")"; touch "$ENV_FILE"; chmod 0600 "$ENV_FILE"; echo "created $ENV_FILE (mode 0600)"; }
-for line in "BUZZ_CHANNELS=$joined" "BUZZ_HOME_CHANNEL=$home" "BUZZ_RELAY_URL=$BUZZ_RELAY_URL"; do
-	key="${line%%=*}"
-	if grep -qE "^$key=" "$ENV_FILE"; then
-		sed -i -E "s|^$key=.*|$line|" "$ENV_FILE"
-	else
-		printf '%s\n' "$line" >> "$ENV_FILE"
-	fi
-done
 
-cat <<EOF
+# Both the file and the sentence below are Hermes's: a deployment that only
+# added the clerk this run has no Hermes to write for, and $ENV_FILE staying
+# absent is the correct answer rather than an empty file nobody reads.
+if [ -n "$HERMES_PUBKEY" ]; then
+	umask 077
+	[ -f "$ENV_FILE" ] || { mkdir -p "$(dirname "$ENV_FILE")"; touch "$ENV_FILE"; chmod 0600 "$ENV_FILE"; echo "created $ENV_FILE (mode 0600)"; }
+	for line in "BUZZ_CHANNELS=$joined" "BUZZ_HOME_CHANNEL=$home" "BUZZ_RELAY_URL=$BUZZ_RELAY_URL"; do
+		key="${line%%=*}"
+		if grep -qE "^$key=" "$ENV_FILE"; then
+			sed -i -E "s|^$key=.*|$line|" "$ENV_FILE"
+		else
+			printf '%s\n' "$line" >> "$ENV_FILE"
+		fi
+	done
+
+	cat <<EOF
 
 Written into $ENV_FILE:
   BUZZ_CHANNELS=$joined
   BUZZ_HOME_CHANNEL=$home   (${NAMES[2]})
   BUZZ_RELAY_URL=$BUZZ_RELAY_URL
-Hermes reads them at its next start. The owner's key was read from $KEY_FILE
-and went nowhere else.
+Hermes reads them at its next start.
+EOF
+fi
+
+cat <<EOF
+
+The owner's key was read from $KEY_FILE and went nowhere else.
 
 For deploy/docker-compose/.env — the clerk's three channels, which this script
 does not write there because that file is the compose stack's:

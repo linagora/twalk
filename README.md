@@ -104,6 +104,7 @@ twalk/
 ├── hermes/              The agent platform: consumer runtime + reference personas
 ├── companion/           Twalk Companion PWA (SvelteKit static export): user-facing configuration surface
 ├── companion-gateway/   Companion backend (Rust): bridge provisioning facade, consent broker, persona orchestrator; openapi.yaml describes its HTTP surface
+├── clerk/               The clerk (Rust): writes what the bus says onto the owner's Buzz relay, signed with a Nostr key of its own, holding no state
 ├── bridges/             Mautrix bridge configurations and registrations
 ├── deploy/              Docker Compose, Kubernetes and Ansible deployment manifests
 ├── ui/                  Optional Buzz control room and admin console

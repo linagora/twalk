@@ -32,10 +32,12 @@
 
 set -eu
 
-# The marker the healthcheck accepts in place of /health (below) is written
-# in the container's own filesystem, which a restart keeps: decided afresh on
-# every start, or a clerk configured since the last one would still count as
-# healthy while hosting nothing — or while crashed.
+# The marker the healthcheck accepts in place of /health (below) lives in
+# /run/clerk, a tmpfs since the key's copy moved there, so a fresh container
+# starts without one; it is still removed here first, because a restart of
+# the same container is not a fresh one, and a clerk configured since the
+# last start would otherwise count as healthy while hosting nothing — or
+# while crashed.
 rm -f /run/clerk/hosting-nothing
 
 required="CLERK_RELAY_URL CLERK_CHANNEL_APPROVALS CLERK_CHANNEL_ACTIVITY CLERK_CHANNEL_JOURNAL"

@@ -18,13 +18,13 @@
 # This script is on the right side of ADR 0032's line. The Companion configures
 # the seam to Hermes and never Hermes's own key, because that would mean Twalk
 # holding a Nostr private key and writing files on a host it may not own; an
-# operator-run script that writes into Hermes's own env file is not Twalk
-# holding anything.
+# operator-run script that writes into the env file it is given — Hermes's,
+# the clerk's, or any future writer's — is not Twalk holding anything.
 #
 # What it does, and does not do:
 #
 # - Generates 32 random bytes from the kernel and writes them as
-#   `BUZZ_PRIVATE_KEY=<hex>` into Hermes's env file, mode 0600. Once: a second
+#   `BUZZ_PRIVATE_KEY=<hex>` into the env file it was given, mode 0600. Once: a second
 #   run leaves an existing key untouched and reprints its public half, because
 #   a key that rotates is an identity the relay no longer knows.
 # - Prints the **public** half, hex and `npub`, and says what to do with it —
