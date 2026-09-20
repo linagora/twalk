@@ -222,6 +222,21 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "502",
         "bus_unreachable needs a Gateway whose bus is configured and does not answer; `hermes_answers.rs::a_bus_that_does_not_answer_is_a_502_and_not_a_503` stages it",
     ),
+    // Hermes's free/busy read (#281). What is reached without bus state is
+    // exercised above; the rest needs a collector's status on the bus and a
+    // stub collector, which `tests/hermes_freebusy.rs` stages.
+    (
+        "get",
+        "/_twalk/hermes/freebusy",
+        "200",
+        "a served read needs a connection the collector said is connected and a collector to relay to; `hermes_freebusy.rs::a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_recorded` stages both",
+    ),
+    (
+        "get",
+        "/_twalk/hermes/freebusy",
+        "502",
+        "collector_unreachable needs a connected connection and a collector that does not answer; `hermes_freebusy.rs` stages it",
+    ),
     (
         "post",
         "/_twalk/bridges/{bridge_id}/status",
@@ -4323,6 +4338,168 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("trigger_not_found"),
     )
     .await?;
+
+    // --- Hermes's free/busy read (#281): the one governed pull, on the same
+    // secret over the request line. Everything here is reached without bus
+    // state: the credential, the window, the connection's name, and a
+    // calendar connection no collector has spoken for.
+    let freebusy_query = harness::freebusy_query;
+    let freebusy_signature = harness::freebusy_signature;
+    let now = harness::rfc3339_now();
+    let two_days = freebusy_query("calendar", "2026-09-24T08:00:00Z", "2026-09-26T08:00:00Z");
+    // Unsigned: neither header.
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{two_days}"),
+        &[],
+        "",
+        401,
+        Some("unsigned"),
+    )
+    .await?;
+    // Signed over another query.
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{two_days}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature("connection=calendar&from=a&to=b", &now).as_str(),
+            ),
+        ],
+        "",
+        401,
+        Some("bad_signature"),
+    )
+    .await?;
+    // Correctly signed, hours old.
+    let old = "2026-09-17T10:00:00Z";
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{two_days}"),
+        &[
+            ("X-Hermes-Timestamp", old),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(&two_days, old).as_str(),
+            ),
+        ],
+        "",
+        401,
+        Some("stale_timestamp"),
+    )
+    .await?;
+    // Signed and fresh, and asking for too much, for nothing in order, and
+    // for no connection at all.
+    let fortnight_and_a_second =
+        freebusy_query("calendar", "2026-09-24T08:00:00Z", "2026-10-08T08:00:01Z");
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{fortnight_and_a_second}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(&fortnight_and_a_second, &now).as_str(),
+            ),
+        ],
+        "",
+        400,
+        Some("window_too_wide"),
+    )
+    .await?;
+    let backwards = freebusy_query("calendar", "2026-09-26T08:00:00Z", "2026-09-24T08:00:00Z");
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{backwards}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(&backwards, &now).as_str(),
+            ),
+        ],
+        "",
+        400,
+        Some("invalid_window"),
+    )
+    .await?;
+    let nobody = "from=2026-09-24T08%3A00%3A00Z&to=2026-09-26T08%3A00%3A00Z";
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{nobody}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(nobody, &now).as_str(),
+            ),
+        ],
+        "",
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    // A connection that is not a calendar: the whatsapp one this Gateway
+    // declares.
+    let not_a_calendar = freebusy_query("whatsapp", "2026-09-24T08:00:00Z", "2026-09-26T08:00:00Z");
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{not_a_calendar}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(&not_a_calendar, &now).as_str(),
+            ),
+        ],
+        "",
+        404,
+        Some("connection_unknown"),
+    )
+    .await?;
+    // A calendar connection this Gateway declares and no collector has
+    // spoken for: refused with the state `unknown`, the same way an
+    // approval towards it is.
+    let unspoken = freebusy_query(
+        "calendar-unspoken",
+        "2026-09-24T08:00:00Z",
+        "2026-09-26T08:00:00Z",
+    );
+    let refused = call
+        .check_raw(
+            Method::GET,
+            &hermes_base,
+            "/_twalk/hermes/freebusy",
+            &format!("/_twalk/hermes/freebusy?{unspoken}"),
+            &[
+                ("X-Hermes-Timestamp", now.as_str()),
+                (
+                    "X-Hermes-Signature-256",
+                    freebusy_signature(&unspoken, &now).as_str(),
+                ),
+            ],
+            "",
+            409,
+            Some("connection_not_connected"),
+        )
+        .await?;
+    assert_eq!(refused.body["state"], "unknown", "{}", refused.body);
     hermes.stop().await;
 
     // And the same route on a Gateway that configured no seam: the variable
@@ -4342,6 +4519,23 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             harness::hermes_signature(&seamless).as_str(),
         )],
         &seamless,
+        503,
+        Some("hermes_answers_not_configured"),
+    )
+    .await?;
+    call.check_raw(
+        Method::GET,
+        &seamless_base,
+        "/_twalk/hermes/freebusy",
+        &format!("/_twalk/hermes/freebusy?{two_days}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(&two_days, &now).as_str(),
+            ),
+        ],
+        "",
         503,
         Some("hermes_answers_not_configured"),
     )

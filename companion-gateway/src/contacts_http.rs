@@ -245,7 +245,7 @@ fn form_urlencoded_pairs(query: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn percent_decode(value: &str) -> String {
+pub(crate) fn percent_decode(value: &str) -> String {
     fn nibble(byte: u8) -> Option<u8> {
         char::from(byte)
             .to_digit(16)

@@ -574,18 +574,7 @@ impl Answers {
     /// Whether this signature is one this Gateway's secret produces over these
     /// bytes. Constant-time, through the `hmac` crate's own verification.
     pub fn authenticates(&self, presented: Option<&str>, body: &[u8]) -> bool {
-        let Some(presented) =
-            presented.and_then(|value| value.trim().strip_prefix(SIGNATURE_PREFIX))
-        else {
-            return false;
-        };
-        let Ok(expected) = hex_bytes(presented) else {
-            return false;
-        };
-        let mut mac = Hmac::<Sha256>::new_from_slice(self.secret.as_bytes())
-            .expect("HMAC accepts a key of any length");
-        mac.update(body);
-        mac.verify_slice(&expected).is_ok()
+        signature_matches(&self.secret, presented, body)
     }
 
     /// The whole act: authenticate the sender, read the answer, check every
@@ -685,18 +674,13 @@ impl Answers {
     }
 
     fn fresh(&self, timestamp: &str) -> Result<(), AnswerRefusal> {
-        let stale = || AnswerRefusal::Stale {
-            timestamp: timestamp.to_owned(),
-        };
-        let sent = parse_rfc3339_seconds(timestamp).ok_or_else(stale)?;
-        let now = (self.now)()
-            .duration_since(UNIX_EPOCH)
-            .map(|since| since.as_secs() as i64)
-            .unwrap_or_default();
-        if (now - sent).abs() > CLOCK_SKEW_SECONDS {
-            return Err(stale());
+        if is_fresh(timestamp, (self.now)()) {
+            Ok(())
+        } else {
+            Err(AnswerRefusal::Stale {
+                timestamp: timestamp.to_owned(),
+            })
         }
-        Ok(())
     }
 
     /// The suggestion, exactly as a persona's own SDK would have built it.
@@ -755,6 +739,38 @@ impl Answers {
     }
 }
 
+/// Whether `presented` — `sha256=<hex>` — is this secret's HMAC-SHA256 over
+/// `signed`. The one check for both of Hermes's routes (#206 over the body,
+/// #281 over the request line): the hex is decoded and the MAC verified in
+/// constant time, so an uppercase signature or a padded one is judged the
+/// same way on both.
+pub(crate) fn signature_matches(secret: &str, presented: Option<&str>, signed: &[u8]) -> bool {
+    let Some(presented) = presented.and_then(|value| value.trim().strip_prefix(SIGNATURE_PREFIX))
+    else {
+        return false;
+    };
+    let Ok(expected) = hex_bytes(presented) else {
+        return false;
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(signed);
+    mac.verify_slice(&expected).is_ok()
+}
+
+/// Whether `timestamp` is an instant within [`CLOCK_SKEW_SECONDS`] of
+/// `now`: the replay rule both of Hermes's routes apply.
+pub(crate) fn is_fresh(timestamp: &str, now: SystemTime) -> bool {
+    let Some(sent) = parse_rfc3339_seconds(timestamp) else {
+        return false;
+    };
+    let now = now
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or_default();
+    (now - sent).abs() <= CLOCK_SKEW_SECONDS
+}
+
 fn hex_bytes(value: &str) -> Result<Vec<u8>, ()> {
     if value.len() % 2 != 0 {
         return Err(());
@@ -767,7 +783,7 @@ fn hex_bytes(value: &str) -> Result<Vec<u8>, ()> {
 
 /// The contract's `date-time`, to the second, in UTC — the same precision the
 /// SDK writes a suggestion's `time` and `expires_at` with.
-fn rfc3339_seconds(at: SystemTime) -> String {
+pub(crate) fn rfc3339_seconds(at: SystemTime) -> String {
     let seconds = at
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
@@ -790,7 +806,7 @@ fn rfc3339_seconds(at: SystemTime) -> String {
 /// and needs exactly one thing here — whether a push is minutes old or hours.
 /// A fractional part and an offset are both accepted, because the sender's
 /// formatting is not this endpoint's contract.
-fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() < 20 {
         return None;

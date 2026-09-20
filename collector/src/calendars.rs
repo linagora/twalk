@@ -22,9 +22,10 @@ use twalk_consent_cache::{Consent, ConsentCache};
 pub use crate::side::SideError;
 
 use crate::caldav::{
-    self, calendars_in, multiget_body, parse_listing, parse_multiget, Calendar, Changes, Cursor,
-    Envelopes, Known, Listing, Resource, PROPFIND_BODY,
+    self, calendars_in, collection_path, multiget_body, parse_listing, parse_multiget, Calendar,
+    Changes, Cursor, Envelopes, Known, Listing, Resource, PROPFIND_BODY,
 };
+use crate::freebusy::{parse_free_busy, Busy, Window};
 
 /// The calendar connection this process holds, and what publishing about it
 /// needs.
@@ -75,6 +76,25 @@ impl Calendars {
             crate::fs::write_json_private(&self.cursor_path(calendar_id), cursor)?;
         }
         Ok(())
+    }
+
+    /// The owner's busy intervals in a window (#281), across the calendars
+    /// the poll reads — the HAL list of their own and the shares they
+    /// accepted, the same set whose changes are published — one
+    /// `free-busy-query` each, merged. No cursor moves and nothing is
+    /// published: a read.
+    pub async fn free_busy(
+        &self,
+        owner_id: &str,
+        token: &str,
+        window: &Window,
+    ) -> Result<Vec<Busy>, SideError> {
+        let mut answers = Vec::new();
+        for calendar in self.side.calendars(owner_id, token).await? {
+            let collection = collection_path(owner_id, &calendar.id);
+            answers.push(self.side.free_busy(&collection, window, token).await?);
+        }
+        Ok(crate::freebusy::merge_answers(answers, window))
     }
 
     /// The decision about a `mailto:` on the mail connection, or `Pending`
@@ -313,6 +333,30 @@ impl Side {
             .await?;
         parse_multiget(&body).map_err(|error| SideError::Unreachable {
             detail: format!("{error:#}"),
+        })
+    }
+
+    /// `REPORT free-busy-query` on one collection (#281, RFC 4791 §7.10):
+    /// the busy periods in the window, read as intervals and nothing else.
+    pub async fn free_busy(
+        &self,
+        collection: &str,
+        window: &Window,
+        token: &str,
+    ) -> Result<Vec<Busy>, SideError> {
+        let method = reqwest::Method::from_bytes(b"REPORT").expect("a method name");
+        let body = self
+            .send(
+                self.http
+                    .request(method, format!("{}{collection}", self.base))
+                    .header("depth", "0")
+                    .header("content-type", "application/xml; charset=utf-8")
+                    .body(window.report_body()),
+                token,
+            )
+            .await?;
+        parse_free_busy(&body, window).map_err(|error| SideError::Unreachable {
+            detail: format!("the free-busy answer for {collection} could not be read: {error:#}"),
         })
     }
 

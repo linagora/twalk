@@ -47,6 +47,11 @@ pub struct Config {
     pub host: String,
     pub state_dir: PathBuf,
     pub metrics_listen: Option<SocketAddr>,
+    /// Where the internal HTTP endpoint the Companion Gateway relays a
+    /// free/busy read to listens (`COLLECTOR_HTTP_LISTEN`, #281); `None`
+    /// serves none. Its bearer is `gateway_service_token`, so one is not
+    /// set without the other.
+    pub http_listen: Option<SocketAddr>,
     pub log_level: String,
     /// How often the run loop checks the grant and the services when all is
     /// well (`COLLECTOR_HEALTH_INTERVAL_SECONDS`, 60 by default; a test sets
@@ -107,6 +112,7 @@ impl Config {
         );
         let gateway_url = optional_string("COLLECTOR_GATEWAY_URL");
         let gateway_service_token = optional_string("COLLECTOR_GATEWAY_SERVICE_TOKEN");
+        let gateway_service_token_set = gateway_service_token.is_some();
         // The Gateway's two variables go together, as the Sensor's do
         // (`sensor/src/config.rs`): half a configuration would skip the
         // registry check exactly like none, but silently.
@@ -139,6 +145,20 @@ impl Config {
                 Some(value) => Some(value.parse().with_context(|| {
                     format!("COLLECTOR_METRICS_LISTEN is not host:port: {value:?}")
                 })?),
+                None => None,
+            },
+            http_listen: match optional_string("COLLECTOR_HTTP_LISTEN") {
+                Some(value) => {
+                    anyhow::ensure!(
+                        gateway_service_token_set,
+                        "COLLECTOR_HTTP_LISTEN is set without COLLECTOR_GATEWAY_SERVICE_TOKEN: the \
+                         free/busy endpoint answers the Companion Gateway's service token and \
+                         nothing else, so without one it would answer nobody (#281)"
+                    );
+                    Some(value.parse().with_context(|| {
+                        format!("COLLECTOR_HTTP_LISTEN is not host:port: {value:?}")
+                    })?)
+                }
                 None => None,
             },
             log_level: optional_string("COLLECTOR_LOG_LEVEL").unwrap_or_else(|| "info".to_owned()),
@@ -262,6 +282,7 @@ mod tests {
             host: "collector".to_owned(),
             state_dir: PathBuf::from("/nonexistent"),
             metrics_listen: None,
+            http_listen: None,
             log_level: "info".to_owned(),
             health_interval: std::time::Duration::from_secs(60),
             calendar_poll_interval: std::time::Duration::from_secs(60),

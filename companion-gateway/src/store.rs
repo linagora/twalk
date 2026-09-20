@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 10] = [
+pub const MIGRATIONS: [&str; 11] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -691,6 +691,27 @@ pub const MIGRATIONS: [&str; 10] = [
     BEGIN
         SELECT RAISE(ABORT, 'the disclosure decision journal is append-only');
     END;
+    "#,
+    // v11 — the one governed pull (issue #281): every free/busy read Hermes
+    // made through this Gateway, served or refused. The record is the point:
+    // a pull that left no trace would be the one thing in this deployment
+    // the owner could not audit. What was read is not kept — intervals are
+    // the owner's agenda — only how many.
+    r#"
+    CREATE TABLE hermes_read (
+        sequence     INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection   TEXT NOT NULL,
+        window_from  TEXT NOT NULL,
+        window_to    TEXT NOT NULL,
+        requested_at TEXT NOT NULL,
+        -- The X-Hermes-Delivery the read carried, when it did: a retry and
+        -- a second read are two rows with one delivery or two.
+        delivery     TEXT,
+        -- 'served', or the code the read was refused with.
+        outcome      TEXT NOT NULL,
+        intervals    INTEGER
+    );
+    CREATE INDEX hermes_read_connection ON hermes_read (connection, sequence);
     "#,
 ];
 
@@ -1602,6 +1623,28 @@ impl Store {
             .context("failed to read the connection statuses")?;
         rows.collect::<Result<Vec<_>, _>>()
             .context("failed to read a connection status row")
+    }
+
+    /// Records one free/busy read (issue #281), whatever its outcome.
+    pub fn record_hermes_read(&self, read: &crate::hermes_freebusy::HermesRead) -> Result<()> {
+        let connection = self.connection();
+        connection
+            .execute(
+                "INSERT INTO hermes_read
+                 (connection, window_from, window_to, requested_at, delivery, outcome, intervals)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    read.connection,
+                    read.window_from,
+                    read.window_to,
+                    read.requested_at,
+                    read.delivery,
+                    read.outcome,
+                    read.intervals.map(|count| count as i64),
+                ],
+            )
+            .context("failed to record a free/busy read")?;
+        Ok(())
     }
 
     /// The most recent transitions, newest first, for the dashboard's feed.

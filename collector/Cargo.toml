@@ -13,6 +13,10 @@ name = "twalk-collector"
 path = "src/main.rs"
 
 [dependencies]
+# The internal HTTP endpoint the Companion Gateway relays a free/busy read
+# to (#281): one route, the Gateway's service token, the same server the
+# Gateway itself is built on.
+axum = "0.8"
 # The consent cache every component that labels a sender shares (#273):
 # a participant in the owner's meeting is labelled by the decision taken
 # about them on the mail connection of the same account (#280).

@@ -76,11 +76,11 @@
 		},
 
 		"collector-stack": {
-			"what": "The collector at its process boundary, against the fake SSO, the fake side service and the shared test stack's bus. #274: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1. #280: an event created, moved and removed in the owner's calendar is the three calendar types with the contract's ids, an unchanged CTag publishes nothing, a participant revoked on the mail connection — in the snapshot or over the stream — is withheld and counted, one never decided about is carried. #276: a mail delivered to the INBOX after the start is inbound.message.received on the mail connection, field by field; a newsletter, an iTIP mail and the owner's own are dropped and counted; a mail in Sent or Archive is never read; a granted sender's mail is granted, a revoked sender's carries no words; what the INBOX held before the start is not published. #278: an approved reply whose target is the mail connection leaves from the owner's mailbox — to the sender alone, in the thread, from the owner's identity, a copy in Sent — and is reported reach=contact; a room target is left to the Sensor; a refused submission is dead-lettered with the reason, an unanswering server retried then dead-lettered. #277: with the fake JMAP server offering push over WebSocket, a delivery wakes the poll ahead of a twelve-second interval and the woken poll is the one that publishes; the socket cut, the next poll catches the next delivery and the socket comes back on its own; a session offering no push leaves the collector to its poll, said once; a session naming no ticket endpoint opens the socket with the bearer; an Email state the server forgot is recovered from the look-back window without a duplicate, without a loss inside the window and without reaching before it; the cursor survives a restart.",
+			"what": "The collector at its process boundary, against the fake SSO, the fake side service and the shared test stack's bus. #274: connected then reconnect_required after a revocation, pending_operator on the calendar connection alone while the mail one stays connected, a grant for another account publishing nothing and naming the account, a registry that cannot be read refused at start — every transition a valid connection.status.changed.v1. #280: an event created, moved and removed in the owner's calendar is the three calendar types with the contract's ids, an unchanged CTag publishes nothing, a participant revoked on the mail connection — in the snapshot or over the stream — is withheld and counted, one never decided about is carried. #276: a mail delivered to the INBOX after the start is inbound.message.received on the mail connection, field by field; a newsletter, an iTIP mail and the owner's own are dropped and counted; a mail in Sent or Archive is never read; a granted sender's mail is granted, a revoked sender's carries no words; what the INBOX held before the start is not published. #278: an approved reply whose target is the mail connection leaves from the owner's mailbox — to the sender alone, in the thread, from the owner's identity, a copy in Sent — and is reported reach=contact; a room target is left to the Sensor; a refused submission is dead-lettered with the reason, an unanswering server retried then dead-lettered. #277: with the fake JMAP server offering push over WebSocket, a delivery wakes the poll ahead of a twelve-second interval and the woken poll is the one that publishes; the socket cut, the next poll catches the next delivery and the socket comes back on its own; a session offering no push leaves the collector to its poll, said once; a session naming no ticket endpoint opens the socket with the bearer; an Email state the server forgot is recovered from the look-back window without a duplicate, without a loss inside the window and without reaching before it; the cursor survives a restart. #281: the internal free/busy endpoint answers the Gateway's service token with the busy intervals of every calendar merged and nothing else — a cancelled event nothing, an all-day one a day — and refuses another bearer, a connection that is not the calendar one, a window too wide or malformed, and a calendar connection that is not connected, with its state.",
 			"component": "collector",
 			"workdir": "collector",
-			"run": "cargo test --test calendar --test mail --test push --test reply --test status",
-			"targets": ["calendar", "mail", "push", "reply", "status"],
+			"run": "cargo test --test calendar --test freebusy --test mail --test push --test reply --test status",
+			"targets": ["calendar", "freebusy", "mail", "push", "reply", "status"],
 			"needs": ["rust", "docker"],
 			"tier": "required",
 			"triggers": ["collector/", "contracts/", "tests/harness/", "consent-cache/", "companion-gateway/openapi.yaml"]
@@ -182,10 +182,10 @@
 		},
 
 		"gateway": {
-			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, the connections' registry and what each said about itself off the bus (#275), approvals — refused towards a connection that cannot send —, suggestions, settings, the disclosure switch and its journal, the portal register, whether a runtime is present, and the OpenAPI description against the routes it serves.",
+			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, the connections' registry and what each said about itself off the bus (#275), approvals — refused towards a connection that cannot send —, Hermes's one governed pull (#281: a free/busy read signed with the answers' secret, capped at fourteen days, refused on a connection that is not connected, relayed to a stub collector, recorded and counted; the skill's script run against the route), suggestions, settings, the disclosure switch and its journal, the portal register, whether a runtime is present, and the OpenAPI description against the routes it serves.",
 			"component": "companion-gateway",
 			"workdir": "companion-gateway",
-			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test disclosure --test hermes_answers --test openapi --test pending --test portals --test runtime --test service --test settings --test signin --test suggestions",
+			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test disclosure --test hermes_answers --test hermes_freebusy --test openapi --test pending --test portals --test runtime --test service --test settings --test signin --test suggestions",
 			"targets": [
 				"approvals",
 				"bootstrap",
@@ -195,6 +195,7 @@
 				"consent_snapshot",
 				"disclosure",
 				"hermes_answers",
+				"hermes_freebusy",
 				"openapi",
 				"pending",
 				"portals",
@@ -206,7 +207,8 @@
 			],
 			"needs": ["rust", "docker"],
 			"tier": "required",
-			"triggers": ["companion-gateway/", "contracts/", "tests/harness/"]
+			"triggers": ["companion-gateway/", "contracts/", "tests/harness/", "skills/"],
+			"triggers_note": "`skills/` since #281: `hermes_freebusy.rs` runs the skill's script against the real route, so a change to the document's script is a change to what this suite proves."
 		},
 
 		"gateway-deployment": {

@@ -373,7 +373,7 @@ fn mailto_of(value: &str) -> Option<String> {
 }
 
 /// RFC 5545 §3.3.1: joins a folded line onto the one before it.
-fn unfold(ics: &str) -> Vec<String> {
+pub(crate) fn unfold(ics: &str) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for raw in ics.split('\n') {
         let raw = raw.trim_end_matches('\r');
@@ -545,7 +545,7 @@ impl Moment {
 }
 
 /// RFC 5545 §3.3.6: `P1DT2H30M`, `PT15M`, `P2W`, with an optional sign.
-fn parse_duration(value: &str) -> Result<ChronoDuration> {
+pub(crate) fn parse_duration(value: &str) -> Result<ChronoDuration> {
     let value = value.trim();
     let (negative, rest) = match value.strip_prefix('-') {
         Some(rest) => (true, rest),

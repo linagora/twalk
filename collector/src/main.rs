@@ -253,6 +253,27 @@ async fn run(config: Config) -> Result<()> {
     // keeps it fresh, the consumer sends with whatever is current, and
     // waits when there is none.
     let shared_access: twalk_collector::replies::SharedAccess = Arc::default();
+    // The free/busy endpoint (#281): the calendar connection's state and the
+    // owner's id on the side service, as the loop last observed them, for a
+    // read to check before it asks.
+    let calendar_access: twalk_collector::http::SharedCalendarAccess = Arc::default();
+    let calendars = calendars.map(Arc::new);
+    if let (Some(listen), Some(token)) = (config.http_listen, &config.gateway_service_token) {
+        let listener = tokio::net::TcpListener::bind(listen)
+            .await
+            .with_context(|| format!("failed to bind the internal HTTP endpoint on {listen}"))?;
+        info!(%listen, "serving the free/busy endpoint to the Companion Gateway");
+        tokio::spawn(twalk_collector::http::serve(
+            listener,
+            twalk_collector::http::Endpoint {
+                service_token: token.clone(),
+                calendars: calendars.clone(),
+                calendar_access: calendar_access.clone(),
+                access: shared_access.clone(),
+                metrics: metrics.clone(),
+            },
+        ));
+    }
     // Rung by the push listener when the server says the Email state
     // changed: the run loop wakes and the mail poll runs at once.
     let mail_wake: Arc<tokio::sync::Notify> = Arc::default();
@@ -430,6 +451,12 @@ async fn run(config: Config) -> Result<()> {
                     "email" => mail_is_connected = true,
                     _ => {}
                 }
+            }
+            if tracker.kind() == "calendar" {
+                *calendar_access.write().await = twalk_collector::http::CalendarAccess {
+                    owner_id: caldav_owner_id.clone(),
+                    state: Some(per_connection.state.as_str()),
+                };
             }
             metrics.set_connection_state(tracker.connection(), per_connection.state);
             if let Some(envelope) = tracker.observe(&per_connection, &occurred_at) {

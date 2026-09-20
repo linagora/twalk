@@ -43,6 +43,7 @@ use crate::contacts::Contacts;
 use crate::contacts_http;
 use crate::hermes_answer::Answers;
 use crate::hermes_answer_http;
+use crate::hermes_freebusy_http;
 use crate::metrics::{Metrics, Route};
 use crate::outbox::Outbox;
 use crate::portals::Portals;
@@ -150,6 +151,9 @@ pub struct Gateway {
     /// into the store: `None` on a Gateway with no store, where nothing is
     /// recorded and no connection has a status.
     connection_statuses: Option<Arc<crate::store::Store>>,
+    /// Hermes's free/busy reads ([`crate::hermes_freebusy`], ticket #281).
+    /// `None` on the same terms as [`Self::answers`].
+    reads: Option<Arc<crate::hermes_freebusy::Reads>>,
     /// Hermes's answers ([`crate::hermes_answer`], ticket #206). `None` when
     /// no seam is configured, which is every deployment that has not opted
     /// into ADR 0032's integration — and then the route says which variable
@@ -182,6 +186,7 @@ impl Gateway {
             portals: None,
             connections: Arc::new(crate::connections::Registry::default()),
             connection_statuses: None,
+            reads: None,
             answers: None,
             now_unix_seconds,
         }
@@ -269,6 +274,18 @@ impl Gateway {
 
     pub fn answers(&self) -> Option<Arc<Answers>> {
         self.answers.clone()
+    }
+
+    /// Adds the half that serves Hermes's free/busy reads (ticket #281), the
+    /// same way: configured with the answers, since it is the same secret,
+    /// and its own half because it also needs a collector to relay to.
+    pub fn with_reads(mut self, reads: Option<Arc<crate::hermes_freebusy::Reads>>) -> Self {
+        self.reads = reads;
+        self
+    }
+
+    pub fn reads(&self) -> Option<Arc<crate::hermes_freebusy::Reads>> {
+        self.reads.clone()
     }
 
     /// Adds the pending-contact projection (ticket #54), the same way. It is
@@ -452,6 +469,10 @@ pub fn router(gateway: Gateway) -> Router {
         // every other, so the guard's table decides what it must carry — a
         // signature of its own, verified by its own handler.
         .merge(hermes_answer_http::routes())
+        // Hermes's free/busy read (ticket #281): the one governed pull, the
+        // same caller, the same secret over the request line, and the same
+        // guard entry.
+        .merge(hermes_freebusy_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))

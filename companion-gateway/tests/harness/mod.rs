@@ -1184,6 +1184,9 @@ pub const HERMES_DOMAIN: &str = "twalk.test";
 /// adds. Everything else it needs — the store, the bus, the owner — it takes
 /// from the consent configuration, because it reuses the approval half.
 pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String, String)> {
+    // A calendar connection no collector ever speaks for (#281): what a
+    // free/busy read on it is refused with, without any bus state.
+    let connections = format!("{TEST_CONNECTIONS},{UNSPOKEN_CALENDAR_CONNECTION}=calendar");
     gateway_env_with(
         static_dir,
         &[
@@ -1192,9 +1195,14 @@ pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String
             ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
             // See `gateway_env_with_consent`.
             ("GATEWAY_APPROVAL_LOOKUP_WINDOW", "100000000"),
+            ("GATEWAY_CONNECTIONS", connections.as_str()),
         ],
     )
 }
+
+/// A calendar connection the Hermes Gateway declares and no collector has
+/// reported (#281).
+pub const UNSPOKEN_CALENDAR_CONNECTION: &str = "calendar-unspoken";
 
 /// The signature Hermes's outbound hook puts on a push: hex HMAC-SHA256 over
 /// the raw body, prefixed `sha256=`.
@@ -1207,6 +1215,39 @@ pub fn hermes_signature(body: &str) -> String {
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(HERMES_ANSWER_SECRET.as_bytes())
         .expect("HMAC accepts a key of any length");
     mac.update(body.as_bytes());
+    format!("sha256={:x}", mac.finalize().into_bytes())
+}
+
+/// The query string of a free/busy read (#281), encoded the way the skill's
+/// script encodes it — `:` and `+` percent-encoded — since the signature
+/// covers the query as sent and the test signs what it sends.
+pub fn freebusy_query(connection: &str, from: &str, to: &str) -> String {
+    let encode = |value: &str| {
+        value
+            .replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('+', "%2B")
+            .replace('&', "%26")
+            .replace('=', "%3D")
+    };
+    format!(
+        "connection={}&from={}&to={}",
+        encode(connection),
+        encode(from),
+        encode(to)
+    )
+}
+
+/// The signature of a free/busy read (#281): hex HMAC-SHA256 over the
+/// canonical line `GET`, the path, the query as sent and the timestamp,
+/// newline-separated, prefixed `sha256=`. Computed from the wire format in
+/// the skill's document rather than from the Gateway's code, so the test
+/// states the contract.
+pub fn freebusy_signature(query: &str, timestamp: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(HERMES_ANSWER_SECRET.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(format!("GET\n/_twalk/hermes/freebusy\n{query}\n{timestamp}").as_bytes());
     format!("sha256={:x}", mac.finalize().into_bytes())
 }
 

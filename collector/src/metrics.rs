@@ -25,6 +25,11 @@ pub struct Metrics {
     /// `calendar_invitation`, `owner`. A silence counted, since a silence
     /// is the one failure this product has shipped without noticing.
     mails_dropped: Mutex<BTreeMap<&'static str, u64>>,
+    /// Free/busy reads served on the internal HTTP endpoint (#281), by
+    /// outcome: `served`, or the refusal's code. Every read of the owner's
+    /// agenda is counted, since a read nobody can see is the thing #281
+    /// exists to prevent.
+    freebusy_reads: Mutex<BTreeMap<&'static str, u64>>,
     /// Whether the push socket to the mail server is open (#277): 1 when a
     /// delivery wakes the poll, 0 when the poll is on its own.
     push_connected: AtomicU64,
@@ -46,9 +51,19 @@ impl Metrics {
             connection_state: Mutex::new(BTreeMap::new()),
             last_renewal_unix_seconds: AtomicU64::new(0),
             mails_dropped: Mutex::new(BTreeMap::new()),
+            freebusy_reads: Mutex::new(BTreeMap::new()),
             push_connected: AtomicU64::new(0),
             push_wakes: AtomicU64::new(0),
         }
+    }
+
+    pub fn record_freebusy_read(&self, outcome: &'static str) {
+        *self
+            .freebusy_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
     }
 
     pub fn set_push_connected(&self, connected: bool) {
@@ -166,6 +181,19 @@ impl Metrics {
             ));
         }
         drop(dropped);
+        out.push_str("# HELP twalk_collector_freebusy_reads_total Free/busy reads asked of the internal endpoint, by outcome: served, or the refusal's code.\n");
+        out.push_str("# TYPE twalk_collector_freebusy_reads_total counter\n");
+        let reads = self
+            .freebusy_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        for outcome in crate::http::READ_OUTCOMES {
+            out.push_str(&format!(
+                "twalk_collector_freebusy_reads_total{{outcome=\"{outcome}\"}} {}\n",
+                reads.get(outcome).copied().unwrap_or(0)
+            ));
+        }
+        drop(reads);
         out.push_str("# HELP twalk_collector_push_connected Whether the push socket to the mail server is open: 1 when a delivery wakes the poll, 0 when the poll is on its own.\n");
         out.push_str("# TYPE twalk_collector_push_connected gauge\n");
         out.push_str(&format!(
