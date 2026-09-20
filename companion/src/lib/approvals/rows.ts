@@ -46,6 +46,8 @@ export type Suggestion = components['schemas']['Suggestion'];
 export type Listing = components['schemas']['SuggestionListing'];
 export type Approval = components['schemas']['Approval'];
 export type Standing = Suggestion['standing'];
+export type Delivery = components['schemas']['Delivery'];
+export type Posted = components['schemas']['PostedReport'];
 
 /**
  * One action a row may offer. Never plural, never defaulted.
@@ -80,6 +82,22 @@ export interface Row {
 	 * rendering a state that cannot end.
 	 */
 	lostReply: boolean;
+	/**
+	 * Whether a reply could reach the contact, decided by the Gateway
+	 * **before** the approval from where the owner's own account stands in
+	 * the trigger's room (#216). `cannot_reach` is a certainty: the room is a
+	 * bridge's portal and the owner's account is not in it, so a bridge
+	 * relays nothing posted there — approving would publish a reply nobody
+	 * receives. The screen says so above the button, not after it.
+	 */
+	delivery: Delivery;
+	/**
+	 * What the Sensor said the approved reply reached once it posted it, or
+	 * `null` while it has said nothing. Never the same fact as
+	 * `approval.publication`: published on the bus and delivered to the
+	 * contact are two sentences on this screen, by construction.
+	 */
+	posted: Posted | null;
 	actions: Action[];
 }
 
@@ -121,8 +139,55 @@ export function toRow(suggestion: Suggestion): Row {
 		approval: suggestion.approval,
 		lostReply:
 			suggestion.standing === 'approved' && suggestion.approval?.publication === 'unpublished',
+		delivery: suggestion.delivery,
+		posted: suggestion.posted,
 		actions: actionsFor(suggestion)
 	};
+}
+
+/**
+ * The sentence about delivery that stands **before** the approval button.
+ *
+ * Three sentences for the Gateway's three answers, and the one for
+ * `cannot_reach` names #123 as what would change it: a reader has to know this
+ * is a known gap in the mechanism and not a bug in their setup. `warns` is
+ * whether the screen draws it as a warning — only the certainty is.
+ */
+export function deliveryCopy(delivery: Delivery): { key: MessageKey; warns: boolean } {
+	switch (delivery.reach) {
+		case 'can_reach':
+			return { key: 'approvals.delivery.canReach', warns: false };
+		case 'cannot_reach':
+			return { key: 'approvals.delivery.cannotReach', warns: true };
+		default:
+			return { key: 'approvals.delivery.unknown', warns: false };
+	}
+}
+
+/** The word behind the Gateway's answer, as a sentence fragment. */
+export function deliveryDetailKey(delivery: Delivery): MessageKey {
+	return `approvals.delivery.detail.${delivery.detail}` as MessageKey;
+}
+
+/**
+ * The sentence about delivery that stands **after** the approval, once the
+ * Gateway says the reply is published.
+ *
+ * "Published on your bus" is the approval's own sentence. This one is about
+ * what happened next, and it is the Sensor's report when there is one —
+ * `contact` or `nobody`, and by which account — and, while there is none,
+ * either the certainty the screen already had (`cannot_reach`) or the honest
+ * "not yet". It is never derived from `approval.publication`.
+ */
+export function postedCopy(row: Pick<Row, 'delivery' | 'posted'>): MessageKey {
+	if (row.posted !== null) {
+		return row.posted.reach === 'contact'
+			? 'approvals.posted.contact'
+			: 'approvals.posted.nobody';
+	}
+	return row.delivery.reach === 'cannot_reach'
+		? 'approvals.delivery.cannotReach'
+		: 'approvals.posted.pending';
 }
 
 /**

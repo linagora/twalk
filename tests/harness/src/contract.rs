@@ -253,3 +253,65 @@ pub fn contract_variant_fixture(type_name: &str, variant: &str) -> Result<Value>
     )?;
     Ok(fixture)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `kind.schema.json` is the networks plus the kinds that are not
+    /// networks (ADR 0033): the two definitions are two files, and nothing
+    /// but this test says they agree. A network added to one and not the
+    /// other is a connection the Gateway would refuse at startup.
+    #[test]
+    fn the_kinds_are_the_networks_and_then_the_rest() {
+        let networks = contract_definition_values("network").expect("the network definition");
+        let kinds = contract_definition_values("kind").expect("the kind definition");
+        assert_eq!(
+            &kinds[..networks.len()],
+            &networks[..],
+            "kind.schema.json does not start with network.schema.json's values, in its order"
+        );
+        assert_eq!(
+            &kinds[networks.len()..],
+            ["calendar"],
+            "the kinds that are not networks"
+        );
+    }
+
+    /// The definitions are the one authority (#268): a schema that repeats
+    /// the list inline is a second one, and it is the copy that rots. Walked
+    /// rather than grepped, so a list under any key is found.
+    #[test]
+    fn no_schema_repeats_a_definitions_enum_inline() {
+        fn inline_copies(value: &Value, at: String, found: &mut Vec<String>) {
+            match value {
+                Value::Object(members) => {
+                    if let Some(Value::Array(values)) = members.get("enum") {
+                        if values.iter().any(|v| v == "whatsapp" || v == "calendar") {
+                            found.push(at.clone());
+                        }
+                    }
+                    for (key, member) in members {
+                        inline_copies(member, format!("{at}/{key}"), found);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        inline_copies(item, format!("{at}/{index}"), found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for type_name in contract_schema_types().expect("the schemas") {
+            let schema = contract_schema(&type_name).expect("a schema");
+            let mut found = Vec::new();
+            inline_copies(&schema, String::new(), &mut found);
+            assert!(
+                found.is_empty(),
+                "{type_name}.schema.json repeats a definition's enum inline at {found:?}: \
+                 $ref definitions/<name>.schema.json instead"
+            );
+        }
+    }
+}

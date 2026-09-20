@@ -64,6 +64,72 @@ test('a mismatch purges the cached shell before reloading', async ({ page }) => 
 	expect(await registrationCount(page)).toBe(0);
 });
 
+test('a Gateway that ships another build of the Companion is a stale shell: one reload, then the banner', async ({
+	page
+}) => {
+	// #222, the case it was filed on: the Companion redeployed, the Gateway
+	// unchanged, and an open tab still running the previous build — five
+	// submissions of a fixed form went out in the old shape while the server
+	// reported itself current. The Gateway now names the build it ships
+	// (`companion_build`, off the export's `_app/version.json`) and this page
+	// knows its own, so the difference is a reload rather than a mystery.
+	//
+	// Register the worker with a matching answer first, so there is a cache
+	// and a registration for the reload to purge: a worker left registered
+	// would answer the very navigation the reload triggers.
+	await page.goto('/diagnostics');
+	await waitForCachedShell(page);
+	const running = (await page.getByTestId('app-build').textContent())?.trim() ?? '';
+	expect(running).not.toBe('');
+
+	let healthRequests = 0;
+	await page.route('**/health', async (route) => {
+		healthRequests += 1;
+		await route.fulfill({
+			status: 200,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				status: 'ok',
+				version: '0.1.0',
+				revision: 'test',
+				companion_build: 'a-build-this-page-is-not'
+			})
+		});
+	});
+	await page.reload();
+
+	// First boot sees the stale shell and reloads; the second finds its marker
+	// and says so instead of looping. Same shape as a moved Gateway, because
+	// it is the same remedy.
+	const banner = page.getByTestId('version-banner');
+	await expect(banner).toBeVisible();
+	await expect(banner).toHaveAttribute('data-kind', 'stale-shell');
+	const builds = page.getByTestId('stale-shell-builds');
+	await expect(builds).toHaveAttribute('data-shipped', 'a-build-this-page-is-not');
+	await expect(builds).toHaveAttribute('data-running', running);
+	expect(healthRequests).toBe(2);
+	// The reload took the cached shell and the worker with it.
+	expect(await cachedPaths(page)).toEqual([]);
+	expect(await registrationCount(page)).toBe(0);
+	// And the page is still usable while it says so — the diagnostics page
+	// names both builds, so a mismatch is read rather than inferred.
+	await expect(page.getByTestId('shipped-build')).toHaveText('a-build-this-page-is-not');
+	await expect(page.getByTestId('handshake-kind')).toHaveAttribute('data-kind', 'stale-shell');
+});
+
+test('the build the Gateway ships and the build this page runs are one and the same on a fresh load', async ({
+	page
+}) => {
+	// The test server reads `_app/version.json` off the export it serves, as
+	// the Gateway does, so on a healthy origin the two agree and nothing is
+	// said — the common case is silence.
+	await page.goto('/diagnostics');
+	const running = (await page.getByTestId('app-build').textContent())?.trim();
+	await expect(page.getByTestId('shipped-build')).toHaveText(running ?? '');
+	await expect(page.getByTestId('handshake-kind')).toHaveAttribute('data-kind', 'match');
+	await expect(page.getByTestId('version-banner')).toHaveCount(0);
+});
+
 test('an unreachable Gateway is not a mismatch', async ({ page }) => {
 	// A version-less answer must never trigger a reload: it would loop.
 	await page.route('**/health', (route) => route.abort('connectionrefused'));

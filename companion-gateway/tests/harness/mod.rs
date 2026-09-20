@@ -189,8 +189,21 @@ pub fn companion_build(test_name: &str) -> Result<PathBuf> {
     std::fs::write(dir.join("app.css"), "body { color: rebeccapurple }\n")?;
     std::fs::write(dir.join("_app/immutable/crypto.wasm"), WASM)?;
     std::fs::write(dir.join("_app/immutable/crypto.wasm.br"), WASM_BROTLI)?;
+    // The build id SvelteKit writes, and the worker's script: both are names
+    // that outlive a build, so both are the shell's policy and never the
+    // immutable assets' (#222).
+    std::fs::write(
+        dir.join("_app/version.json"),
+        format!("{{\"version\":\"{COMPANION_BUILD_ID}\"}}"),
+    )?;
+    std::fs::write(dir.join("service-worker.js"), SERVICE_WORKER_JS)?;
     Ok(dir)
 }
+
+/// The build id the fake export carries, which `/health` reports as
+/// `companion_build` (#222).
+pub const COMPANION_BUILD_ID: &str = "1789839442194-test";
+pub const SERVICE_WORKER_JS: &str = "// the fake worker\n";
 
 /// The markers the static fixtures carry, asserted on by the tests.
 pub const INDEX_HTML: &str = "<!doctype html>\n<title>Companion home</title>\n";

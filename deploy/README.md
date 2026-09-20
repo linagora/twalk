@@ -14,6 +14,17 @@ docker compose up -d --wait
 
 One step, no manual provisioning: the stack's `provision` one-shot creates the Sensor account on the way up. `./provision.sh` remains for ad-hoc accounts.
 
+## What the Gateway's state directory holds, and what losing it costs
+
+The Companion Gateway keeps its SQLite stores on the `gateway-data` volume (`GATEWAY_STATE_DIR`, `/data` in the container): the owner's device sessions, the append-only consent journal and its outbox, the settings, and the relay's own note that it created the owner's account. Recreating that directory — a fresh volume, a restore from a backup taken before onboarding, a move between hosts — loses exactly those, and nothing on the homeserver.
+
+Two consequences are worth knowing before it happens rather than after:
+
+- **Sign-in still works.** Whether this deployment has its account is asked of the homeserver on every `GET /api/deployment`, whoever created the account ([#133](https://github.com/linagora/twalk/issues/133)); a store with no memory of creating it is not a deployment with no account, and the sign-in screen is offered. Every device is signed out, since the sessions were in the store, and signs back in from the Companion.
+- **Consent starts over.** The journal is the single record of who the user decided may be read; a lost journal means every contact is `pending` again until the user decides again — nothing published before is unpublished by it, and nothing decided before is remembered. Back the volume up if that history matters to you.
+
+The registration relay's own refusal does not depend on that row either: the homeserver's `M_USER_IN_USE` closes the window on a second attempt whatever the store remembers.
+
 ## Hermes, and the two things it asks of you
 
 Hermes is part of that one step, so `docker compose up -d --wait` gives you a deployment where the whole loop can close: a contact writes, a persona drafts a reply, you approve it in the Companion, and the reply reaches the room. `hermes/tests/full_loop.rs` runs exactly this stack and asserts exactly that.
@@ -77,21 +88,19 @@ Both variables, and not just the token, because the token alone acts as the **wr
 
 Telegram is the one where that register does not start empty. It syncs the chat list at login, so roughly fifteen portal rooms appear at once rather than accumulating as conversations become active — a list of decisions waiting, since nothing is observed until the user chooses it. `../bridges/README.md` states the three configuration keys that decide how big that jump is, and what happens if a Telegram group is promoted to a supergroup.
 
-Three things follow, and each is worth knowing before you go looking for a missing message.
+Four things follow, and each is worth knowing before you go looking for a missing message.
 
 - **Nothing is observed by default, and that is deliberate.** Those eighteen rooms held roughly 1,300 memberships, several hundred people who do not know Twalk exists. Observation is chosen per conversation, and until it is chosen the Sensor is in none of them.
 - **The deployment can say how many conversations it is outside.** `GET /api/portals` lists every conversation with its name, its size and whether the Sensor is inside; `/metrics` carries the same counts as `twalk_companion_gateway_portal_rooms{observation="observing|invited|absent"}`. The Sensor's own `twalk_sensor_observed_rooms` says how many rooms it is actually reading.
 - **A conversation stuck at `invited` is a configuration error with a name.** The Gateway invited the Sensor and the Sensor refused the inviter: that bridge's bot is missing from `SENSOR_ALLOWED_INVITERS`. The Sensor counts those refusals as `twalk_sensor_invites_total{outcome="ignored"}` and logs one warning each.
 
-<<<<<<< HEAD
+- **A readable bridge with no conversations says which account it asked as.** Each entry of `bridges` in `GET /api/portals` carries `asked_as` and `joined_rooms`, because `absent: 0` used to mean two different things and a deployment could not tell them apart: a network that has genuinely built no conversation yet, and a register asking an account that is in no rooms. `joined_rooms: 0` next to a `sender_localpart`-shaped account is the second ([#171](https://github.com/linagora/twalk/issues/171)); the Gateway also logs one warning per read, naming the account and the variable.
+
 ### The bridge bots are also the accounts that are not people
 
 Those same bot ids belong in `SENSOR_BRIDGE_BOTS` too, and for the opposite reason ([#152](https://github.com/linagora/twalk/issues/152), ADR 0026). `SENSOR_ALLOWED_INVITERS` says whose invitation the Sensor accepts; `SENSOR_BRIDGE_BOTS` says which accounts are the appservices' own service identities, about which nothing is published at all — not presence, not what they write into a portal room, and no consent decision. Leave it empty and the bots are published as contacts: on the reference deployment `@whatsappbot` and `@signalbot` produced 1,150 of 1,216 presence events, two a minute each for as long as the stack ran, and each one travelled through the consent machinery, so the consent state can acquire a row about a robot.
 
 Two lists rather than one, because the second question is not the first and `SENSOR_ALLOWED_INVITERS` also names *you*: deriving the bots from it would delete your own presence — or that of a second account you trust to invite the Sensor — from the bus as a side effect of an unrelated setting. An account you do not name stays a contact, which is the safe failure in this one direction: mistaking a contact for a bot makes a real person disappear from the stream in silence. `twalk_sensor_events_dropped_total{reason="bridge_bot"}` is how you check it worked, and a flat zero on a stack with bridges connected means an id is misspelled rather than that there was nothing to drop.
-=======
-- **A readable bridge with no conversations says which account it asked as.** Each entry of `bridges` in `GET /api/portals` carries `asked_as` and `joined_rooms`, because `absent: 0` used to mean two different things and a deployment could not tell them apart: a network that has genuinely built no conversation yet, and a register asking an account that is in no rooms. `joined_rooms: 0` next to a `sender_localpart`-shaped account is the second ([#171](https://github.com/linagora/twalk/issues/171)); the Gateway also logs one warning per read, naming the account and the variable.
->>>>>>> origin/main
 
 A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversations read at all, and says so in `GET /api/portals` rather than quietly contributing nothing to the totals. `GATEWAY_PORTAL_REFRESH_SECONDS` decides only how fresh the `/metrics` counts are (300 by default, `0` turns the background read off); the API always reads the homeserver there and then. `GATEWAY_CROWD_THRESHOLD` (20 by default) is where a member count becomes a crowd: the chooser asks the user to acknowledge the size of any conversation at or above it before the Sensor is put in, and a conversation whose room is replaced is followed automatically only below it (ADR 0029). The Companion reads the served value and holds no number of its own. `GATEWAY_CONNECTIONS` names the deployment's **connections** (ADR 0033) — the accounts it observes or acts through, the perimeters consent is scoped to; left empty, every bridge is one connection named after its network, plus `matrix` for the user's own account on the homeserver, and the Sensor stamps each event with the connection whose bridge bot built its room, read from the Gateway rather than derived. Declare it to name a second account of one network (each connection named after its `GATEWAY_BRIDGES` entry) or a collector's mailbox or calendar.
 
@@ -103,11 +112,14 @@ A bridge whose `GATEWAY_BRIDGE_<ID>_AS_TOKEN` is unset has none of its conversat
 | `docker-compose/.env.example` | Every variable, documented; the file to read first |
 | `docker-compose/provision.sh` | Matrix account provisioning (the Sensor, ad-hoc accounts) |
 | `docker-compose/provision-bridges.sh` | Step 1 above: registrations, Synapse's configuration, the restart |
-| `docker-compose/provision-owner-device.sh` | The operator route of ADR 0034: the `Twalk` device on the owner's own account, its credential written where the Sensor reads it |
-| `docker-compose/provision-hermes-nostr-key.sh` | The Nostr key Hermes — the agent runtime of ADR 0032, not this stack's persona runtime — signs Buzz events with; written into Hermes's own env file (`BUZZ_PRIVATE_KEY`), never into this stack's, because Twalk holds no Buzz key. Prints the public half, which the relay must be told to accept |
+| `docker-compose/provision-owner-device.sh` | The operator route of ADR 0034: a **Matrix** device named `Twalk` on the owner's own account, for the Sensor to post approved replies through, its credential written where the Sensor reads it |
+| `docker-compose/provision-clerk-device.sh` | The operator route of ADR 0036 (#284): a **Companion Gateway** device named `Buzz` on the owner's session, for the clerk to carry a ✅ made on Buzz through `POST /api/approvals` — listed on the dashboard and revoked there like a phone. The owner's Matrix password at the terminal, one OpenID token, one sign-in, and the refresh token written into `CLERK_GATEWAY_SESSION_DIR` at mode 0600; the Matrix login it makes for the token is logged out at the end. With `--from-owner-device` it makes no login at all and mints the OpenID token with `SENSOR_OWNER_DEVICE_ACCESS_TOKEN` — the device the row above created — which it never logs out: for a homeserver without password login (SSO only) or an operator who is not at a terminal, and it makes the clerk's Gateway device depend on nothing the deployment did not already hold. The password stays the default because a credential you type is one you did not have to store. Idempotent: an alive session is refreshed and kept, a dead one replaced with the other `Buzz` devices revoked |
+| `docker-compose/provision-nostr-key.sh` | A Nostr key for a Buzz writer, generated once into the env file it is given (`BUZZ_PRIVATE_KEY`, with the public half beside it), never into this stack's `.env`. Two writers use it: Hermes — the agent runtime of ADR 0032, not this stack's persona runtime — into its own env file, and the clerk (#265) into a file of its own. Prints the public half, which the relay must be told to accept. `provision-hermes-nostr-key.sh` is the old name, kept as a symlink |
+| `docker-compose/provision-buzz-channels.sh` | The operator route of #218: the owner's four Buzz channels, created **as the owner** from a key file only they write, Hermes added as a bot member when its env file holds a key, every `--bot <pubkey>` (the clerk's) added the same way, the UUIDs written where Hermes reads them and the three `CLERK_CHANNEL_*` lines printed for this stack's `.env` — no UUID typed by hand |
 | `docker-compose/synapse/homeserver.yaml` | Synapse's configuration template (Jinja2, rendered by the image) |
-| `docker-compose/*.Dockerfile` | One image per Twalk component |
+| `docker-compose/*.Dockerfile` | One image per Twalk component, the clerk's (`clerk.Dockerfile`) included |
 | `docker-compose/hermes-entrypoint.sh` | Hermes's entrypoint: start the runtime, or say why it is hosting nothing |
+| `docker-compose/clerk-entrypoint.sh` | The clerk's entrypoint: start the clerk, or say why it is hosting nothing; hand its key and, since #284, its Gateway session directory to the unprivileged account it runs as, and refuse a write half that is half set, naming the script |
 | `docker-compose/run-persona-image.sh` | The argv every persona in `HERMES_PERSONAS` names, shipped in the Hermes image as `run-persona` |
 | `../bridges/` | Each bridge's base configuration, and the generator the one-shots run |
 

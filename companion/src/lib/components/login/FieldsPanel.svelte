@@ -318,6 +318,20 @@
 				{$t('networks.field.pattern')}
 			{:else if found.because === 'unreadable'}
 				{$t('networks.cookies.unreadable')}
+			{:else if
+				override !== null &&
+				override.hostScopedMissing !== null &&
+				found.names.some((name) => override.hostScoped.includes(name))
+			}
+				<!-- A cookie the API host never carries: the paste was complete
+				     and the cookie was never in it, so the cause is the request
+				     copied, not the copying (#220). -->
+				<span data-testid="cookies-missing-scoped">
+					{$t(override.hostScopedMissing, {
+						names: found.names.join(', '),
+						scoped: found.names.filter((name) => override.hostScoped.includes(name)).join(', ')
+					})}
+				</span>
 			{:else}
 				{$t('networks.cookies.missing', { names: found.names.join(', ') })}
 			{/if}

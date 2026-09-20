@@ -137,4 +137,24 @@ describe('the SMS cookie step’s words', () => {
 	it('carry this step’s own failure copy, which the generic sentence cannot', () => {
 		expect(override?.refused).toBe('sms.failed.google');
 	});
+
+	// #220: the step id the real bridge advertises, read off the reference
+	// deployment, where the guessed id drew the fallback panel instead of these
+	// words. The stub's id and the guess both still resolve to the same copy.
+	it('are attached to the step id mautrix-gmessages really advertises', () => {
+		expect(overrideFor(SMS.stepCopy, 'fi.mau.gmessages.google_account')).toBe(override);
+		expect(overrideFor(SMS.stepCopy, 'fi.mau.gmessages.login.cookies')).toBe(override);
+	});
+
+	it('say where the cookies are, where they are not, which are not wanted, and where they must not go', () => {
+		expect(keys).toContain('sms.cookies.where.application');
+		expect(keys).toContain('sms.cookies.where.notNetwork');
+		expect(keys).toContain('sms.cookies.notThese');
+		expect(keys).toContain('sms.cookies.onlyHere');
+	});
+
+	it('know which cookie a request to the API host never carries, and have a sentence for it', () => {
+		expect(override?.hostScoped).toEqual(['OSID']);
+		expect(override?.hostScopedMissing).toBe('sms.cookies.missingScoped');
+	});
 });

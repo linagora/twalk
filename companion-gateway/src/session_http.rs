@@ -340,14 +340,47 @@ async fn deployment(State(gateway): State<Gateway>) -> Response {
     let Some(sessions) = gateway.sessions() else {
         return not_configured();
     };
-    let bootstrapped = match sessions.owner_account_created() {
-        Ok(created) => created.is_some(),
-        Err(error) => {
-            // A store that cannot answer must not be reported as "no account
-            // yet": that would send a returning user to the account form,
-            // which is the journey this endpoint exists to end.
-            warn!(%error, "the session store could not say whether the account exists");
-            return refused(StatusCode::SERVICE_UNAVAILABLE, "store_unreadable");
+    // `bootstrapped` means "this deployment has its account", not "this
+    // Gateway's store remembers creating it" (#133). The store's row is the
+    // registration relay's own promise and settles the question when it is
+    // there; when it is not — an account provisioned outside the relay, a
+    // state directory recreated or restored from before onboarding — the
+    // homeserver is asked, because it is the one that knows.
+    let remembered = sessions.owner_account_created();
+    let bootstrapped = match &remembered {
+        Ok(Some(_)) => true,
+        Ok(None) | Err(_) => {
+            let Some(bootstrap) = gateway.bootstrap() else {
+                // Sign-in configured and no homeserver client is a shape the
+                // configuration does not produce (the client falls back to
+                // sign-in's own URL); if it ever does, say so rather than
+                // guess.
+                warn!("no homeserver client to ask whether the account exists");
+                return refused(StatusCode::SERVICE_UNAVAILABLE, "homeserver_unreachable");
+            };
+            match bootstrap.account_exists(sessions.owner()).await {
+                Ok(exists) => exists,
+                Err(error) => {
+                    // Neither source can answer, so neither answer is given:
+                    // "no account yet" would send a returning user to the
+                    // account form, which is the journey this endpoint
+                    // exists to end. Which of the two failed is named, since
+                    // an operator fixes them in different places.
+                    match &remembered {
+                        Err(store) => {
+                            warn!(%store, %error, "neither the session store nor the homeserver could say whether the account exists");
+                            return refused(StatusCode::SERVICE_UNAVAILABLE, "store_unreadable");
+                        }
+                        Ok(_) => {
+                            warn!(%error, "the homeserver could not say whether the account exists");
+                            return refused(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "homeserver_unreachable",
+                            );
+                        }
+                    }
+                }
+            }
         }
     };
     Json(serde_json::json!({

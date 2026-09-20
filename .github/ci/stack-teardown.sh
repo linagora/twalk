@@ -30,19 +30,28 @@
 # required check red for a reason that is not the change under test, which is the
 # exact failure mode this whole workflow exists to avoid.
 #
+# The clerk's relay stack (`twalk-ci-clerk`, `TWALK_CLERK_TEST_*`) persists
+# between runs for the same reason: the clerk suite seeds it fresh — a real
+# relay, Postgres and Redis — per run under a bus prefix of its own, so a warm
+# relay carries nothing from the previous run for the next one to trip over.
+# It is absent from the `projects` list below on purpose, same as the shared
+# stack.
+#
 # Never `docker system prune`, never `docker builder prune`: on a self-hosted
 # runner the daemon is shared with whatever else the host does, and the build
 # cache is the only reason a warm run is warm.
 set -uo pipefail
 
-# The per-run stacks. `twalk-ci-test` — the shared harness stack — is absent from
-# this list on purpose; see the header.
+# The per-run stacks. `twalk-ci-test` — the shared harness stack — and
+# `twalk-ci-clerk` — the clerk's relay stack — are absent from this list on
+# purpose; see the header.
 projects=(
   twalk-ci-deploy
   twalk-ci-bridges
   twalk-ci-nobridges
   twalk-ci-portals
   twalk-ci-loop
+  twalk-ci-clerk-deploy
 )
 
 echo '--- the per-run deployment projects'
@@ -70,7 +79,7 @@ echo '--- per-stack images'
 # Tagged per compose project (#38) so parallel worktrees never overwrite each
 # other's build. The operator's own `:local` tags are never touched.
 for project in "${projects[@]}"; do
-  for image in twalk/sensor twalk/companion-gateway twalk/hermes twalk/persona-assistant; do
+  for image in twalk/sensor twalk/companion-gateway twalk/hermes twalk/persona-assistant twalk/clerk; do
     docker image rm "$image:$project" >/dev/null 2>&1 || true
   done
 done

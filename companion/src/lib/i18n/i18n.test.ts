@@ -1,18 +1,32 @@
-// The two things about i18n that are logic rather than copy: which locale the
-// browser's preferences resolve to, and whether the ICU patterns in both
-// catalogues actually format.
+// The things about i18n that are logic rather than copy: which locale the
+// browser's preferences resolve to, whether the five catalogues say the same
+// things, and whether their ICU patterns actually format.
 
 import { describe, expect, it } from 'vitest';
 
+import de from './de.json';
 import en from './en.json';
+import es from './es.json';
 import fr from './fr.json';
-import { pickLocale } from './locale';
+import it_ from './it.json';
+import { LOCALES, pickLocale, type Locale } from './locale';
 import { translate } from './index';
+
+const catalogues: Record<Locale, Record<string, string>> = { en, fr, it: it_, es, de };
+
+/** The placeholder names an ICU pattern interpolates, in order of first use. */
+function placeholders(pattern: string): string[] {
+	return [...new Set([...pattern.matchAll(/\{(\w+)\s*[,}]/g)].map((m) => m[1]))].sort();
+}
 
 describe('pickLocale', () => {
 	it('takes the first preference the Companion speaks', () => {
-		expect(pickLocale(['de', 'fr', 'en'])).toBe('fr');
+		expect(pickLocale(['ja', 'fr', 'en'])).toBe('fr');
 		expect(pickLocale(['en-GB', 'fr'])).toBe('en');
+		// The three #102 added are spoken now, not skipped over.
+		expect(pickLocale(['de', 'fr'])).toBe('de');
+		expect(pickLocale(['it-CH', 'en'])).toBe('it');
+		expect(pickLocale(['es-MX'])).toBe('es');
 	});
 
 	it('matches a regional variant on its language', () => {
@@ -24,7 +38,7 @@ describe('pickLocale', () => {
 	});
 
 	it('falls back to English when it recognises nothing', () => {
-		expect(pickLocale(['de', 'ja'])).toBe('en');
+		expect(pickLocale(['pt', 'ja'])).toBe('en');
 		expect(pickLocale([])).toBe('en');
 		expect(pickLocale(undefined)).toBe('en');
 	});
@@ -32,12 +46,42 @@ describe('pickLocale', () => {
 
 describe('the catalogues', () => {
 	it('translate the same set of keys', () => {
-		// A key present in one language and absent in the other is a screen
-		// that silently reads English to a French user.
-		expect(Object.keys(fr).sort()).toEqual(Object.keys(en).sort());
+		// A key present in English and absent in another language is a screen
+		// that silently reads English to that user — the fallback exists for a
+		// key added in a hurry, not as a way to ship a partial catalogue.
+		for (const locale of LOCALES) {
+			expect(Object.keys(catalogues[locale]).sort(), locale).toEqual(Object.keys(en).sort());
+		}
 	});
 
-	it('format every message in both languages', () => {
+	it('interpolate the same placeholders under every key', () => {
+		// A translation that drops `{count}` or renames it `{n}` formats fine
+		// and shows a sentence with a hole in it. Plural branches are compared
+		// by name only: how many forms a language needs is that language's
+		// business.
+		for (const locale of LOCALES) {
+			for (const key of Object.keys(en) as (keyof typeof en)[]) {
+				expect(placeholders(catalogues[locale][key] ?? ''), `${locale} ${key}`).toEqual(
+					placeholders(en[key])
+				);
+			}
+		}
+	});
+
+	it('say whether a native speaker reviewed them', () => {
+		// `catalogue.review` is the one entry that is not copy: it is the
+		// catalogue's own statement of its provenance, which CONTRIBUTING.md
+		// tells a reviewer how to change. English and French were written by
+		// the people who own the product; the other three were produced
+		// without a native reviewer and must say so until one has.
+		expect(en['catalogue.review']).toBe('reviewed');
+		expect(fr['catalogue.review']).toBe('reviewed');
+		for (const locale of ['it', 'es', 'de'] as const) {
+			expect(catalogues[locale]['catalogue.review'], locale).toMatch(/^unreviewed — /);
+		}
+	});
+
+	it('format every message in every language', () => {
 		// The point is the patterns: an unbalanced brace or an unknown ICU
 		// function throws at format time, which would be a blank screen.
 		const values = {
@@ -46,6 +90,12 @@ describe('the catalogues', () => {
 			domain: 'example.com',
 			expected: '0.1.0',
 			actual: '0.2.0',
+			hint: 'k3y9',
+			status: 401,
+			model: 'qwen',
+			scoped: 'OSID',
+			running: '1789839442194',
+			shipped: '1789900000000',
 			path: '/nowhere',
 			https: 'https://',
 			localhost: 'http://localhost',
@@ -80,6 +130,9 @@ describe('the catalogues', () => {
 			// The deployment's own address, as /recover reports it when nothing
 			// answered there (ticket #115).
 			url: 'http://twalk.example:8009',
+			// The account the Sensor posted a reply as, in its report of what the
+			// reply reached (#216).
+			postedAs: '@you:example.com',
 			// The two homeservers a refused Matrix connection names (#138):
 			// the one the user asked for, and the one this deployment drives.
 			wanted: 'linagora.com',
@@ -121,9 +174,10 @@ describe('the catalogues', () => {
 			field: 'Phone number',
 			found: 'password'
 		};
-		for (const key of Object.keys(en) as (keyof typeof en)[]) {
-			expect(translate('en', key, values), key).toBeTruthy();
-			expect(translate('fr', key, values), key).toBeTruthy();
+		for (const locale of LOCALES) {
+			for (const key of Object.keys(en) as (keyof typeof en)[]) {
+				expect(translate(locale, key, values), `${locale} ${key}`).toBeTruthy();
+			}
 		}
 	});
 
@@ -132,6 +186,9 @@ describe('the catalogues', () => {
 		expect(translate('en', 'gate.intro', { count: 3 })).toContain('3 things');
 		expect(translate('fr', 'gate.intro', { count: 1 })).toContain('un élément');
 		expect(translate('fr', 'gate.intro', { count: 3 })).toContain('3 éléments');
+		// One of the three new ones, so the plural rule is exercised there too.
+		expect(translate('de', 'dashboard.messages.count', { count: 1 })).toBe('1 Nachricht');
+		expect(translate('de', 'dashboard.messages.count', { count: 3 })).toBe('3 Nachrichten');
 	});
 
 	it('interpolate named placeholders', () => {

@@ -78,12 +78,18 @@
 	import Icon from '$lib/icons/Icon.svelte';
 	import { locale, t } from '$lib/i18n';
 	import { networkNameKey, relativeTime } from '$lib/dashboard/format';
+	import { gateway } from '$lib/api/client';
 	import { approve, loadSuggestions } from '$lib/approvals/api';
+	import { personaRows } from '$lib/dashboard/model';
+	import { emptyApprovalsKey, readRuntime, UNKNOWN, type Runtime } from '$lib/runtime/presence';
 	import { dismiss, dismissed, restoreAll } from '$lib/approvals/dismissed';
 	import type { Explained } from '$lib/approvals/refusal';
 	import {
+		deliveryCopy,
+		deliveryDetailKey,
 		goneStale,
 		noticesFor,
+		postedCopy,
 		toRows,
 		triggerKey,
 		type Listing,
@@ -110,9 +116,33 @@
 
 	let ticker: ReturnType<typeof setInterval> | null = null;
 
+	/**
+	 * The two facts the empty state needs to say *why* it is empty (#177):
+	 * whether an agent runtime is here at all (#189), and whether the user has
+	 * activated any assistant — a read of the consent state this screen never
+	 * made, although the dashboard makes it. Neither is a value that means
+	 * "still working": `unknown` and `null` are rendered as not knowing.
+	 */
+	let runtime = $state<Runtime>(UNKNOWN);
+	let anyPersonaActive = $state<boolean | null>(null);
+
 	onMount(() => {
 		hidden = dismissed();
 		void refresh();
+		void readRuntime().then((read) => {
+			runtime = read;
+		});
+		void gateway
+			.GET('/api/consent/state')
+			.then((answer) => {
+				anyPersonaActive =
+					answer.data === undefined
+						? null
+						: personaRows(answer.data.entries).some((row) => row.active);
+			})
+			.catch(() => {
+				anyPersonaActive = null;
+			});
 		// The relative times, and the staleness warning. No polling: this
 		// screen re-reads when the user asks, because a list that reordered
 		// itself under a finger about to press approve is the last thing an
@@ -303,13 +333,18 @@
 	{/if}
 
 	{#if loaded && problem === null && rows.length === 0}
-		<div class="card" data-testid="approvals-empty">
+		{@const why = emptyApprovalsKey(runtime, anyPersonaActive)}
+		<div class="card" data-testid="approvals-empty" data-why={why.slice('approvals.empty.'.length)}>
 			<p class="card__title">
 				<Icon name="persona" size="dense" />
 				{$t('approvals.empty.title')}
 			</p>
 			<p class="small">{$t('approvals.empty.body')}</p>
-			<p class="small muted">{$t('approvals.empty.noRuntime')}</p>
+			<!-- Three situations, three sentences (#177): no runtime to propose
+			     anything; a runtime and nothing activated; an active assistant
+			     that proposed nothing — the common case, and the one a single
+			     sentence for all three used to bury. -->
+			<p class="small muted" data-testid="approvals-empty-why">{$t(why)}</p>
 		</div>
 	{/if}
 
@@ -401,6 +436,39 @@
 					})}
 					{row.approval.edited ? $t('approvals.sent.edited') : $t('approvals.sent.unedited')}
 				</p>
+				<!-- Published is not delivered (#216): a second sentence, from the
+				     Sensor's own report when there is one, and never from the
+				     approval's `publication`. -->
+				<p
+					class="small {row.posted?.reach === 'nobody' ? 'card card--warning' : ''}"
+					data-testid="delivered"
+					data-reach={row.posted?.reach ?? 'pending'}
+				>
+					<Icon name={row.posted?.reach === 'nobody' ? 'warning' : 'ok'} size="dense" />
+					{$t(postedCopy(row), {
+						postedAs: row.posted?.posted_as ?? '',
+						detail: $t(deliveryDetailKey(row.delivery))
+					})}
+				</p>
+			{/if}
+
+			<!-- Before the button, not after it: whether this reply can reach the
+			     contact at all (#216). `cannot_reach` is a certainty the Gateway
+			     read off the homeserver, so it is drawn as a warning; the button
+			     stays, because the Gateway is the authority on refusing and a
+			     screen that hid it would be a second, disagreeing one. -->
+			{#if row.standing === 'approvable'}
+				{@const delivery = deliveryCopy(row.delivery)}
+				<p
+					class="small {delivery.warns ? 'card card--warning' : 'muted'}"
+					role={delivery.warns ? 'alert' : undefined}
+					data-testid="delivery"
+					data-reach={row.delivery.reach}
+					data-detail={row.delivery.detail}
+				>
+					{#if delivery.warns}<Icon name="warning" size="dense" />{/if}
+					{$t(delivery.key, { detail: $t(deliveryDetailKey(row.delivery)) })}
+				</p>
 			{/if}
 
 			{#if editing === row.id}
@@ -425,6 +493,16 @@
 					{$t('approvals.sent.body', { owner: outcome.by, sequence: outcome.sequence ?? 0 })}
 					{outcome.edited ? $t('approvals.sent.edited') : $t('approvals.sent.unedited')}
 				</p>
+				{#if row.standing !== 'approved'}
+					<!-- The re-read has not landed yet: what is known about delivery
+					     is what was known before the button. -->
+					<p class="small muted" data-testid="delivered" data-reach="pending">
+						{$t(postedCopy(row), {
+							postedAs: '',
+							detail: $t(deliveryDetailKey(row.delivery))
+						})}
+					</p>
+				{/if}
 			{:else if outcome !== undefined && outcome.kind === 'refused'}
 				<div
 					class="card card--warning small"

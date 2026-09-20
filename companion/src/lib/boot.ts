@@ -25,6 +25,8 @@
 
 import { writable } from 'svelte/store';
 
+import { version as appBuild } from '$app/environment';
+
 import type { CapabilityReport } from '$lib/capabilities/report';
 import { initLocale } from '$lib/i18n';
 import { startSessionKeeper } from '$lib/session/refresh';
@@ -90,13 +92,21 @@ export async function startBoot(): Promise<void> {
 	const capabilities = reportCapabilities(await probeCapabilities());
 	state.update((current) => ({ ...current, capabilities }));
 
-	const { outcome, health } = await shakeHands();
+	// The build this page runs, for the second comparison (#222): a Gateway
+	// of the right version that ships another build is a stale shell too.
+	const { outcome, health } = await shakeHands(EXPECTED_GATEWAY_VERSION, appBuild);
 	state.update((current) => ({ ...current, handshake: outcome, health, ready: true }));
 
 	const { reloadForNewGateway, registerServiceWorker } = await import('$lib/version/reload');
 
-	if (outcome.kind === 'mismatch') {
-		const decision = await reloadForNewGateway(outcome.actual);
+	if (outcome.kind === 'mismatch' || outcome.kind === 'stale-shell') {
+		// Two reasons, one remedy (#222): the shell this browser holds is not
+		// the one the server serves — because the Gateway moved, or because
+		// the Companion was redeployed under the same Gateway. Purge, drop the
+		// worker, reload once; the marker is the thing that moved.
+		const decision = await reloadForNewGateway(
+			outcome.kind === 'mismatch' ? outcome.actual : outcome.shipped
+		);
 		if (decision === 'already-tried') {
 			state.update((current) => ({ ...current, reloadRefused: true }));
 		}

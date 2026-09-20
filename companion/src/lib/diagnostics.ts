@@ -48,6 +48,7 @@ export function buildDiagnostics(input: DiagnosticsInput): string {
 		`built for gateway: ${input.expectedGatewayVersion}`,
 		`gateway version: ${input.health?.version ?? 'unknown'}`,
 		`gateway revision: ${input.health?.revision ?? 'unknown'}`,
+		`gateway ships build: ${input.health?.companionBuild ?? 'unknown'}`,
 		`version handshake: ${describeHandshake(input.handshake)}`,
 		''
 	];
@@ -82,6 +83,8 @@ function describeHandshake(handshake: Handshake): string {
 			return `match (${handshake.version})`;
 		case 'mismatch':
 			return `mismatch (built for ${handshake.expected}, gateway ${handshake.actual})`;
+		case 'stale-shell':
+			return `stale shell (running build ${handshake.running}, gateway ships ${handshake.shipped})`;
 		case 'unreachable':
 			return `unreachable (${handshake.reason})`;
 	}
