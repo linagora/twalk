@@ -315,6 +315,25 @@ impl Running {
     fn store_file(&self) -> PathBuf {
         harness::gateway_state_dir(&self.static_dir).join("consent.sqlite3")
     }
+
+    /// Every byte of every file in the Gateway's state directory — the
+    /// store **and** its WAL, as `tests/pending.rs` reads it. The store runs
+    /// in WAL mode and the Gateway is still up, so what this run wrote is in
+    /// `consent.sqlite3-wal` and an assertion over the main file alone would
+    /// pass for a reason that has nothing to do with the schema.
+    fn state_bytes(&self) -> Result<Vec<u8>> {
+        let state_dir = harness::gateway_state_dir(&self.static_dir);
+        let mut bytes = Vec::new();
+        for entry in std::fs::read_dir(&state_dir)
+            .with_context(|| format!("failed to read {}", state_dir.display()))?
+        {
+            let path = entry?.path();
+            if path.is_file() {
+                bytes.extend(std::fs::read(&path)?);
+            }
+        }
+        Ok(bytes)
+    }
 }
 
 /// A granted contact, their message, and a persona's suggestion for it —
@@ -510,8 +529,18 @@ async fn an_approval_while_off_carries_neither_the_line_nor_the_member_and_while
     assert_eq!(event["data"]["edited"], json!(false));
 
     // What the Gateway keeps of either: no text at all. The sentence is on
-    // the bus with the reply, where the retention is declared.
-    let bytes = std::fs::read(running.store_file())?;
+    // the bus with the reply, where the retention is declared. Every file
+    // in the state directory, because the rows this test wrote are in the
+    // WAL and not yet in the main file. The approval rows themselves are
+    // there — the search is not vacuous — which the id check proves first.
+    let bytes = running.state_bytes()?;
+    assert!(
+        bytes
+            .windows(disclosed_id.len())
+            .any(|window| window == disclosed_id.as_bytes()),
+        "the approval row was not found in the state directory, so the search below would \
+         prove nothing"
+    );
     for text in [
         undisclosed_body.as_str(),
         disclosed_body.as_str(),

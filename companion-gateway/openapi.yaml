@@ -1789,8 +1789,12 @@ paths:
               reply.
             - `suggestion_unreadable` - the suggestion is on the bus and
               this build cannot read it (an unknown network, an unknown
-              consent state, a content type the contract does not name).
-              Found and not understood, which is not "not found".
+              consent state, a content type the contract does not name — or,
+              sent unedited, a body so long that the disclosure appended
+              after it would exceed the contract's 65 536, which only a
+              persona that ignored the SDK's cap can publish; editing the
+              reply shorter is the way out). Found and not understood, which
+              is not "not found".
           content:
             application/json:
               schema:

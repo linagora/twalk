@@ -1267,6 +1267,17 @@ impl Approvals {
         } else {
             None
         };
+        if let Some(sentence) = &disclosure {
+            if !fits_with_disclosure(&content.body, sentence) {
+                return Err(Refusal::SuggestionUnreadable(format!(
+                    "its body is {} characters and, with the disclosure appended, the reply \
+                     would exceed the contract's {CONTRACT_MAX_BODY}. The SDK caps a body at \
+                     {MAX_BODY} for exactly this, so the persona that published it ignored the \
+                     cap; edit the reply shorter, or refuse it",
+                    content.body.chars().count()
+                )));
+            }
+        }
         if switch.enabled && disclosure.is_none() {
             // Not a refusal: the contract allows a suggestion without the
             // member, and a persona that set none is one that predates
@@ -1698,6 +1709,24 @@ pub struct Approved {
     pub stream_sequence: u64,
 }
 
+/// Whether a body and the sentence appended after it fit the contract's
+/// `final.body` (ticket #121).
+///
+/// The edited path cannot get here over the limit — [`parse_content`] caps
+/// the body at [`MAX_BODY`] — but the **unedited** path sends the
+/// suggestion's own body, and the suggestion schema still allows 65 536:
+/// a third-party persona that ignored the SDK's cap can publish a body the
+/// sentence no longer fits after. That is refused rather than the sentence
+/// withheld, because a reply going out undisclosed is the one outcome ADR
+/// 0031 exists to prevent — a suggestion that cannot be disclosed is one
+/// that should not exist — and refused as `suggestion_unreadable` rather
+/// than `malformed_request`, because the request was fine: what this
+/// Gateway cannot turn into a contract event is the suggestion. The user's
+/// way out is the edited path, which caps the body so the line always fits.
+fn fits_with_disclosure(body: &str, sentence: &str) -> bool {
+    body.chars().count() + 1 + sentence.chars().count() <= CONTRACT_MAX_BODY
+}
+
 /// Whether an RFC 3339 instant is at or before another.
 ///
 /// Compared as instants rather than as strings: a suggestion's `expires_at`
@@ -1863,6 +1892,30 @@ mod tests {
         let appended =
             crate::disclosure::append(&longest, &"y".repeat(crate::disclosure::MAX_CHARS));
         assert_eq!(appended.chars().count(), CONTRACT_MAX_BODY);
+    }
+
+    #[test]
+    fn an_unedited_body_the_sentence_no_longer_fits_after_is_refused_not_undisclosed() {
+        let sentence = "Rédigé avec mon assistant IA.";
+        // The SDK's cap, and every body under it: the line always fits.
+        assert!(fits_with_disclosure(&"x".repeat(MAX_BODY), sentence));
+        assert!(fits_with_disclosure(
+            &"x".repeat(MAX_BODY),
+            &"y".repeat(crate::disclosure::MAX_CHARS)
+        ));
+        // A contract-valid suggestion from a persona that ignored the cap.
+        assert!(!fits_with_disclosure(
+            &"x".repeat(CONTRACT_MAX_BODY),
+            sentence
+        ));
+        assert!(fits_with_disclosure(
+            &"x".repeat(CONTRACT_MAX_BODY - 1 - sentence.chars().count()),
+            sentence
+        ));
+        assert!(!fits_with_disclosure(
+            &"x".repeat(CONTRACT_MAX_BODY - sentence.chars().count()),
+            sentence
+        ));
     }
 
     #[test]

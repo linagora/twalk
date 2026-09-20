@@ -505,8 +505,17 @@ async fn a_valid_approval_publishes_a_schema_valid_reply_and_names_its_position(
     assert_eq!(recorded["event_id"], event["id"]);
 
     // Nothing of what was said is in the Gateway's own store: the reply is
-    // on the bus, where the retention is declared.
-    let bytes = std::fs::read(running.state_dir().join("consent.sqlite3"))?;
+    // on the bus, where the retention is declared. Every file in the state
+    // directory — the store is in WAL mode and the Gateway is still up, so
+    // this run's rows are in `consent.sqlite3-wal`, and a search of the main
+    // file alone would pass vacuously. The approval row is found first, so
+    // that the absence below is an absence from bytes that hold the row.
+    let bytes = state_bytes(&running.state_dir())?;
+    assert!(
+        contains(&bytes, talk.suggestion_id.as_bytes()),
+        "the approval row was not found in the state directory, so the search below would \
+         prove nothing"
+    );
     assert!(
         !contains(&bytes, talk.suggestion_body.as_bytes()),
         "the Gateway's store holds the text of the reply that was sent"
@@ -514,8 +523,23 @@ async fn a_valid_approval_publishes_a_schema_valid_reply_and_names_its_position(
     Ok(())
 }
 
+/// Every byte of every file in the Gateway's state directory, as
+/// `tests/pending.rs` reads it: the store and its WAL.
+fn state_bytes(state_dir: &std::path::Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for entry in std::fs::read_dir(state_dir)
+        .with_context(|| format!("failed to read {}", state_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.is_file() {
+            bytes.extend(std::fs::read(&path)?);
+        }
+    }
+    Ok(bytes)
+}
+
 /// Whether a byte slice contains another — a substring search over the
-/// database file, as `tests/pending.rs` does.
+/// database files, as `tests/pending.rs` does.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
