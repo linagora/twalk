@@ -529,7 +529,7 @@
 	"persona.removed.hours": "Les heures d’activité. Une plage horaire est une règle à appliquer et à auditer à l’exécution ; un réglage cosmétique ici laisserait croire à une protection qui n’existe pas.",
 
 	"persona.runtime.title": "Ce qui se passe après l’activation",
-	"persona.runtime.body": "La décision est enregistrée et publiée sur votre bus, où le moteur d’agents la lira. Ce moteur n’est pas encore déployé : l’assistant ne produira donc aucune proposition aujourd’hui. L’activer maintenant garantit qu’il partira des réseaux que vous avez choisis, et de rien d’autre, le jour où il tournera.",
+	"persona.runtime.body": "La décision est enregistrée et publiée sur votre bus, où le moteur d’agents la lit : l’assistant part des réseaux que vous avez choisis, et de rien d’autre.",
 
 	"persona.pause.meaning": "Mettre un assistant en pause signifie qu’il ne reçoit plus rien. Il continue de tourner et reste supervisé : il est privé d’événements, pas arrêté.",
 
@@ -590,8 +590,12 @@
 	"dashboard.persona.activate": "Activer",
 	"dashboard.persona.working": "Enregistrement…",
 	"dashboard.persona.pausedMeaning": "Un agent en pause ne reçoit plus rien. Il continue de tourner et reste supervisé : il est privé d’événements, pas arrêté.",
-	"dashboard.persona.noRuntime": "Aucun moteur d’agents n’est encore déployé ici : un agent actif ne produit donc rien aujourd’hui. Votre décision est enregistrée et publiée, et le moteur la respectera dès son démarrage.",
 	"dashboard.persona.failed": "La décision a été refusée ({error}). Rien n’a changé.",
+	"runtime.present": "Votre moteur d’agents tourne ici et héberge {count, plural, one {un assistant} other {# assistants}}. Un assistant actif lit ce que vous avez autorisé et vous propose des réponses à approuver.",
+	"runtime.gone": "Un moteur d’agents a tourné ici et ne tourne plus. Un assistant actif ne produit rien tant qu’il n’est pas revenu ; vos décisions sont enregistrées et respectées dès son retour.",
+	"runtime.never": "Aucun moteur d’agents n’a encore hébergé d’assistant ici : un assistant actif ne produit donc rien aujourd’hui. Votre décision est enregistrée et publiée, et le moteur la respectera dès son démarrage.",
+	"runtime.noBus": "Ce serveur n’a pas de bus d’événements configuré : aucun moteur d’agents ne peut donc y tourner, et un assistant n’y lirait rien et ne proposerait rien.",
+	"runtime.unknown": "Impossible de lire pour l’instant si un moteur d’agents tourne sur votre serveur.",
 
 	"dashboard.messages.title": "Messages transportés",
 	"dashboard.messages.unknown": "Non comptés sur ce déploiement.",
@@ -650,7 +654,10 @@
 
 	"approvals.empty.title": "Rien n’attend",
 	"approvals.empty.body": "Aucun persona n’a proposé de réponse dans la portion du flux d’événements que votre serveur relit.",
-	"approvals.empty.noRuntime": "Si vous n’avez pas activé votre assistant, ou si votre déploiement n’héberge aucune plateforme d’agents, voilà à quoi cela ressemble : rien ne va mal, et il n’y a rien à approuver.",
+	"approvals.empty.noRuntime": "Aucun moteur d’agents ne tourne sur ce déploiement en ce moment : rien ne peut être proposé. Rien ne va mal, et il n’y a rien à approuver.",
+	"approvals.empty.notActivated": "Votre assistant n’est activé sur aucun réseau : il ne propose donc rien. Activez-le depuis le tableau de bord quand vous le souhaitez.",
+	"approvals.empty.nothingProposed": "Votre assistant est actif et n’a rien proposé dans cette portion du flux : aucun message qu’il peut lire n’est arrivé. Rien ne va mal, et il n’y a rien à approuver.",
+	"approvals.empty.unknown": "Impossible de lire pour l’instant si votre assistant est actif ou si un moteur d’agents tourne : cet écran ne peut donc pas dire pourquoi la liste est vide.",
 
 	"approvals.row.persona": "Proposée par {persona}",
 	"approvals.row.produced": "Écrite {when}",

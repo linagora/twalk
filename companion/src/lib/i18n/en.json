@@ -530,7 +530,7 @@
 	"persona.removed.hours": "Active hours. A time window is a rule to be enforced and audited at runtime; a cosmetic control here would suggest a protection that does not exist.",
 
 	"persona.runtime.title": "What happens after you activate it",
-	"persona.runtime.body": "The decision is recorded and published on your bus, where the agent runtime will read it. That runtime is not deployed yet, so the assistant will produce no suggestions today — activating it now means it starts from the networks you chose, and from nothing else, on the day it runs.",
+	"persona.runtime.body": "The decision is recorded and published on your bus, where the agent runtime reads it: the assistant starts from the networks you chose, and from nothing else.",
 
 	"persona.pause.meaning": "Pausing an assistant means it receives nothing. It keeps running and stays supervised — it is starved, not stopped.",
 
@@ -591,8 +591,12 @@
 	"dashboard.persona.activate": "Activate",
 	"dashboard.persona.working": "Recording…",
 	"dashboard.persona.pausedMeaning": "A paused agent receives nothing. It keeps running and stays supervised — it is starved, not stopped.",
-	"dashboard.persona.noRuntime": "No agent runtime is deployed here yet, so an active agent produces nothing today. Your decision is recorded and published, and the runtime honours it from the day it starts.",
 	"dashboard.persona.failed": "The decision was refused ({error}). Nothing changed.",
+	"runtime.present": "Your agent runtime is running here and hosting {count, plural, one {one assistant} other {# assistants}}. An active assistant reads what you allowed and proposes replies for you to approve.",
+	"runtime.gone": "An agent runtime ran here and is not running now. An active assistant produces nothing until it is back; your decisions are recorded and honoured the moment it returns.",
+	"runtime.never": "No agent runtime has hosted an assistant here yet, so an active assistant produces nothing today. Your decision is recorded and published, and the runtime honours it from the day it starts.",
+	"runtime.noBus": "This server has no event bus configured, so no agent runtime can run against it: an assistant here can read nothing and propose nothing.",
+	"runtime.unknown": "Whether an agent runtime is running could not be read from your server just now.",
 
 	"dashboard.messages.title": "Messages carried",
 	"dashboard.messages.unknown": "Not counted on this deployment.",
@@ -651,7 +655,10 @@
 
 	"approvals.empty.title": "Nothing is waiting",
 	"approvals.empty.body": "No persona has proposed a reply in the stretch of the event stream this server reads.",
-	"approvals.empty.noRuntime": "If you have not activated your assistant, or your deployment runs no agent platform, this is what that looks like: there is nothing wrong, and there is nothing to approve.",
+	"approvals.empty.noRuntime": "No agent runtime is running against this deployment right now, so nothing can be proposed: there is nothing wrong here, and there is nothing to approve.",
+	"approvals.empty.notActivated": "Your assistant is not activated on any network, so it proposes nothing. Activate it from the dashboard when you want it to.",
+	"approvals.empty.nothingProposed": "Your assistant is active and has proposed nothing in this stretch of the stream: no message it may read has arrived. There is nothing wrong, and there is nothing to approve.",
+	"approvals.empty.unknown": "Whether your assistant is active, or whether an agent runtime is running, could not be read just now — so this screen cannot say why the list is empty.",
 
 	"approvals.row.persona": "Proposed by {persona}",
 	"approvals.row.produced": "Written {when}",
