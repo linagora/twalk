@@ -123,6 +123,17 @@
 			"triggers": ["clerk/", "deploy/docker-compose/"]
 		},
 
+		"collector-deployment": {
+			"what": "The collector inside the reference deployment (#279): its image built and its compose service really started, on a .env filled as deploy/README.md says, with no grant in its volume — the state a deployment is in before the operator's one interactive step, which no test can take. It reaches the stack's bus and says reconnect_required for each connection with the command to run in the hint, says the same in its log, stays up, and its entrypoint refuses a client secret readable by others before the binary runs. No SSO and no Gateway are contacted.",
+			"component": "collector",
+			"workdir": "collector",
+			"run": "cargo test --test deployment",
+			"targets": ["deployment"],
+			"needs": ["rust", "docker", "deployment"],
+			"tier": "advisory",
+			"triggers": ["collector/", "deploy/docker-compose/"]
+		},
+
 		"sdk-python": {
 			"what": "The Python persona SDK's pure half: the consent gate, the deterministic ids, the envelopes, the completion reader, the language list — stdlib only, against the contract's own fixtures.",
 			"component": "sdk",

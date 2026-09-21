@@ -305,7 +305,12 @@ async fn run(config: Config) -> Result<()> {
         ));
     }
 
-    let client = Client::discover(config.oidc.clone()).await?;
+    // The SSO's discovery document is read the first time a grant has to be
+    // renewed, not at start: a deployment brought up before its SSO answers
+    // — or with no grant yet, where there is nothing to renew — must say so
+    // on the bus and keep running, not exit for compose to restart in a
+    // loop. `discover` retries on every round until the SSO answers.
+    let mut client: Option<Client> = None;
     let mut trackers: Vec<Tracker> = config
         .connections
         .iter()
@@ -331,7 +336,8 @@ async fn run(config: Config) -> Result<()> {
                 state: State::ReconnectRequired,
                 service: Some("sso"),
                 hint: Some(format!(
-                    "No grant in {}. Run `twalk-collector authorize` on the host and sign in as {}.",
+                    "No grant in {}. Run `twalk-collector authorize` — on a compose deployment, \
+                     `deploy/docker-compose/provision-connection.sh` — and sign in as {}.",
                     config.oidc.grant_file.display(),
                     config.owner_email
                 )),
@@ -341,7 +347,7 @@ async fn run(config: Config) -> Result<()> {
                     .as_ref()
                     .is_none_or(|token| !token.is_fresh(RENEWAL_MARGIN))
                 {
-                    match client.renew(current).await? {
+                    match renew(&mut client, &config, current).await? {
                         Renewal::Renewed {
                             grant: rotated,
                             access: fresh,
@@ -377,7 +383,9 @@ async fn run(config: Config) -> Result<()> {
                     None => Observation {
                         state: State::Unreachable,
                         service: Some("sso"),
-                        hint: Some("The SSO did not answer; the collector retries on its own.".to_owned()),
+                        hint: Some(
+                            "The SSO did not answer; the collector retries on its own.".to_owned(),
+                        ),
                     },
                     Some(token) => {
                         let mut identities = config.services.whoami(token).await;
@@ -389,7 +397,13 @@ async fn run(config: Config) -> Result<()> {
                         // `pending_operator` (issue #274: two refusals).
                         let stale = matches!(&identities, Ok(ids) if ids.unauthenticated() && !renewed_this_round);
                         if stale {
-                            match client.renew(grant.as_ref().expect("a token comes from a grant")).await? {
+                            match renew(
+                                &mut client,
+                                &config,
+                                grant.as_ref().expect("a token comes from a grant"),
+                            )
+                            .await?
+                            {
                                 Renewal::Renewed {
                                     grant: rotated,
                                     access: fresh,
@@ -460,6 +474,22 @@ async fn run(config: Config) -> Result<()> {
             }
             metrics.set_connection_state(tracker.connection(), per_connection.state);
             if let Some(envelope) = tracker.observe(&per_connection, &occurred_at) {
+                // A transition is said in the log in the operator's words as
+                // well as on the bus: `docker compose logs collector` is
+                // where they look first, and the hint is the next step.
+                match per_connection.state {
+                    State::Connected => info!(
+                        connection = tracker.connection(),
+                        "the connection is connected"
+                    ),
+                    state => warn!(
+                        connection = tracker.connection(),
+                        state = state.as_str(),
+                        service = per_connection.service,
+                        hint = per_connection.hint.as_deref().unwrap_or_default(),
+                        "the connection is not connected"
+                    ),
+                }
                 publish(&jetstream, &envelope, &metrics).await;
             }
         }
@@ -583,13 +613,35 @@ async fn run(config: Config) -> Result<()> {
 }
 
 /// The SSO refused the grant: only the operator can give a new one.
+/// One renewal, with the SSO discovered first when it has not been yet: a
+/// discovery the SSO does not answer is the same `Unreachable` a renewal it
+/// does not answer is, and the next round asks again.
+async fn renew(client: &mut Option<Client>, config: &Config, grant: &Grant) -> Result<Renewal> {
+    if client.is_none() {
+        match Client::discover(config.oidc.clone()).await {
+            Ok(discovered) => *client = Some(discovered),
+            Err(error) => {
+                return Ok(Renewal::Unreachable {
+                    detail: format!("{error:#}"),
+                })
+            }
+        }
+    }
+    client
+        .as_ref()
+        .expect("discovered just above")
+        .renew(grant)
+        .await
+}
+
 fn reconnect_required(config: &Config) -> Observation {
     Observation {
         state: State::ReconnectRequired,
         service: Some("sso"),
         hint: Some(format!(
-            "The SSO refused to renew the grant. Run `twalk-collector authorize --renew` \
-             on the host and sign in again as {}; nothing is published until then.",
+            "The SSO refused to renew the grant. Run `twalk-collector authorize --renew` — on a \
+             compose deployment, `deploy/docker-compose/provision-connection.sh --renew` — and \
+             sign in again as {}; nothing is published until then.",
             config.owner_email
         )),
     }
