@@ -91,6 +91,46 @@ async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_r
     Ok(())
 }
 
+/// #279: an SSO that does not answer when the collector starts — the
+/// deployment came up before it, or its discovery document is not served
+/// — is `unreachable` on the bus with the grant left alone, not a
+/// `reconnect_required` sending the operator to sign in again for nothing;
+/// and the collector keeps running rather than exiting for compose to
+/// restart, so it is `connected` the round after the SSO answers.
+#[tokio::test]
+async fn an_sso_that_does_not_answer_at_start_is_unreachable_and_the_grant_is_kept() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("silent-sso").await?;
+    run.authorize().await?;
+    run.sso.silence("sso");
+    let collector = run.start()?;
+    let silent = wait_for_state(&bus, &run, &run.mail, "unreachable").await?;
+    validate_against_contract(&silent, "connection.status.changed")?;
+    assert_eq!(silent["data"]["from_state"], "unknown");
+    assert_eq!(silent["data"]["service"], "sso");
+    assert!(
+        states_of(&bus, &run, &run.mail)
+            .await?
+            .iter()
+            .all(|event| event["data"]["to_state"] != "reconnect_required"),
+        "a silent SSO is not a revoked grant"
+    );
+    collector
+        .wait_logged("the SSO could not be reached", 1)
+        .await?;
+    run.sso.restore("sso");
+    let connected = wait_for_state(&bus, &run, &run.mail, "connected").await?;
+    assert_eq!(connected["data"]["from_state"], "unreachable");
+    assert_eq!(
+        collector.count_logged("collector starting").await,
+        1,
+        "the collector did not restart"
+    );
+    collector.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connection_only(
 ) -> Result<()> {

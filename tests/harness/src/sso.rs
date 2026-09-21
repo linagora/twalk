@@ -276,6 +276,8 @@ impl FakeSso {
     }
 
     /// Makes one service stop answering: `unreachable`, not a refusal.
+    /// `"jmap"`, `"caldav"`, or since #279 `"sso"` — discovery and the token
+    /// endpoint alike.
     pub fn silence(&self, service: &'static str) {
         self.lock().silent.push(service);
     }
@@ -587,6 +589,13 @@ fn respond_json(
     path: &str,
     guard: &mut State,
 ) -> Option<(&'static str, Value)> {
+    // The SSO itself silenced (#279): neither discovery nor the token
+    // endpoint answers, the way an SSO a deployment came up before does.
+    if guard.silent.contains(&"sso")
+        && matches!(path, "/.well-known/openid-configuration" | "/token")
+    {
+        return None;
+    }
     match (request.method.as_str(), path) {
         ("GET", "/.well-known/openid-configuration") => {
             let issuer = format!("http://127.0.0.1:{}", guard.port);

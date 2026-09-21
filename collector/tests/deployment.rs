@@ -209,6 +209,19 @@ async fn compose_ps(env_file: &Path) -> Result<Vec<Value>> {
         .collect())
 }
 
+/// The files this test writes in the temp directory, removed when it ends
+/// — passing or failing, since a secret file at 0644 is not something to
+/// leave behind, even a throwaway one.
+struct TempFiles(Vec<PathBuf>);
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn teardown_requested() -> bool {
     std::env::var("TWALK_COLLECTOR_DEPLOY_TEST_TEARDOWN")
         .map(|value| value == "1")
@@ -229,27 +242,32 @@ async fn the_collector_profile_builds_starts_and_says_on_the_bus_that_it_has_no_
 {
     let secret_file = write_secret_file(0o600)?;
     let env_file = write_env_file(&secret_file)?;
+    let mut temp_files = TempFiles(vec![secret_file.clone(), env_file.clone()]);
 
     // The README's second step, on the two services this test needs, the
-    // collector's image built for this stack. `--force-recreate` so a warm
-    // stack's collector starts again and says its first state again.
+    // collector's image built for this stack. The bus first, and its head
+    // noted, so what is asserted below was published by *this* start and
+    // not by a previous run's on a warm stack; then the collector,
+    // `--force-recreate` so a warm stack's collector starts again and says
+    // its first state again. Its volume is never written to: `authorize` is
+    // never run here, so "no grant" holds on a warm stack too.
     compose(&env_file, &["build", "collector"], "build collector").await?;
+    compose(&env_file, &["up", "-d", "--wait", "nats"], "up nats").await?;
+    let bus = Bus::connect_to(&nats_url())
+        .await
+        .context("the stack's bus is not reachable on the published port")?;
+    bus.ensure_stream(STREAM, &["twalk.>"]).await?;
+    let before = bus.head(STREAM).await?;
     compose(
         &env_file,
-        &[
-            "up",
-            "-d",
-            "--wait",
-            "--force-recreate",
-            "nats",
-            "collector",
-        ],
-        "up",
+        &["up", "-d", "--wait", "--force-recreate", "collector"],
+        "up collector",
     )
     .await?;
 
-    // Started, and stayed started: the collector refuses configuration it
-    // cannot run on by exiting, and compose would restart it in a loop —
+    // Started, and stayed started: `--wait` on a service with no healthcheck
+    // returns once the container runs, and a collector that refuses its
+    // configuration exits right after for compose to restart in a loop —
     // so "running twice in a row, a few seconds apart" is the assertion.
     for _ in 0..2 {
         sleep(Duration::from_secs(3)).await;
@@ -268,16 +286,14 @@ async fn the_collector_profile_builds_starts_and_says_on_the_bus_that_it_has_no_
         );
     }
 
-    // On the bus: one transition per connection, from `unknown` to
-    // `reconnect_required`, the SSO the service in question, and the
-    // command to run in the hint — contract-valid, from this collector.
-    let bus = Bus::connect_to(&nats_url())
-        .await
-        .context("the stack's bus is not reachable on the published port")?;
+    // On the bus, after the head noted above: one transition per
+    // connection, from `unknown` to `reconnect_required`, the SSO the
+    // service in question, and the command to run in the hint —
+    // contract-valid, from this collector.
     let mut said: Vec<Value> = Vec::new();
     for _ in 0..30 {
         said = bus
-            .fetch_all(STREAM, STATUS_SUBJECT)
+            .fetch_since(STREAM, STATUS_SUBJECT, before)
             .await?
             .into_iter()
             .filter(|event| {
@@ -336,6 +352,8 @@ async fn the_collector_profile_builds_starts_and_says_on_the_bus_that_it_has_no_
     // starts, on an env file naming the loose file.
     let loose = write_secret_file(0o644)?;
     let loose_env = write_env_file(&loose)?;
+    temp_files.0.push(loose.clone());
+    temp_files.0.push(loose_env.clone());
     let refused = compose_allowing_failure(
         &loose_env,
         &["run", "--rm", "--no-deps", "collector", "authorize"],
@@ -344,18 +362,20 @@ async fn the_collector_profile_builds_starts_and_says_on_the_bus_that_it_has_no_
     .await?;
     match refused {
         Ok(stdout) => bail!("a world-readable client secret was accepted:\n{stdout}"),
+        // `collector refuses to start` is the entrypoint's own sentence:
+        // the binary has a refusal of its own for the same file, and this
+        // is the one that fires before the binary runs.
         Err(stderr) => assert!(
-            stderr.contains("readable by group or") && stderr.contains("chmod 0600"),
-            "the refusal names the mode and the fix:\n{stderr}"
+            stderr.contains("collector refuses to start")
+                && stderr.contains("readable by group or")
+                && stderr.contains("chmod 0600"),
+            "the refusal is the entrypoint's, naming the mode and the fix:\n{stderr}"
         ),
     }
 
     if teardown_requested() {
         teardown(&env_file).await?;
     }
-    let _ = std::fs::remove_file(&secret_file);
-    let _ = std::fs::remove_file(&loose);
-    let _ = std::fs::remove_file(&env_file);
-    let _ = std::fs::remove_file(&loose_env);
+    drop(temp_files);
     Ok(())
 }

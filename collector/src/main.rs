@@ -330,6 +330,11 @@ async fn run(config: Config) -> Result<()> {
     loop {
         let now = SystemTime::now();
         let mut renewed_this_round = false;
+        // The SSO did not answer a renewal this round: the grant may well
+        // stand, and the state is `unreachable` — not the `reconnect_required`
+        // a refusal would be, which would send the operator to sign in
+        // again for an SSO that was merely down.
+        let mut sso_unreachable = false;
         let mut caldav_owner_id: Option<String> = None;
         let observation = match &grant {
             None => Observation {
@@ -372,21 +377,22 @@ async fn run(config: Config) -> Result<()> {
                         }
                         Renewal::Unreachable { detail } => {
                             metrics.record_renewal("unreachable", unix_seconds(now));
+                            sso_unreachable = true;
                             warn!(%detail, "the SSO could not be reached");
                         }
                     }
                 }
                 match &access {
-                    None if grant.is_some() => sso_refusal
-                        .clone()
-                        .unwrap_or_else(|| reconnect_required(&config)),
-                    None => Observation {
+                    None if sso_unreachable => Observation {
                         state: State::Unreachable,
                         service: Some("sso"),
                         hint: Some(
                             "The SSO did not answer; the collector retries on its own.".to_owned(),
                         ),
                     },
+                    None => sso_refusal
+                        .clone()
+                        .unwrap_or_else(|| reconnect_required(&config)),
                     Some(token) => {
                         let mut identities = config.services.whoami(token).await;
                         // A 401 on a token this process believes fresh is
@@ -612,28 +618,27 @@ async fn run(config: Config) -> Result<()> {
     }
 }
 
-/// The SSO refused the grant: only the operator can give a new one.
 /// One renewal, with the SSO discovered first when it has not been yet: a
-/// discovery the SSO does not answer is the same `Unreachable` a renewal it
-/// does not answer is, and the next round asks again.
+/// discovery the SSO does not answer — or answers with something that is
+/// not a discovery document — is the same `Unreachable` a renewal it does
+/// not answer is, said in the log with the cause, and the next round asks
+/// again.
 async fn renew(client: &mut Option<Client>, config: &Config, grant: &Grant) -> Result<Renewal> {
-    if client.is_none() {
-        match Client::discover(config.oidc.clone()).await {
-            Ok(discovered) => *client = Some(discovered),
+    let client = match client {
+        Some(client) => client,
+        None => match Client::discover(config.oidc.clone()).await {
+            Ok(discovered) => client.insert(discovered),
             Err(error) => {
                 return Ok(Renewal::Unreachable {
                     detail: format!("{error:#}"),
                 })
             }
-        }
-    }
-    client
-        .as_ref()
-        .expect("discovered just above")
-        .renew(grant)
-        .await
+        },
+    };
+    client.renew(grant).await
 }
 
+/// The SSO refused the grant: only the operator can give a new one.
 fn reconnect_required(config: &Config) -> Observation {
     Observation {
         state: State::ReconnectRequired,
