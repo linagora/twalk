@@ -282,6 +282,27 @@ pub fn identity_get(account_id: &str) -> (&'static str, Value) {
 
 /// `Email/query` for the mail with a Message-ID (#278): the mail a reply
 /// answers, found again by the one identifier the approval carries.
+/// The same, for the Message-ID **stripped of its angle brackets**
+/// (#331). RFC 5322 writes a `Message-ID` as `<local@domain>` and that is
+/// what a mail carries, but a `header` filter is answered from the
+/// server's search index, and an index that stores the parsed value
+/// answers nothing to the written one — with no `unsupportedFilter` to
+/// say so, an empty list being indistinguishable from an absent mail.
+/// Asking both forms in one batch costs one call and says which form the
+/// server knows.
+pub fn email_by_bare_message_id(account_id: &str, message_id: &str) -> (&'static str, Value) {
+    email_by_message_id(account_id, bare_message_id(message_id))
+}
+
+/// `<id@host>` without its brackets; anything else unchanged.
+pub fn bare_message_id(message_id: &str) -> &str {
+    message_id
+        .trim()
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or(message_id)
+}
+
 pub fn email_by_message_id(account_id: &str, message_id: &str) -> (&'static str, Value) {
     (
         "Email/query",

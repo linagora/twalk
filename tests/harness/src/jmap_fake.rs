@@ -142,6 +142,12 @@ pub(crate) struct MailStore {
     /// A test can make `EmailSubmission/set` refuse (`pending_operator`'s
     /// shape on the sending side): every submission answers `notCreated`.
     refuse_submissions: bool,
+    /// Which form of a `Message-ID` this server's search index holds
+    /// (#331): the value as written, `<id@host>`, or the parsed one
+    /// without its brackets. A real server holds one of them and answers
+    /// an empty list — never a refusal — to a filter written the other
+    /// way, which reads exactly like a mail that is not there.
+    bare_message_id_index: bool,
 }
 
 /// One reply the collector submitted, as the fake received it.
@@ -191,6 +197,7 @@ impl Default for MailStore {
             read_ids: Vec::new(),
             submissions: Vec::new(),
             refuse_submissions: false,
+            bare_message_id_index: false,
         }
     }
 }
@@ -234,6 +241,10 @@ impl MailStore {
 
     pub(crate) fn refuse_submissions(&mut self, refuse: bool) {
         self.refuse_submissions = refuse;
+    }
+
+    pub(crate) fn index_message_ids_bare(&mut self, bare: bool) {
+        self.bare_message_id_index = bare;
     }
 }
 
@@ -728,8 +739,16 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
                 && after.is_none_or(|after| mail.received_at.as_str() >= after)
                 && header.as_ref().is_none_or(|(name, value)| {
                     if name == "message-id" {
-                        mail.message_id.trim_matches(|c| c == '<' || c == '>')
-                            == value.trim_matches(|c| c == '<' || c == '>')
+                        // Exactly as this server indexes it, and not both
+                        // ways: a fake more forgiving than the real
+                        // service proves nothing (#328's lesson, #331's
+                        // case).
+                        let indexed = if store.bare_message_id_index {
+                            mail.message_id.trim_matches(|c| c == '<' || c == '>')
+                        } else {
+                            mail.message_id.as_str()
+                        };
+                        indexed == value
                     } else {
                         mail.headers
                             .iter()

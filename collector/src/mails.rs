@@ -408,6 +408,7 @@ impl Mailbox {
                     jmap::mailbox_get(account),
                     jmap::identity_get(account),
                     jmap::email_by_message_id(account, &reply.in_reply_to),
+                    jmap::email_by_bare_message_id(account, &reply.in_reply_to),
                 ],
             )
             .await?;
@@ -427,9 +428,27 @@ impl Mailbox {
                     self.owner_email
                 ))
             })?;
-        let original_id = first_id(&response.result(3)?).ok_or_else(|| {
+        // The mail the reply answers, by the Message-ID as written and by
+        // the same without its brackets (#331). A server that indexes one
+        // form answers nothing to the other, and answers it with an empty
+        // list rather than a refusal: on the reference deployment this
+        // read the owner's own inbox, found nothing, and the collector
+        // reported a mail that was sitting there unread as gone. Which
+        // form matched is logged, because that is the measurement.
+        let written = first_id(&response.result(3)?);
+        let bare = first_id(&response.result(4)?);
+        if written.is_none() && bare.is_some() {
+            info!(
+                "this server indexes a Message-ID without its angle brackets: the thread was \
+                 found by the bare form and not by the written one"
+            );
+        }
+        let original_id = written.or(bare).ok_or_else(|| {
             SendError::Permanent(
-                "the mail the reply answers is no longer in the mailbox".to_owned(),
+                "no mail in the mailbox carries the Message-ID this reply answers, in either \
+                 the written or the bare form: it may have been deleted, or this server may \
+                 not answer a header filter at all"
+                    .to_owned(),
             )
         })?;
         let response = self

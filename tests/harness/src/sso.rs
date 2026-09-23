@@ -427,6 +427,13 @@ impl FakeSso {
         self.lock().mails.refuse_submissions(refuse);
     }
 
+    /// Makes the mail server's search index hold a `Message-ID` without
+    /// its angle brackets (#331), the way TMail's does: a filter written
+    /// `<id@host>` then matches nothing, with no refusal to say why.
+    pub fn index_message_ids_bare(&self, bare: bool) {
+        self.lock().mails.index_message_ids_bare(bare);
+    }
+
     /// Every Email id whose content the collector read, in order.
     pub fn mails_read(&self) -> Vec<String> {
         self.lock().mails.read_ids()
