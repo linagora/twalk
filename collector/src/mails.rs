@@ -404,7 +404,6 @@ impl Mailbox {
                 &session.api_url,
                 token,
                 vec![
-                    outbound::reply_already_sent(account, &reply.event_id),
                     jmap::mailbox_get(account),
                     jmap::identity_get(account),
                     jmap::email_by_message_id(account, &reply.in_reply_to),
@@ -412,16 +411,26 @@ impl Mailbox {
                 ],
             )
             .await?;
-        if first_id(&response.result(0)?).is_some() {
-            return Ok(Sent { already_sent: true });
-        }
-        let mailboxes = response.result(1)?;
+        let mailboxes = response.result(0)?;
         let sent_id = jmap::mailbox_with_role(&mailboxes, "sent").ok_or_else(|| {
             SendError::Permanent("the JMAP server lists no Sent mailbox".to_owned())
         })?;
         let drafts_id =
             jmap::mailbox_with_role(&mailboxes, "drafts").unwrap_or_else(|| sent_id.clone());
-        let identity_id = jmap::identity_for(&response.result(2)?, &self.owner_email)
+        // Has this approval already been answered? JMAP has no transaction
+        // id, so a redelivered approval — the process stopped between the
+        // submission and the acknowledgement — would send the owner's
+        // words twice. Every reply carries the approval's id in
+        // `X-Twalk-Approval`, and Sent is asked for it by **reading** its
+        // newest mails rather than by a filter the server may not answer
+        // (#331).
+        if self
+            .already_answered(&session, token, account, &sent_id, &reply.event_id)
+            .await?
+        {
+            return Ok(Sent { already_sent: true });
+        }
+        let identity_id = jmap::identity_for(&response.result(1)?, &self.owner_email)
             .ok_or_else(|| {
                 SendError::Permanent(format!(
                     "the JMAP server offers no sending identity for {}: the reply cannot leave as the owner",
@@ -435,8 +444,8 @@ impl Mailbox {
         // read the owner's own inbox, found nothing, and the collector
         // reported a mail that was sitting there unread as gone. Which
         // form matched is logged, because that is the measurement.
-        let written = first_id(&response.result(3)?);
-        let bare = first_id(&response.result(4)?);
+        let written = first_id(&response.result(2)?);
+        let bare = first_id(&response.result(3)?);
         if written.is_none() && bare.is_some() {
             info!(
                 "this server indexes a Message-ID without its angle brackets: the thread was \
@@ -551,6 +560,47 @@ impl Mailbox {
             .await?,
         )
         .await
+    }
+
+    /// Whether a reply for this approval is already in Sent (#331). A
+    /// listing and a get: the ids of Sent's newest mails, then which
+    /// approval each was sent for, matched here. No filter, because the
+    /// server this runs against answers none; one page, because a
+    /// redelivery arrives in minutes and not a mailbox later.
+    async fn already_answered(
+        &self,
+        session: &Session,
+        token: &str,
+        account: &str,
+        sent_id: &str,
+        approval_id: &str,
+    ) -> Result<bool, SendError> {
+        let listing = self
+            .batch(
+                &session.api_url,
+                token,
+                vec![jmap::newest_in_mailbox(account, sent_id, 0)],
+            )
+            .await?;
+        let ids = jmap::queried_ids(&listing.result(0)?);
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        let mails = self
+            .batch(
+                &session.api_url,
+                token,
+                vec![jmap::approvals_of(account, &ids)],
+            )
+            .await?;
+        let already = jmap::holds_approval(&mails.result(0)?, approval_id);
+        if already {
+            info!(
+                approval = approval_id,
+                "this approval's reply is already in Sent: nothing is sent again"
+            );
+        }
+        Ok(already)
     }
 
     /// The mails a reply might answer, found the way a mail client finds

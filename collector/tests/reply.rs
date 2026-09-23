@@ -381,6 +381,75 @@ async fn a_reply_leaves_when_the_server_indexes_message_ids_without_their_bracke
     Ok(())
 }
 
+/// #331's other half: JMAP has no transaction id, so a redelivered
+/// approval — the process stopped between the submission and the
+/// acknowledgement — would send the owner's words to a contact twice.
+/// Every reply carries the approval's id in `X-Twalk-Approval`, and Sent
+/// is asked for it by reading its newest mails, not by a filter this
+/// server does not answer. The second delivery sends nothing and reports
+/// the reply as already out.
+#[tokio::test]
+async fn an_approval_delivered_twice_sends_one_mail() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("twice").await?;
+    run.authorize().await?;
+    run.serve_snapshot(
+        &bus,
+        vec![run.decided_on_mail("mailto:alice@example.org", "granted")],
+    )
+    .await?;
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("mailbox taken as it stands", 1)
+        .await?;
+
+    let mail = FakeMail::from_person(
+        "Alice Martin",
+        "alice@example.org",
+        OWNER,
+        "Point hebdo",
+        "On se voit toujours lundi ?",
+    );
+    let message_id = mail.message_id.clone();
+    run.sso.deliver(mail);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
+        .await?;
+
+    let approved = approval(&run, &message_id, "Oui, lundi 9h.", "twice");
+    let event_id = approved["id"].as_str().unwrap();
+    bus.publish_event(APPROVED_SUBJECT, &approved).await?;
+    wait_for_copy(&bus, &run, POSTED_SUBJECT, event_id).await?;
+    assert_eq!(run.sso.submissions().len(), 1);
+
+    // The same approval again, as a redelivery brings it: the same event,
+    // under a message id of its own so the bus does not deduplicate what
+    // this test is about.
+    bus.publish_event_with_headers(
+        APPROVED_SUBJECT,
+        "redelivered",
+        async_nats::HeaderMap::new(),
+        &approved,
+    )
+    .await?;
+    collector
+        .wait_logged("already in Sent: nothing is sent again", 1)
+        .await?;
+    assert_eq!(
+        run.sso.submissions().len(),
+        1,
+        "the contact receives the owner's words once"
+    );
+    assert!(
+        copies_of(&bus, &run, DEAD_SUBJECT, event_id)
+            .await?
+            .is_empty(),
+        "a reply already sent is not a failure"
+    );
+    collector.stop().await;
+    Ok(())
+}
+
 /// #331, as the reference deployment showed it: TMail answers an **empty
 /// list** to a header filter on `Message-ID`, in either form, for a mail
 /// sitting unread in the owner's inbox — and an empty list is what an

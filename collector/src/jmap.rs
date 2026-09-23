@@ -287,6 +287,62 @@ pub fn newest_in_account(account_id: &str, position: usize) -> (&'static str, Va
     )
 }
 
+/// One page of a mailbox's newest mails, ids only: the Sent folder, for
+/// the guard that asks whether this approval's reply is already there
+/// (#331). The same shape as [`newest_in_account`], scoped.
+pub fn newest_in_mailbox(
+    account_id: &str,
+    mailbox_id: &str,
+    position: usize,
+) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "inMailbox": mailbox_id },
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "position": position,
+            "limit": QUERY_PAGE
+        }),
+    )
+}
+
+/// The property a mail's `X-Twalk-Approval` is asked for under (RFC 8621
+/// §4.1.4): a **get**, not a search, so it answers off the mail itself and
+/// not off an index the server may not keep (#331).
+pub fn approval_header_property() -> String {
+    format!("header:{}:asText", crate::outbound::APPROVAL_HEADER)
+}
+
+/// `Email/get` asking those mails which approval they were sent for, and
+/// nothing else — no body, no subject, no address.
+pub fn approvals_of(account_id: &str, ids: &[String]) -> (&'static str, Value) {
+    (
+        "Email/get",
+        json!({
+            "accountId": account_id,
+            "ids": ids,
+            "properties": ["id", approval_header_property()]
+        }),
+    )
+}
+
+/// Whether one of those mails was sent for this approval: the header read
+/// back, trimmed, compared whole.
+pub fn holds_approval(email_get: &Value, approval_id: &str) -> bool {
+    let property = approval_header_property();
+    email_get
+        .get("list")
+        .and_then(Value::as_array)
+        .is_some_and(|list| {
+            list.iter().any(|mail| {
+                mail.get(&property)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.trim() == approval_id)
+            })
+        })
+}
+
 /// `Email/get` asking for the Message-IDs of those mails and nothing else
 /// — no body, no subject, no address (#331).
 pub fn message_ids_of(account_id: &str, ids: &[String]) -> (&'static str, Value) {
@@ -1032,6 +1088,29 @@ impl Envelopes {
 mod tests {
     use super::*;
 
+    /// #331's other half: a reply already in Sent is recognised by the
+    /// approval it carries, read off the mail itself — a get, not a
+    /// search, since this server answers no filter on that header either.
+    #[test]
+    fn a_reply_already_sent_is_the_one_carrying_this_approval() {
+        let property = approval_header_property();
+        assert_eq!(property, "header:X-Twalk-Approval:asText");
+        let (name, get) = approvals_of("u1", &["m1".to_owned()]);
+        assert_eq!(name, "Email/get");
+        assert_eq!(get["properties"], json!(["id", property]));
+        let sent = json!({ "list": [
+            { "id": "m1", &property: "another-approval" },
+            { "id": "m2", &property: " 3969f329 " },
+        ]});
+        assert!(holds_approval(&sent, "3969f329"), "trimmed, compared whole");
+        assert!(!holds_approval(&sent, "3969"), "never a prefix");
+        assert!(!holds_approval(&json!({ "list": [] }), "3969f329"));
+        assert!(
+            !holds_approval(&json!({ "list": [{ "id": "m3" }] }), "3969f329"),
+            "a mail Twalk did not send carries no approval"
+        );
+    }
+
     /// #331: the thread is matched here, on what the mails say, because
     /// the server may answer no filter at all. RFC 8621 §4.1.1 carries a
     /// `messageId` parsed, without the brackets a mail writes it with, so
@@ -1110,7 +1189,7 @@ mod tests {
         // The batch that prepares a send, call for call: the one whose
         // `using` list was wrong in production.
         let sending = using(vec![
-            crate::outbound::reply_already_sent("u1", "e1"),
+            newest_in_mailbox("u1", "sent-1", 0),
             mailbox_get("u1"),
             identity_get("u1"),
             email_by_message_id("u1", "<m@example.com>"),

@@ -312,16 +312,12 @@ pub fn original_is_from_recipient(reply: &ApprovedReply, original: &Mail) -> Res
     }
 }
 
-pub fn reply_already_sent(account_id: &str, event_id: &str) -> (&'static str, Value) {
-    (
-        "Email/query",
-        json!({
-            "accountId": account_id,
-            "filter": { "header": [APPROVAL_HEADER, event_id] },
-            "limit": 1
-        }),
-    )
-}
+// The guard that asks whether this approval's reply is already in Sent
+// was an `Email/query` filtered on `header: [X-Twalk-Approval, …]` until
+// #331: the server it runs against answers no header filter, so the guard
+// answered "no" every time and JMAP has no transaction id to fall back
+// on. It is `jmap::newest_in_mailbox` + `jmap::approvals_of` now — a
+// listing and a get, which answer off the mails themselves.
 
 /// `Email/set` destroying the draft a failed submission left behind.
 pub fn destroy_draft(account_id: &str, email_id: &str) -> (&'static str, Value) {

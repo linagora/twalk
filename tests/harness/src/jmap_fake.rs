@@ -546,6 +546,23 @@ fn email_object(id: &str, mailbox: &str, mail: &FakeMail, properties: Option<&[S
     let mut object = serde_json::Map::new();
     object.insert("id".to_owned(), json!(id));
     let wants = |name: &str| properties.is_none_or(|p| p.iter().any(|w| w == name));
+    // `header:<name>:asText` (RFC 8621 §4.1.4): a property read off the
+    // mail itself, which is how a client asks about a header a server
+    // does not index (#331). Asked for by name, answered by name.
+    for asked in properties.unwrap_or(&[]) {
+        if let Some(name) = asked
+            .strip_prefix("header:")
+            .and_then(|rest| rest.strip_suffix(":asText"))
+        {
+            let value = mail
+                .headers
+                .iter()
+                .find(|(held, _)| held.eq_ignore_ascii_case(name))
+                .map(|(_, value)| Value::String(value.trim().to_owned()))
+                .unwrap_or(Value::Null);
+            object.insert(asked.clone(), value);
+        }
+    }
     if wants("blobId") {
         object.insert("blobId".to_owned(), json!(format!("b{id}")));
     }
