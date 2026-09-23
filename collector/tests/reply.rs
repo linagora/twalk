@@ -134,6 +134,10 @@ async fn an_approved_reply_leaves_from_the_owners_mailbox_to_the_sender_alone_an
     collector
         .wait_logged("mailbox taken as it stands", 1)
         .await?;
+    // A server that does answer a header filter on `Message-ID`: the
+    // other case is its own test (#331), and the fake's default is the one
+    // TMail showed.
+    run.sso.answer_no_header_filter(false);
 
     // Alice's mail, in a thread, with Bob in copy — the reply goes to Alice
     // alone all the same.
@@ -310,6 +314,191 @@ async fn a_refused_submission_is_dead_lettered_and_an_unanswering_server_is_retr
         "retried before being given up on"
     );
     assert_eq!(collector.count_logged("exhausted its retries").await, 2);
+    collector.stop().await;
+    Ok(())
+}
+
+/// #331: the thread is found by a `Message-ID` header filter, and a server
+/// answers such a filter from its search index. TMail's holds the parsed
+/// value, without the angle brackets RFC 5322 writes it with, and answers
+/// an **empty list** — never a refusal — to the written form: on the
+/// reference deployment the collector read the owner's own inbox, found
+/// nothing, and reported a mail sitting there unread as gone. The send
+/// asks both forms, so a reply leaves whichever one the server knows.
+#[tokio::test]
+async fn a_reply_leaves_when_the_server_indexes_message_ids_without_their_brackets() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("bare-id").await?;
+    run.authorize().await?;
+    run.serve_snapshot(
+        &bus,
+        vec![run.decided_on_mail("mailto:alice@example.org", "granted")],
+    )
+    .await?;
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("mailbox taken as it stands", 1)
+        .await?;
+
+    // This server answers a header filter, and indexes a Message-ID
+    // without its brackets; the mail arrives carrying one written with
+    // them, as every mail does.
+    run.sso.answer_no_header_filter(false);
+    run.sso.index_message_ids_bare(true);
+    let mail = FakeMail::from_person(
+        "Alice Martin",
+        "alice@example.org",
+        OWNER,
+        "Point hebdo",
+        "On se voit toujours lundi ?",
+    );
+    let message_id = mail.message_id.clone();
+    assert!(message_id.starts_with('<') && message_id.ends_with('>'));
+    run.sso.deliver(mail);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
+        .await?;
+
+    let approved = approval(&run, &message_id, "Oui, avec plaisir.", "bare-id");
+    bus.publish_event(APPROVED_SUBJECT, &approved).await?;
+    let event_id = approved["id"].as_str().unwrap();
+    let report = wait_for_copy(&bus, &run, POSTED_SUBJECT, event_id).await?;
+    assert_eq!(report.header("reach"), Some("contact"));
+    let submissions = run.sso.submissions();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(
+        submissions[0].in_reply_to,
+        [message_id],
+        "the reply is in the thread, whichever form found it"
+    );
+    // And the collector says which form the server knew, since that is the
+    // one thing this failure cannot be guessed from afterwards.
+    collector
+        .wait_logged("indexes a Message-ID without its angle brackets", 1)
+        .await?;
+
+    collector.stop().await;
+    Ok(())
+}
+
+/// #331's other half: JMAP has no transaction id, so a redelivered
+/// approval — the process stopped between the submission and the
+/// acknowledgement — would send the owner's words to a contact twice.
+/// Every reply carries the approval's id in `X-Twalk-Approval`, and Sent
+/// is asked for it by reading its newest mails, not by a filter this
+/// server does not answer. The second delivery sends nothing and reports
+/// the reply as already out.
+#[tokio::test]
+async fn an_approval_delivered_twice_sends_one_mail() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("twice").await?;
+    run.authorize().await?;
+    run.serve_snapshot(
+        &bus,
+        vec![run.decided_on_mail("mailto:alice@example.org", "granted")],
+    )
+    .await?;
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("mailbox taken as it stands", 1)
+        .await?;
+
+    let mail = FakeMail::from_person(
+        "Alice Martin",
+        "alice@example.org",
+        OWNER,
+        "Point hebdo",
+        "On se voit toujours lundi ?",
+    );
+    let message_id = mail.message_id.clone();
+    run.sso.deliver(mail);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
+        .await?;
+
+    let approved = approval(&run, &message_id, "Oui, lundi 9h.", "twice");
+    let event_id = approved["id"].as_str().unwrap();
+    bus.publish_event(APPROVED_SUBJECT, &approved).await?;
+    wait_for_copy(&bus, &run, POSTED_SUBJECT, event_id).await?;
+    assert_eq!(run.sso.submissions().len(), 1);
+
+    // The same approval again, as a redelivery brings it: the same event,
+    // under a message id of its own so the bus does not deduplicate what
+    // this test is about.
+    bus.publish_event_with_headers(
+        APPROVED_SUBJECT,
+        "redelivered",
+        async_nats::HeaderMap::new(),
+        &approved,
+    )
+    .await?;
+    collector
+        .wait_logged("already in Sent: nothing is sent again", 1)
+        .await?;
+    assert_eq!(
+        run.sso.submissions().len(),
+        1,
+        "the contact receives the owner's words once"
+    );
+    assert!(
+        copies_of(&bus, &run, DEAD_SUBJECT, event_id)
+            .await?
+            .is_empty(),
+        "a reply already sent is not a failure"
+    );
+    collector.stop().await;
+    Ok(())
+}
+
+/// #331, as the reference deployment showed it: TMail answers an **empty
+/// list** to a header filter on `Message-ID`, in either form, for a mail
+/// sitting unread in the owner's inbox — and an empty list is what an
+/// absent mail looks like. The thread is then found the way a mail client
+/// finds anything: the mailbox's newest mails, asked what their
+/// Message-ID is.
+#[tokio::test]
+async fn a_reply_finds_its_thread_by_reading_the_mailbox_when_no_filter_answers() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("no-filter").await?;
+    run.authorize().await?;
+    run.serve_snapshot(
+        &bus,
+        vec![run.decided_on_mail("mailto:alice@example.org", "granted")],
+    )
+    .await?;
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("mailbox taken as it stands", 1)
+        .await?;
+
+    let mail = FakeMail::from_person(
+        "Alice Martin",
+        "alice@example.org",
+        OWNER,
+        "Et jeudi ?",
+        "Jeudi 14h vous irait ?",
+    );
+    let message_id = mail.message_id.clone();
+    run.sso.deliver(mail);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
+        .await?;
+
+    let approved = approval(&run, &message_id, "Jeudi 14h, parfait.", "no-filter");
+    bus.publish_event(APPROVED_SUBJECT, &approved).await?;
+    let report =
+        wait_for_copy(&bus, &run, POSTED_SUBJECT, approved["id"].as_str().unwrap()).await?;
+    assert_eq!(report.header("reach"), Some("contact"));
+    let submissions = run.sso.submissions();
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(
+        submissions[0].in_reply_to,
+        [message_id],
+        "the reply is in the thread the scan found"
+    );
+    collector
+        .wait_logged("answers no header filter for a Message-ID", 1)
+        .await?;
     collector.stop().await;
     Ok(())
 }

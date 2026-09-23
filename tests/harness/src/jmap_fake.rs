@@ -142,6 +142,17 @@ pub(crate) struct MailStore {
     /// A test can make `EmailSubmission/set` refuse (`pending_operator`'s
     /// shape on the sending side): every submission answers `notCreated`.
     refuse_submissions: bool,
+    /// Which form of a `Message-ID` this server's search index holds
+    /// (#331): the value as written, `<id@host>`, or the parsed one
+    /// without its brackets. A real server holds one of them and answers
+    /// an empty list — never a refusal — to a filter written the other
+    /// way, which reads exactly like a mail that is not there.
+    bare_message_id_index: bool,
+    /// Whether this server answers a `header` filter at all (#331). TMail
+    /// answers an empty list to one on `Message-ID`, in either form, for a
+    /// mail that is in the mailbox — and an empty list is what an absent
+    /// mail looks like, so a client cannot tell the difference.
+    no_header_filter: bool,
 }
 
 /// One reply the collector submitted, as the fake received it.
@@ -191,6 +202,11 @@ impl Default for MailStore {
             read_ids: Vec::new(),
             submissions: Vec::new(),
             refuse_submissions: false,
+            bare_message_id_index: false,
+            // As measured against TMail (#331): the fake follows the one
+            // real server this project has run against, and a test that
+            // needs the filter path says so.
+            no_header_filter: true,
         }
     }
 }
@@ -234,6 +250,14 @@ impl MailStore {
 
     pub(crate) fn refuse_submissions(&mut self, refuse: bool) {
         self.refuse_submissions = refuse;
+    }
+
+    pub(crate) fn index_message_ids_bare(&mut self, bare: bool) {
+        self.bare_message_id_index = bare;
+    }
+
+    pub(crate) fn answer_no_header_filter(&mut self, none: bool) {
+        self.no_header_filter = none;
     }
 }
 
@@ -522,6 +546,23 @@ fn email_object(id: &str, mailbox: &str, mail: &FakeMail, properties: Option<&[S
     let mut object = serde_json::Map::new();
     object.insert("id".to_owned(), json!(id));
     let wants = |name: &str| properties.is_none_or(|p| p.iter().any(|w| w == name));
+    // `header:<name>:asText` (RFC 8621 §4.1.4): a property read off the
+    // mail itself, which is how a client asks about a header a server
+    // does not index (#331). Asked for by name, answered by name.
+    for asked in properties.unwrap_or(&[]) {
+        if let Some(name) = asked
+            .strip_prefix("header:")
+            .and_then(|rest| rest.strip_suffix(":asText"))
+        {
+            let value = mail
+                .headers
+                .iter()
+                .find(|(held, _)| held.eq_ignore_ascii_case(name))
+                .map(|(_, value)| Value::String(value.trim().to_owned()))
+                .unwrap_or(Value::Null);
+            object.insert(asked.clone(), value);
+        }
+    }
     if wants("blobId") {
         object.insert("blobId".to_owned(), json!(format!("b{id}")));
     }
@@ -720,6 +761,16 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
             ))
         });
     let after = filter.get("after").and_then(Value::as_str);
+    // A server whose index holds no headers answers an empty list, not a
+    // refusal (#331): the shape TMail showed on the reference deployment.
+    if store.no_header_filter && header.is_some() {
+        return json!({ "accountId": args.get("accountId"), "ids": [], "position": 0, "total": 0 });
+    }
+    let descending = args
+        .get("sort")
+        .and_then(Value::as_array)
+        .and_then(|sort| sort.first())
+        .is_some_and(|by| by.get("isAscending") == Some(&Value::Bool(false)));
     let ids: Vec<&String> = store
         .mails
         .iter()
@@ -728,8 +779,16 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
                 && after.is_none_or(|after| mail.received_at.as_str() >= after)
                 && header.as_ref().is_none_or(|(name, value)| {
                     if name == "message-id" {
-                        mail.message_id.trim_matches(|c| c == '<' || c == '>')
-                            == value.trim_matches(|c| c == '<' || c == '>')
+                        // Exactly as this server indexes it, and not both
+                        // ways: a fake more forgiving than the real
+                        // service proves nothing (#328's lesson, #331's
+                        // case).
+                        let indexed = if store.bare_message_id_index {
+                            mail.message_id.trim_matches(|c| c == '<' || c == '>')
+                        } else {
+                            mail.message_id.as_str()
+                        };
+                        indexed == value
                     } else {
                         mail.headers
                             .iter()
@@ -742,6 +801,11 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
         .into_iter()
         .map(|(_, _, id)| id)
         .collect();
+    let ids: Vec<&String> = if descending {
+        ids.into_iter().rev().collect()
+    } else {
+        ids
+    };
     let total = ids.len();
     let position = args.get("position").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = args
@@ -783,12 +847,24 @@ fn email_set(args: &Value, store: &mut MailStore, created: &mut BTreeMap<String,
                     })
                     .unwrap_or_default()
             };
+            // The body is what `textBody` names, not whatever
+            // `bodyValues` happens to hold: a part nobody points at is
+            // not a body, and a server that stored it anyway would hide
+            // a create that sends an empty mail (#332).
             let text = object
-                .get("bodyValues")
-                .and_then(Value::as_object)
-                .and_then(|values| values.values().next())
-                .and_then(|value| value.get("value"))
+                .get("textBody")
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("partId"))
                 .and_then(Value::as_str)
+                .and_then(|part_id| {
+                    object
+                        .get("bodyValues")
+                        .and_then(Value::as_object)?
+                        .get(part_id)?
+                        .get("value")?
+                        .as_str()
+                })
                 .unwrap_or_default()
                 .to_owned();
             let ids = |name: &str| -> Vec<String> {

@@ -404,57 +404,96 @@ impl Mailbox {
                 &session.api_url,
                 token,
                 vec![
-                    outbound::reply_already_sent(account, &reply.event_id),
                     jmap::mailbox_get(account),
                     jmap::identity_get(account),
                     jmap::email_by_message_id(account, &reply.in_reply_to),
+                    jmap::email_by_bare_message_id(account, &reply.in_reply_to),
                 ],
             )
             .await?;
-        if first_id(&response.result(0)?).is_some() {
-            return Ok(Sent { already_sent: true });
-        }
-        let mailboxes = response.result(1)?;
+        let mailboxes = response.result(0)?;
         let sent_id = jmap::mailbox_with_role(&mailboxes, "sent").ok_or_else(|| {
             SendError::Permanent("the JMAP server lists no Sent mailbox".to_owned())
         })?;
         let drafts_id =
             jmap::mailbox_with_role(&mailboxes, "drafts").unwrap_or_else(|| sent_id.clone());
-        let identity_id = jmap::identity_for(&response.result(2)?, &self.owner_email)
+        // Has this approval already been answered? JMAP has no transaction
+        // id, so a redelivered approval — the process stopped between the
+        // submission and the acknowledgement — would send the owner's
+        // words twice. Every reply carries the approval's id in
+        // `X-Twalk-Approval`, and Sent is asked for it by **reading** its
+        // newest mails rather than by a filter the server may not answer
+        // (#331).
+        if self
+            .already_answered(&session, token, account, &sent_id, &reply.event_id)
+            .await?
+        {
+            return Ok(Sent { already_sent: true });
+        }
+        let identity_id = jmap::identity_for(&response.result(1)?, &self.owner_email)
             .ok_or_else(|| {
                 SendError::Permanent(format!(
                     "the JMAP server offers no sending identity for {}: the reply cannot leave as the owner",
                     self.owner_email
                 ))
             })?;
-        let original_id = first_id(&response.result(3)?).ok_or_else(|| {
-            SendError::Permanent(
-                "the mail the reply answers is no longer in the mailbox".to_owned(),
-            )
-        })?;
+        // The mail the reply answers, by the Message-ID as written and by
+        // the same without its brackets (#331). A server that indexes one
+        // form answers nothing to the other, and answers it with an empty
+        // list rather than a refusal: on the reference deployment this
+        // read the owner's own inbox, found nothing, and the collector
+        // reported a mail that was sitting there unread as gone. Which
+        // form matched is logged, because that is the measurement.
+        let written = first_id(&response.result(2)?);
+        let bare = first_id(&response.result(3)?);
+        if written.is_none() && bare.is_some() {
+            info!(
+                "this server indexes a Message-ID without its angle brackets: the thread was \
+                 found by the bare form and not by the written one"
+            );
+        }
+        let candidates = match written.or(bare) {
+            Some(id) => vec![id],
+            // Neither form: this server answers no header filter for a
+            // Message-ID at all — measured against TMail on the reference
+            // deployment, where the mail was in the owner's inbox, unread,
+            // while both queries came back empty (#331).
+            None => {
+                self.thread_by_reading_the_mailbox(&session, token, account, reply)
+                    .await?
+            }
+        };
         let response = self
             .batch(
                 &session.api_url,
                 token,
-                vec![jmap::email_get(account, &[original_id])],
+                vec![jmap::email_get(account, &candidates)],
             )
             .await?;
-        let original = response
+        let read: Vec<Mail> = response
             .result(0)?
             .get("list")
             .and_then(Value::as_array)
-            .and_then(|list| list.first())
-            .map(Mail::parse)
-            .transpose()
-            .map_err(|error| {
-                SendError::Permanent(format!("the mail answered cannot be read: {error:#}"))
-            })?
+            .map(|list| {
+                list.iter()
+                    .filter_map(|mail| Mail::parse(mail).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The Message-ID found the thread; the address is the approval's,
+        // and an original that is not from it is a mail somebody else sent
+        // under that Message-ID — refused for good, never answered. A
+        // Message-ID is the sender's to choose, so two mails may carry
+        // one: the contact's is the one answered, and the refusal is for
+        // when none of them is theirs (#331).
+        let original = read
+            .iter()
+            .find(|mail| outbound::original_is_from_recipient(reply, mail).is_ok())
+            .or(read.first())
+            .cloned()
             .ok_or_else(|| {
                 SendError::Permanent("the mail answered could not be read back".to_owned())
             })?;
-        // The Message-ID found the thread; the address is the approval's,
-        // and an original that is not from it is a mail somebody else sent
-        // under that Message-ID — refused for good, never answered.
         outbound::original_is_from_recipient(reply, &original).map_err(SendError::Permanent)?;
         let sender = outbound::Sender {
             account_id: account.to_owned(),
@@ -521,6 +560,101 @@ impl Mailbox {
             .await?,
         )
         .await
+    }
+
+    /// Whether a reply for this approval is already in Sent (#331). A
+    /// listing and a get: the ids of Sent's newest mails, then which
+    /// approval each was sent for, matched here. No filter, because the
+    /// server this runs against answers none; one page, because a
+    /// redelivery arrives in minutes and not a mailbox later.
+    async fn already_answered(
+        &self,
+        session: &Session,
+        token: &str,
+        account: &str,
+        sent_id: &str,
+        approval_id: &str,
+    ) -> Result<bool, SendError> {
+        let listing = self
+            .batch(
+                &session.api_url,
+                token,
+                vec![jmap::newest_in_mailbox(account, sent_id, 0)],
+            )
+            .await?;
+        let ids = jmap::queried_ids(&listing.result(0)?);
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        let mails = self
+            .batch(
+                &session.api_url,
+                token,
+                vec![jmap::approvals_of(account, &ids)],
+            )
+            .await?;
+        let already = jmap::holds_approval(&mails.result(0)?, approval_id);
+        if already {
+            info!(
+                approval = approval_id,
+                "this approval's reply is already in Sent: nothing is sent again"
+            );
+        }
+        Ok(already)
+    }
+
+    /// The mails a reply might answer, found the way a mail client finds
+    /// anything: the account's newest, asked what their Message-ID is,
+    /// matched here (#331). Ids and Message-IDs only — no body, no
+    /// subject, no address is read — and page by page, since the mail
+    /// answered may be older than one page of a busy mailbox.
+    async fn thread_by_reading_the_mailbox(
+        &self,
+        session: &Session,
+        token: &str,
+        account: &str,
+        reply: &ApprovedReply,
+    ) -> Result<Vec<String>, SendError> {
+        let mut scanned = 0usize;
+        for page in 0..jmap::THREAD_SCAN_PAGES {
+            let listing = self
+                .batch(
+                    &session.api_url,
+                    token,
+                    vec![jmap::newest_in_account(account, scanned)],
+                )
+                .await?;
+            let ids = jmap::queried_ids(&listing.result(0)?);
+            if ids.is_empty() {
+                break;
+            }
+            scanned += ids.len();
+            let last_page = ids.len() < jmap::QUERY_PAGE;
+            let mails = self
+                .batch(
+                    &session.api_url,
+                    token,
+                    vec![jmap::message_ids_of(account, &ids)],
+                )
+                .await?;
+            let found = jmap::ids_with_message_id(&mails.result(0)?, &reply.in_reply_to);
+            if !found.is_empty() {
+                info!(
+                    scanned,
+                    pages = page + 1,
+                    "this server answers no header filter for a Message-ID: the thread was \
+                     found by reading the mailbox instead"
+                );
+                return Ok(found);
+            }
+            if last_page {
+                break;
+            }
+        }
+        Err(SendError::Permanent(format!(
+            "no mail carries the Message-ID this reply answers: no header filter answered it, \
+             and it is in none of the {scanned} newest mails of the mailbox"
+        )))
     }
 
     /// One batch of calls, and what the server answered them, paired with

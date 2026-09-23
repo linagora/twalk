@@ -232,7 +232,9 @@ pub fn reply_calls(
     if !references.iter().any(|id| id == &reply.in_reply_to) {
         references.push(reply.in_reply_to.clone());
     }
-    let bare = |id: &str| id.trim_matches(|c| c == '<' || c == '>').to_owned();
+    // RFC 8621 §4.1.1 carries these parsed, without the angle brackets a
+    // mail writes them with; the collector strips them in one place.
+    let bare = |id: &str| crate::jmap::bare_message_id(id).to_owned();
     let email = json!({
         "mailboxIds": { drafts_id: true },
         "keywords": { "$draft": true, "$seen": true },
@@ -241,7 +243,12 @@ pub fn reply_calls(
         "subject": subject,
         "inReplyTo": [bare(&reply.in_reply_to)],
         "references": references.iter().map(|id| bare(id)).collect::<Vec<_>>(),
-        "bodyStructure": { "partId": "1", "type": "text/plain", "charset": "utf-8" },
+        // The body as RFC 8621 §4.1.4 has a client send one on create:
+        // `textBody` naming a part, and `bodyValues` keyed by that part's
+        // id. `bodyStructure` is the server's own reading of a mail it
+        // holds; TMail accepted a create carrying it, stored no body, and
+        // sent an empty mail to a contact (#332).
+        "textBody": [{ "partId": "1", "type": "text/plain", "charset": "utf-8" }],
         "bodyValues": { "1": { "value": reply.body, "isTruncated": false } },
         format!("header:{APPROVAL_HEADER}:asText"): reply.event_id
     });
@@ -305,16 +312,12 @@ pub fn original_is_from_recipient(reply: &ApprovedReply, original: &Mail) -> Res
     }
 }
 
-pub fn reply_already_sent(account_id: &str, event_id: &str) -> (&'static str, Value) {
-    (
-        "Email/query",
-        json!({
-            "accountId": account_id,
-            "filter": { "header": [APPROVAL_HEADER, event_id] },
-            "limit": 1
-        }),
-    )
-}
+// The guard that asks whether this approval's reply is already in Sent
+// was an `Email/query` filtered on `header: [X-Twalk-Approval, …]` until
+// #331: the server it runs against answers no header filter, so the guard
+// answered "no" every time and JMAP has no transaction id to fall back
+// on. It is `jmap::newest_in_mailbox` + `jmap::approvals_of` now — a
+// listing and a get, which answer off the mails themselves.
 
 /// `Email/set` destroying the draft a failed submission left behind.
 pub fn destroy_draft(account_id: &str, email_id: &str) -> (&'static str, Value) {
