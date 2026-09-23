@@ -222,6 +222,15 @@ fn suggestion_json(listed: &Listed) -> Value {
             "body": listed.suggestion.body,
             "format": listed.suggestion.format.as_str(),
         },
+        // Who is answered and what they asked, in the persona's own words
+        // (#334): the one thing an approval screen may say about a
+        // message nobody reopened. `null` when the suggestion carries
+        // none, and when the label it was published under was not
+        // `granted`.
+        "context": listed.context.as_ref().map(|context| json!({
+            "contact": context.contact,
+            "summary": context.summary,
+        })),
         // The sentence the reply will carry after the body (#121): shown
         // fixed beside the editable text, so the user sees the whole
         // outgoing message and cannot edit the disclosure out of it.
@@ -295,6 +304,10 @@ mod tests {
                 format: Format::Plain,
             },
             disclosure: Some("Rédigé avec mon assistant IA.".to_owned()),
+            context: Some(crate::suggestions::Answering {
+                contact: Some("Aïcha Benali".to_owned()),
+                summary: "Aïcha Benali demande si le dîner tient toujours.".to_owned(),
+            }),
             stream_sequence: 42,
             standing,
             approval,
@@ -329,6 +342,31 @@ mod tests {
                 "the listing carries the trigger's {member:?}"
             );
         }
+    }
+
+    #[test]
+    /// #334: the screen may say who is answered and what they asked, in
+    /// the persona's words, and a suggestion that carries none renders
+    /// the member as `null` rather than inventing one.
+    #[test]
+    fn the_context_is_rendered_as_the_persona_wrote_it_or_null() {
+        let listed = listed(Standing::Approvable, None);
+        let rendered = suggestion_json(&listed);
+        assert_eq!(rendered["context"]["contact"], json!("Aïcha Benali"));
+        assert_eq!(
+            rendered["context"]["summary"],
+            json!("Aïcha Benali demande si le dîner tient toujours.")
+        );
+        assert!(
+            !rendered["suggestion"]["body"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("dîner tient toujours"),
+            "the context is a member of its own, never folded into the body"
+        );
+        let mut none = listed;
+        none.context = None;
+        assert_eq!(suggestion_json(&none)["context"], json!(null));
     }
 
     #[test]

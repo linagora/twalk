@@ -17,6 +17,7 @@ hand in every persona.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -52,6 +53,33 @@ FIRST_ATTEMPT = 1
 #: one the schema refuses there. The Gateway applies the same arithmetic to
 #: an edited body.
 MAX_BODY_CHARS = 65536 - 1 - DISCLOSURE_MAX_CHARS
+
+#: The cap on a suggestion's :attr:`Suggestion.context` — what the persona
+#: says the contact asked (#334). Short on purpose: it is read at a glance
+#: above a proposed reply, and the shorter it is the less of somebody's
+#: message it can become.
+MAX_CONTEXT_CHARS = 280
+
+#: The cap on the contact's display name as the context carries it.
+MAX_CONTACT_CHARS = 120
+
+#: What a context may never carry, because a model writes it and an
+#: approval surface — Buzz among them, which is somebody else's relay —
+#: shows it. An address is the contact's own identifier, a filename is
+#: theirs too, and a link is a way to carry either. Refused on
+#: construction rather than trimmed: a summary that had to be cut to be
+#: publishable is one the persona should write again.
+_ADDRESS = re.compile(
+    r"""(?xi)
+    \b[\w.+-]+@[\w-]+\.[\w.-]+       # an e-mail address
+  | \bhttps?://                       # a link
+  | \b(?:mailto|tel|sms):             # a URI that names a person
+  | \+\d[\d\s().-]{7,}\d              # a telephone number
+    """
+)
+_FILENAME = re.compile(
+    r"(?i)\b[\w-]+\.(?:pdf|docx?|xlsx?|pptx?|odt|ods|csv|txt|zip|rar|png|jpe?g|gif|heic|mp[34]|mov)\b"
+)
 MAX_RATIONALE_CHARS = 2048
 
 SUGGESTION_FORMATS = ("text/plain", "text/markdown", "text/html")
@@ -100,6 +128,7 @@ class Suggestion:
     rationale: Optional[str] = None
     language: Optional[str] = None
     disclosure: Optional[str] = None
+    context: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.format not in SUGGESTION_FORMATS:
@@ -110,6 +139,8 @@ class Suggestion:
             raise EnvelopeError(
                 f"confidence must be between 0 and 1, got {self.confidence!r}"
             )
+        if self.context is not None:
+            _refuse_unless_a_summary(self.context)
         if self.disclosure is not None and self.disclosure not in SENTENCES.values():
             raise EnvelopeError(
                 "disclosure must be one of the contract's sentences "
@@ -117,6 +148,35 @@ class Suggestion:
                 "selected by language, never written; set `language` instead, "
                 f"got {self.disclosure!r}"
             )
+
+
+def _refuse_unless_a_summary(context: str) -> None:
+    """Refuses a context that is not a summary (#334).
+
+    The rule it enforces is short because the rule it *cannot* enforce is
+    the important one: a persona must say what was asked and never quote
+    what was written, and no expression can tell one from the other. What
+    is checkable is checked — a cap, no address, no attachment name, no
+    link — so that the failure a model is most likely to produce is the
+    one that never reaches an approval surface.
+    """
+    if not context.strip():
+        raise EnvelopeError("a context that says nothing is left out, not sent empty")
+    if len(context) > MAX_CONTEXT_CHARS:
+        raise EnvelopeError(
+            f"context is {len(context)} characters and the contract caps it at "
+            f"{MAX_CONTEXT_CHARS}: say what was asked in a sentence or two"
+        )
+    if _ADDRESS.search(context):
+        raise EnvelopeError(
+            "context must carry no address or link: an approval surface shows it, "
+            "and one of them is somebody else's relay"
+        )
+    if _FILENAME.search(context):
+        raise EnvelopeError(
+            "context must name no attachment: say that there are attachments, "
+            "never what they are called"
+        )
 
 
 def sha256_hex(value: str) -> str:
@@ -293,6 +353,17 @@ def suggest_event(
         },
         "attempt": attempt,
     }
+    if suggestion.context:
+        # Who is answered and what they asked, written by the one component
+        # allowed to read the message, at the moment it reads it (#334,
+        # resolving #160). The display name comes off the trigger's own
+        # envelope rather than from the model: the persona summarises, it
+        # does not name.
+        context: Dict[str, Any] = {"summary": suggestion.context}
+        contact = trigger.sender_display_name
+        if contact:
+            context["contact"] = cap_chars(contact, MAX_CONTACT_CHARS)
+        data["context"] = context
     if suggestion.confidence is not None:
         data["confidence"] = suggestion.confidence
     if suggestion.rationale:

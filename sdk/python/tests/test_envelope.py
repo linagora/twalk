@@ -18,7 +18,12 @@ from twalk_sdk import (
     thinking_id,
 )
 from twalk_sdk import DISCLOSURE_MAX_CHARS, SENTENCES
-from twalk_sdk.envelope import MAX_BODY_CHARS, MAX_RATIONALE_CHARS, nats_headers
+from twalk_sdk.envelope import (
+    MAX_BODY_CHARS,
+    MAX_CONTEXT_CHARS,
+    MAX_RATIONALE_CHARS,
+    nats_headers,
+)
 
 SOURCE = "hermes://twalk.example.com/personas/assistant"
 RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -108,6 +113,66 @@ class ThinkingEventTest(unittest.TestCase):
                     )
 
 
+class ContextTest(unittest.TestCase):
+    """#334: a persona says who it answers and what they asked, and the SDK
+    refuses the shapes a model is most likely to get wrong."""
+
+    def summary(self, text: str) -> Suggestion:
+        return Suggestion(body="Oui, avec plaisir.", context=text)
+
+    def test_the_name_comes_from_the_trigger_and_the_summary_from_the_author(self) -> None:
+        event = suggest_event(
+            persona_id="assistant",
+            source=SOURCE,
+            trigger=trigger(),
+            suggestion=self.summary("Aïcha demande si le dîner tient toujours."),
+        )
+        self.assertEqual(
+            event["data"]["context"],
+            {
+                "summary": "Aïcha demande si le dîner tient toujours.",
+                "contact": "Aïcha Benali",
+            },
+        )
+
+    def test_a_suggestion_with_no_context_carries_none(self) -> None:
+        event = suggest_event(
+            persona_id="assistant",
+            source=SOURCE,
+            trigger=trigger(),
+            suggestion=Suggestion(body="Oui."),
+        )
+        self.assertNotIn("context", event["data"])
+
+    def test_an_address_a_link_or_a_number_is_refused(self) -> None:
+        for refused in (
+            "Elle écrit depuis aicha@example.org pour confirmer.",
+            "Elle renvoie vers https://example.org/agenda.",
+            "Elle demande de rappeler au +33 6 12 34 56 78.",
+            "Elle écrit à mailto:michel@example.org.",
+        ):
+            with self.assertRaises(EnvelopeError, msg=refused):
+                self.summary(refused)
+
+    def test_an_attachment_is_said_and_never_named(self) -> None:
+        with self.assertRaises(EnvelopeError):
+            self.summary("Elle joint profil-samy.pdf et attend votre avis.")
+        # Saying that there are attachments is the point of a summary.
+        self.assertIsNotNone(
+            self.summary("Elle joint deux pièces jointes et attend votre avis.").context
+        )
+
+    def test_a_summary_longer_than_the_cap_is_refused_and_never_trimmed(self) -> None:
+        with self.assertRaises(EnvelopeError) as refusal:
+            self.summary("x" * (MAX_CONTEXT_CHARS + 1))
+        self.assertIn(str(MAX_CONTEXT_CHARS), str(refusal.exception))
+        self.assertIsNotNone(self.summary("x" * MAX_CONTEXT_CHARS).context)
+
+    def test_a_context_that_says_nothing_is_left_out(self) -> None:
+        with self.assertRaises(EnvelopeError):
+            self.summary("   ")
+
+
 class SuggestEventTest(unittest.TestCase):
     def test_it_matches_the_contract_fixture(self) -> None:
         event = suggest_event(
@@ -118,6 +183,10 @@ class SuggestEventTest(unittest.TestCase):
                 body="Pas de problème, à 20h !",
                 confidence=0.86,
                 rationale="Demande simple et ton amical : une confirmation courte suffit.",
+                # What the contact asked, in the persona's own words (#334):
+                # the summary is the author's, the name on it is the
+                # trigger's own and never the model's.
+                context="Aïcha Benali demande si le dîner de ce soir tient toujours et à quelle heure.",
                 # The sentence the loop selects from the language the model
                 # answered (ADR 0031) — here handed in as the loop would
                 # have set it, since this module only writes it down.
