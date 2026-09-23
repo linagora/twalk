@@ -632,6 +632,63 @@ struct TriggerData {
     message_id: Option<String>,
 }
 
+/// The message a suggestion answers, as **one route** may read it (#336,
+/// resolving the third option of #160): the Companion's own approval card,
+/// served to the owner through their identity provider, asking for the one
+/// message they are about to reply to.
+///
+/// A third view of an inbound event, and deliberately the widest — the
+/// reason the other two are narrow is that they had no use for the words,
+/// and this one is the use. It is read here, in the module that already
+/// reads triggers and already owns the consent check, rather than in a
+/// second place implementing the same rules: that second place is how
+/// #110 happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    /// The contact's display name as the event carried it, when it carried
+    /// one. Their identifier is not here: the screen names a person, it
+    /// does not address one.
+    pub contact: Option<String>,
+    /// When the network says they wrote it.
+    pub received_at: Option<String>,
+    pub body: String,
+    pub format: String,
+    /// How many attachments came with it, never what they are called: the
+    /// owner is told there are files, and the files stay where they are.
+    pub attachments: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AnsweredDocument {
+    id: String,
+    subject: String,
+    network: String,
+    #[serde(default)]
+    connection: Option<String>,
+    #[serde(default)]
+    data: AnsweredData,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnsweredData {
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    network_timestamp: Option<String>,
+    #[serde(default)]
+    contact: Option<AnsweredContact>,
+    #[serde(default)]
+    attachments: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct AnsweredContact {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
 /// The trigger event as a suggestion built **outside** a persona needs it
 /// (ticket #206): the attributes a `persona.*` envelope copies from the
 /// message it answers.
@@ -1537,6 +1594,78 @@ impl Approvals {
     }
 
     /// Finds one suggestion on the bus by its CloudEvents id.
+    /// The message one suggestion answers (#336).
+    ///
+    /// Everything this route refuses, it refuses for a reason the approval
+    /// path already has a name for: a suggestion nobody can find, a trigger
+    /// beyond the bounded read, a contact whose consent does not stand **at
+    /// this moment**. The last is the one that matters: a screen that could
+    /// show a revoked contact's message because it was granted yesterday
+    /// would be a way around the decision, and this read is refused exactly
+    /// where an approval would be.
+    pub async fn answered(&self, suggestion_event_id: &str) -> Result<Answered, Refusal> {
+        let jetstream = self.jetstream().await.map_err(|error| {
+            warn!(%error, "a message read could not reach the bus");
+            Refusal::BusUnreachable(format!("{error:#}"))
+        })?;
+        let suggestion = self.find_suggestion(jetstream, suggestion_event_id).await?;
+        if suggestion.consent_label != State::Granted {
+            return Err(Refusal::NeverConsented {
+                label: suggestion.consent_label,
+            });
+        }
+        let trigger_event_id = suggestion.trigger_event_id.clone();
+        let found = self
+            .scan(
+                jetstream,
+                &bus_subject(crate::contacts::INBOUND_MESSAGE_TYPE),
+                Some(suggestion.stream_sequence),
+                |message| {
+                    let document: AnsweredDocument =
+                        serde_json::from_slice(&message.payload).ok()?;
+                    (document.id == trigger_event_id).then_some(document)
+                },
+            )
+            .await
+            .map_err(|error| {
+                warn!(%error, "a message read could not read the bus");
+                Refusal::BusUnreachable(format!("{error:#}"))
+            })?;
+        let document = match found {
+            Found::Match(document, _) => document,
+            Found::None { exhaustive } => {
+                return Err(if exhaustive {
+                    Refusal::TriggerNotFound {
+                        trigger_event_id: suggestion.trigger_event_id.clone(),
+                    }
+                } else {
+                    Refusal::TriggerOutOfReach {
+                        trigger_event_id: suggestion.trigger_event_id.clone(),
+                        window: self.lookup_window,
+                    }
+                })
+            }
+        };
+        let network = Network::parse(&document.network).unwrap_or(suggestion.network);
+        let connection = connection_of(&self.connections, document.connection.as_deref(), network)?;
+        // The clause this route exists under: consent now, not the label
+        // the message arrived with.
+        self.consent_now(&document.subject, &connection, network)?;
+        Ok(Answered {
+            contact: document
+                .data
+                .contact
+                .and_then(|contact| contact.display_name),
+            received_at: document.data.network_timestamp,
+            body: document.data.body.unwrap_or_default(),
+            format: document
+                .data
+                .format
+                .unwrap_or_else(|| Format::Plain.as_str().to_owned()),
+            attachments: document.data.attachments.len(),
+        })
+    }
+
     async fn find_suggestion(
         &self,
         jetstream: &async_nats::jetstream::Context,

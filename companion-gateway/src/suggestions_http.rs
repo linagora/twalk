@@ -66,6 +66,10 @@ pub fn routes() -> Router<Gateway> {
     Router::new()
         .route("/api/suggestions", get(list))
         .route("/api/suggestions/{suggestion_event_id}", get(one))
+        .route(
+            "/api/suggestions/{suggestion_event_id}/message",
+            get(answered),
+        )
 }
 
 /// `GET /api/suggestions?limit=50` — the suggestions waiting to be read.
@@ -150,6 +154,43 @@ async fn one(State(gateway): State<Gateway>, Path(event_id): Path<String>) -> Re
     }
     match suggestions.one(&event_id).await {
         Ok(listed) => Json(suggestion_json(&listed)).into_response(),
+        Err(refusal) => refuse(refusal),
+    }
+}
+
+/// `GET /api/suggestions/{suggestion_event_id}/message` — the message this
+/// suggestion answers (#336, the third option of #160 kept for the one
+/// surface that may have it).
+///
+/// ```json
+/// { "contact": "Aïcha Benali", "received_at": "2026-09-17T09:58:00Z",
+///   "body": "On décale à 20h ?", "format": "text/plain", "attachments": 0 }
+/// ```
+///
+/// A read **on demand**: no listing carries a message, and this route is
+/// reached only when the owner asks for one suggestion's trigger. It is
+/// served by [`crate::approval::Approvals::answered`] — the module that
+/// already reads triggers and already owns the consent check — so the rules
+/// exist once. Consent is read **now**: a contact revoked since the message
+/// arrived is a refusal with its code, exactly where an approval would be
+/// refused, and not a message.
+///
+/// It is why the Companion may show this and Buzz may not: the Companion is
+/// served to the owner through their own identity provider, and a relay
+/// nobody here runs is not (#335).
+async fn answered(State(gateway): State<Gateway>, Path(event_id): Path<String>) -> Response {
+    let Some(approvals) = gateway.approvals() else {
+        return not_configured();
+    };
+    match approvals.answered(&event_id).await {
+        Ok(answered) => Json(json!({
+            "contact": answered.contact,
+            "received_at": answered.received_at,
+            "body": answered.body,
+            "format": answered.format,
+            "attachments": answered.attachments,
+        }))
+        .into_response(),
         Err(refusal) => refuse(refusal),
     }
 }

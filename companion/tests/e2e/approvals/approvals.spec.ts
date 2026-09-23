@@ -95,6 +95,17 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		expect(page1).not.toContain(published.inboundBody);
 		expect(page1).not.toContain(published.networkIdentifier);
 
+		// #336: and the message itself is one click away, on this screen and
+		// nowhere else. Nothing carried it until the owner asked: the words
+		// appear only after the details is opened, from the route whose
+		// single job that is, which reads consent again before answering.
+		const answered = row.getByTestId('answered');
+		await expect(answered).toBeVisible();
+		await expect(row.getByTestId('answered-body')).toHaveCount(0);
+		await answered.locator('summary').click();
+		await expect(row.getByTestId('answered-body')).toContainText(published.inboundBody);
+		await expect(row.getByTestId('answered-header')).toContainText(published.displayName);
+
 		// #216, before the button: whether this reply can reach the contact at
 		// all is said *here*, from the Gateway's read of the homeserver, and
 		// not discovered after the fact. This stack's bridges are stubs the

@@ -22,7 +22,7 @@
 
 import { gateway } from '$lib/api/client';
 import { troubleOf } from '$lib/api/trouble';
-import type { components } from '$lib/api/schema';
+import type { components, paths } from '$lib/api/schema';
 import { explain, type Explained } from './refusal';
 import type { Listing } from './rows';
 
@@ -31,6 +31,14 @@ export type Approval = components['schemas']['Approval'];
 export type Listed = { ok: true; listing: Listing } | { ok: false; problem: Explained };
 
 export type Approved = { ok: true; approval: Approval } | { ok: false; problem: Explained };
+
+/** The message a suggestion answers, as the contact wrote it (#336). */
+export type AnsweredMessage =
+	paths['/api/suggestions/{suggestion_event_id}/message']['get']['responses'][200]['content']['application/json'];
+
+export type Answered =
+	| { ok: true; message: AnsweredMessage }
+	| { ok: false; problem: Explained };
 
 /** The Gateway's stable code, or `null` when the body carried none. */
 function codeOf(error: unknown): string | null {
@@ -57,6 +65,31 @@ export async function loadSuggestions(): Promise<Listed> {
  * event's `edited` flag says which happened — so the audit trail answers "how
  * often do I correct my assistant?" without keeping a word of what was said.
  */
+/**
+ * The message one suggestion answers — asked for, never listed.
+ *
+ * The listing carries nothing of a contact's message on purpose (#110, ADR
+ * 0012); this is the one route that reads it, on the owner's own screen,
+ * behind their own sign-in, when they ask for this one suggestion (#336).
+ * The Gateway reads consent **now**, so a contact revoked since they wrote
+ * is a refusal here exactly as they would be at the moment of sending —
+ * which is why the caller renders the problem and never a blank quote.
+ */
+export async function answeredMessage(id: string): Promise<Answered> {
+	const answer = await gateway
+		.GET('/api/suggestions/{suggestion_event_id}/message', {
+			params: { path: { suggestion_event_id: id } }
+		})
+		.catch(() => null);
+	if (answer === null) {
+		return { ok: false, problem: explain('unreachable', null) };
+	}
+	if (answer.data !== undefined) {
+		return { ok: true, message: answer.data };
+	}
+	return { ok: false, problem: explain(troubleOf(answer), codeOf(answer.error)) };
+}
+
 export async function approve(id: string, edited?: string): Promise<Approved> {
 	const answer = await gateway
 		.POST('/api/approvals', {

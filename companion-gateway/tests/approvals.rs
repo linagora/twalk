@@ -1334,3 +1334,74 @@ async fn an_approval_towards_a_connection_that_cannot_send_is_refused_until_it_c
     assert_eq!(status, reqwest::StatusCode::CREATED, "{answer}");
     Ok(())
 }
+
+/// #336: the message a suggestion answers, read on demand from the
+/// Companion's own card — and refused exactly where an approval would be.
+///
+/// The route is the third of #160's options, kept for the one surface
+/// served to the owner through their identity provider. What makes it safe
+/// is not that it reads less: it reads the message whole. It is that it
+/// reads it **now**, under the consent that stands now, through the module
+/// that already owns that check — so a contact revoked since they wrote
+/// cannot be read by opening an approval that was fine yesterday.
+#[tokio::test]
+async fn the_message_a_suggestion_answers_is_read_while_consent_stands() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("answered").await?;
+    let talk = conversation(&running, &bus, "answered", "granted", &in_seconds(3600)).await?;
+    let path = format!("/api/suggestions/{}/message", talk.suggestion_id);
+
+    let (status, message) = running.get(&path).await?;
+    assert_eq!(status, reqwest::StatusCode::OK, "{message}");
+    assert_eq!(
+        message["body"], "On décale à 20h ?",
+        "the message the owner is about to answer, as the contact wrote it: {message}"
+    );
+    assert_eq!(message["contact"], "Aicha Benali G24");
+    assert_eq!(
+        message["attachments"], 0,
+        "attachments are counted, never named: {message}"
+    );
+    assert!(
+        message.get("network_identifier").is_none(),
+        "a screen names a person, it does not address one: {message}"
+    );
+
+    // Revoked since they wrote: the same suggestion, the same words on the
+    // bus, and the door closes — with the code the approval path uses.
+    running.decide(&talk.contact, "revoked").await?;
+    let (status, refusal) = running.get(&path).await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CONFLICT,
+        "a revoked contact's message is not read back: {refusal}"
+    );
+    assert_eq!(refusal["error"], "consent_revoked");
+    assert!(
+        !refusal.to_string().contains("On décale"),
+        "the refusal carries no word of the message: {refusal}"
+    );
+
+    // And a message that arrived under a label that was never granted is
+    // not the screen's to show either, whatever the journal says now.
+    running.decide(&talk.contact, "granted").await?;
+    let pending = conversation(
+        &running,
+        &bus,
+        "answered-pending",
+        "pending",
+        &in_seconds(3600),
+    )
+    .await?;
+    let (status, refusal) = running
+        .get(&format!(
+            "/api/suggestions/{}/message",
+            pending.suggestion_id
+        ))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["error"], "suggestion_was_never_consented");
+    running.gateway.stop().await;
+    Ok(())
+}

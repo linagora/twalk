@@ -96,7 +96,12 @@
 	import { locale, t } from '$lib/i18n';
 	import { networkNameKey, relativeTime } from '$lib/dashboard/format';
 	import { gateway } from '$lib/api/client';
-	import { approve, loadSuggestions } from '$lib/approvals/api';
+	import {
+		answeredMessage,
+		approve,
+		loadSuggestions,
+		type AnsweredMessage
+	} from '$lib/approvals/api';
 	import { loadDisclosure } from '$lib/settings/api';
 	import { disclosureRecord, type DisclosureState } from '$lib/settings/model';
 	import { personaRows } from '$lib/dashboard/model';
@@ -291,6 +296,28 @@
 	function when(instant: string): string {
 		return relativeTime(instant, now, $locale) ?? instant;
 	}
+
+	/**
+	 * The message being answered, per suggestion, read only when the owner
+	 * opens it (#336). Nothing here is fetched with the listing: the
+	 * Gateway's route is the one door onto a contact's words, and it reads
+	 * consent at the moment it is asked — so a refusal is rendered as what
+	 * it says, never as an empty quote.
+	 */
+	let answered = $state<Record<string, AnsweredMessage | Explained | 'reading'>>({});
+
+	async function readAnswered(id: string): Promise<void> {
+		if (answered[id] !== undefined && answered[id] !== 'reading') {
+			return;
+		}
+		answered = { ...answered, [id]: 'reading' };
+		const result = await answeredMessage(id);
+		answered = { ...answered, [id]: result.ok ? result.message : result.problem };
+	}
+
+	function isExplained(value: AnsweredMessage | Explained): value is Explained {
+		return 'code' in value;
+	}
 </script>
 
 {#snippet disclosureLine(row: Row)}
@@ -476,6 +503,37 @@
 			{#if editing !== row.id}
 				{@render disclosureLine(row)}
 			{/if}
+
+			<!-- #336: the message being answered, on demand and on this screen
+			     alone. A click, not a line: the words of somebody who did not
+			     choose to be here are read when the owner needs them to
+			     decide, and the Gateway checks consent again to serve them. -->
+			<details
+				class="small answered"
+				data-testid="answered"
+				ontoggle={(event) =>
+					(event.currentTarget as HTMLDetailsElement).open ? readAnswered(row.id) : undefined}
+			>
+				<summary>{$t('approvals.answered.open')}</summary>
+				{#if answered[row.id] === 'reading' || answered[row.id] === undefined}
+					<p class="muted" data-testid="answered-reading">{$t('approvals.answered.loading')}</p>
+				{:else if isExplained(answered[row.id] as AnsweredMessage | Explained)}
+					{@const problem = answered[row.id] as Explained}
+					<p class="muted" data-testid="answered-problem" data-code={problem.code}>
+						{$t(problem.cause)} — {$t(problem.remedyText)}
+					</p>
+				{:else}
+					{@const message = answered[row.id] as AnsweredMessage}
+					<p class="muted" data-testid="answered-header">
+						{message.contact ?? ''}
+						{#if message.received_at !== null}
+							· {$t('approvals.answered.received', { when: when(message.received_at) })}
+						{/if}
+						· {$t('approvals.answered.attachments', { count: message.attachments })}
+					</p>
+					<blockquote class="proposed muted" data-testid="answered-body">{message.body}</blockquote>
+				{/if}
+			</details>
 
 			<p class="small muted" data-testid="timing">
 				{$t('approvals.row.produced', { when: when(row.producedAt) })}
