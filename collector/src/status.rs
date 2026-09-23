@@ -76,7 +76,9 @@ pub struct Tracker {
     connection: String,
     kind: &'static str,
     host: String,
-    last: Option<State>,
+    /// The last answer published for this connection: its state and the
+    /// hint that came with it, since either changing is a change (#320).
+    last: Option<(State, Option<String>)>,
 }
 
 impl Tracker {
@@ -97,18 +99,32 @@ impl Tracker {
         self.kind
     }
 
-    /// The envelope to publish for this observation, or `None` when the
-    /// state did not change — the same answer twice is silence.
+    /// The envelope to publish for this observation, or `None` when
+    /// nothing changed — the same answer twice is silence.
+    ///
+    /// The **hint** is part of "the same answer" (#320). Two refusals can
+    /// share a state and mean different work: a missing audience and a URL
+    /// naming a service this collector does not read are both
+    /// `pending_operator`, and an operator who acted on the first sentence
+    /// has to be told when the second one becomes true. A state that did
+    /// not change carries `from_state` equal to `to_state`, which is the
+    /// honest reading: the connection did not move, the reason did.
     pub fn observe(&mut self, observation: &Observation, occurred_at: &str) -> Option<Value> {
-        if self.last == Some(observation.state) {
+        let answer = (observation.state, observation.hint.clone());
+        if self.last.as_ref() == Some(&answer) {
             return None;
         }
-        let from_state = self.last.map(State::as_str).unwrap_or("unknown");
-        self.last = Some(observation.state);
+        let from_state = self
+            .last
+            .as_ref()
+            .map(|(state, _)| state.as_str())
+            .unwrap_or("unknown");
+        self.last = Some(answer);
         let id = sha256_hex(&format!(
-            "{}:{}:{occurred_at}",
+            "{}:{}:{occurred_at}:{}",
             self.connection,
-            observation.state.as_str()
+            observation.state.as_str(),
+            observation.hint.as_deref().unwrap_or_default()
         ));
         let mut data = json!({
             "connection": self.connection,
@@ -150,6 +166,40 @@ pub fn sha256_hex(input: &str) -> String {
 mod tests {
     use super::*;
 
+    /// #320: two refusals can share a state and mean different work. The
+    /// operator who acted on the first sentence is told the second one,
+    /// and the connection is honest about not having moved.
+    #[test]
+    fn a_state_that_stays_with_a_new_reason_is_published_once_and_not_twice() {
+        let mut tracker = Tracker::new("calendar-linagora", "calendar", "collector.example.com");
+        let pending = |hint: &str| Observation {
+            state: State::PendingOperator,
+            service: Some("caldav"),
+            hint: Some(hint.to_owned()),
+        };
+        let audience = pending("an audience or a scope the operator has to add at the SSO");
+        let not_a_resource_server = pending("no scope added at the SSO will change this answer");
+        tracker
+            .observe(&audience, "2026-09-23T09:00:00Z")
+            .expect("the first observation publishes");
+        assert!(
+            tracker.observe(&audience, "2026-09-23T09:01:00Z").is_none(),
+            "the same sentence twice is silence"
+        );
+        let changed = tracker
+            .observe(&not_a_resource_server, "2026-09-23T09:02:00Z")
+            .expect("a reason that changed is published");
+        assert_eq!(changed["data"]["from_state"], "pending_operator");
+        assert_eq!(changed["data"]["to_state"], "pending_operator");
+        assert_eq!(
+            changed["data"]["hint"],
+            "no scope added at the SSO will change this answer"
+        );
+        assert!(tracker
+            .observe(&not_a_resource_server, "2026-09-23T09:03:00Z")
+            .is_none());
+    }
+
     #[test]
     fn the_first_observation_of_a_run_comes_from_unknown_and_the_same_state_twice_is_silence() {
         let mut tracker = Tracker::new("mail-linagora", "email", "collector.example.com");
@@ -185,7 +235,11 @@ mod tests {
         assert_eq!(refused["data"]["service"], "sso");
         assert_eq!(
             refused["id"],
-            sha256_hex("mail-linagora:reconnect_required:2026-09-20T09:02:00Z")
+            sha256_hex(
+                "mail-linagora:reconnect_required:2026-09-20T09:02:00Z:Run \
+                 `twalk-collector authorize --renew`."
+            ),
+            "the id covers the hint too, so two reasons at one second are two events"
         );
     }
 

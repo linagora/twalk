@@ -630,13 +630,24 @@ async fn ask<T>(
         })?;
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        // What the operator has to do depends on what the service said, and
+        // until #320 the collector said one thing for every refusal: "add an
+        // audience or a scope at the SSO". That is the right sentence for a
+        // resource server that took the token and wanted more of it, and a
+        // wrong instruction for a service that does not read bearer tokens
+        // at all — a Cozy instance where the deployment expected an OpenPaaS
+        // side service answers `401 text/plain` with no challenge whatever,
+        // and no scope added anywhere would change that. So the hint names
+        // what was observed: the challenge the service offered, or its
+        // absence.
+        let challenge = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_owned());
         return Err(ServiceRefusal::PendingOperator {
             status: status.as_u16(),
-            detail: format!(
-                "{service} refused a fresh token with {status}: the grant stands, but the client \
-                 lacks what {service} expects — an audience or a scope the operator has to add \
-                 to the client at the SSO"
-            ),
+            detail: refusal_detail(service, url, status.as_u16(), challenge.as_deref()),
         });
     }
     if !status.is_success() {
@@ -654,6 +665,46 @@ async fn ask<T>(
     account_of(&body).ok_or_else(|| ServiceRefusal::Unreachable {
         detail: format!("{service} answered a document with no account in it"),
     })
+}
+
+/// The operator's sentence for a service that refused a fresh token,
+/// derived from the challenge it offered (RFC 9110 §11.6.1) and from
+/// nothing else (#320).
+///
+/// Three cases, because they are three different mornings:
+/// - a `Bearer` challenge: the service reads bearer tokens and refused
+///   this one — an audience, a scope, or an expired grant;
+/// - another scheme: it asked for something this collector does not send.
+///   It may still accept a bearer (a service that advertises `Basic` often
+///   does), so the sentence says what was asked rather than what to do;
+/// - no challenge at all: it refused without saying how to authenticate,
+///   which an OAuth resource server does not do. The URL is the first
+///   thing to check.
+pub fn refusal_detail(service: &str, url: &str, status: u16, challenge: Option<&str>) -> String {
+    let scheme = challenge
+        .and_then(|challenge| challenge.split_whitespace().next())
+        .map(str::to_ascii_lowercase);
+    match scheme.as_deref() {
+        Some("bearer") => format!(
+            "{service} refused a fresh token with {status} and asks for a bearer: the grant \
+             stands, but the client lacks what {service} expects — an audience or a scope the \
+             operator has to add to the client at the SSO"
+        ),
+        Some(_) => {
+            let challenge = challenge.unwrap_or_default();
+            format!(
+                "{service} refused a fresh token with {status} and asked for {challenge} \
+                 instead of a bearer: it is not taking the SSO's tokens on this route. Check \
+                 that {url} is the service this collector reads, and that its operator accepts \
+                 the SSO's tokens there"
+            )
+        }
+        None => format!(
+            "{service} refused a fresh token with {status} and offered no authentication \
+             challenge, which an OAuth resource server does not do. Check that {url} names the \
+             service this collector reads — no scope added at the SSO will change this answer"
+        ),
+    }
 }
 
 /// `bytes` random bytes from the OS CSPRNG, base64url — the shape a PKCE
@@ -756,6 +807,65 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #320: the sentence an operator reads is derived from the challenge
+    /// the service offered, because that is the only thing that says what
+    /// is wrong. Measured on two real services: LINAGORA's Twake Calendar
+    /// (a Cozy instance) refuses a bearer with `401` and **no**
+    /// `WWW-Authenticate` at all, and the Twake dev platform's OpenPaaS
+    /// side service refuses with `Basic realm="ESN"` — neither of which is
+    /// a missing audience, which is what the collector used to say to both.
+    #[test]
+    fn what_the_operator_is_told_follows_what_the_service_asked_for() {
+        let bearer = refusal_detail(
+            "caldav",
+            "https://side.example.org",
+            403,
+            Some("Bearer realm=\"openpaas\", error=\"insufficient_scope\""),
+        );
+        assert!(
+            bearer.contains(
+                "an audience or a scope the operator has to add to the client at the SSO"
+            ),
+            "{bearer}"
+        );
+
+        // A service that asks for another scheme may still take a bearer —
+        // many advertise only `Basic` — so the sentence says what was
+        // asked and leaves the conclusion to the operator.
+        let basic = refusal_detail(
+            "caldav",
+            "https://sabre.example.org",
+            401,
+            Some("Basic realm=\"ESN\", charset=\"UTF-8\""),
+        );
+        assert!(basic.contains("asked for Basic realm=\"ESN\""), "{basic}");
+        assert!(basic.contains("https://sabre.example.org"), "{basic}");
+        assert!(
+            !basic.contains("audience"),
+            "not a missing audience: {basic}"
+        );
+
+        // No challenge at all: not an OAuth resource server, and no scope
+        // added anywhere will change its answer.
+        let silent = refusal_detail("caldav", "https://cozy.example.org", 401, None);
+        assert!(
+            silent.contains("offered no authentication challenge"),
+            "{silent}"
+        );
+        assert!(
+            silent.contains("no scope added at the SSO will change this answer"),
+            "{silent}"
+        );
+        assert!(silent.contains("https://cozy.example.org"), "{silent}");
+
+        // The scheme is read case-insensitively: RFC 9110 §11.1 does not
+        // fix its spelling.
+        assert!(
+            refusal_detail("jmap", "https://mail.example.org", 401, Some("bearer"))
+                .contains("an audience or a scope")
+        );
+    }
 
     #[test]
     fn the_pkce_challenge_is_the_s256_of_the_verifier_in_base64url() {

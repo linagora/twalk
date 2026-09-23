@@ -39,6 +39,37 @@ async fn wait_for_state(bus: &Bus, run: &Run, connection: &str, state: &str) -> 
     .await
 }
 
+/// The same, for a state a connection has already been in once: the last
+/// such event, and only when its hint is the one the test is about.
+async fn wait_for_hint(
+    bus: &Bus,
+    run: &Run,
+    connection: &str,
+    state: &str,
+    needle: &str,
+) -> Result<Value> {
+    let connection = connection.to_owned();
+    let state = state.to_owned();
+    let needle = needle.to_owned();
+    poll_until(
+        || async {
+            states_of(bus, run, &connection)
+                .await
+                .ok()?
+                .into_iter()
+                .rev()
+                .find(|event| {
+                    event["data"]["to_state"].as_str() == Some(state.as_str())
+                        && event["data"]["hint"]
+                            .as_str()
+                            .is_some_and(|hint| hint.contains(&needle))
+                })
+        },
+        &format!("{connection} to reach {state} saying {needle:?}"),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn a_connection_says_connected_then_reconnect_required_when_the_grant_is_revoked(
 ) -> Result<()> {
@@ -144,12 +175,14 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
     let calendar = wait_for_state(&bus, &run, &run.calendar, "pending_operator").await?;
     validate_against_contract(&calendar, "connection.status.changed")?;
     assert_eq!(calendar["data"]["service"], "caldav");
+    // The service asked for a bearer and refused this one, so the hint is
+    // the one about the client's audience — the operator's work is at the
+    // SSO (#320: and only in this case).
+    let hint = calendar["data"]["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("caldav"), "{calendar}");
     assert!(
-        calendar["data"]["hint"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("caldav"),
-        "{calendar}"
+        hint.contains("an audience or a scope the operator has to add to the client at the SSO"),
+        "{hint}"
     );
     // The mail connection is fine: the grant stands and JMAP takes it.
     let mail = wait_for_state(&bus, &run, &run.mail, "connected").await?;
@@ -162,9 +195,44 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
         "the calendar's refusal is not the mailbox's state"
     );
 
-    // Restored: the transition back is published, once.
+    // A service that refuses **without saying how to authenticate** is the
+    // other morning (#320): not an OAuth resource server at all — the URL
+    // names something else, a Cozy instance where the deployment expected
+    // an OpenPaaS side service. Same state, since the operator still has
+    // work to do; a different sentence, because "add an audience at the
+    // SSO" would send them to fix something nobody said was wrong. The
+    // connection is left in `pending_operator` on purpose: an operator who
+    // acted on the first sentence has to be told the second one, so the
+    // hint changing is itself a change worth publishing.
+    run.sso.refuse_without_challenge("caldav");
+    let silent_refusal = wait_for_hint(
+        &bus,
+        &run,
+        &run.calendar,
+        "pending_operator",
+        "offered no authentication challenge",
+    )
+    .await?;
+    let hint = silent_refusal["data"]["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("offered no authentication challenge"),
+        "{hint}"
+    );
+    assert!(
+        hint.contains("no scope added at the SSO will change this answer"),
+        "{hint}"
+    );
+    assert!(
+        !hint.contains("an audience or a scope the operator has to add"),
+        "the two refusals do not share a sentence: {hint}"
+    );
+    assert_eq!(
+        silent_refusal["data"]["from_state"], "pending_operator",
+        "the connection did not move; the reason did"
+    );
     run.sso.restore("caldav");
     wait_for_state(&bus, &run, &run.calendar, "connected").await?;
+
     // And a service that does not answer is unreachable, which is neither.
     run.sso.silence("jmap");
     let silent = wait_for_state(&bus, &run, &run.mail, "unreachable").await?;

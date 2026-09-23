@@ -80,6 +80,10 @@ struct State {
     revoked: bool,
     /// Services told to refuse a fresh token with 403 (`pending_operator`).
     refusing: Vec<&'static str>,
+    /// Services told to refuse **without offering any challenge** (#320):
+    /// the shape of a service that is not an OAuth resource server at all,
+    /// where a deployment expected one. `401`, no `WWW-Authenticate`.
+    refusing_silently: Vec<&'static str>,
     /// Services told not to answer at all (`unreachable`): the connection is
     /// accepted and closed.
     silent: Vec<&'static str>,
@@ -275,6 +279,14 @@ impl FakeSso {
         self.lock().refusing.push(service);
     }
 
+    /// Makes one service refuse **without saying how to authenticate**
+    /// (#320): `401` and no `WWW-Authenticate`, the way a service that is
+    /// not an OAuth resource server answers a bearer it never asked for.
+    /// The operator's next step is the URL, not their SSO.
+    pub fn refuse_without_challenge(&self, service: &'static str) {
+        self.lock().refusing_silently.push(service);
+    }
+
     /// Makes one service stop answering: `unreachable`, not a refusal.
     /// `"jmap"`, `"caldav"`, or since #279 `"sso"` — discovery and the token
     /// endpoint alike.
@@ -286,6 +298,7 @@ impl FakeSso {
     pub fn restore(&self, service: &'static str) {
         let mut guard = self.lock();
         guard.refusing.retain(|s| *s != service);
+        guard.refusing_silently.retain(|s| *s != service);
         guard.silent.retain(|s| *s != service);
     }
 
@@ -488,6 +501,13 @@ struct Response {
     status: &'static str,
     content_type: &'static str,
     body: Vec<u8>,
+    /// What the refusal offers as `WWW-Authenticate` (#320): a service that
+    /// reads bearer tokens says so, one that reads something else says
+    /// that, and a service that is not an OAuth resource server at all —
+    /// a Cozy instance where a deployment expected an OpenPaaS side
+    /// service — says nothing, which is the case the collector used to
+    /// report as a missing audience.
+    challenge: Option<&'static str>,
 }
 
 impl Response {
@@ -496,7 +516,13 @@ impl Response {
             status,
             content_type: "application/json",
             body: serde_json::to_vec(&body).expect("a JSON value serialises"),
+            challenge: None,
         }
+    }
+
+    fn challenging(mut self, challenge: &'static str) -> Self {
+        self.challenge = Some(challenge);
+        self
     }
 
     fn xml(status: &'static str, body: String) -> Self {
@@ -504,6 +530,7 @@ impl Response {
             status,
             content_type: "application/xml; charset=utf-8",
             body: body.into_bytes(),
+            challenge: None,
         }
     }
 
@@ -512,6 +539,7 @@ impl Response {
             status,
             content_type: "text/calendar; charset=utf-8",
             body: body.into_bytes(),
+            challenge: None,
         }
     }
 }
@@ -524,13 +552,17 @@ async fn serve_connection(mut stream: TcpStream, state: Arc<Mutex<State>>) -> Re
         status,
         content_type,
         body,
+        challenge,
     }) = respond(&request, &state)
     else {
         // A silenced service: the connection closes with nothing said.
         return Ok(());
     };
+    let challenge = challenge
+        .map(|challenge| format!("www-authenticate: {challenge}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\n{challenge}content-length: {}\r\nconnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
@@ -591,11 +623,39 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<RawRequest>> {
 fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<Response> {
     let path = request.path.split('?').next().unwrap_or_default();
     let mut guard = state.lock().expect("the fake SSO is not poisoned");
-    if let Some(rest) = path.strip_prefix("/dav/calendars/") {
-        return dav(request, rest, &mut guard);
+    let response = if let Some(rest) = path.strip_prefix("/dav/calendars/") {
+        dav(request, rest, &mut guard)?
+    } else {
+        let (status, body) = respond_json(request, path, &mut guard)?;
+        Response::json(status, body)
+    };
+    // A resource server's refusal says how to authenticate (RFC 9110
+    // §11.6.1), and says it on every one of its routes — unless the test
+    // told this service to refuse silently (#320), which is the answer the
+    // collector must not read as a missing audience.
+    if !(response.status.starts_with("401") || response.status.starts_with("403")) {
+        return Some(response);
     }
-    let (status, body) = respond_json(request, path, &mut guard)?;
-    Some(Response::json(status, body))
+    match service_of(path) {
+        Some(service) if !guard.refusing_silently.contains(&service) => {
+            Some(response.challenging("Bearer realm=\"twalk\", error=\"insufficient_scope\""))
+        }
+        _ => Some(response),
+    }
+}
+
+/// Which resource service a path belongs to: the mailbox's routes are
+/// under `/jmap`, the side service's are `/api/user` and the DAV
+/// collections. The SSO's own endpoints are neither — a token endpoint
+/// refusing a client is not a resource server challenging a bearer.
+fn service_of(path: &str) -> Option<&'static str> {
+    if path.starts_with("/jmap") {
+        Some("jmap")
+    } else if path.starts_with("/api/user") || path.starts_with("/dav/") {
+        Some("caldav")
+    } else {
+        None
+    }
 }
 
 fn respond_json(
@@ -792,6 +852,14 @@ enum Admission {
 fn admit(name: &'static str, request: &RawRequest, guard: &State) -> Admission {
     if guard.silent.contains(&name) {
         return Admission::Silent;
+    }
+    if guard.refusing_silently.contains(&name) {
+        // The Cozy case (#320): a service that never asked for a bearer
+        // refuses one without saying what it would accept instead.
+        return Admission::Refused(
+            "401 Unauthorized",
+            json!({ "error": "unauthenticated", "detail": format!("{name} is not an OAuth resource server here") }),
+        );
     }
     if guard.refusing.contains(&name) {
         return Admission::Refused(

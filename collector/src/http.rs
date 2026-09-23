@@ -177,7 +177,7 @@ async fn free_busy(
             )
                 .into_response()
         }
-        Err(SideError::Refused { status }) => refuse(
+        Err(SideError::Refused { status, .. }) => refuse(
             &endpoint,
             StatusCode::BAD_GATEWAY,
             "caldav_refused",

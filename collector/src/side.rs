@@ -9,9 +9,16 @@ use anyhow::Result;
 /// Why a request to a service did not answer with what was asked.
 #[derive(Debug)]
 pub enum SideError {
-    /// `401`/`403`: the token itself, or what the client lacks — the words
-    /// the status machinery already has (`ServiceRefusal`).
-    Refused { status: u16 },
+    /// `401`/`403`: the token itself, or what the client lacks. The
+    /// `WWW-Authenticate` the service offered comes with it, because what
+    /// the operator has to do depends on it and on nothing else the
+    /// collector can see (#320): a service that asks for a bearer wants
+    /// more of the token, one that asks for something else — or for
+    /// nothing at all — is not reading the SSO's tokens here.
+    Refused {
+        status: u16,
+        challenge: Option<String>,
+    },
     /// No answer, another status, or an answer that is not what the service
     /// says.
     Unreachable { detail: String },
@@ -20,7 +27,9 @@ pub enum SideError {
 impl std::fmt::Display for SideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused { status } => write!(f, "the service refused the token with {status}"),
+            Self::Refused { status, .. } => {
+                write!(f, "the service refused the token with {status}")
+            }
             Self::Unreachable { detail } => f.write_str(detail),
         }
     }
@@ -79,6 +88,11 @@ pub async fn send(
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err(SideError::Refused {
             status: status.as_u16(),
+            challenge: response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.trim().to_owned()),
         });
     }
     if !status.is_success() {
