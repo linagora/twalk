@@ -624,8 +624,9 @@ impl Gateway {
     }
 
     /// `POST /api/approvals` with `{"suggestion_event_id": id, "final":
-    /// {"body": text}}` — no `final` when `edited_body` is `None`, which
-    /// sends the persona's own words and is recorded as such. One `401` is
+    /// {"body": text, "written_by": "owner"}}` — no `final` when
+    /// `edited_body` is `None`, which sends the persona's own words and is
+    /// recorded as such. One `401` is
     /// answered by one refresh and one retry; a second `401` is
     /// [`GatewayError::Unauthenticated`].
     pub async fn approve(
@@ -635,7 +636,12 @@ impl Gateway {
     ) -> Result<Outcome, GatewayError> {
         let mut body = serde_json::json!({ "suggestion_event_id": suggestion_id });
         if let Some(text) = edited_body {
-            body["final"] = serde_json::json!({ "body": text });
+            // `written_by: "owner"` because on Buzz there is no draft to
+            // correct: the compose box is empty, and a reply in the thread
+            // is a text the owner wrote in place of the persona's (#327).
+            // It is what decides whether the disclosure is appended, so it
+            // is stated rather than left to be guessed from the body.
+            body["final"] = serde_json::json!({ "body": text, "written_by": "owner" });
         }
         let body = serde_json::to_vec(&body).map_err(|e| GatewayError::Malformed {
             status: 0,
@@ -1162,7 +1168,12 @@ mod tests {
         let body: Value = serde_json::from_str(&seen[0].body).unwrap();
         assert_eq!(
             body,
-            serde_json::json!({ "suggestion_event_id": SUGGESTION, "final": { "body": "texte" } })
+            serde_json::json!({
+                "suggestion_event_id": SUGGESTION,
+                // #327: a reply typed in the thread is the owner's own
+                // text, and the Gateway appends no sentence to it.
+                "final": { "body": "texte", "written_by": "owner" }
+            })
         );
         assert_eq!(
             stub.seen("refresh").len(),

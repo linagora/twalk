@@ -219,13 +219,31 @@
 		return key === null ? network : $t(key);
 	}
 
+	/**
+	 * Whose words the open editor holds (#327). Correcting the draft leaves
+	 * it the persona's — the sentence still describes how the text was
+	 * produced — and writing one's own reply in its place does not, which
+	 * is ADR 0019's own rule: *a message the user wrote themselves carries
+	 * nothing*. Two gestures, because no comparison of two texts can tell a
+	 * correction from a replacement.
+	 */
+	let authorship = $state<'persona' | 'owner'>('persona');
+
 	function openEditor(row: Row) {
 		editing = row.id;
+		authorship = 'persona';
 		draft = row.body;
+	}
+
+	function openOwnReply(row: Row) {
+		editing = row.id;
+		authorship = 'owner';
+		draft = '';
 	}
 
 	function closeEditor() {
 		editing = null;
+		authorship = 'persona';
 		draft = '';
 	}
 
@@ -256,7 +274,11 @@
 			return;
 		}
 		busy = row.id;
-		const answer = await approve(row.id, text === row.body ? undefined : text);
+		const answer = await approve(
+			row.id,
+			text === row.body ? undefined : text,
+			editing === row.id ? authorship : 'persona'
+		);
 		busy = null;
 		if (answer.ok) {
 			outcomes = {
@@ -617,7 +639,11 @@
 
 			{#if editing === row.id}
 				<label class="field" for={`editor-${row.id}`}>
-					<span class="label">{$t('approvals.editing.label')}</span>
+					<span class="label">
+						{authorship === 'owner'
+							? $t('approvals.writeOwn.label')
+							: $t('approvals.editing.label')}
+					</span>
 					<!-- Not inside a form, so no key submits it. -->
 					<textarea
 						id={`editor-${row.id}`}
@@ -628,9 +654,18 @@
 					></textarea>
 				</label>
 				<p class="small muted" data-testid="editor-hint">{$t('approvals.editing.hint')}</p>
-				<!-- Under the editor, not inside it: the one line the user does
-				     not write. -->
-				{@render disclosureLine(row)}
+				{#if authorship === 'owner'}
+					<!-- ADR 0019: a message the user wrote themselves carries
+					     nothing, so the card says so before they send it rather
+					     than leaving them to notice its absence afterwards. -->
+					<p class="small muted" data-testid="own-reply-undisclosed">
+						{$t('approvals.writeOwn.undisclosed')}
+					</p>
+				{:else}
+					<!-- Under the editor, not inside it: the one line the user does
+					     not write. -->
+					{@render disclosureLine(row)}
+				{/if}
 			{/if}
 
 			{#if outcome !== undefined && outcome.kind === 'sent'}
@@ -706,10 +741,26 @@
 					<button
 						class="button button--secondary"
 						type="button"
-						onclick={() => (editing === row.id ? closeEditor() : openEditor(row))}
+						onclick={() =>
+							editing === row.id && authorship === 'persona' ? closeEditor() : openEditor(row)}
 						data-testid="edit"
 					>
-						{editing === row.id ? $t('approvals.editing.cancel') : $t('approvals.edit')}
+						{editing === row.id && authorship === 'persona'
+							? $t('approvals.editing.cancel')
+							: $t('approvals.edit')}
+					</button>
+				{/if}
+				{#if row.actions.includes('edit')}
+					<button
+						class="button button--secondary"
+						type="button"
+						onclick={() =>
+							editing === row.id && authorship === 'owner' ? closeEditor() : openOwnReply(row)}
+						data-testid="write-own"
+					>
+						{editing === row.id && authorship === 'owner'
+							? $t('approvals.editing.cancel')
+							: $t('approvals.writeOwn')}
 					</button>
 				{/if}
 				{#if row.actions.includes('dismiss')}

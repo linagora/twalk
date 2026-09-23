@@ -607,8 +607,9 @@ async fn the_edited_content_wins_over_what_the_persona_wrote() -> Result<()> {
     assert_eq!(
         stored.payload["data"]["final"]["body"],
         json!(format!("{edited}\n{DISCLOSURE}")),
-        "what the user approved is exactly what goes out, with the disclosure after it: the \
-         sentence is invariant whether the suggestion was sent untouched or rewritten (ADR 0031)"
+        "what the user approved is exactly what goes out, with the disclosure after it: \
+         correcting a draft does not make it somebody else's text, so the sentence stands \
+         (ADR 0031, and #327 for the case where it does not)"
     );
     assert_ne!(
         stored.payload["data"]["final"]["body"],
@@ -1402,6 +1403,82 @@ async fn the_message_a_suggestion_answers_is_read_while_consent_stands() -> Resu
         .await?;
     assert_eq!(status, reqwest::StatusCode::CONFLICT, "{refusal}");
     assert_eq!(refusal["error"], "suggestion_was_never_consented");
+    running.gateway.stop().await;
+    Ok(())
+}
+
+/// #327, and ADR 0019's own sentence: *"A message the user wrote
+/// themselves carries nothing."*
+///
+/// Until this, the Gateway appended the disclosure whenever the switch was
+/// on, and the first reply the owner wrote in place of a draft went out to
+/// a real contact saying a model had written it. The rule is not measured
+/// on the text — a body that differs says *something changed*, not whether
+/// a word was corrected or the draft was thrown away — so the gesture
+/// declares it, and the two gestures are two different sends.
+#[tokio::test]
+async fn a_reply_the_owner_wrote_themselves_goes_out_with_no_sentence_appended() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("approve-written").await?;
+    let talk = conversation(&running, &bus, "written", "granted", &in_seconds(3600)).await?;
+
+    let mine = "Bonjour Christelle, je regarde ça cette semaine et je reviens vers vous.";
+    let (status, answer) = running
+        .approve(&json!({
+            "suggestion_event_id": talk.suggestion_id,
+            "final": { "body": mine, "format": "text/plain", "written_by": "owner" }
+        }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["edited"], json!(true));
+    assert_eq!(
+        answer["written_by"],
+        json!("owner"),
+        "the trail says whose words went out, which `edited` never could: {answer}"
+    );
+
+    let stored = stored_reply(&bus, answer["stream_sequence"].as_u64().unwrap()).await?;
+    validate_against_contract(&stored.payload, "persona.reply.approved")?;
+    assert_eq!(
+        stored.payload["data"]["final"]["body"],
+        json!(mine),
+        "the owner's own words, whole and alone: nothing is appended to a message they wrote"
+    );
+    assert_eq!(stored.payload["data"]["written_by"], json!("owner"));
+    assert_eq!(
+        stored.payload["data"].get("disclosure"),
+        None,
+        "a reply the owner wrote carries no sentence at all, not an empty one: {}",
+        stored.payload
+    );
+    assert!(
+        !stored.payload.to_string().contains(DISCLOSURE),
+        "the sentence is nowhere in the event: {}",
+        stored.payload
+    );
+
+    // And a claim of authorship over the persona's own text is not a way to
+    // send it undisclosed: same words as the draft, so it *is* the draft.
+    let second = conversation(&running, &bus, "written-same", "granted", &in_seconds(3600)).await?;
+    let (status, answer) = running
+        .approve(&json!({
+            "suggestion_event_id": second.suggestion_id,
+            "final": {
+                "body": second.suggestion_body,
+                "format": "text/plain",
+                "written_by": "owner"
+            }
+        }))
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{answer}");
+    assert_eq!(answer["written_by"], json!("persona"));
+    let stored = stored_reply(&bus, answer["stream_sequence"].as_u64().unwrap()).await?;
+    assert_eq!(stored.payload["data"]["disclosure"], json!(DISCLOSURE));
+    assert_eq!(
+        stored.payload["data"]["final"]["body"],
+        json!(format!("{}\n{DISCLOSURE}", second.suggestion_body))
+    );
     running.gateway.stop().await;
     Ok(())
 }

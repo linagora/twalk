@@ -128,6 +128,11 @@
           "type": "boolean",
           "description": "True when the final content differs from the approved suggestion. Lets oversight interfaces measure how often personas are corrected."
         },
+        "written_by": {
+          "type": "string",
+          "enum": ["persona", "owner"],
+          "description": "Optional, defaulting to persona. Who wrote the body being sent: the persona, the human's corrections to its draft included, or the human themselves in place of that draft. Declared by the gesture the approval was given with, never measured on the text — a body that differs from the draft says that something changed, not whether a word was corrected or the draft was thrown away. It is what the disclosure follows (ADR 0019: a message the user wrote themselves carries nothing), and the half of the audit trail edited could not give: correcting an assistant and replacing it are two different acts."
+        },
         "target": {
           "type": "object",
           "oneOf": [

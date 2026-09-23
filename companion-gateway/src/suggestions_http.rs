@@ -313,6 +313,10 @@ fn approval_json(recorded: &RecordedApproval) -> Value {
         "network": recorded.network.as_str(),
         "contact": recorded.contact,
         "edited": recorded.edited,
+        // Whose words went out (#327), the same member the approval's own
+        // surface renders: one shape from both doors, or a screen grows
+        // two code paths.
+        "written_by": recorded.written_by,
         "approved_at": recorded.approved_at,
         "publication": recorded.publication(),
         "stream_sequence": recorded.stream_sequence,
@@ -454,6 +458,7 @@ mod tests {
             network: Network::Whatsapp,
             contact: "@whatsapp_336:example.com".to_owned(),
             edited: true,
+            written_by: "persona".to_owned(),
             approved_at: "2026-09-17T10:04:37.000Z".to_owned(),
             published_at: Some("2026-09-17T10:04:37.100Z".to_owned()),
             stream_sequence: Some(4242),
