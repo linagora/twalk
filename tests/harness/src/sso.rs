@@ -284,9 +284,7 @@ impl FakeSso {
     /// not an OAuth resource server answers a bearer it never asked for.
     /// The operator's next step is the URL, not their SSO.
     pub fn refuse_without_challenge(&self, service: &'static str) {
-        let mut guard = self.lock();
-        guard.refusing_silently.push(service);
-        guard.refusing.push(service);
+        self.lock().refusing_silently.push(service);
     }
 
     /// Makes one service stop answering: `unreachable`, not a refusal.
@@ -611,35 +609,38 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<RawRequest>> {
 fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<Response> {
     let path = request.path.split('?').next().unwrap_or_default();
     let mut guard = state.lock().expect("the fake SSO is not poisoned");
-    if let Some(rest) = path.strip_prefix("/dav/calendars/") {
-        return dav(request, rest, &mut guard);
-    }
-    let (status, body) = respond_json(request, path, &mut guard)?;
-    // A refusal says how to authenticate, as an OAuth resource server does
-    // (RFC 9110 §11.6.1) — unless this service was told to refuse silently
-    // (#320), which is what the collector must not read as a missing
-    // audience.
-    let response = Response::json(status, body);
-    Some(if status.starts_with("401") || status.starts_with("403") {
-        let silent = ["jmap", "caldav"].iter().any(|service| {
-            guard.refusing_silently.contains(service) && path_belongs_to(path, service)
-        });
-        if silent {
-            response
-        } else {
-            response.challenging("Bearer realm=\"twalk\", error=\"insufficient_scope\"")
-        }
+    let response = if let Some(rest) = path.strip_prefix("/dav/calendars/") {
+        dav(request, rest, &mut guard)?
     } else {
-        response
-    })
+        let (status, body) = respond_json(request, path, &mut guard)?;
+        Response::json(status, body)
+    };
+    // A resource server's refusal says how to authenticate (RFC 9110
+    // §11.6.1), and says it on every one of its routes — unless the test
+    // told this service to refuse silently (#320), which is the answer the
+    // collector must not read as a missing audience.
+    if !(response.status.starts_with("401") || response.status.starts_with("403")) {
+        return Some(response);
+    }
+    match service_of(path) {
+        Some(service) if !guard.refusing_silently.contains(&service) => {
+            Some(response.challenging("Bearer realm=\"twalk\", error=\"insufficient_scope\""))
+        }
+        _ => Some(response),
+    }
 }
 
-/// Which service a path belongs to, for the refusal above: the mail
-/// service's routes are under `/jmap`, the side service's are the rest.
-fn path_belongs_to(path: &str, service: &str) -> bool {
-    match service {
-        "jmap" => path.starts_with("/jmap"),
-        _ => path.starts_with("/api/user") || path.starts_with("/dav/"),
+/// Which resource service a path belongs to: the mailbox's routes are
+/// under `/jmap`, the side service's are `/api/user` and the DAV
+/// collections. The SSO's own endpoints are neither — a token endpoint
+/// refusing a client is not a resource server challenging a bearer.
+fn service_of(path: &str) -> Option<&'static str> {
+    if path.starts_with("/jmap") {
+        Some("jmap")
+    } else if path.starts_with("/api/user") || path.starts_with("/dav/") {
+        Some("caldav")
+    } else {
+        None
     }
 }
 
@@ -837,6 +838,14 @@ enum Admission {
 fn admit(name: &'static str, request: &RawRequest, guard: &State) -> Admission {
     if guard.silent.contains(&name) {
         return Admission::Silent;
+    }
+    if guard.refusing_silently.contains(&name) {
+        // The Cozy case (#320): a service that never asked for a bearer
+        // refuses one without saying what it would accept instead.
+        return Admission::Refused(
+            "401 Unauthorized",
+            json!({ "error": "unauthenticated", "detail": format!("{name} is not an OAuth resource server here") }),
+        );
     }
     if guard.refusing.contains(&name) {
         return Admission::Refused(

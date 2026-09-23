@@ -680,7 +680,7 @@ async fn ask<T>(
 /// - no challenge at all: it refused without saying how to authenticate,
 ///   which an OAuth resource server does not do. The URL is the first
 ///   thing to check.
-fn refusal_detail(service: &str, url: &str, status: u16, challenge: Option<&str>) -> String {
+pub fn refusal_detail(service: &str, url: &str, status: u16, challenge: Option<&str>) -> String {
     let scheme = challenge
         .and_then(|challenge| challenge.split_whitespace().next())
         .map(str::to_ascii_lowercase);
@@ -694,8 +694,9 @@ fn refusal_detail(service: &str, url: &str, status: u16, challenge: Option<&str>
             let challenge = challenge.unwrap_or_default();
             format!(
                 "{service} refused a fresh token with {status} and asked for {challenge} \
-                 instead of a bearer. Check that {url} is the service this collector reads; if \
-                 it is, its operator has to accept the SSO's tokens there"
+                 instead of a bearer: it is not taking the SSO's tokens on this route. Check \
+                 that {url} is the service this collector reads, and that its operator accepts \
+                 the SSO's tokens there"
             )
         }
         None => format!(

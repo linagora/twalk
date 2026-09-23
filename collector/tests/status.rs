@@ -195,15 +195,15 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
         "the calendar's refusal is not the mailbox's state"
     );
 
-    // Restored: the transition back is published, once.
-    run.sso.restore("caldav");
-    wait_for_state(&bus, &run, &run.calendar, "connected").await?;
     // A service that refuses **without saying how to authenticate** is the
     // other morning (#320): not an OAuth resource server at all — the URL
     // names something else, a Cozy instance where the deployment expected
     // an OpenPaaS side service. Same state, since the operator still has
     // work to do; a different sentence, because "add an audience at the
-    // SSO" would send them to fix something nobody said was wrong.
+    // SSO" would send them to fix something nobody said was wrong. The
+    // connection is left in `pending_operator` on purpose: an operator who
+    // acted on the first sentence has to be told the second one, so the
+    // hint changing is itself a change worth publishing.
     run.sso.refuse_without_challenge("caldav");
     let silent_refusal = wait_for_hint(
         &bus,
@@ -225,6 +225,10 @@ async fn a_service_refusing_a_fresh_token_is_pending_operator_on_its_own_connect
     assert!(
         !hint.contains("an audience or a scope the operator has to add"),
         "the two refusals do not share a sentence: {hint}"
+    );
+    assert_eq!(
+        silent_refusal["data"]["from_state"], "pending_operator",
+        "the connection did not move; the reason did"
     );
     run.sso.restore("caldav");
     wait_for_state(&bus, &run, &run.calendar, "connected").await?;

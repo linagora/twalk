@@ -529,14 +529,19 @@ async fn run(config: Config) -> Result<()> {
                         error!(error = %format!("{error:#}"), "the calendar cursor could not be written; the next poll republishes");
                     }
                 }
-                Err(SideError::Refused { status }) => {
+                Err(SideError::Refused { status, challenge }) => {
+                    // What the operator is told follows what the service
+                    // asked for, here as at `authorize` (#320): this is the
+                    // path that reported a Cozy instance as a missing
+                    // audience on the reference deployment.
                     let refused = Observation {
                         state: State::PendingOperator,
                         service: Some("caldav"),
-                        hint: Some(format!(
-                            "caldav refused a fresh token with {status} on a calendar read: the grant \
-                             stands, but the client lacks what caldav expects — an audience or a \
-                             scope the operator has to add to the client at the SSO"
+                        hint: Some(twalk_collector::oidc::refusal_detail(
+                            "caldav",
+                            &config.services.caldav_url,
+                            status,
+                            challenge.as_deref(),
                         )),
                     };
                     for tracker in trackers.iter_mut().filter(|t| t.kind() == "calendar") {
@@ -587,14 +592,15 @@ async fn run(config: Config) -> Result<()> {
                         }
                     }
                 }
-                Err(SideError::Refused { status }) => {
+                Err(SideError::Refused { status, challenge }) => {
                     let refused = Observation {
                         state: State::PendingOperator,
                         service: Some("jmap"),
-                        hint: Some(format!(
-                            "jmap refused a fresh token with {status} on a mailbox read: the grant \
-                             stands, but the client lacks what jmap expects — an audience or a \
-                             scope the operator has to add to the client at the SSO"
+                        hint: Some(twalk_collector::oidc::refusal_detail(
+                            "jmap",
+                            &config.services.jmap_session_url,
+                            status,
+                            challenge.as_deref(),
                         )),
                     };
                     for tracker in trackers.iter_mut().filter(|t| t.kind() == "email") {
