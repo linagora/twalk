@@ -663,6 +663,8 @@
 	"approvals.trigger.message": "Eine Antwort auf eine Nachricht auf {network}",
 	"approvals.trigger.other": "Eine Antwort auf ein {network}-Ereignis vom Typ {type}",
 	"approvals.trigger.id": "Nachrichtenreferenz {id}",
+	"approvals.context.label": "Worauf diese Antwort antwortet, wie dein Assistent es gelesen hat",
+	"approvals.context.named": "{contact} · {summary}",
 	"approvals.whoIsIt.title": "Dieser Bildschirm kann dir nicht sagen, an wen sie geht",
 	"approvals.whoIsIt.body": "Dein Server listet, was dein Assistent geschrieben hat, und bezeichnet die Nachricht, auf die er antwortet, allein durch ihre Referenz — nie durch den Absender, nie durch ein Zitat dessen, was er sagte. Seine Nachricht zu lesen, um diese Zeile zu beschriften, würde die Worte eines Kontakts an einen Ort kopieren, an den sie zuvor nicht gereist waren. Ob dieser Tausch der richtige ist, ist eine offene Frage im Projekt, und dies ist, was die Antwort heute kostet.",
 	"approvals.standing.approvable": "Wartet auf dich",

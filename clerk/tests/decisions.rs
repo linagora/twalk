@@ -1022,12 +1022,22 @@ async fn nothing_of_the_owners_reply_reaches_a_log_or_the_activity_feed() -> Res
 
 /// The delivery line of one `approbations` post: the third line, where
 /// `text::approval_post` puts it (the fixture's body is one line).
+/// The post's delivery line: the one immediately above the gesture line.
+///
+/// Found by what surrounds it rather than by its index, since #335 put a
+/// context line between the header and the body when the suggestion
+/// carries one. Its place in the post is what matters — read before the ✅
+/// it qualifies — and that is what this asserts.
 fn delivery_line_of(post: &Event) -> String {
-    post.content
-        .lines()
-        .nth(2)
-        .unwrap_or_else(|| panic!("a post has at least three lines:\n{}", post.content))
-        .to_owned()
+    let lines: Vec<&str> = post.content.lines().collect();
+    let gesture = lines
+        .iter()
+        .position(|line| line.starts_with('✅'))
+        .unwrap_or_else(|| panic!("a post names its gestures:\n{}", post.content));
+    lines
+        .get(gesture.wrapping_sub(1))
+        .unwrap_or_else(|| panic!("a post has a line above its gestures:\n{}", post.content))
+        .to_string()
 }
 
 /// Builds suggestion `n` of the run, scripts what the stub says of it

@@ -609,6 +609,7 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         clerk.lang,
         &suggestion.data.suggestion.body,
         &suggestion.network,
+        suggestion.data.context.as_ref(),
         suggestion.data.expires_at.as_deref(),
         &delivery_line,
         &reference,

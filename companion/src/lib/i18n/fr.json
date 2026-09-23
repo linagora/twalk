@@ -753,6 +753,8 @@
 	"approvals.trigger.message": "Une réponse à un message sur {network}",
 	"approvals.trigger.other": "Une réponse à un événement {network} de type {type}",
 	"approvals.trigger.id": "Référence du message {id}",
+	"approvals.context.label": "Ce à quoi cette réponse répond, d'après votre assistant",
+	"approvals.context.named": "{contact} · {summary}",
 	"approvals.whoIsIt.title": "Cet écran ne peut pas vous dire à qui elle s’adresse",
 	"approvals.whoIsIt.body": "Votre serveur liste ce que votre assistant a écrit, et identifie le message auquel il répond par sa seule référence — jamais par l’expéditeur, jamais par une citation de ses mots. Relire son message pour étiqueter cette ligne copierait les mots d’un contact là où ils n’étaient jamais allés. Savoir si ce compromis est le bon est une question ouverte sur le projet, et voici ce que la réponse coûte aujourd’hui.",
 

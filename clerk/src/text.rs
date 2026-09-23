@@ -99,21 +99,35 @@ pub fn approval_post(
     l: Lang,
     body: &str,
     network: &str,
+    context: Option<&crate::events::Answering>,
     expires_at: Option<&str>,
     delivery_line: &str,
     reference: &str,
 ) -> String {
     let network = network_name(network);
-    let expiry = expires_at.map(|at| match (l, clock_utc(at)) {
-        (Lang::Fr, Some(clock)) => format!(" · expire à {clock} (heure locale non connue)"),
-        (Lang::Fr, None) => format!(" · expire à {at}"),
-        (Lang::En, Some(clock)) => format!(" · expires at {clock} (local time not known)"),
-        (Lang::En, None) => format!(" · expires at {at}"),
+    let expiry = expires_at.map(|at| match (l, day_utc(at), clock_utc(at)) {
+        (Lang::Fr, Some(day), Some(clock)) => format!(" · expire le {day} à {clock}"),
+        (Lang::Fr, ..) => format!(" · expire à {at}"),
+        (Lang::En, Some(day), Some(clock)) => format!(" · expires on {day} at {clock}"),
+        (Lang::En, ..) => format!(" · expires at {at}"),
     });
     let expiry = expiry.as_deref().unwrap_or("");
+    // What the persona says it is answering, above the text it proposes
+    // (#335): the owner reads why before they read what. The contact's
+    // name is prefixed only when the summary does not already carry it,
+    // since the persona writes as a person would.
+    let context = context
+        .map(|answering| match &answering.contact {
+            Some(contact) if !answering.summary.contains(contact.as_str()) => {
+                format!("{contact} · {}\n", answering.summary)
+            }
+            _ => format!("{}\n", answering.summary),
+        })
+        .unwrap_or_default();
     match l {
         Lang::Fr => format!(
             "Réponse proposée · {network}{expiry}\n\
+             {context}\
              « {body} »\n\
              {delivery_line}\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
@@ -121,6 +135,7 @@ pub fn approval_post(
         ),
         Lang::En => format!(
             "Proposed reply · {network}{expiry}\n\
+             {context}\
              “{body}”\n\
              {delivery_line}\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
@@ -402,6 +417,16 @@ fn clock_utc(rfc3339: &str) -> Option<String> {
     Some(format!("{:02}:{:02} UTC", at.hour(), at.minute()))
 }
 
+/// The day an instant falls on, `DD/MM`, for a deadline that is not
+/// today's (#326). A suggestion's window is the deployment's to set and is
+/// often a day: `expire à 09:52 UTC`, read at 10:30, says a proposal is
+/// dead when it has twenty-three hours left — and the owner acts on that,
+/// or worse does not act at all.
+fn day_utc(rfc3339: &str) -> Option<String> {
+    let at = OffsetDateTime::parse(rfc3339, &Rfc3339).ok()?.to_utc();
+    Some(format!("{:02}/{:02}", at.day(), u8::from(at.month())))
+}
+
 /// The first twelve characters of an id and an ellipsis, or the whole id
 /// when it is no longer than that.
 fn short_id(id: &str) -> String {
@@ -468,6 +493,7 @@ mod tests {
                 l,
                 body,
                 "whatsapp",
+                None,
                 Some("2026-09-17T11:00:00Z"),
                 &unread(l),
                 REFERENCE,
@@ -488,12 +514,17 @@ mod tests {
             Lang::Fr,
             "Pas de problème, à 20h !",
             "whatsapp",
+            Some(&crate::events::Answering {
+                contact: Some("Aïcha Benali".to_owned()),
+                summary: "Aïcha Benali demande si le dîner tient toujours.".to_owned(),
+            }),
             Some("2026-09-17T21:41:00Z"),
             &unread(Lang::Fr),
             REFERENCE,
         );
         let expected = format!(
-            "Réponse proposée · WhatsApp · expire à 21:41 UTC (heure locale non connue)\n\
+            "Réponse proposée · WhatsApp · expire le 17/09 à 21:41 UTC\n\
+             Aïcha Benali demande si le dîner tient toujours.\n\
              « Pas de problème, à 20h ! »\n\
              Livraison : non lue par le greffier (aucun device configuré) — l’écran Approbations \
              la connaît.\n\
@@ -509,12 +540,17 @@ mod tests {
             Lang::En,
             "No problem, see you at 8!",
             "signal",
+            Some(&crate::events::Answering {
+                contact: Some("Aïcha Benali".to_owned()),
+                summary: "She asks whether dinner is still on.".to_owned(),
+            }),
             Some("2026-09-17T21:41:00Z"),
             &unread(Lang::En),
             REFERENCE,
         );
         let expected = format!(
-            "Proposed reply · Signal · expires at 21:41 UTC (local time not known)\n\
+            "Proposed reply · Signal · expires on 17/09 at 21:41 UTC\n\
+             Aïcha Benali · She asks whether dinner is still on.\n\
              “No problem, see you at 8!”\n\
              Delivery: not read by the clerk (no device configured) — the Approvals screen knows \
              it.\n\
@@ -522,6 +558,66 @@ mod tests {
              {REFERENCE}"
         );
         assert_eq!(post, expected);
+    }
+
+    /// #335: the name is prefixed only when the summary does not already
+    /// carry it, since a persona writes as a person would; and a post for
+    /// a suggestion with no context is the post as it was.
+    #[test]
+    fn the_context_line_names_the_contact_once_or_not_at_all() {
+        let post = |contact: Option<&str>, summary: &str| {
+            approval_post(
+                Lang::Fr,
+                "Oui",
+                "whatsapp",
+                Some(&crate::events::Answering {
+                    contact: contact.map(str::to_owned),
+                    summary: summary.to_owned(),
+                }),
+                None,
+                &unread(Lang::Fr),
+                REFERENCE,
+            )
+        };
+        assert!(
+            post(Some("Aïcha"), "Aïcha demande l'heure.").contains("\nAïcha demande l'heure.\n")
+        );
+        assert!(post(Some("Aïcha"), "Elle demande l'heure.")
+            .contains("\nAïcha · Elle demande l'heure.\n"));
+        assert!(post(None, "Elle demande l'heure.").contains("\nElle demande l'heure.\n"));
+        let without = approval_post(
+            Lang::Fr,
+            "Oui",
+            "whatsapp",
+            None,
+            None,
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
+        assert!(
+            without.starts_with("Réponse proposée · WhatsApp\n« Oui »"),
+            "a suggestion with no context is posted as before: {without}"
+        );
+    }
+
+    /// #326: a window longer than an hour read as already expired, because
+    /// the post said a time of day and nothing else.
+    #[test]
+    fn a_deadline_says_which_day_it_falls_on() {
+        let post = approval_post(
+            Lang::Fr,
+            "Oui",
+            "whatsapp",
+            None,
+            Some("2026-09-24T09:52:09Z"),
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
+        assert!(post.contains("expire le 24/09 à 09:52 UTC"), "{post}");
+        assert!(
+            !post.contains("heure locale"),
+            "the parenthesis went with the ambiguity it was apologising for"
+        );
     }
 
     #[test]
@@ -536,7 +632,7 @@ mod tests {
                 detail: "owner_joined".to_owned(),
             },
         );
-        let post = approval_post(Lang::Fr, "Oui", "sms", None, &line, REFERENCE);
+        let post = approval_post(Lang::Fr, "Oui", "sms", None, None, &line, REFERENCE);
         let lines: Vec<&str> = post.lines().collect();
         assert_eq!(lines[0], "Réponse proposée · SMS");
         assert_eq!(lines[1], "« Oui »");
@@ -553,6 +649,7 @@ mod tests {
             "Oui",
             "sms",
             None,
+            None,
             &unread(Lang::Fr),
             "twalk:suggestion:abc",
         );
@@ -563,6 +660,7 @@ mod tests {
             Lang::Fr,
             "Oui",
             "sms",
+            None,
             Some("bientôt"),
             &unread(Lang::Fr),
             "twalk:suggestion:abc",
@@ -580,6 +678,7 @@ mod tests {
             Lang::Fr,
             body,
             "whatsapp",
+            None,
             None,
             &unread(Lang::Fr),
             REFERENCE,
@@ -764,6 +863,7 @@ mod tests {
                     l,
                     "Oui",
                     "sms",
+                    None,
                     Some("2026-09-17T11:00:00Z"),
                     &line,
                     REFERENCE,
@@ -963,6 +1063,7 @@ mod tests {
                     lang,
                     "Oui · à 20h",
                     "whatsapp",
+                    None,
                     expires,
                     &unread(lang),
                     &reference,
@@ -973,7 +1074,8 @@ mod tests {
                     activity_approved(lang, network_off_post(&post).unwrap(), false),
                     activity_approved(lang, "whatsapp", false)
                 );
-                let post = approval_post(lang, "Oui", "irc", expires, &unread(lang), &reference);
+                let post =
+                    approval_post(lang, "Oui", "irc", None, expires, &unread(lang), &reference);
                 assert_eq!(network_off_post(&post), Some("irc"), "{post}");
             }
         }

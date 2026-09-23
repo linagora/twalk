@@ -70,6 +70,8 @@ export interface PublishedSuggestion {
 	body: string;
 	/** The sentence the reply discloses itself with, or `null` when it carries none. */
 	disclosure: string | null;
+	/** What the suggestion says it answers (#335): the persona's own words. */
+	contextSummary: string;
 	/** What the *contact* wrote, which must appear nowhere on any screen. */
 	inboundBody: string;
 	displayName: string;
@@ -111,6 +113,7 @@ export async function publishSuggestion(
 	const roomId = `!approvals${tag}:${options.serverName}`;
 	const inboundBody = `MARKER-INBOUND-${tag} on décale à 20h ?`;
 	const displayName = `MARKER-NAME-${tag}`;
+	const contextSummary = `MARKER-CONTEXT-${tag} elle demande si le dîner tient toujours.`;
 	const networkIdentifier = `+3361${tag}`;
 	const observed = options.observedConsent ?? 'granted';
 	const disclosure = options.disclosure === undefined ? FRENCH_DISCLOSURE : options.disclosure;
@@ -154,6 +157,10 @@ export async function publishSuggestion(
 			persona_id: 'assistant',
 			trigger: { event_id: triggerId, event_type: INBOUND_TYPE },
 			suggestion: { body: options.body, format: 'text/plain' },
+			// What the persona says it is answering (#334, #335): the name it
+			// took off the trigger's envelope, and its own summary. Never the
+			// contact's words — `inboundBody` must stay off the page.
+			context: { contact: displayName, summary: contextSummary },
 			attempt: 1,
 			expires_at: options.expiresAt ?? new Date(now.getTime() + 3_600_000).toISOString(),
 			// A field of its own, never inside the body (ADR 0031); the schema
@@ -171,6 +178,7 @@ export async function publishSuggestion(
 		disclosure,
 		inboundBody,
 		displayName,
+		contextSummary,
 		networkIdentifier
 	};
 }

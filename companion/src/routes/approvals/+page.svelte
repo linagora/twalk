@@ -439,6 +439,23 @@
 				{/if}
 			</p>
 
+			{#if row.context !== null}
+				<!-- What the persona says it is answering (#334, #335): read
+				     before the text it proposes, so the user knows why before
+				     they judge what. The persona's words about the message,
+				     never the message — that is a click of its own (#336). -->
+				<p class="small muted" data-testid="context">
+					{#if row.context.contact !== null && row.context.contact !== undefined}
+						{$t('approvals.context.named', {
+							contact: row.context.contact,
+							summary: row.context.summary
+						})}
+					{:else}
+						{row.context.summary}
+					{/if}
+				</p>
+			{/if}
+
 			{#if outcome !== undefined && outcome.kind === 'sent' && outcome.edited}
 				<!-- Once an edited reply has gone out, what matters is what went
 				     out, and that is the user's text — which this screen has in
