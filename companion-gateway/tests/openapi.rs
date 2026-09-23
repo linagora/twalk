@@ -261,6 +261,18 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "500",
         "store_unavailable, as above",
     ),
+    (
+        "get",
+        "/api/suggestions/{suggestion_event_id}/message",
+        "500",
+        "store_unavailable, as above",
+    ),
+    (
+        "get",
+        "/api/suggestions/{suggestion_event_id}/message",
+        "409",
+        "consent_revoked, consent_pending and suggestion_was_never_consented need a decision in the journal or a label that is not granted on the bus; `approvals.rs::the_message_a_suggestion_answers_is_read_while_consent_stands` stages both",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1502,6 +1514,7 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // --- the refusals every /api endpoint shares: no credential at all
     let absent_approval = format!("/api/approvals/{}", "a".repeat(64));
     let absent_suggestion = format!("/api/suggestions/{}", "a".repeat(64));
+    let absent_message = format!("{absent_suggestion}/message");
     for (method, template, target) in [
         (Method::GET, "/api/session", "/api/session"),
         (Method::DELETE, "/api/session", "/api/session"),
@@ -1546,6 +1559,11 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::GET,
             "/api/suggestions/{suggestion_event_id}",
             absent_suggestion.as_str(),
+        ),
+        (
+            Method::GET,
+            "/api/suggestions/{suggestion_event_id}/message",
+            absent_message.as_str(),
         ),
         (Method::GET, "/api/portals", "/api/portals"),
         (Method::GET, "/api/portals/moves", "/api/portals/moves"),
@@ -1798,6 +1816,17 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         &base,
         "/api/suggestions/{suggestion_event_id}",
         &absent_suggestion,
+        &consent_cookie,
+        None,
+        503,
+        Some("suggestions_not_configured"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &base,
+        "/api/suggestions/{suggestion_event_id}/message",
+        &format!("{absent_suggestion}/message"),
         &consent_cookie,
         None,
         503,
@@ -3242,6 +3271,48 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("suggestion_not_found"),
     )
     .await?;
+    // #336: the message that suggestion answers, read on demand. The
+    // contact is granted here — the suite approved a reply to them a few
+    // lines up — so the words come back; the same route refuses where an
+    // approval would.
+    let answered = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/suggestions/{suggestion_event_id}/message",
+            &format!("/api/suggestions/{suggestion_id}/message"),
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        answered.body["body"]
+            .as_str()
+            .is_some_and(|body| !body.is_empty()),
+        "the message a reply answers is what this route is for: {}",
+        answered.body
+    );
+    assert!(
+        answered.body["attachments"].as_u64().is_some(),
+        "attachments are counted, never named: {}",
+        answered.body
+    );
+    call.check(
+        Method::GET,
+        &consenting_base,
+        "/api/suggestions/{suggestion_event_id}/message",
+        &format!(
+            "/api/suggestions/{}/message",
+            sha256_hex("openapi-no-such-suggestion")
+        ),
+        &deciding_cookie,
+        None,
+        404,
+        Some("suggestion_not_found"),
+    )
+    .await?;
     call.check(
         Method::GET,
         &consenting_base,
@@ -3327,6 +3398,19 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         &narrow_base,
         "/api/suggestions/{suggestion_event_id}",
         &format!("/api/suggestions/{suggestion_id}"),
+        &[("twalk_device", narrow_device.as_str())],
+        None,
+        410,
+        Some("suggestion_out_of_reach"),
+    )
+    .await?;
+    // And through the door #336 opened: the message a suggestion answers is
+    // behind the same bounded read, and says so with the same code.
+    call.check(
+        Method::GET,
+        &narrow_base,
+        "/api/suggestions/{suggestion_event_id}/message",
+        &format!("/api/suggestions/{suggestion_id}/message"),
         &[("twalk_device", narrow_device.as_str())],
         None,
         410,

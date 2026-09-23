@@ -1683,6 +1683,45 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/suggestions/{suggestion_event_id}/message": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The message this suggestion answers, read on demand.
+         * @description The third of #160's options, kept for the one surface that may have
+         *     it: the Companion's own approval card, served to the owner through
+         *     their identity provider. A relay this deployment does not run — Buzz
+         *     — gets the persona's summary and nothing else (#334, #335).
+         *
+         *     It is a **read on demand**. No listing carries a message; this route
+         *     is reached only when the owner asks for one suggestion's trigger, and
+         *     it is served by the same module that reads triggers for an approval,
+         *     so the rules exist once and not twice. That is the whole design: a
+         *     second implementation of the reduction is how #110 happened.
+         *
+         *     **Consent is read now.** A contact revoked since their message
+         *     arrived is a refusal with its code, exactly where `POST
+         *     /api/approvals` would refuse to send — a screen that could show a
+         *     revoked contact's words because they were granted yesterday would be
+         *     a way around the decision.
+         *
+         *     The body is what the bus holds, which is what the Sensor published
+         *     under the reduction that applied when it arrived (ADR 0012, ADR
+         *     0028). Attachments are counted, never named.
+         */
+        get: operations["getAnsweredMessage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -7144,6 +7183,130 @@ export interface operations {
                 };
             };
             503: components["responses"]["SuggestionsNotConfigured"];
+        };
+    };
+    getAnsweredMessage: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /**
+                 * @description The CloudEvents id of a `persona.suggest.produced` event: 64
+                 *     lowercase hex characters, the contract's own id shape. The same
+                 *     parameter names the suggestion being read (`GET /api/suggestions/{id}`)
+                 *     and the one whose approval is being asked about.
+                 * @example 319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b
+                 */
+                suggestion_event_id: components["parameters"]["suggestionEventId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The message, as the contact wrote it. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @description How many files came with it, never what they are called. */
+                        attachments: number;
+                        body: string;
+                        /**
+                         * @description The contact's display name as the event carried it, or
+                         *     `null`. Their identifier is not here: the screen names a
+                         *     person, it does not address one.
+                         */
+                        contact: null | string;
+                        format: string;
+                        /** @description When the network says they wrote it. */
+                        received_at: null | string;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description `suggestion_not_found`, `trigger_not_found` - the whole retained
+             *     stream was read and the suggestion, or the message it answers, is
+             *     not on it.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_not_found" | "trigger_not_found";
+                    };
+                };
+            };
+            /**
+             * @description `consent_revoked`, `consent_pending` - the contact's consent does
+             *     not stand at this moment, so their message is not shown. The same
+             *     codes, the same status and the same reason as the approval that
+             *     would be refused: this read is closed exactly where the send is.
+             *
+             *     `suggestion_was_never_consented` - the message arrived under a
+             *     label that was not `granted`, so it was never the persona's to
+             *     answer and is not the screen's to show.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "consent_revoked" | "consent_pending" | "suggestion_was_never_consented";
+                    };
+                };
+            };
+            /**
+             * @description `suggestion_out_of_reach`, `trigger_out_of_reach` - the bounded
+             *     read gave up first, so it may exist further back than this
+             *     Gateway looks. `detail` names the variable that widens it.
+             */
+            410: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestion_out_of_reach" | "trigger_out_of_reach";
+                    };
+                };
+            };
+            /**
+             * @description `store_unavailable` - the Gateway's own store could not be read,
+             *     so whether this contact's consent stands could not be settled.
+             *     Nothing is shown on a store that cannot answer.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            /** @description `suggestions_not_configured` - this Gateway watches no bus. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "suggestions_not_configured";
+                    };
+                };
+            };
         };
     };
     getHealth: {

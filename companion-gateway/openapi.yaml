@@ -1502,6 +1502,145 @@ paths:
         "503":
           $ref: "#/components/responses/SuggestionsNotConfigured"
 
+  /api/suggestions/{suggestion_event_id}/message:
+    get:
+      operationId: getAnsweredMessage
+      tags: [suggestions]
+      summary: The message this suggestion answers, read on demand.
+      description: |
+        The third of #160's options, kept for the one surface that may have
+        it: the Companion's own approval card, served to the owner through
+        their identity provider. A relay this deployment does not run — Buzz
+        — gets the persona's summary and nothing else (#334, #335).
+
+        It is a **read on demand**. No listing carries a message; this route
+        is reached only when the owner asks for one suggestion's trigger, and
+        it is served by the same module that reads triggers for an approval,
+        so the rules exist once and not twice. That is the whole design: a
+        second implementation of the reduction is how #110 happened.
+
+        **Consent is read now.** A contact revoked since their message
+        arrived is a refusal with its code, exactly where `POST
+        /api/approvals` would refuse to send — a screen that could show a
+        revoked contact's words because they were granted yesterday would be
+        a way around the decision.
+
+        The body is what the bus holds, which is what the Sensor published
+        under the reduction that applied when it arrived (ADR 0012, ADR
+        0028). Attachments are counted, never named.
+      parameters:
+        - $ref: "#/components/parameters/suggestionEventId"
+      security:
+        - deviceToken: []
+      responses:
+        "200":
+          description: The message, as the contact wrote it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contact, received_at, body, format, attachments]
+                additionalProperties: false
+                properties:
+                  contact:
+                    oneOf:
+                      - type: "null"
+                      - type: string
+                    description: |
+                      The contact's display name as the event carried it, or
+                      `null`. Their identifier is not here: the screen names a
+                      person, it does not address one.
+                  received_at:
+                    oneOf:
+                      - type: "null"
+                      - type: string
+                        format: date-time
+                    description: When the network says they wrote it.
+                  body:
+                    type: string
+                  format:
+                    type: string
+                  attachments:
+                    type: integer
+                    minimum: 0
+                    description: |
+                      How many files came with it, never what they are called.
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "409":
+          description: |
+            `consent_revoked`, `consent_pending` - the contact's consent does
+            not stand at this moment, so their message is not shown. The same
+            codes, the same status and the same reason as the approval that
+            would be refused: this read is closed exactly where the send is.
+
+            `suggestion_was_never_consented` - the message arrived under a
+            label that was not `granted`, so it was never the persona's to
+            answer and is not the screen's to show.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [
+                            consent_revoked,
+                            consent_pending,
+                            suggestion_was_never_consented,
+                          ]
+        "404":
+          description: |
+            `suggestion_not_found`, `trigger_not_found` - the whole retained
+            stream was read and the suggestion, or the message it answers, is
+            not on it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [suggestion_not_found, trigger_not_found]
+        "410":
+          description: |
+            `suggestion_out_of_reach`, `trigger_out_of_reach` - the bounded
+            read gave up first, so it may exist further back than this
+            Gateway looks. `detail` names the variable that widens it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [suggestion_out_of_reach, trigger_out_of_reach]
+        "500":
+          description: |
+            `store_unavailable` - the Gateway's own store could not be read,
+            so whether this contact's consent stands could not be settled.
+            Nothing is shown on a store that cannot answer.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [store_unavailable]
+        "503":
+          description: |
+            `suggestions_not_configured` - this Gateway watches no bus.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [suggestions_not_configured]
+
   /api/suggestions/{suggestion_event_id}:
     get:
       operationId: getSuggestion
