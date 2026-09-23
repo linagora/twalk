@@ -53,8 +53,23 @@ pub struct Suggestion {
 pub struct SuggestionData {
     pub persona_id: String,
     pub suggestion: Content,
+    /// What the persona says it is answering (#334): its own account of
+    /// the message, never the message. The clerk posts it to a relay it
+    /// does not own, so this is the only thing about the conversation
+    /// that ever leaves for Buzz — the owner decided that, and #335
+    /// carries the decision.
+    #[serde(default)]
+    pub context: Option<Answering>,
     #[serde(default)]
     pub expires_at: Option<String>,
+}
+
+/// Who is answered and what they asked, as the suggestion carries it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Answering {
+    #[serde(default)]
+    pub contact: Option<String>,
+    pub summary: String,
 }
 
 /// A suggestion's own words. `body` is the one field of a contact's
@@ -213,8 +228,13 @@ mod tests {
         );
     }
 
+    /// #335: the clerk holds what the persona **wrote about** the message
+    /// — a name and a summary, the line the owner reads before the reply —
+    /// and still nothing the contact wrote. The struct is the enforcement:
+    /// a suggestion event loaded with a body, an excerpt or a display name
+    /// on its trigger parses into a view with nowhere to hold any of it.
     #[test]
-    fn the_view_of_a_suggestion_has_no_member_for_the_contact() {
+    fn the_view_of_a_suggestion_holds_the_personas_words_and_none_of_the_contacts() {
         let bytes = fixture("persona.suggest.produced.json");
         let suggestion: Suggestion = serde_json::from_slice(&bytes).unwrap();
         let value = serde_json::to_value(&suggestion).unwrap();
@@ -233,11 +253,36 @@ mod tests {
             value["data"].as_object().unwrap().keys().cloned().collect();
         assert_eq!(
             data,
-            ["persona_id", "suggestion", "expires_at"]
+            ["persona_id", "suggestion", "context", "expires_at"]
                 .into_iter()
                 .map(String::from)
                 .collect()
         );
+        assert_eq!(
+            value["data"]["context"]["summary"],
+            serde_json::json!(
+                "Aïcha Benali demande si le dîner de ce soir tient toujours et à quelle heure."
+            ),
+            "what the persona says it answers, which is what a post shows above the reply"
+        );
+
+        // The same event with a trigger a helpful producer loaded: none of
+        // it is held, as before #334 and after it.
+        let mut loaded: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        loaded["data"]["trigger"] = serde_json::json!({
+            "event_id": "b".repeat(64),
+            "event_type": "fr.linagora.twalk.inbound.message.received.v1",
+            "body": "ON DÉCALE À 20H",
+            "contact": { "display_name": "SOMEBODY ELSE" }
+        });
+        loaded["data"]["rationale"] = serde_json::json!("SHE ASKED TO MOVE IT");
+        let held = format!(
+            "{:?}",
+            serde_json::from_value::<Suggestion>(loaded).expect("it parses")
+        );
+        for quoted in ["ON DÉCALE À 20H", "SOMEBODY ELSE", "SHE ASKED TO MOVE IT"] {
+            assert!(!held.contains(quoted), "the clerk holds {quoted:?}");
+        }
 
         let inner: std::collections::BTreeSet<_> = value["data"]["suggestion"]
             .as_object()

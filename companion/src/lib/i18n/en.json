@@ -754,6 +754,8 @@
 	"approvals.trigger.message": "A reply to a message on {network}",
 	"approvals.trigger.other": "A reply to a {network} event of type {type}",
 	"approvals.trigger.id": "Message reference {id}",
+	"approvals.context.label": "What this reply answers, as your assistant read it",
+	"approvals.context.named": "{contact} · {summary}",
 	"approvals.whoIsIt.title": "This screen cannot tell you who it is to",
 	"approvals.whoIsIt.body": "Your server lists what your assistant wrote, and identifies the message it answers by its reference alone — never by the sender, never by a quote of what they said. Reading their message to label this row would copy a contact’s words somewhere they had not travelled before. Whether that trade is the right one is an open question on the project, and this is what the answer costs today.",
 

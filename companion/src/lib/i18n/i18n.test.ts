@@ -178,7 +178,11 @@ describe('the catalogues', () => {
 			found: 'password',
 			// The disclosure's record (#121): who turned it off, and when. `date`
 			// and `reason` are above.
-			actor: '@you:example.com'
+			actor: '@you:example.com',
+			// What a suggestion says it answers (#334): the contact's display
+			// name and the persona's own summary of what they asked.
+			contact: 'Aïcha Benali',
+			summary: 'Aïcha Benali demande si le dîner de ce soir tient toujours.'
 		};
 		for (const locale of LOCALES) {
 			for (const key of Object.keys(en) as (keyof typeof en)[]) {

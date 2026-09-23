@@ -79,13 +79,20 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		await expect(row.getByTestId('proposed')).not.toContainText(FRENCH_DISCLOSURE);
 		await expect(row.getByTestId('disclosure-off')).toHaveCount(0);
 
-		// #160, on the screen: the row says which network it answers and never
-		// who wrote. Nothing of the contact's message is anywhere on this page
-		// — not their words, not their name, not their number (#110, ADR 0012).
+		// #160, decided by the owner and built as #334/#335: the row says what
+		// it answers in the **persona's** words — who wrote, and what they
+		// asked — because the persona is the only component allowed to read
+		// the message and wrote this while reading it. The contact's own
+		// words are still nowhere on this page, and neither is their number:
+		// nothing here was obtained by reopening an inbound event (#110, ADR
+		// 0012).
 		await expect(row.getByTestId('trigger')).toContainText('WhatsApp');
+		const context = row.getByTestId('context');
+		await expect(context).toBeVisible();
+		await expect(context).toContainText(published.contextSummary);
+		await expect(context).toContainText(published.displayName);
 		const page1 = await rendered(page);
 		expect(page1).not.toContain(published.inboundBody);
-		expect(page1).not.toContain(published.displayName);
 		expect(page1).not.toContain(published.networkIdentifier);
 
 		// #216, before the button: whether this reply can reach the contact at

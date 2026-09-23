@@ -67,6 +67,15 @@ export interface Row {
 	attempt: number | null;
 	/** The persona's own words: the thing being approved, and the only text here. */
 	body: string;
+	/**
+	 * What the persona says it is answering (#334, #335): who wrote, and two
+	 * sentences about what they asked — written by the persona, which is the
+	 * only component allowed to read the message. `null` when the suggestion
+	 * carries none, and when the label its trigger carried was not granted.
+	 * Never the contact's own words: those are reached by opening the message
+	 * itself, which is a deliberate click and not a line on a card (#336).
+	 */
+	context: Suggestion['context'];
 	format: string;
 	/**
 	 * The sentence the reply will disclose itself with, after the body and on
@@ -145,6 +154,7 @@ export function toRow(suggestion: Suggestion): Row {
 		attempt: suggestion.attempt,
 		body: suggestion.suggestion.body,
 		format: suggestion.suggestion.format,
+		context: suggestion.context,
 		disclosure: suggestion.disclosure,
 		trigger: suggestion.trigger,
 		standing: suggestion.standing,
