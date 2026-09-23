@@ -370,6 +370,34 @@ async fn a_reply_leaves_whichever_form_of_the_message_id_the_server_indexes() ->
     collector
         .wait_logged("indexes a Message-ID without its angle brackets", 1)
         .await?;
+
+    // And when the server answers **no** header filter at all — TMail, on
+    // the reference deployment, for a mail sitting unread in the owner's
+    // inbox — the thread is found the way a client finds anything: the
+    // mailbox's newest mails, asked what their Message-ID is.
+    run.sso.answer_no_header_filter(true);
+    let second = FakeMail::from_person(
+        "Alice Martin",
+        "alice@example.org",
+        OWNER,
+        "Et jeudi ?",
+        "Jeudi 14h vous irait ?",
+    );
+    let second_id = second.message_id.clone();
+    run.sso.deliver(second);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 2)
+        .await?;
+    let approved = approval(&run, &second_id, "Jeudi 14h, parfait.", "no-filter");
+    bus.publish_event(APPROVED_SUBJECT, &approved).await?;
+    let report =
+        wait_for_copy(&bus, &run, POSTED_SUBJECT, approved["id"].as_str().unwrap()).await?;
+    assert_eq!(report.header("reach"), Some("contact"));
+    let submissions = run.sso.submissions();
+    assert_eq!(submissions.len(), 2, "{submissions:?}");
+    assert_eq!(submissions[1].in_reply_to, [second_id]);
+    collector
+        .wait_logged("answers no header filter for a Message-ID", 1)
+        .await?;
     collector.stop().await;
     Ok(())
 }

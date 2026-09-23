@@ -267,6 +267,64 @@ pub fn email_received_after(
     )
 }
 
+/// The newest mails of a mailbox, ids only (#331): how a thread is found
+/// when the server answers no header filter — list what a client lists,
+/// then match the Message-ID on the mails themselves. `inMailbox` and a
+/// sort on `receivedAt` are what every mail client asks for on every
+/// start, so a server that cannot serve this cannot serve a mailbox.
+pub fn newest_in_mailbox(
+    account_id: &str,
+    mailbox_id: &str,
+    limit: usize,
+) -> (&'static str, Value) {
+    (
+        "Email/query",
+        json!({
+            "accountId": account_id,
+            "filter": { "inMailbox": mailbox_id },
+            "sort": [{ "property": "receivedAt", "isAscending": false }],
+            "limit": limit
+        }),
+    )
+}
+
+/// `Email/get` asking for the Message-IDs of those mails and nothing else
+/// — no body, no subject, no address (#331).
+pub fn message_ids_of(account_id: &str, ids: &[String]) -> (&'static str, Value) {
+    (
+        "Email/get",
+        json!({ "accountId": account_id, "ids": ids, "properties": ["id", "messageId"] }),
+    )
+}
+
+/// The id of the mail among those whose `messageId` is this one. RFC 8621
+/// §4.1.1 carries the value parsed, without the angle brackets a mail
+/// writes it with, so both sides are compared bare.
+pub fn id_with_message_id(email_get: &Value, message_id: &str) -> Option<String> {
+    let wanted = bare_message_id(message_id);
+    email_get
+        .get("list")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|mail| {
+            mail.get("messageId")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .any(|id| bare_message_id(id) == wanted)
+                })
+        })
+        .and_then(|mail| mail.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// How many of a mailbox's newest mails the thread is looked for among,
+/// when the server answers no header filter: a mail answered days after it
+/// arrived is still found, and nothing here is read but ids.
+pub const THREAD_SCAN: usize = 200;
+
 /// How many ids one `Email/query` page asks for: RFC 8621's servers cap a
 /// page at a few hundred; the recovery reads page after page until one
 /// comes back short.

@@ -443,14 +443,68 @@ impl Mailbox {
                  found by the bare form and not by the written one"
             );
         }
-        let original_id = written.or(bare).ok_or_else(|| {
-            SendError::Permanent(
-                "no mail in the mailbox carries the Message-ID this reply answers, in either \
-                 the written or the bare form: it may have been deleted, or this server may \
-                 not answer a header filter at all"
-                    .to_owned(),
-            )
-        })?;
+        let original_id = match written.or(bare) {
+            Some(id) => id,
+            // Neither form: this server does not answer a header filter
+            // for `Message-ID` at all — measured against TMail on the
+            // reference deployment, where the mail was in the owner's
+            // inbox, unread, while both queries came back empty (#331).
+            // So the thread is found the way a mail client finds
+            // anything: list the mailbox's newest, ask those mails what
+            // their Message-ID is, and match here. Ids and Message-IDs
+            // only; no word of any mail is read.
+            None => {
+                let inbox_id = jmap::mailbox_with_role(&mailboxes, "inbox").ok_or_else(|| {
+                    SendError::Permanent("the JMAP server lists no INBOX".to_owned())
+                })?;
+                let listing = self
+                    .batch(
+                        &session.api_url,
+                        token,
+                        vec![jmap::newest_in_mailbox(
+                            account,
+                            &inbox_id,
+                            jmap::THREAD_SCAN,
+                        )],
+                    )
+                    .await?;
+                let ids: Vec<String> = listing.result(0)?["ids"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let scanned = ids.len();
+                let mails = self
+                    .batch(
+                        &session.api_url,
+                        token,
+                        vec![jmap::message_ids_of(account, &ids)],
+                    )
+                    .await?;
+                let found = jmap::id_with_message_id(&mails.result(0)?, &reply.in_reply_to);
+                match found {
+                    Some(id) => {
+                        info!(
+                            scanned,
+                            "this server answers no header filter for a Message-ID: the thread \
+                             was found by reading the mailbox's newest mails instead"
+                        );
+                        id
+                    }
+                    None => {
+                        return Err(SendError::Permanent(format!(
+                            "no mail carries the Message-ID this reply answers: neither a \
+                             header filter nor the newest {scanned} mails of the INBOX found \
+                             it, so it is not there to be answered"
+                        )))
+                    }
+                }
+            }
+        };
         let response = self
             .batch(
                 &session.api_url,

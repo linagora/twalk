@@ -148,6 +148,11 @@ pub(crate) struct MailStore {
     /// an empty list — never a refusal — to a filter written the other
     /// way, which reads exactly like a mail that is not there.
     bare_message_id_index: bool,
+    /// Whether this server answers a `header` filter at all (#331). TMail
+    /// answers an empty list to one on `Message-ID`, in either form, for a
+    /// mail that is in the mailbox — and an empty list is what an absent
+    /// mail looks like, so a client cannot tell the difference.
+    no_header_filter: bool,
 }
 
 /// One reply the collector submitted, as the fake received it.
@@ -198,6 +203,7 @@ impl Default for MailStore {
             submissions: Vec::new(),
             refuse_submissions: false,
             bare_message_id_index: false,
+            no_header_filter: false,
         }
     }
 }
@@ -245,6 +251,10 @@ impl MailStore {
 
     pub(crate) fn index_message_ids_bare(&mut self, bare: bool) {
         self.bare_message_id_index = bare;
+    }
+
+    pub(crate) fn answer_no_header_filter(&mut self, none: bool) {
+        self.no_header_filter = none;
     }
 }
 
@@ -731,6 +741,16 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
             ))
         });
     let after = filter.get("after").and_then(Value::as_str);
+    // A server whose index holds no headers answers an empty list, not a
+    // refusal (#331): the shape TMail showed on the reference deployment.
+    if store.no_header_filter && header.is_some() {
+        return json!({ "accountId": args.get("accountId"), "ids": [], "position": 0, "total": 0 });
+    }
+    let descending = args
+        .get("sort")
+        .and_then(Value::as_array)
+        .and_then(|sort| sort.first())
+        .is_some_and(|by| by.get("isAscending") == Some(&Value::Bool(false)));
     let ids: Vec<&String> = store
         .mails
         .iter()
@@ -761,6 +781,11 @@ fn email_query(args: &Value, store: &MailStore) -> Value {
         .into_iter()
         .map(|(_, _, id)| id)
         .collect();
+    let ids: Vec<&String> = if descending {
+        ids.into_iter().rev().collect()
+    } else {
+        ids
+    };
     let total = ids.len();
     let position = args.get("position").and_then(Value::as_u64).unwrap_or(0) as usize;
     let limit = args
