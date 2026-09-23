@@ -158,6 +158,11 @@ fn inbound_event(sender: &str, room_id: &str, consent: &str) -> Value {
 /// #121): the contract's French one, because the suggestions are French.
 const DISCLOSURE: &str = "Rédigé avec mon assistant IA.";
 
+/// What the persona says it answers (#334): a name it took off the
+/// trigger's envelope, and a summary it wrote.
+const CONTACT_NAME: &str = "Aïcha Benali";
+const SUMMARY: &str = "Aïcha Benali demande si le dîner de ce soir tient toujours.";
+
 /// One `persona.suggest.produced.v1` as the assistant publishes one.
 fn suggest_event(trigger: &Value, body: &str, expires_at: Option<&str>) -> Value {
     let trigger_id = trigger["id"].as_str().expect("the trigger has an id");
@@ -167,6 +172,9 @@ fn suggest_event(trigger: &Value, body: &str, expires_at: Option<&str>) -> Value
         "trigger": { "event_id": trigger_id, "event_type": INBOUND_TYPE },
         "suggestion": { "body": body, "format": "text/plain" },
         "disclosure": DISCLOSURE,
+        // What the persona says it is answering (#334): its own words
+        // about the message, never the message.
+        "context": { "contact": CONTACT_NAME, "summary": SUMMARY },
         "attempt": attempt
     });
     if let Some(expires_at) = expires_at {
@@ -415,6 +423,11 @@ async fn a_suggestion_on_the_bus_is_listed_with_what_the_screen_needs() -> Resul
     assert!(
         !talk.suggestion_body.contains(DISCLOSURE),
         "the body is the persona's words alone; the sentence is a member of its own"
+    );
+    assert_eq!(
+        entry["context"],
+        json!({ "contact": CONTACT_NAME, "summary": SUMMARY }),
+        "who is answered and what they asked, in the persona's own words (#334): {entry}"
     );
     assert_eq!(
         entry["trigger"]["event_id"],

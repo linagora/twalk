@@ -17,6 +17,10 @@
       "event_id": "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0",
       "event_type": "fr.linagora.twalk.inbound.message.received.v1"
     },
+    "context": {
+      "contact": "Aïcha Benali",
+      "summary": "Aïcha Benali demande si le dîner de ce soir tient toujours et à quelle heure."
+    },
     "suggestion": {
       "body": "Pas de problème, à 20h !",
       "format": "text/plain"

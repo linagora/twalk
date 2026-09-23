@@ -190,6 +190,18 @@ pub struct Listed {
     /// that is neither is listed as `None` and logged rather than drawn
     /// (see [`Suggestions::settle`]).
     pub disclosure: Option<String>,
+    /// Who this answers and what they asked, in the persona's own words
+    /// (#334) — or `None`, which is what a suggestion published before
+    /// #334 carries, and what this read serves for a trigger whose label
+    /// was not `granted`.
+    ///
+    /// It is content derived from a contact's message, so it lives under
+    /// the consent of the words it derives from. This read applies the
+    /// only consent fact it has — the label the trigger carried, which is
+    /// also what makes the suggestion approvable at all — and deliberately
+    /// does not fold in *current* consent: that stays where this module
+    /// put it, at `POST /api/approvals`, the moment it matters.
+    pub context: Option<Answering>,
     pub stream_sequence: u64,
     pub standing: Standing,
     /// The approval this Gateway recorded, when there is one. `publication`
@@ -271,6 +283,8 @@ struct SuggestionData {
     #[serde(default)]
     disclosure: Option<String>,
     #[serde(default)]
+    context: Option<Answering>,
+    #[serde(default)]
     attempt: Option<u64>,
     #[serde(default)]
     expires_at: Option<String>,
@@ -288,6 +302,18 @@ struct TriggerReference {
 struct SuggestionContent {
     body: String,
     format: String,
+}
+
+/// What the persona said it was answering (#334, resolving #160): a
+/// display name it took off the trigger's envelope, and a summary it
+/// wrote. Never the contact's own words — the contract caps it and the
+/// SDK refuses an address, an attachment name or a link in it, because a
+/// model writes it and an approval surface shows it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct Answering {
+    #[serde(default)]
+    pub contact: Option<String>,
+    pub summary: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +490,12 @@ impl Suggestions {
             &document.data.persona_id,
             document.data.disclosure,
         );
+        // A context is a contact's message in somebody else's words, and a
+        // label that is not `granted` is a message this Gateway does not
+        // retell (#334). The reply stays visible — it is the persona's own
+        // text, and the user may still refuse it — and what it answers
+        // does not.
+        let context = listed_context(document.data.context, consent_label);
         Ok(Listed {
             event_id: document.id,
             source: document.source,
@@ -480,6 +512,7 @@ impl Suggestions {
                 format,
             },
             disclosure,
+            context,
             stream_sequence: sequence,
             standing,
             approval,
@@ -876,6 +909,21 @@ pub fn standing(
     }
 }
 
+/// The `data.context` a listing draws (#334): the persona's own account of
+/// what it answers, and `None` when the label the trigger carried was not
+/// `granted`.
+///
+/// A context is a contact's message in somebody else's words, so it lives
+/// under the consent of the words it derives from — and the label is the
+/// only consent fact this read has, the same one that decides whether the
+/// suggestion can be approved at all. Whether consent still stands *now*
+/// is deliberately not folded in here (see this module's documentation):
+/// that question is answered at the moment it matters, by
+/// `POST /api/approvals`.
+fn listed_context(context: Option<Answering>, label: State) -> Option<Answering> {
+    context.filter(|_| label == State::Granted)
+}
+
 /// The `data.disclosure` a listing draws: the contract's own sentence,
 /// verbatim, or `None` (ticket #121, ADR 0031).
 ///
@@ -985,6 +1033,32 @@ mod tests {
             standing(None, Some("whenever"), "2036-09-17T12:00:00.000Z"),
             Standing::Approvable
         );
+    }
+
+    /// #334, and the line it draws. The persona may say who it answers
+    /// and what they asked — it wrote those words, having read the message
+    /// it is allowed to read. Nobody else may put a contact's own words in
+    /// a suggestion: a `trigger` carrying a display name, a body or an
+    /// excerpt parses into a struct with nowhere to hold them, as before.
+    #[test]
+    fn a_context_is_read_when_the_persona_wrote_one_and_withheld_when_the_label_is_not_granted() {
+        let answering = || Answering {
+            contact: Some("Aïcha Benali".to_owned()),
+            summary: "Aïcha Benali demande si le dîner tient toujours.".to_owned(),
+        };
+        assert_eq!(
+            listed_context(Some(answering()), State::Granted),
+            Some(answering()),
+            "a granted trigger's suggestion says what it answers"
+        );
+        for label in [State::Pending, State::Revoked] {
+            assert_eq!(
+                listed_context(Some(answering()), label),
+                None,
+                "a context is a contact's message in somebody else's words"
+            );
+        }
+        assert_eq!(listed_context(None, State::Granted), None);
     }
 
     #[test]
