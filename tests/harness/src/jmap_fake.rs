@@ -320,6 +320,18 @@ pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static
             json!({ "type": "urn:ietf:params:jmap:error:notRequest", "status": 400 }),
         );
     };
+    // What the request says it uses (RFC 8620 §3.2). A request that
+    // declares nothing is not a request: everything below is answered
+    // against this list, and a call whose capability is missing from it is
+    // `unknownMethod` — which is what a real server answers and what this
+    // fake used to let through (#328).
+    let Some(using) = request.get("using").and_then(Value::as_array) else {
+        return (
+            "400 Bad Request",
+            json!({ "type": "urn:ietf:params:jmap:error:notRequest", "status": 400 }),
+        );
+    };
+    let using: Vec<&str> = using.iter().filter_map(Value::as_str).collect();
     let mut responses = Vec::new();
     // Creation ids (`#reply`) of this request, for a back-reference from a
     // later call (RFC 8620 §3.7).
@@ -332,6 +344,10 @@ pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static
         ) else {
             continue;
         };
+        if !using.contains(&capability_of(name)) {
+            responses.push(json!(["error", { "type": "unknownMethod" }, call_id]));
+            continue;
+        }
         let account_id = args.get("accountId").and_then(Value::as_str);
         if account_id != Some(ACCOUNT_ID) {
             responses.push(json!(["error", { "type": "accountNotFound" }, call_id]));
@@ -359,6 +375,19 @@ pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static
         "200 OK",
         json!({ "methodResponses": responses, "sessionState": "session-1" }),
     )
+}
+
+/// The capability a method belongs to. `Identity/get` and
+/// `EmailSubmission/set` are the submission capability's (RFC 8621 §6 and
+/// §7), not the mail capability's — the distinction #328 was found by, on
+/// a real server, after every test here had passed.
+fn capability_of(method: &str) -> &'static str {
+    match method {
+        "Identity/get" | "EmailSubmission/set" | "EmailSubmission/get" => {
+            "urn:ietf:params:jmap:submission"
+        }
+        _ => "urn:ietf:params:jmap:mail",
+    }
 }
 
 fn mailbox_get(store: &MailStore) -> Value {
@@ -938,4 +967,47 @@ fn submission_set(
         "created": created_out,
         "notCreated": not_created
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 8620 §3.2: a server answers `unknownMethod` to a call whose
+    /// capability the request did not declare. The fake owed the suites
+    /// this rule — without it, a request that asks for `Identity/get`
+    /// under the mail capability alone passes here and is refused by every
+    /// real server (#328).
+    #[test]
+    fn a_call_whose_capability_is_not_declared_is_unknown_to_this_server() {
+        let mut store = MailStore::default();
+        let mut ask = |using: &str| {
+            let body = json!({
+                "using": ["urn:ietf:params:jmap:core", using],
+                "methodCalls": [["Identity/get", { "accountId": ACCOUNT_ID, "ids": null }, "c0"]]
+            })
+            .to_string();
+            let (status, answer) = api(&body, &mut store, "owner@example.com");
+            assert_eq!(status, "200 OK");
+            answer["methodResponses"][0][0]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!(ask("urn:ietf:params:jmap:mail"), "error");
+        assert_eq!(ask("urn:ietf:params:jmap:submission"), "Identity/get");
+    }
+
+    /// And a request that declares nothing at all is not a request.
+    #[test]
+    fn a_request_with_no_using_list_is_refused_whole() {
+        let mut store = MailStore::default();
+        let body = json!({
+            "methodCalls": [["Mailbox/get", { "accountId": ACCOUNT_ID }, "c0"]]
+        })
+        .to_string();
+        let (status, answer) = api(&body, &mut store, "owner@example.com");
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(answer["type"], "urn:ietf:params:jmap:error:notRequest");
+    }
 }

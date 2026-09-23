@@ -146,27 +146,37 @@ pub const EMAIL_PROPERTIES: &[&str] = &[
 
 pub const SUBMISSION_CAPABILITY: &str = "urn:ietf:params:jmap:submission";
 
-/// One JMAP request, RFC 8620 §3.3: the `using` list — the mail capability
-/// alone for a read — and the calls.
+/// The capability a method belongs to. `Identity/get` and the
+/// `EmailSubmission` methods are the submission capability's (RFC 8621 §6
+/// and §7); everything this collector calls otherwise is the mail
+/// capability's.
+fn capability_of(method: &str) -> &'static str {
+    match method {
+        "Identity/get" | "EmailSubmission/set" | "EmailSubmission/get" => SUBMISSION_CAPABILITY,
+        _ => MAIL_CAPABILITY,
+    }
+}
+
+/// One JMAP request, RFC 8620 §3.3, whose `using` list is **derived from
+/// the calls it carries**: core, plus the capability each method belongs
+/// to, once.
+///
+/// RFC 8620 §3.2 makes a server answer `unknownMethod` to a call whose
+/// capability the request did not declare, and a `using` list written by
+/// hand beside the calls got that wrong in production: `Identity/get` went
+/// out under the mail capability alone and no approved reply could leave
+/// the mailbox ([#328](https://github.com/linagora/twalk/issues/328)).
+/// Derived, the pair cannot disagree. A batch of reads still declares no
+/// submission capability, so a server that offers none serves it — which
+/// is why the two were separate in the first place.
 pub fn request(calls: Vec<(&str, Value)>) -> Value {
-    request_using(&["urn:ietf:params:jmap:core", MAIL_CAPABILITY], calls)
-}
-
-/// A request that submits (#278): the submission capability as well, asked
-/// for only when a call needs it, so a server without it still serves the
-/// reads.
-pub fn submission_request(calls: Vec<(&str, Value)>) -> Value {
-    request_using(
-        &[
-            "urn:ietf:params:jmap:core",
-            MAIL_CAPABILITY,
-            SUBMISSION_CAPABILITY,
-        ],
-        calls,
-    )
-}
-
-fn request_using(using: &[&str], calls: Vec<(&str, Value)>) -> Value {
+    let mut using = vec!["urn:ietf:params:jmap:core"];
+    for (method, _) in &calls {
+        let capability = capability_of(method);
+        if !using.contains(&capability) {
+            using.push(capability);
+        }
+    }
     json!({
         "using": using,
         "methodCalls": calls
@@ -911,6 +921,41 @@ impl Envelopes {
 
 #[cfg(test)]
 mod tests {
+
+    /// #328: the `using` list is the calls' own capabilities, so a batch
+    /// cannot ask for a method it did not declare — and a batch of reads
+    /// still asks for nothing a server without submission would refuse.
+    #[test]
+    fn a_requests_capabilities_are_the_ones_its_calls_belong_to() {
+        let using = |calls: Vec<(&str, Value)>| {
+            request(calls)["using"]
+                .as_array()
+                .expect("a using list")
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            using(vec![mailbox_get("u1"), email_get("u1", &["m1".to_owned()])]),
+            ["urn:ietf:params:jmap:core", MAIL_CAPABILITY],
+            "a read declares no submission capability: a server offering none still serves it"
+        );
+        let sending = using(vec![
+            email_by_message_id("u1", "<m@example.com>"),
+            mailbox_get("u1"),
+            identity_get("u1"),
+        ]);
+        assert_eq!(
+            sending,
+            [
+                "urn:ietf:params:jmap:core",
+                MAIL_CAPABILITY,
+                SUBMISSION_CAPABILITY
+            ],
+            "Identity/get carries the submission capability into the batch that asks for it"
+        );
+    }
     use super::*;
 
     fn email_object() -> Value {
