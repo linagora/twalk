@@ -267,23 +267,22 @@ pub fn email_received_after(
     )
 }
 
-/// The newest mails of a mailbox, ids only (#331): how a thread is found
-/// when the server answers no header filter — list what a client lists,
-/// then match the Message-ID on the mails themselves. `inMailbox` and a
-/// sort on `receivedAt` are what every mail client asks for on every
-/// start, so a server that cannot serve this cannot serve a mailbox.
-pub fn newest_in_mailbox(
-    account_id: &str,
-    mailbox_id: &str,
-    limit: usize,
-) -> (&'static str, Value) {
+/// One page of the account's newest mails, ids only (#331): how a thread
+/// is found when the server answers no header filter — list what a client
+/// lists, then match the Message-ID on the mails themselves. A sort on
+/// `receivedAt` is what every mail client asks for on every start, so a
+/// server that cannot serve this cannot serve a mailbox. The whole
+/// account and not one mailbox, because the filter it replaces was
+/// account-wide: a mail a rule filed elsewhere is still one the owner may
+/// answer.
+pub fn newest_in_account(account_id: &str, position: usize) -> (&'static str, Value) {
     (
         "Email/query",
         json!({
             "accountId": account_id,
-            "filter": { "inMailbox": mailbox_id },
             "sort": [{ "property": "receivedAt", "isAscending": false }],
-            "limit": limit
+            "position": position,
+            "limit": QUERY_PAGE
         }),
     )
 }
@@ -297,16 +296,32 @@ pub fn message_ids_of(account_id: &str, ids: &[String]) -> (&'static str, Value)
     )
 }
 
-/// The id of the mail among those whose `messageId` is this one. RFC 8621
-/// §4.1.1 carries the value parsed, without the angle brackets a mail
-/// writes it with, so both sides are compared bare.
-pub fn id_with_message_id(email_get: &Value, message_id: &str) -> Option<String> {
+/// The ids an `Email/query` answered, in the order the server gave them.
+pub fn queried_ids(email_query: &Value) -> Vec<String> {
+    email_query
+        .get("ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The ids of the mails whose `messageId` is this one — every one of
+/// them, since a Message-ID is the sender's to choose and two mails may
+/// carry the same (#278's case, which `original_is_from_recipient`
+/// answers). RFC 8621 §4.1.1 carries the value parsed, without the angle
+/// brackets a mail writes it with, so both sides are compared bare.
+pub fn ids_with_message_id(email_get: &Value, message_id: &str) -> Vec<String> {
     let wanted = bare_message_id(message_id);
-    email_get
-        .get("list")
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|mail| {
+    let Some(list) = email_get.get("list").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter(|mail| {
             mail.get("messageId")
                 .and_then(Value::as_array)
                 .is_some_and(|ids| {
@@ -315,15 +330,15 @@ pub fn id_with_message_id(email_get: &Value, message_id: &str) -> Option<String>
                         .any(|id| bare_message_id(id) == wanted)
                 })
         })
-        .and_then(|mail| mail.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+        .filter_map(|mail| mail.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect()
 }
 
-/// How many of a mailbox's newest mails the thread is looked for among,
-/// when the server answers no header filter: a mail answered days after it
-/// arrived is still found, and nothing here is read but ids.
-pub const THREAD_SCAN: usize = 200;
+/// How many pages of the account's newest mails the thread is looked for
+/// among when the server answers no header filter. Five pages is a few
+/// days of a busy mailbox and a bounded amount of work; past it the
+/// refusal says how far it looked rather than that the mail is not there.
+pub const THREAD_SCAN_PAGES: usize = 5;
 
 /// How many ids one `Email/query` page asks for: RFC 8621's servers cap a
 /// page at a few hundred; the recovery reads page after page until one
@@ -338,10 +353,8 @@ pub fn identity_get(account_id: &str) -> (&'static str, Value) {
     )
 }
 
-/// `Email/query` for the mail with a Message-ID (#278): the mail a reply
-/// answers, found again by the one identifier the approval carries.
-/// The same, for the Message-ID **stripped of its angle brackets**
-/// (#331). RFC 5322 writes a `Message-ID` as `<local@domain>` and that is
+/// `Email/query` for the mail with a Message-ID **stripped of its angle
+/// brackets** (#331). RFC 5322 writes a `Message-ID` as `<local@domain>` and that is
 /// what a mail carries, but a `header` filter is answered from the
 /// server's search index, and an index that stores the parsed value
 /// answers nothing to the written one — with no `unsupportedFilter` to
@@ -361,6 +374,10 @@ pub fn bare_message_id(message_id: &str) -> &str {
         .unwrap_or(message_id)
 }
 
+/// `Email/query` for the mail with a Message-ID (#278): the mail a reply
+/// answers, found again by the one identifier the approval carries — when
+/// the server answers a header filter at all, which #331 found is not
+/// something to count on.
 pub fn email_by_message_id(account_id: &str, message_id: &str) -> (&'static str, Value) {
     (
         "Email/query",
@@ -1014,6 +1031,62 @@ impl Envelopes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #331: the thread is matched here, on what the mails say, because
+    /// the server may answer no filter at all. RFC 8621 §4.1.1 carries a
+    /// `messageId` parsed, without the brackets a mail writes it with, so
+    /// both sides are compared bare — and a mail that carries another
+    /// Message-ID is not the one answered.
+    #[test]
+    fn the_thread_is_the_mail_whose_message_id_matches_bare_or_written() {
+        let answered = json!({ "list": [
+            { "id": "m1", "messageId": ["other@example.org"] },
+            { "id": "m2", "messageId": ["Mime4j.8ff@linagora.com"] },
+        ]});
+        assert_eq!(
+            ids_with_message_id(&answered, "<Mime4j.8ff@linagora.com>"),
+            ["m2".to_owned()],
+            "the written form finds a server that answers the parsed one"
+        );
+        assert_eq!(
+            ids_with_message_id(&answered, "Mime4j.8ff@linagora.com"),
+            ["m2".to_owned()]
+        );
+        assert!(
+            ids_with_message_id(&answered, "<nobody@example.org>").is_empty(),
+            "a mail nobody answered is not a thread"
+        );
+        assert!(ids_with_message_id(&json!({ "list": [] }), "<a@b>").is_empty());
+        // Two mails may carry one Message-ID: both are candidates, and
+        // which one is answered is decided on their senders.
+        let reused = json!({ "list": [
+            { "id": "m1", "messageId": ["same@example.org"] },
+            { "id": "m2", "messageId": ["same@example.org"] },
+        ]});
+        assert_eq!(
+            ids_with_message_id(&reused, "<same@example.org>"),
+            ["m1".to_owned(), "m2".to_owned()]
+        );
+        assert_eq!(bare_message_id("<a@b>"), "a@b");
+        assert_eq!(bare_message_id("a@b"), "a@b", "already bare");
+        assert_eq!(bare_message_id("<a@b"), "<a@b", "not a matched pair");
+        // And what the two calls ask for: one page of the mailbox's
+        // newest, then those mails' Message-IDs and nothing else.
+        let (name, query) = newest_in_account("u1", QUERY_PAGE);
+        assert_eq!(name, "Email/query");
+        assert!(query.get("filter").is_none(), "the whole account: {query}");
+        assert_eq!(query["position"], json!(QUERY_PAGE), "page by page");
+        assert_eq!(query["sort"][0]["property"], "receivedAt");
+        assert_eq!(query["sort"][0]["isAscending"], json!(false));
+        let (name, get) = message_ids_of("u1", &["m1".to_owned()]);
+        assert_eq!(name, "Email/get");
+        assert_eq!(get["properties"], json!(["id", "messageId"]));
+        assert_eq!(
+            queried_ids(&json!({ "ids": ["m1", "m2"] })),
+            ["m1".to_owned(), "m2".to_owned()]
+        );
+        assert!(queried_ids(&json!({})).is_empty());
+    }
 
     /// #328: the `using` list is the calls' own capabilities, so a batch
     /// cannot ask for a method it did not declare — and a batch of reads

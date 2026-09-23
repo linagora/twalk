@@ -134,6 +134,10 @@ async fn an_approved_reply_leaves_from_the_owners_mailbox_to_the_sender_alone_an
     collector
         .wait_logged("mailbox taken as it stands", 1)
         .await?;
+    // A server that does answer a header filter on `Message-ID`: the
+    // other case is its own test (#331), and the fake's default is the one
+    // TMail showed.
+    run.sso.answer_no_header_filter(false);
 
     // Alice's mail, in a thread, with Bob in copy — the reply goes to Alice
     // alone all the same.
@@ -322,7 +326,7 @@ async fn a_refused_submission_is_dead_lettered_and_an_unanswering_server_is_retr
 /// nothing, and reported a mail sitting there unread as gone. The send
 /// asks both forms, so a reply leaves whichever one the server knows.
 #[tokio::test]
-async fn a_reply_leaves_whichever_form_of_the_message_id_the_server_indexes() -> Result<()> {
+async fn a_reply_leaves_when_the_server_indexes_message_ids_without_their_brackets() -> Result<()> {
     ensure_stack().await?;
     let bus = Bus::connect().await?;
     let run = Run::prepare("bare-id").await?;
@@ -337,8 +341,10 @@ async fn a_reply_leaves_whichever_form_of_the_message_id_the_server_indexes() ->
         .wait_logged("mailbox taken as it stands", 1)
         .await?;
 
-    // This server indexes a Message-ID without its brackets, and the mail
-    // arrives carrying one written with them, as every mail does.
+    // This server answers a header filter, and indexes a Message-ID
+    // without its brackets; the mail arrives carrying one written with
+    // them, as every mail does.
+    run.sso.answer_no_header_filter(false);
     run.sso.index_message_ids_bare(true);
     let mail = FakeMail::from_person(
         "Alice Martin",
@@ -371,30 +377,56 @@ async fn a_reply_leaves_whichever_form_of_the_message_id_the_server_indexes() ->
         .wait_logged("indexes a Message-ID without its angle brackets", 1)
         .await?;
 
-    // And when the server answers **no** header filter at all — TMail, on
-    // the reference deployment, for a mail sitting unread in the owner's
-    // inbox — the thread is found the way a client finds anything: the
-    // mailbox's newest mails, asked what their Message-ID is.
-    run.sso.answer_no_header_filter(true);
-    let second = FakeMail::from_person(
+    collector.stop().await;
+    Ok(())
+}
+
+/// #331, as the reference deployment showed it: TMail answers an **empty
+/// list** to a header filter on `Message-ID`, in either form, for a mail
+/// sitting unread in the owner's inbox — and an empty list is what an
+/// absent mail looks like. The thread is then found the way a mail client
+/// finds anything: the mailbox's newest mails, asked what their
+/// Message-ID is.
+#[tokio::test]
+async fn a_reply_finds_its_thread_by_reading_the_mailbox_when_no_filter_answers() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("no-filter").await?;
+    run.authorize().await?;
+    run.serve_snapshot(
+        &bus,
+        vec![run.decided_on_mail("mailto:alice@example.org", "granted")],
+    )
+    .await?;
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("mailbox taken as it stands", 1)
+        .await?;
+
+    let mail = FakeMail::from_person(
         "Alice Martin",
         "alice@example.org",
         OWNER,
         "Et jeudi ?",
         "Jeudi 14h vous irait ?",
     );
-    let second_id = second.message_id.clone();
-    run.sso.deliver(second);
-    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 2)
+    let message_id = mail.message_id.clone();
+    run.sso.deliver(mail);
+    run.wait_for_events(&bus, MESSAGE_SUBJECT, &run.mail, 1)
         .await?;
-    let approved = approval(&run, &second_id, "Jeudi 14h, parfait.", "no-filter");
+
+    let approved = approval(&run, &message_id, "Jeudi 14h, parfait.", "no-filter");
     bus.publish_event(APPROVED_SUBJECT, &approved).await?;
     let report =
         wait_for_copy(&bus, &run, POSTED_SUBJECT, approved["id"].as_str().unwrap()).await?;
     assert_eq!(report.header("reach"), Some("contact"));
     let submissions = run.sso.submissions();
-    assert_eq!(submissions.len(), 2, "{submissions:?}");
-    assert_eq!(submissions[1].in_reply_to, [second_id]);
+    assert_eq!(submissions.len(), 1, "{submissions:?}");
+    assert_eq!(
+        submissions[0].in_reply_to,
+        [message_id],
+        "the reply is in the thread the scan found"
+    );
     collector
         .wait_logged("answers no header filter for a Message-ID", 1)
         .await?;

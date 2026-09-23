@@ -203,7 +203,10 @@ impl Default for MailStore {
             submissions: Vec::new(),
             refuse_submissions: false,
             bare_message_id_index: false,
-            no_header_filter: false,
+            // As measured against TMail (#331): the fake follows the one
+            // real server this project has run against, and a test that
+            // needs the filter path says so.
+            no_header_filter: true,
         }
     }
 }

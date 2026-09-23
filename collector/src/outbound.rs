@@ -232,7 +232,9 @@ pub fn reply_calls(
     if !references.iter().any(|id| id == &reply.in_reply_to) {
         references.push(reply.in_reply_to.clone());
     }
-    let bare = |id: &str| id.trim_matches(|c| c == '<' || c == '>').to_owned();
+    // RFC 8621 §4.1.1 carries these parsed, without the angle brackets a
+    // mail writes them with; the collector strips them in one place.
+    let bare = |id: &str| crate::jmap::bare_message_id(id).to_owned();
     let email = json!({
         "mailboxIds": { drafts_id: true },
         "keywords": { "$draft": true, "$seen": true },
