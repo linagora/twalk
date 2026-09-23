@@ -3703,6 +3703,34 @@ export interface components {
              * @enum {string}
              */
             consent: "granted" | "pending" | "revoked";
+            /**
+             * @description Who this reply answers and what they asked (#334, resolving
+             *     #160), written by the persona at publication time: the one
+             *     component allowed to read the message, saying what it says while
+             *     it reads it, so that nothing downstream has to reopen an inbound
+             *     event to draw an approval screen (#110, ADR 0012).
+             *
+             *     `null` when the suggestion carries none — a persona that predates
+             *     this, or one that chose not to — and `null` when the label the
+             *     trigger carried was not `granted`: a context is a contact's
+             *     message in somebody else's words, and it lives under the consent
+             *     of the words it derives from. Whether consent still stands *now*
+             *     is not folded in here, for the reason the rest of this listing
+             *     does not fold it in either: that question is answered at `POST
+             *     /api/approvals`, the moment it matters.
+             */
+            context: null | {
+                /**
+                 * @description The contact's display name as the trigger carried it, or
+                 *     `null` when the network gave none.
+                 */
+                contact: null | string;
+                /**
+                 * @description What the contact asked, in the persona's own words —
+                 *     never a quotation of their message.
+                 */
+                summary: string;
+            };
             delivery: components["schemas"]["Delivery"];
             /**
              * @description The sentence the reply will disclose itself with, after the body
