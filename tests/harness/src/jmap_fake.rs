@@ -332,6 +332,17 @@ pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static
         );
     };
     let using: Vec<&str> = using.iter().filter_map(Value::as_str).collect();
+    // And a capability this server does not offer is refused whole, which
+    // is what a server does with a `using` list it cannot honour.
+    if let Some(unknown) = using
+        .iter()
+        .find(|capability| !OFFERED_CAPABILITIES.contains(capability))
+    {
+        return (
+            "400 Bad Request",
+            json!({ "type": "urn:ietf:params:jmap:error:unknownCapability", "status": 400, "detail": format!("this server does not offer {unknown}") }),
+        );
+    }
     let mut responses = Vec::new();
     // Creation ids (`#reply`) of this request, for a back-reference from a
     // later call (RFC 8620 §3.7).
@@ -344,7 +355,10 @@ pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static
         ) else {
             continue;
         };
-        if !using.contains(&capability_of(name)) {
+        // RFC 8620 §3.2: a call whose capability the request did not
+        // declare is `unknownMethod`, and so is a method of an object this
+        // server does not serve at all.
+        if !capability_of(name).is_some_and(|capability| using.contains(&capability)) {
             responses.push(json!(["error", { "type": "unknownMethod" }, call_id]));
             continue;
         }
@@ -377,16 +391,32 @@ pub(crate) fn api(body: &str, store: &mut MailStore, account: &str) -> (&'static
     )
 }
 
+/// What this server offers, and therefore the only capabilities a request
+/// may say it uses (RFC 8620 §3.2).
+const OFFERED_CAPABILITIES: [&str; 3] = [
+    "urn:ietf:params:jmap:core",
+    "urn:ietf:params:jmap:mail",
+    "urn:ietf:params:jmap:submission",
+];
+
 /// The capability a method belongs to. `Identity/get` and
 /// `EmailSubmission/set` are the submission capability's (RFC 8621 §6 and
 /// §7), not the mail capability's — the distinction #328 was found by, on
 /// a real server, after every test here had passed.
-fn capability_of(method: &str) -> &'static str {
-    match method {
-        "Identity/get" | "EmailSubmission/set" | "EmailSubmission/get" => {
-            "urn:ietf:params:jmap:submission"
-        }
-        _ => "urn:ietf:params:jmap:mail",
+///
+/// The collector holds the same table (`capability_of` in
+/// `collector/src/jmap.rs`), where it decides what a request declares;
+/// here it decides what this server accepts. They are two sides of one
+/// rule and are edited together.
+fn capability_of(method: &str) -> Option<&'static str> {
+    // A server knows which objects it serves and answers `unknownMethod`
+    // for the rest, rather than guessing a capability for a name it does
+    // not recognise — a fake that guessed would agree with a client that
+    // guessed the same way, and prove nothing.
+    match method.split('/').next().unwrap_or_default() {
+        "Email" | "Mailbox" | "Thread" | "SearchSnippet" => Some("urn:ietf:params:jmap:mail"),
+        "Identity" | "EmailSubmission" => Some("urn:ietf:params:jmap:submission"),
+        _ => None,
     }
 }
 
@@ -996,6 +1026,23 @@ mod tests {
         };
         assert_eq!(ask("urn:ietf:params:jmap:mail"), "error");
         assert_eq!(ask("urn:ietf:params:jmap:submission"), "Identity/get");
+    }
+
+    /// A capability this server does not offer is refused whole.
+    #[test]
+    fn a_capability_this_server_does_not_offer_is_refused_whole() {
+        let mut store = MailStore::default();
+        let body = json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:calendars"],
+            "methodCalls": [["Mailbox/get", { "accountId": ACCOUNT_ID }, "c0"]]
+        })
+        .to_string();
+        let (status, answer) = api(&body, &mut store, "owner@example.com");
+        assert_eq!(status, "400 Bad Request");
+        assert_eq!(
+            answer["type"],
+            "urn:ietf:params:jmap:error:unknownCapability"
+        );
     }
 
     /// And a request that declares nothing at all is not a request.

@@ -399,18 +399,18 @@ impl Mailbox {
         // 8620 §3.2 requires, and no approved reply could leave the
         // mailbox at all (#328). The `using` list is now derived from the
         // calls, so this batch asks for what it needs by carrying it.
-        let prepare = vec![
-            outbound::reply_already_sent(account, &reply.event_id),
-            jmap::mailbox_get(account),
-            jmap::identity_get(account),
-            jmap::email_by_message_id(account, &reply.in_reply_to),
-        ];
-        let response = Batch::of(
-            &prepare,
-            self.call(&session.api_url, token, prepare.clone())
-                .await
-                .map_err(transient)?,
-        );
+        let response = self
+            .batch(
+                &session.api_url,
+                token,
+                vec![
+                    outbound::reply_already_sent(account, &reply.event_id),
+                    jmap::mailbox_get(account),
+                    jmap::identity_get(account),
+                    jmap::email_by_message_id(account, &reply.in_reply_to),
+                ],
+            )
+            .await?;
         if first_id(&response.result(0)?).is_some() {
             return Ok(Sent { already_sent: true });
         }
@@ -432,13 +432,13 @@ impl Mailbox {
                 "the mail the reply answers is no longer in the mailbox".to_owned(),
             )
         })?;
-        let read = vec![jmap::email_get(account, &[original_id])];
-        let response = Batch::of(
-            &read,
-            self.call(&session.api_url, token, read.clone())
-                .await
-                .map_err(transient)?,
-        );
+        let response = self
+            .batch(
+                &session.api_url,
+                token,
+                vec![jmap::email_get(account, &[original_id])],
+            )
+            .await?;
         let original = response
             .result(0)?
             .get("list")
@@ -463,13 +463,13 @@ impl Mailbox {
             drafts_id,
             sent_id,
         };
-        let calls = outbound::reply_calls(reply, &original, &sender);
-        let response = Batch::of(
-            &calls,
-            self.call(&session.api_url, token, calls.clone())
-                .await
-                .map_err(transient)?,
-        );
+        let response = self
+            .batch(
+                &session.api_url,
+                token,
+                outbound::reply_calls(reply, &original, &sender),
+            )
+            .await?;
         let created = response.result(0)?;
         let Some(draft_id) = created
             .pointer("/created/reply/id")
@@ -523,6 +523,23 @@ impl Mailbox {
         .await
     }
 
+    /// One batch of calls, and what the server answered them, paired with
+    /// what was asked: the send path reads its results through [`Batch`],
+    /// so a refusal names the method it was refused on (#328).
+    async fn batch(
+        &self,
+        api_url: &str,
+        token: &str,
+        calls: Vec<(&'static str, Value)>,
+    ) -> Result<Batch, SendError> {
+        let methods = calls.iter().map(|(method, _)| *method).collect();
+        let response = self
+            .call(api_url, token, calls)
+            .await
+            .map_err(|error| SendError::Transient(error.to_string()))?;
+        Ok(Batch { methods, response })
+    }
+
     async fn call(
         &self,
         api_url: &str,
@@ -541,9 +558,13 @@ impl Mailbox {
     }
 }
 
+/// A method's result on a **read** path. The type alone, for the reason
+/// [`Batch::result`] gives on the send path: a method error's
+/// `description` is the server's own words about what it did not like, and
+/// those words may echo an address or a subject.
 fn method(response: &Value, index: usize) -> Result<Value, SideError> {
     jmap::method_result(response, index).map_err(|error| SideError::Unreachable {
-        detail: format!("the JMAP server answered an error: {error}"),
+        detail: format!("the JMAP server answered {}", error.kind),
     })
 }
 
@@ -601,18 +622,15 @@ struct Batch {
 }
 
 impl Batch {
-    fn of(calls: &[(&'static str, Value)], response: Value) -> Self {
-        Self {
-            methods: calls.iter().map(|(method, _)| *method).collect(),
-            response,
-        }
-    }
-
     /// The `index`th result, the error classed for the retry policy — and,
     /// since a method error's `description` may quote what the server did
     /// not like, the type and the method are what the reason carries.
     fn result(&self, index: usize) -> Result<Value, SendError> {
-        let method = self.methods.get(index).copied().unwrap_or("that method");
+        let method = self
+            .methods
+            .get(index)
+            .copied()
+            .unwrap_or("a call this batch never made");
         jmap::method_result(&self.response, index).map_err(|error| {
             let why = format!("the JMAP server answered {} to {method}", error.kind);
             if METHOD_ERRORS_A_RETRY_CANNOT_CHANGE.contains(&error.kind.as_str()) {
@@ -646,7 +664,31 @@ fn first_id(query: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{look_back_from, MailState, PUBLISHED_RING};
+    use super::{look_back_from, Batch, MailState, SendError, PUBLISHED_RING};
+    use serde_json::json;
+
+    /// #328: `unknownMethod` said nothing about which of four calls the
+    /// server did not know. A batch remembers what it asked, so the reason
+    /// a reply is dead-lettered names the method — and still quotes no
+    /// `description`, which may echo the server's own words.
+    #[test]
+    fn a_refusal_names_the_method_it_was_refused_on_and_nothing_the_server_said() {
+        let batch = Batch {
+            methods: vec!["Email/query", "Identity/get"],
+            response: json!({ "methodResponses": [
+                ["Email/query", { "ids": [] }, "c0"],
+                ["error", { "type": "unknownMethod", "description": "no such thing as <mm@example.com>" }, "c1"],
+            ]}),
+        };
+        assert!(batch.result(0).is_ok());
+        let SendError::Permanent(why) = batch.result(1).unwrap_err() else {
+            panic!("unknownMethod is a refusal a retry cannot change");
+        };
+        assert_eq!(
+            why,
+            "the JMAP server answered unknownMethod to Identity/get"
+        );
+    }
 
     #[test]
     fn the_look_back_starts_five_minutes_before_the_last_read_and_nowhere_without_one() {

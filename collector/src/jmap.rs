@@ -150,9 +150,22 @@ pub const SUBMISSION_CAPABILITY: &str = "urn:ietf:params:jmap:submission";
 /// `EmailSubmission` methods are the submission capability's (RFC 8621 §6
 /// and §7); everything this collector calls otherwise is the mail
 /// capability's.
+///
+/// The fake server the suites run against holds the same table on the
+/// other side of the crate boundary (`capability_of` in
+/// `tests/harness/src/jmap_fake.rs`, which cannot depend on this crate): a
+/// method added here is added there too, or the suites go green on a
+/// request no real server would answer — which is how #328 happened.
 fn capability_of(method: &str) -> &'static str {
-    match method {
-        "Identity/get" | "EmailSubmission/set" | "EmailSubmission/get" => SUBMISSION_CAPABILITY,
+    // The object, not the whole method name: `Identity/set` belongs where
+    // `Identity/get` does, and a table written call by call would have to
+    // grow for each — which is the shape that failed in the first place.
+    match method.split('/').next().unwrap_or_default() {
+        "Identity" | "EmailSubmission" => SUBMISSION_CAPABILITY,
+        "VacationResponse" => "urn:ietf:params:jmap:vacationresponse",
+        "Core" => "urn:ietf:params:jmap:core",
+        // `Email`, `Mailbox`, `Thread`, `SearchSnippet`: RFC 8621's mail
+        // objects, which is everything else this collector calls.
         _ => MAIL_CAPABILITY,
     }
 }
@@ -921,6 +934,7 @@ impl Envelopes {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     /// #328: the `using` list is the calls' own capabilities, so a batch
     /// cannot ask for a method it did not declare — and a batch of reads
@@ -941,10 +955,13 @@ mod tests {
             ["urn:ietf:params:jmap:core", MAIL_CAPABILITY],
             "a read declares no submission capability: a server offering none still serves it"
         );
+        // The batch that prepares a send, call for call: the one whose
+        // `using` list was wrong in production.
         let sending = using(vec![
-            email_by_message_id("u1", "<m@example.com>"),
+            crate::outbound::reply_already_sent("u1", "e1"),
             mailbox_get("u1"),
             identity_get("u1"),
+            email_by_message_id("u1", "<m@example.com>"),
         ]);
         assert_eq!(
             sending,
@@ -955,8 +972,15 @@ mod tests {
             ],
             "Identity/get carries the submission capability into the batch that asks for it"
         );
+        // The object decides, not the call: a method this collector does
+        // not call today is classed with its siblings and not guessed.
+        assert_eq!(capability_of("Identity/set"), SUBMISSION_CAPABILITY);
+        assert_eq!(
+            capability_of("EmailSubmission/query"),
+            SUBMISSION_CAPABILITY
+        );
+        assert_eq!(capability_of("Thread/get"), MAIL_CAPABILITY);
     }
-    use super::*;
 
     fn email_object() -> Value {
         json!({
