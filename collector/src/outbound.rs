@@ -241,7 +241,12 @@ pub fn reply_calls(
         "subject": subject,
         "inReplyTo": [bare(&reply.in_reply_to)],
         "references": references.iter().map(|id| bare(id)).collect::<Vec<_>>(),
-        "bodyStructure": { "partId": "1", "type": "text/plain", "charset": "utf-8" },
+        // The body as RFC 8621 §4.1.4 has a client send one on create:
+        // `textBody` naming a part, and `bodyValues` keyed by that part's
+        // id. `bodyStructure` is the server's own reading of a mail it
+        // holds; TMail accepted a create carrying it, stored no body, and
+        // sent an empty mail to a contact (#332).
+        "textBody": [{ "partId": "1", "type": "text/plain", "charset": "utf-8" }],
         "bodyValues": { "1": { "value": reply.body, "isTruncated": false } },
         format!("header:{APPROVAL_HEADER}:asText"): reply.event_id
     });

@@ -827,12 +827,24 @@ fn email_set(args: &Value, store: &mut MailStore, created: &mut BTreeMap<String,
                     })
                     .unwrap_or_default()
             };
+            // The body is what `textBody` names, not whatever
+            // `bodyValues` happens to hold: a part nobody points at is
+            // not a body, and a server that stored it anyway would hide
+            // a create that sends an empty mail (#332).
             let text = object
-                .get("bodyValues")
-                .and_then(Value::as_object)
-                .and_then(|values| values.values().next())
-                .and_then(|value| value.get("value"))
+                .get("textBody")
+                .and_then(Value::as_array)
+                .and_then(|parts| parts.first())
+                .and_then(|part| part.get("partId"))
                 .and_then(Value::as_str)
+                .and_then(|part_id| {
+                    object
+                        .get("bodyValues")
+                        .and_then(Value::as_object)?
+                        .get(part_id)?
+                        .get("value")?
+                        .as_str()
+                })
                 .unwrap_or_default()
                 .to_owned();
             let ids = |name: &str| -> Vec<String> {
