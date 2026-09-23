@@ -775,6 +775,9 @@
 	"approvals.editing.hint": "Écrire ici n’envoie rien, et aucune touche ne l’envoie. Appuyez sur « Approuver et envoyer » quand le texte dit ce que vous voulez dire.",
 	"approvals.editing.save": "Approuver et envoyer ce texte",
 	"approvals.editing.cancel": "Garder ce qui était proposé",
+	"approvals.writeOwn": "Écrire ma réponse",
+	"approvals.writeOwn.label": "Votre réponse, à la place de celle proposée",
+	"approvals.writeOwn.undisclosed": "Vous écrivez ce message : il partira tel quel, sans la mention de l'assistant.",
 	"approvals.editing.empty": "Une réponse vide enverrait un message vide. Écrivez quelque chose, ou gardez ce qui était proposé.",
 
 	"approvals.disclosure.label": "Ajoutée après la réponse, sur une ligne à part — non modifiable ici :",

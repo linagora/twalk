@@ -1,30 +1,29 @@
 {
   "specversion": "1.0",
-  "id": "57f0e4d352d1ba5e6bf0e92223634253cd852e3d7d018ea91025dc098c1a564a",
+  "id": "7c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5",
   "source": "hermes://twalk.example.com/personas/assistant",
   "type": "fr.linagora.twalk.persona.reply.approved.v1",
-  "time": "2026-09-17T10:04:37Z",
+  "time": "2026-09-21T08:20:11Z",
   "subject": "319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b",
   "datacontenttype": "application/json",
   "dataschema": "https://schemas.twalk.dev/cloudevents/v1/persona.reply.approved.schema.json",
-  "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-  "network": "whatsapp",
-  "connection": "whatsapp",
+  "network": "email",
+  "connection": "mail-linagora",
   "consent": "granted",
   "data": {
     "persona_id": "assistant",
     "suggestion_event_id": "319be8ff15d5dee005c8aa27119b983da8223959987e5dbc639d81e370b5ef9b",
     "approved_by": "@michel:example.com",
     "final": {
-      "body": "Pas de problème, à 20h ! 👍\nRédigé avec mon assistant IA.",
+      "body": "Bonjour Christelle, je regarde ça cette semaine et je reviens vers vous.",
       "format": "text/plain"
     },
     "edited": true,
-    "written_by": "persona",
+    "written_by": "owner",
     "target": {
-      "room_id": "!abcXYZ123:example.com",
-      "reply_to_event_id": "$AbCdEfGh1234"
-    },
-    "disclosure": "Rédigé avec mon assistant IA."
+      "connection": "mail-linagora",
+      "in_reply_to": "<9b8c7d6e-1@example.org>",
+      "recipient": "mailto:alice@example.org"
+    }
   }
 }

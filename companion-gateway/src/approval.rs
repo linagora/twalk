@@ -182,6 +182,41 @@ pub const MAX_BODY: usize = CONTRACT_MAX_BODY - 1 - crate::disclosure::MAX_CHARS
 /// One approval, as a request states it.
 ///
 /// One suggestion id. Not a list — see the module's second bullet.
+/// Who wrote the text going out (#327).
+///
+/// Not measured on the body, declared by the gesture. A body that differs
+/// from the draft says *something changed*; it cannot say whether the
+/// owner corrected a word or threw the draft away and wrote their own
+/// reply, and those are the two cases ADR 0019 treats differently. So the
+/// client says which gesture it was, and a client that says nothing is
+/// taken to have sent the persona's text — the reading that keeps the
+/// sentence rather than the one that drops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WrittenBy {
+    /// The persona drafted it; the owner approved it, corrections included.
+    #[default]
+    Persona,
+    /// The owner wrote it themselves, in place of the draft.
+    Owner,
+}
+
+impl WrittenBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Persona => "persona",
+            Self::Owner => "owner",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "persona" => Some(Self::Persona),
+            "owner" => Some(Self::Owner),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub suggestion_event_id: String,
@@ -193,6 +228,11 @@ pub struct Request {
     /// The edited content, when the user changed the suggestion before
     /// approving. Absent means "send the suggestion as it stands".
     pub edited: Option<Content>,
+    /// Who wrote what is being sent (#327): `final.written_by`, or
+    /// [`WrittenBy::Persona`] when the caller says nothing — including
+    /// when there is no `final` at all, which is the persona's text by
+    /// definition.
+    pub written_by: WrittenBy,
 }
 
 impl Request {
@@ -236,25 +276,40 @@ impl Request {
             Some(Value::String(value)) => Some(value.clone()),
             Some(_) => return Err(Invalid::ApprovedByNotAString),
         };
-        let edited = match object.get("final") {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(parse_content(value)?),
+        let (edited, written_by) = match object.get("final") {
+            None | Some(Value::Null) => (None, WrittenBy::default()),
+            Some(value) => {
+                let (content, written_by) = parse_content(value)?;
+                (Some(content), written_by)
+            }
         };
         Ok(Self {
             suggestion_event_id: suggestion_event_id.to_owned(),
             approved_by,
             edited,
+            written_by,
         })
     }
 }
 
-fn parse_content(value: &Value) -> Result<Content, Invalid> {
+fn parse_content(value: &Value) -> Result<(Content, WrittenBy), Invalid> {
     let object = value.as_object().ok_or(Invalid::FinalNotAnObject)?;
     for member in object.keys() {
-        if !matches!(member.as_str(), "body" | "format") {
+        if !matches!(member.as_str(), "body" | "format" | "written_by") {
             return Err(Invalid::UnknownMember(format!("final.{member}")));
         }
     }
+    // Inside `final` on purpose (#327): a claim about who wrote a text
+    // cannot exist where there is no text.
+    let written_by = match object.get("written_by") {
+        None | Some(Value::Null) => WrittenBy::default(),
+        Some(value) => {
+            let raw = value
+                .as_str()
+                .ok_or_else(|| Invalid::UnknownWrittenBy(value.to_string()))?;
+            WrittenBy::parse(raw).ok_or_else(|| Invalid::UnknownWrittenBy(raw.to_owned()))?
+        }
+    };
     let body = object
         .get("body")
         .and_then(Value::as_str)
@@ -274,10 +329,13 @@ fn parse_content(value: &Value) -> Result<Content, Invalid> {
             Format::parse(raw).ok_or_else(|| Invalid::UnknownFormat(raw.to_owned()))?
         }
     };
-    Ok(Content {
-        body: body.to_owned(),
-        format,
-    })
+    Ok((
+        Content {
+            body: body.to_owned(),
+            format,
+        },
+        written_by,
+    ))
 }
 
 /// A CloudEvents id as every `persona.*` and `inbound.*` type spells one:
@@ -305,13 +363,14 @@ pub enum Invalid {
     EmptyFinalBody,
     FinalBodyTooLong(usize),
     UnknownFormat(String),
+    UnknownWrittenBy(String),
 }
 
 impl Invalid {
     pub fn code(&self) -> &'static str {
         match self {
             Invalid::Batch => "approval_is_not_a_batch",
-            Invalid::UnknownFormat(_) => "unknown_value",
+            Invalid::UnknownFormat(_) | Invalid::UnknownWrittenBy(_) => "unknown_value",
             _ => "malformed_request",
         }
     }
@@ -339,6 +398,11 @@ impl Invalid {
             Invalid::ApprovedByNotAString => {
                 "approved_by is a Matrix user ID when it is present at all".to_owned()
             }
+            Invalid::UnknownWrittenBy(value) => format!(
+                "final.written_by is {value:?}: it says who wrote the text being sent, and it \
+                 is \"persona\" — the draft, corrections included — or \"owner\", the reply you \
+                 wrote in its place. Absent means the persona's (#327)"
+            ),
             Invalid::FinalNotAnObject => {
                 "final is an object with a body and an optional format".to_owned()
             }
@@ -754,6 +818,12 @@ pub struct Approval {
     /// alone: the disclosure is appended after this comparison, so it can
     /// neither make an untouched reply look edited nor hide an edit.
     pub edited: bool,
+    /// Who wrote what is going out (#327): the persona, corrections
+    /// included, or the owner in place of the draft. What the disclosure
+    /// follows, and a fact of the trail — "how often do I correct my
+    /// assistant?" and "how often do I write it myself?" are two questions,
+    /// and `edited` alone answered neither.
+    pub written_by: WrittenBy,
     /// The sentence appended after the body, when the switch is on and the
     /// suggestion carries one (ticket #121). `None` means neither the line
     /// nor the `data.disclosure` member is on the event.
@@ -823,6 +893,7 @@ impl Approval {
                     "format": self.content.format.as_str(),
                 },
                 "edited": self.edited,
+                "written_by": self.written_by.as_str(),
                 "target": self.trigger.target.json(),
             }
         });
@@ -1435,6 +1506,22 @@ impl Approvals {
             .edited
             .clone()
             .unwrap_or_else(|| suggestion.suggestion.clone());
+        // Who wrote what is going out (#327). The gesture says it; a text
+        // identical to the draft is the draft, whatever the gesture said,
+        // because the one thing a claim of authorship must not be is a way
+        // to send the persona's own words undisclosed.
+        let written_by = match request.written_by {
+            WrittenBy::Owner if content != suggestion.suggestion => WrittenBy::Owner,
+            WrittenBy::Owner => {
+                info!(
+                    suggestion = %suggestion.event_id,
+                    "this approval claims the owner's authorship for the persona's own text: \
+                     the reply is the draft, and it is disclosed as one"
+                );
+                WrittenBy::Persona
+            }
+            WrittenBy::Persona => WrittenBy::Persona,
+        };
         // The body alone, before the disclosure is appended: an untouched
         // reply is not an edit, and the sentence is not in the field the
         // user edits (ADR 0031).
@@ -1449,7 +1536,17 @@ impl Approvals {
                 "the disclosure switch could not be read: {error:#}"
             ))
         })?;
-        let disclosure = if switch.enabled {
+        // ADR 0019, in its own words: *"A message the user wrote themselves
+        // carries nothing: the disclosure states a fact about how **this**
+        // message was produced, and attaching it to everything would make
+        // it meaningless."* Until #327 the Gateway attached it whenever the
+        // switch was on, and a reply the owner had written in place of the
+        // draft went out saying a model had written it. A correction keeps
+        // the sentence — the words are still the persona's, improved — and
+        // that asymmetry is the decision, not an oversight: the alternative
+        // makes the disclosure removable by typing a character, which is
+        // exactly what the switch exists to do openly instead.
+        let disclosure = if switch.enabled && written_by == WrittenBy::Persona {
             suggestion.disclosure.clone()
         } else {
             None
@@ -1465,7 +1562,7 @@ impl Approvals {
                 )));
             }
         }
-        if switch.enabled && disclosure.is_none() {
+        if switch.enabled && disclosure.is_none() && written_by == WrittenBy::Persona {
             // Not a refusal: the contract allows a suggestion without the
             // member, and a persona that set none is one that predates
             // #121 or is not the first-party SDK. But a reply going out
@@ -1483,6 +1580,7 @@ impl Approvals {
             approved_by: self.owner.clone(),
             content,
             edited,
+            written_by,
             disclosure,
         };
         let event_id = approval.event_id();
@@ -1531,6 +1629,7 @@ impl Approvals {
             approval.trigger.network,
             &approval.trigger.contact,
             approval.edited,
+            approval.written_by.as_str(),
             &now,
         ) {
             warn!(%error, "an approval could not be recorded; nothing was published");
@@ -2135,6 +2234,7 @@ mod tests {
             approved_by: "@michel:example.com".to_owned(),
             content: suggestion().suggestion,
             edited: false,
+            written_by: WrittenBy::Persona,
             disclosure: None,
         };
         let mut hasher = Sha256::new();
@@ -2210,6 +2310,74 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// #327: the gesture says who wrote the text, and the envelope carries
+    /// it — beside `edited`, which answers a different question.
+    #[test]
+    fn a_request_says_who_wrote_the_text_and_says_nothing_by_saying_persona() {
+        let request = |final_member: Value| {
+            Request::parse(&json!({
+                "suggestion_event_id": "a".repeat(64),
+                "final": final_member
+            }))
+        };
+        assert_eq!(
+            request(json!({ "body": "Merci !" })).unwrap().written_by,
+            WrittenBy::Persona,
+            "a client that says nothing sends the persona's text: the reading that keeps the \
+             sentence, never the one that drops it"
+        );
+        assert_eq!(
+            request(json!({ "body": "Merci !", "written_by": "owner" }))
+                .unwrap()
+                .written_by,
+            WrittenBy::Owner
+        );
+        assert_eq!(
+            Request::parse(&json!({ "suggestion_event_id": "a".repeat(64) }))
+                .unwrap()
+                .written_by,
+            WrittenBy::Persona,
+            "no final at all is the persona's text by definition"
+        );
+        // A claim about who wrote a text cannot exist where there is no
+        // text, which is why it lives inside `final`.
+        match Request::parse(&json!({
+            "suggestion_event_id": "a".repeat(64),
+            "written_by": "owner"
+        })) {
+            Err(Invalid::UnknownMember(member)) => assert_eq!(member, "written_by"),
+            other => panic!("{other:?}"),
+        }
+        match request(json!({ "body": "Merci !", "written_by": "somebody" })) {
+            Err(Invalid::UnknownWrittenBy(value)) => assert_eq!(value, "somebody"),
+            other => panic!("{other:?}"),
+        }
+        let envelope = Approval {
+            suggestion: suggestion(),
+            trigger: trigger(),
+            approved_by: "@michel:example.com".to_owned(),
+            content: Content {
+                body: "Bonjour, je regarde ça cette semaine.".to_owned(),
+                format: Format::Plain,
+            },
+            edited: true,
+            written_by: WrittenBy::Owner,
+            // The owner's own words carry nothing (ADR 0019), which is why
+            // the composer sets no sentence for them in the first place.
+            disclosure: None,
+        }
+        .envelope("2026-09-23T10:04:37.000Z");
+        assert_eq!(envelope["data"]["written_by"], json!("owner"));
+        assert_eq!(envelope["data"]["edited"], json!(true));
+        assert!(
+            !envelope["data"]["final"]["body"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("assistant"),
+            "a reply the owner wrote says nothing about an assistant: {envelope}"
+        );
+    }
+
     #[test]
     fn the_envelope_is_shaped_as_the_contract_describes() {
         let approval = Approval {
@@ -2221,6 +2389,7 @@ mod tests {
                 format: Format::Plain,
             },
             edited: true,
+            written_by: WrittenBy::Persona,
             disclosure: Some("Rédigé avec mon assistant IA.".to_owned()),
         };
         let event = approval.envelope("2026-09-17T10:04:37.000Z");
@@ -2268,6 +2437,7 @@ mod tests {
             approved_by: "@michel:example.com".to_owned(),
             content: suggestion().suggestion,
             edited: false,
+            written_by: WrittenBy::Persona,
             disclosure: None,
         };
         let event = approval.envelope("2026-09-17T10:04:37.000Z");
@@ -2388,6 +2558,7 @@ mod tests {
                 format: Format::Plain,
             },
             edited: false,
+            written_by: WrittenBy::Persona,
             // The switch is not what this test is about; a mail reply
             // carries the disclosure exactly as a room reply does (#121).
             disclosure: None,

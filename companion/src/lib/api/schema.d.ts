@@ -1874,6 +1874,14 @@ export interface components {
             stream_sequence?: number | null;
             /** @description The suggestion that was approved. */
             suggestion_event_id: string;
+            /**
+             * @description Whose words went out (#327): the persona's draft, corrections
+             *     included, or the reply the owner wrote in its place. What the
+             *     disclosure followed. Rows recorded before this member existed
+             *     read `persona`, which is what they were.
+             * @enum {string}
+             */
+            written_by: "persona" | "owner";
         };
         /**
          * @description One approval. A closed object with one required member, and that
@@ -1892,7 +1900,8 @@ export interface components {
             /**
              * @description The edited content, when the user changed the suggestion before
              *     approving. Absent means "send what the persona wrote"; the
-             *     published event's `edited` flag says which happened.
+             *     published event's `edited` flag says which happened, and its
+             *     `written_by` says whose words they were (#327).
              */
             final?: {
                 /**
@@ -1911,6 +1920,28 @@ export interface components {
                  * @enum {string}
                  */
                 format: "text/plain" | "text/markdown" | "text/html";
+                /**
+                 * @description Who wrote this text (#327). `persona` — the default, and
+                 *     what a client that says nothing means — is the draft, the
+                 *     user's corrections to it included. `owner` is the reply the
+                 *     user wrote in its place, having thrown the draft away.
+                 *
+                 *     It is **what the disclosure follows**. ADR 0019 says that a
+                 *     message the user wrote themselves carries nothing, so an
+                 *     `owner` reply goes out with no sentence appended, whatever
+                 *     the switch says; a `persona` one carries it while the switch
+                 *     is on. The distinction is declared by the gesture and never
+                 *     measured on the text: a body that differs from the draft
+                 *     says that something changed, not whether a word was
+                 *     corrected or the draft was replaced.
+                 *
+                 *     A client that claims `owner` for a body identical to the
+                 *     draft is answered as `persona`: a claim of authorship is not
+                 *     a way to send the persona's own words undisclosed.
+                 * @default persona
+                 * @enum {string}
+                 */
+                written_by: "persona" | "owner";
             };
             /**
              * @description The CloudEvents id of the `persona.suggest.produced` event being

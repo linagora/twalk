@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 11] = [
+pub const MIGRATIONS: [&str; 12] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -713,6 +713,15 @@ pub const MIGRATIONS: [&str; 11] = [
     );
     CREATE INDEX hermes_read_connection ON hermes_read (connection, sequence);
     "#,
+    // v12 — whose words went out (issue #327). `edited` says a body
+    // differed from the draft; it never said whether the owner corrected a
+    // word or threw the draft away and wrote their own reply, and those are
+    // the two cases ADR 0019 treats differently — the second carries no
+    // disclosure. Rows written before this one are the persona's, which is
+    // what they were: until #327 nothing else could be sent.
+    r#"
+    ALTER TABLE approval ADD COLUMN written_by TEXT NOT NULL DEFAULT 'persona';
+    "#,
 ];
 
 /// One conversation's move, as the register decided it (issue #255).
@@ -834,6 +843,11 @@ pub struct RecordedApproval {
     pub network: Network,
     pub contact: String,
     pub edited: bool,
+    /// Whose words went out (#327): `persona` — the draft, corrections
+    /// included — or `owner`, the reply written in its place. What the
+    /// disclosure followed, and the half of the trail `edited` could not
+    /// carry.
+    pub written_by: String,
     pub approved_at: String,
     /// `None` until the bus acknowledged the publication. A recorded
     /// approval that is not published is a crash between the two, not a
@@ -1932,14 +1946,15 @@ impl Store {
         network: Network,
         contact: &str,
         edited: bool,
+        written_by: &str,
         approved_at: &str,
     ) -> Result<()> {
         self.connection()
             .execute(
                 "INSERT INTO approval \
                  (event_id, suggestion_event_id, approved_by, persona_id, network, contact, \
-                  edited, approved_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                  edited, written_by, approved_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (event_id) DO NOTHING",
                 rusqlite::params![
                     event_id,
@@ -1949,6 +1964,7 @@ impl Store {
                     network.as_str(),
                     contact,
                     i64::from(edited),
+                    written_by,
                     approved_at,
                 ],
             )
@@ -1991,7 +2007,8 @@ impl Store {
         let mut statement = connection
             .prepare(
                 "SELECT event_id, suggestion_event_id, approved_by, persona_id, network, \
-                        contact, edited, approved_at, published_at, stream_sequence \
+                        contact, edited, written_by, approved_at, published_at, \
+                        stream_sequence \
                  FROM approval WHERE suggestion_event_id = ? ORDER BY sequence LIMIT 1",
             )
             .context("failed to prepare the approval query")?;
@@ -2006,8 +2023,9 @@ impl Store {
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
                 ))
             })
             .optional()
@@ -2020,6 +2038,7 @@ impl Store {
             network,
             contact,
             edited,
+            written_by,
             approved_at,
             published_at,
             stream_sequence,
@@ -2036,6 +2055,7 @@ impl Store {
                 .with_context(|| format!("the store holds the unknown network {network:?}"))?,
             contact,
             edited: edited != 0,
+            written_by,
             approved_at,
             published_at,
             stream_sequence: stream_sequence.map(|sequence| sequence as u64),
@@ -3768,6 +3788,11 @@ mod tests {
                 "approved_at",
                 "published_at",
                 "stream_sequence",
+                // #327: whose words went out. A boolean's worth of fact
+                // about authorship, added by a migration and therefore
+                // last — never the text itself, which is the rule this
+                // test exists for.
+                "written_by",
             ],
             "an approval is an id, an owner, a boolean and a position — never the text that \
              was approved"
@@ -3788,6 +3813,7 @@ mod tests {
                 Network::Whatsapp,
                 "@whatsapp_336:example.com",
                 true,
+                "persona",
                 "2026-09-17T10:04:37.000Z",
             )
             .unwrap();
@@ -3815,6 +3841,7 @@ mod tests {
                 Network::Whatsapp,
                 "@whatsapp_336:example.com",
                 false,
+                "persona",
                 "2026-09-17T11:00:00.000Z",
             )
             .unwrap();

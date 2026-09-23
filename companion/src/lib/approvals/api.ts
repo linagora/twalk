@@ -61,8 +61,9 @@ export async function loadSuggestions(): Promise<Listed> {
 /**
  * Approves one suggestion, optionally with the text the user edited.
  *
- * `final` absent means "send what the persona wrote", and the published
- * event's `edited` flag says which happened — so the audit trail answers "how
+ * `final` absent means "send what the persona wrote"; the published event's
+ * `edited` flag says which happened and `written_by` says whose words they
+ * were (#327) — so the audit trail answers "how
  * often do I correct my assistant?" without keeping a word of what was said.
  */
 /**
@@ -90,12 +91,30 @@ export async function answeredMessage(id: string): Promise<Answered> {
 	return { ok: false, problem: explain(troubleOf(answer), codeOf(answer.error)) };
 }
 
-export async function approve(id: string, edited?: string): Promise<Approved> {
+export async function approve(
+	id: string,
+	edited?: string,
+	writtenBy: 'persona' | 'owner' = 'persona'
+): Promise<Approved> {
 	const answer = await gateway
 		.POST('/api/approvals', {
 			body: {
 				suggestion_event_id: id,
-				...(edited === undefined ? {} : { final: { body: edited, format: 'text/plain' as const } })
+				...(edited === undefined
+					? {}
+					: {
+							final: {
+								body: edited,
+								format: 'text/plain' as const,
+								// #327: who wrote this text, declared by the gesture that
+								// produced it — correcting the draft leaves it the
+								// persona's, writing one's own reply does not. It is what
+								// decides whether the disclosure is appended, so the
+								// screen states it rather than letting the Gateway guess
+								// from a body that merely differs.
+								written_by: writtenBy
+							}
+						})
 			}
 		})
 		.catch(() => null);

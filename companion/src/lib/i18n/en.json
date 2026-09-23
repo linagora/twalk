@@ -776,6 +776,9 @@
 	"approvals.editing.hint": "Nothing is sent by typing here, and no key sends it. Press “Approve and send” when the text says what you mean.",
 	"approvals.editing.save": "Approve and send this text",
 	"approvals.editing.cancel": "Keep what was proposed",
+	"approvals.writeOwn": "Write my own reply",
+	"approvals.writeOwn.label": "Your reply, in place of the one proposed",
+	"approvals.writeOwn.undisclosed": "You are writing this message: it goes out as it is, without the assistant's sentence.",
 	"approvals.editing.empty": "An empty reply would send an empty message. Write something, or keep what was proposed.",
 
 	"approvals.disclosure.label": "Added after the reply, on a line of its own — not editable here:",

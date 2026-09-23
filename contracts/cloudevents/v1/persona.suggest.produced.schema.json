@@ -81,36 +81,23 @@
     },
     "consent": {
       "type": "string",
-      "enum": [
-        "granted",
-        "pending",
-        "revoked"
-      ],
+      "enum": ["granted", "pending", "revoked"],
       "description": "Twalk extension. Consent state of the trigger event's sender, copied from the trigger."
     },
     "data": {
       "type": "object",
-      "required": [
-        "persona_id",
-        "trigger",
-        "suggestion"
-      ],
+      "required": ["persona_id", "trigger", "suggestion"],
       "additionalProperties": false,
       "properties": {
         "persona_id": {
           "type": "string",
           "pattern": "^[a-z0-9_-]+$",
           "description": "Identifier of the persona that produced the suggestion.",
-          "examples": [
-            "assistant"
-          ]
+          "examples": ["assistant"]
         },
         "trigger": {
           "type": "object",
-          "required": [
-            "event_id",
-            "event_type"
-          ],
+          "required": ["event_id", "event_type"],
           "additionalProperties": false,
           "properties": {
             "event_id": {
@@ -126,12 +113,29 @@
           },
           "description": "Structured reference to the event the suggestion replies to."
         },
+        "context": {
+          "type": "object",
+          "required": ["summary"],
+          "additionalProperties": false,
+          "properties": {
+            "contact": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "description": "Optional. The contact's display name as the trigger carried it, so an approval surface can say who is being answered without anyone reopening the message (#160's decision, #334)."
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 280,
+              "description": "What the contact asked, in the persona's own words — never a quotation of their message. Written by the only component allowed to read that message, at the moment it reads it, so that no component downstream has to reopen an inbound event to draw an approval screen (#110, ADR 0012). It is content derived from a contact's message and is governed as such: a surface shows it only while the label the trigger carried is granted. The caps and the prohibitions the SDK enforces — no address, no attachment name, no quotation — are what keeps a model's prose from becoming a second excerpt."
+            }
+          },
+          "description": "Optional. Who this reply answers and what they asked, written by the persona at publication time (#334, resolving #160). Never the contact's own words."
+        },
         "suggestion": {
           "type": "object",
-          "required": [
-            "body",
-            "format"
-          ],
+          "required": ["body", "format"],
           "additionalProperties": false,
           "properties": {
             "body": {
@@ -141,11 +145,7 @@
             },
             "format": {
               "type": "string",
-              "enum": [
-                "text/plain",
-                "text/markdown",
-                "text/html"
-              ],
+              "enum": ["text/plain", "text/markdown", "text/html"],
               "description": "Content type of the body field. text/plain is the default and safest."
             }
           },
@@ -177,28 +177,6 @@
           "minLength": 1,
           "maxLength": 200,
           "description": "Optional. The sentence disclosing that this reply was drafted with an AI assistant, in the language the persona wrote in (ADR 0019), selected from contracts/disclosure/v1/sentences.json by the only component that knows that language. Never part of the suggestion body itself: the Companion Gateway appends it, at approval, to the body a human can otherwise edit freely (ADR 0031). Its addition to this v1 schema, closed with additionalProperties: false, is a deliberate exception to the new-suffix rule this schema's own type field states, recorded and accepted in ADR 0031."
-        },
-        "context": {
-          "type": "object",
-          "required": [
-            "summary"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "contact": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 120,
-              "description": "Optional. The contact's display name as the trigger carried it, so an approval surface can say who is being answered without anyone reopening the message (#160's decision, #334)."
-            },
-            "summary": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 280,
-              "description": "What the contact asked, in the persona's own words — never a quotation of their message. Written by the only component allowed to read that message, at the moment it reads it, so that no component downstream has to reopen an inbound event to draw an approval screen (#110, ADR 0012). It is content derived from a contact's message and is governed as such: a surface shows it only while the label the trigger carried is granted. The caps and the prohibitions the SDK enforces — no address, no attachment name, no quotation — are what keeps a model's prose from becoming a second excerpt."
-            }
-          },
-          "description": "Optional. Who this reply answers and what they asked, written by the persona at publication time (#334, resolving #160). Never the contact's own words."
         }
       }
     }

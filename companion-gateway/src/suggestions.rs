@@ -972,6 +972,7 @@ mod tests {
             network: Network::Whatsapp,
             contact: "@whatsapp_33612345678:example.com".to_owned(),
             edited: false,
+            written_by: "persona".to_owned(),
             approved_at: "2026-09-17T10:04:37.000Z".to_owned(),
             published_at: Some("2026-09-17T10:04:37.100Z".to_owned()),
             stream_sequence: Some(4242),
