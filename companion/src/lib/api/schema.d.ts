@@ -4336,30 +4336,10 @@ export interface components {
             };
         };
         /**
-         * @description - `sign_in_not_configured` — this deployment has no owner
-         *       (`GATEWAY_OWNER` is unset), so its whole API is closed. This is
-         *       what the guard answers.
-         *     - `consent_not_configured` — `GATEWAY_NATS_URL` is unset, so there
-         *       is no consent store, no disclosure journal in it, and no approval
-         *       path for the switch to govern. The consent routes' own code, so a
-         *       client learns one fact under one word.
-         */
-        DisclosureNotConfigured: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": components["schemas"]["Error"] & {
-                    /** @enum {unknown} */
-                    error?: "sign_in_not_configured" | "consent_not_configured";
-                };
-            };
-        };
-        /**
          * @description `store_unavailable` — the disclosure journal could not be read, or
          *     the decision could not be recorded; nothing was changed.
          */
-        DisclosureStoreUnavailable: {
+        DisclosureJournalUnavailable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -4487,6 +4467,30 @@ export interface components {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
                     error?: "suggestions_not_configured";
+                };
+            };
+        };
+        /**
+         * @description What either of the owner's recorded switches answers when this
+         *     deployment cannot hold one — the disclosure (#121) and the calendar
+         *     location (#354), whose journals live in the same store.
+         *
+         *     - `sign_in_not_configured` — this deployment has no owner
+         *       (`GATEWAY_OWNER` is unset), so its whole API is closed. This is
+         *       what the guard answers.
+         *     - `consent_not_configured` — `GATEWAY_NATS_URL` is unset, so there
+         *       is no consent store and no journal in it to record a decision.
+         *       The consent routes' own code, so a client learns one fact under
+         *       one word.
+         */
+        SwitchNotConfigured: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "sign_in_not_configured" | "consent_not_configured";
                 };
             };
         };
@@ -6925,7 +6929,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             500: components["responses"]["CalendarLocationStoreUnavailable"];
-            503: components["responses"]["DisclosureNotConfigured"];
+            503: components["responses"]["SwitchNotConfigured"];
         };
     };
     putCalendarLocationState: {
@@ -6969,7 +6973,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthenticated"];
             500: components["responses"]["CalendarLocationStoreUnavailable"];
-            503: components["responses"]["DisclosureNotConfigured"];
+            503: components["responses"]["SwitchNotConfigured"];
         };
     };
     getCollectionSettings: {
@@ -7047,8 +7051,8 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthenticated"];
-            500: components["responses"]["DisclosureStoreUnavailable"];
-            503: components["responses"]["DisclosureNotConfigured"];
+            500: components["responses"]["DisclosureJournalUnavailable"];
+            503: components["responses"]["SwitchNotConfigured"];
         };
     };
     putDisclosureState: {
@@ -7091,8 +7095,8 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthenticated"];
-            500: components["responses"]["DisclosureStoreUnavailable"];
-            503: components["responses"]["DisclosureNotConfigured"];
+            500: components["responses"]["DisclosureJournalUnavailable"];
+            503: components["responses"]["SwitchNotConfigured"];
         };
     };
     getLanguagePreference: {
