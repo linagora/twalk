@@ -126,6 +126,28 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// An error and what caused it, to the bottom.
+///
+/// `reqwest`'s own `Display` says `error sending request for url (…)` and
+/// stops: whether the connection was reset, the name did not resolve, the
+/// TLS handshake failed or the request timed out is in the **source
+/// chain**, which is exactly the part an operator needs. Dropping it
+/// turned a live diagnosis into guesswork on 2026-09-24, and the rule
+/// this project keeps arriving at is the same one: say what was observed.
+pub fn because(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut said = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let sentence = cause.to_string();
+        if !said.contains(&sentence) {
+            said.push_str(": ");
+            said.push_str(&sentence);
+        }
+        source = cause.source();
+    }
+    said
+}
+
 /// The HTTP client both services are asked through: one timeout, rustls.
 pub fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
@@ -171,7 +193,7 @@ pub async fn send(
             .send()
             .await
             .map_err(|error| SideError::Unreachable {
-                detail: format!("{service} did not answer: {error}"),
+                detail: format!("{service} did not answer: {}", because(&error)),
             })?;
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
