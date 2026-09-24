@@ -1,6 +1,6 @@
 {
   "specversion": "1.0",
-  "id": "3e99c00185819b15ebb4d332828ebebdf243029911a63543e761ff207c529f7f",
+  "id": "1f3c5d7e9a0b2c4d6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5",
   "source": "caldav://calendar.example.com/dav/calendars/64f1c0a2e9b1d3f4a5b6c7d8/64f1c0a2e9b1d3f4a5b6c7d8/",
   "type": "fr.linagora.twalk.calendar.event.created.v1",
   "time": "2026-10-01T08:00:12Z",
@@ -34,8 +34,14 @@
         "name": "Alice Martin",
         "role": "required",
         "partstat": "accepted"
+      },
+      {
+        "identity": "mailto:bob@example.org",
+        "name": null,
+        "role": "optional",
+        "partstat": "needs-action"
       }
     ],
-    "participants_withheld": 1
+    "participants_withheld": 0
   }
 }

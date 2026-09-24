@@ -53,6 +53,8 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use crate::switch::{Invalid, Meaning, State, Update};
+
 /// The contract's own table: `contracts/disclosure/v1/sentences.json`, one
 /// sentence per language tag, verbatim.
 pub const SENTENCES_JSON: &str = include_str!("../../contracts/disclosure/v1/sentences.json");
@@ -64,7 +66,7 @@ pub const MAX_CHARS: usize = 200;
 
 /// The longest a `reason` on a switch decision may be — the consent
 /// journal's own cap on the same member.
-pub const MAX_REASON_CHARS: usize = 1024;
+pub use crate::switch::MAX_REASON_CHARS;
 
 fn sentences() -> &'static BTreeMap<String, String> {
     static SENTENCES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
@@ -118,114 +120,22 @@ pub fn append(body: &str, sentence: &str) -> String {
     format!("{body}\n{sentence}")
 }
 
-/// The switch as the journal answers it: the last decision, or the default.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DisclosureState {
-    pub enabled: bool,
-    /// When the last decision was taken, RFC 3339; `None` when none ever
-    /// was, which is the default and says "on since the deployment began".
-    pub since: Option<String>,
-    /// Who took it: the deployment's owner, as a consent decision's `actor`.
-    pub actor: Option<String>,
-    pub reason: Option<String>,
-}
+/// The state a store with no decision in it holds: on, and nobody decided.
+/// The shape and the parsing are every switch's ([`crate::switch`]); what
+/// is this module's is the **default**: ADR 0031 ships the sentence on, so
+/// a deployment that never decided discloses.
+pub const DEFAULT: State = State::shipped_as(true);
 
-impl DisclosureState {
-    /// The state a store with no decision in it holds: on, and nobody
-    /// decided.
-    pub const DEFAULT: Self = Self {
-        enabled: true,
-        since: None,
-        actor: None,
-        reason: None,
-    };
+/// What `enabled` means here, for the sentence a refusal gives back.
+const MEANING: Meaning = Meaning {
+    decision: "a disclosure decision",
+    enabled: "true appends the disclosure to every approved reply, false stops it for every \
+              reply until it is turned on again",
+};
 
-    /// The journal's own vocabulary for a state: what `new_state` holds.
-    /// The one place the two words are spelled, so the writer and the reader
-    /// in [`crate::store`] cannot drift from each other.
-    pub fn word(enabled: bool) -> &'static str {
-        if enabled {
-            "on"
-        } else {
-            "off"
-        }
-    }
-
-    /// The reverse: a `new_state` read back, or `None` for a word the
-    /// journal never writes.
-    pub fn enabled_from(word: &str) -> Option<bool> {
-        match word {
-            "on" => Some(true),
-            "off" => Some(false),
-            _ => None,
-        }
-    }
-}
-
-/// One decision as a client states it: `{"enabled": bool, "reason"?: string}`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DisclosureUpdate {
-    pub enabled: bool,
-    pub reason: Option<String>,
-}
-
-/// What is wrong with a switch request. One code, `malformed_request`, and a
-/// sentence naming the member, because every one of these is something the
-/// caller can fix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invalid(pub String);
-
-impl Invalid {
-    pub fn code(&self) -> &'static str {
-        "malformed_request"
-    }
-
-    pub fn message(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Parses a switch request. A closed object: `enabled` is required and a
-/// boolean, `reason` is optional and at most [`MAX_REASON_CHARS`], and any
-/// other member is refused rather than ignored — a client that sent
-/// `{"disclosure": false}` should learn that nothing happened.
-pub fn parse_update(body: &Value) -> Result<DisclosureUpdate, Invalid> {
-    let object = body.as_object().ok_or_else(|| {
-        Invalid("the request body is not a JSON object: send {\"enabled\": true|false}".to_owned())
-    })?;
-    for member in object.keys() {
-        if !matches!(member.as_str(), "enabled" | "reason") {
-            return Err(Invalid(format!(
-                "the request body has the unknown member {member:?}: a disclosure decision \
-                 carries enabled and an optional reason"
-            )));
-        }
-    }
-    let enabled = match object.get("enabled") {
-        Some(Value::Bool(enabled)) => *enabled,
-        Some(_) => {
-            return Err(Invalid(
-                "enabled is a boolean: true appends the disclosure to every approved reply, \
-                 false stops it for every reply until it is turned on again"
-                    .to_owned(),
-            ))
-        }
-        None => return Err(Invalid("enabled is required".to_owned())),
-    };
-    let reason = match object.get("reason") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(reason)) => {
-            let count = reason.chars().count();
-            if count > MAX_REASON_CHARS {
-                return Err(Invalid(format!(
-                    "reason is {count} characters, and the limit is {MAX_REASON_CHARS}"
-                )));
-            }
-            Some(reason.clone())
-        }
-        Some(_) => return Err(Invalid("reason is a string when it is present".to_owned())),
-    };
-    Ok(DisclosureUpdate { enabled, reason })
+/// Parses a disclosure decision: see [`crate::switch::parse_update`].
+pub fn parse_update(body: &Value) -> Result<Update, Invalid> {
+    crate::switch::parse_update(body, MEANING)
 }
 
 #[cfg(test)]
@@ -347,14 +257,14 @@ mod tests {
     fn a_decision_is_a_boolean_and_an_optional_reason() {
         assert_eq!(
             parse_update(&json!({ "enabled": false, "reason": "a test" })),
-            Ok(DisclosureUpdate {
+            Ok(Update {
                 enabled: false,
                 reason: Some("a test".to_owned())
             })
         );
         assert_eq!(
             parse_update(&json!({ "enabled": true, "reason": null })),
-            Ok(DisclosureUpdate {
+            Ok(Update {
                 enabled: true,
                 reason: None
             })
@@ -385,20 +295,20 @@ mod tests {
 
     #[test]
     fn the_default_is_on_and_nobody_decided() {
-        let state = DisclosureState::DEFAULT;
+        let state = crate::disclosure::DEFAULT;
         assert_eq!(
             state,
-            DisclosureState {
+            State {
                 enabled: true,
                 since: None,
                 actor: None,
                 reason: None
             }
         );
-        assert_eq!(DisclosureState::word(state.enabled), "on");
-        assert_eq!(DisclosureState::word(false), "off");
-        assert_eq!(DisclosureState::enabled_from("on"), Some(true));
-        assert_eq!(DisclosureState::enabled_from("off"), Some(false));
-        assert_eq!(DisclosureState::enabled_from("ON"), None);
+        assert_eq!(State::word(state.enabled), "on");
+        assert_eq!(State::word(false), "off");
+        assert_eq!(State::enabled_from("on"), Some(true));
+        assert_eq!(State::enabled_from("off"), Some(false));
+        assert_eq!(State::enabled_from("ON"), None);
     }
 }

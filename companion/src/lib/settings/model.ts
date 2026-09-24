@@ -78,6 +78,14 @@ export type Language = NonNullable<LanguagePreference['language']>;
 export type Probe = components['schemas']['ModelProbe'];
 export type DisclosureState = components['schemas']['DisclosureState'];
 
+/**
+ * The calendar-location switch as the Gateway answers it (#354). Its own
+ * type, not the disclosure's: the two documents are member-for-member alike
+ * and `CONTEXT.md` reserves *disclosure* for the line a persona's reply
+ * carries, so calling this one that would make the glossary say two things.
+ */
+export type CalendarLocationState = components['schemas']['CalendarLocationState'];
+
 /** The five languages, each named in itself — the Companion's own list, so the two cannot drift. */
 export const LANGUAGE_NAMES: Record<Language, string> = LOCALE_NAMES;
 
@@ -252,6 +260,50 @@ export function disclosureRecord(state: DisclosureState, locale: string): Disclo
 	return state.enabled
 		? { kind: 'on', key: 'settings.disclosure.record.onSince', values }
 		: { kind: 'off', key: 'settings.disclosure.record.off', values };
+}
+
+/** The calendar-location record line's three shapes (#354). */
+export type CalendarLocationRecord =
+	/** Off, and nobody ever decided: how a deployment ships. */
+	| { kind: 'quiet'; key: 'settings.calendarLocation.record.off'; values: Record<string, never> }
+	/** Off again, since a dated, attributed decision. */
+	| {
+			kind: 'quiet';
+			key: 'settings.calendarLocation.record.offSince';
+			values: { date: string; actor: string };
+	  }
+	/** On, since a dated, attributed decision. */
+	| {
+			kind: 'sending';
+			key: 'settings.calendarLocation.record.on';
+			values: { date: string; actor: string };
+	  };
+
+/**
+ * The one line the calendar-location card reads back (#354). The
+ * disclosure's shape with its emphasis reversed, and the reversal is the
+ * point: there, the noteworthy state is **off**, because a reply going out
+ * undisclosed is what ADR 0019 wants somebody to notice. Here it is **on**,
+ * because that is the direction in which something leaves the machine.
+ *
+ * Off with no date is how a deployment ships, said in its own words — "no
+ * decision was taken" is not "somebody turned it off", and dating a default
+ * would invent a decision nobody made.
+ */
+export function calendarLocationRecord(
+	state: CalendarLocationState,
+	locale: string
+): CalendarLocationRecord {
+	if (!state.enabled && (state.since === null || state.actor === null)) {
+		return { kind: 'quiet', key: 'settings.calendarLocation.record.off', values: {} };
+	}
+	const values = {
+		date: state.since === null ? '' : disclosureDate(state.since, locale),
+		actor: state.actor ?? ''
+	};
+	return state.enabled
+		? { kind: 'sending', key: 'settings.calendarLocation.record.on', values }
+		: { kind: 'quiet', key: 'settings.calendarLocation.record.offSince', values };
 }
 
 /**

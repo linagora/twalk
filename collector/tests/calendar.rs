@@ -16,7 +16,11 @@ use twalk_test_harness::{ensure_stack, validate_against_contract, Bus};
 
 const DESCRIPTION: &str = "Notes nobody decided to share";
 
-const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-weekly\r\nSUMMARY:Weekly sync\r\nDESCRIPTION:Notes nobody decided to share\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:michel@example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=Alice Martin;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+/// The LOCATION the fixture carries. Published only when the owner has
+/// opened the switch (#354), and never otherwise.
+const LOCATION: &str = "Salle B, 4e étage";
+
+const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-weekly\r\nSUMMARY:Weekly sync\r\nDESCRIPTION:Notes nobody decided to share\r\nLOCATION:Salle B\\, 4e étage\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:michel@example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=Alice Martin;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
 /// A standing meeting the calendar already held before the collector ever
 /// ran: the past, which is not published.
@@ -89,6 +93,11 @@ async fn what_the_calendar_held_is_not_published_and_create_change_remove_are_th
     assert_eq!(created["data"]["participants"].as_array().unwrap().len(), 3);
     assert_eq!(created["data"]["participants_withheld"], 0);
     assert!(!created.to_string().contains(DESCRIPTION), "{created}");
+    // #354: the switch ships off, so the place stays on this machine even
+    // though the collector read it. The member is there and is null — a
+    // consumer learns "not published", not "no such thing".
+    assert_eq!(created["data"]["location"], Value::Null, "{created}");
+    assert!(!created.to_string().contains(LOCATION), "{created}");
     assert_eq!(
         created["id"],
         sha256_hex(&format!("caldav:{collection}weekly.ics:{first_etag}"))
@@ -242,6 +251,29 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
         fields.contains(&json!("title")) && fields.contains(&json!("participants")),
         "{changed}"
     );
+
+    // #354: the owner opens the switch on the Gateway, and the next round
+    // reads it — without a restart, which is the whole point of refreshing
+    // it per round. The place then travels, and a place that moves is
+    // named as the field that moved.
+    run.sso.set_calendar_location(true);
+    let moved = renamed.replace("LOCATION:Salle B\\, 4e étage", "LOCATION:Salle A");
+    run.sso.put_event(&run.calendar, "weekly", &moved);
+    let changed = wait_for(&bus, &run, "changed", 2).await?;
+    let opened = changed.last().expect("a second change");
+    validate_against_contract(opened, "calendar.event.changed")?;
+    assert_eq!(opened["data"]["event"]["location"], "Salle A", "{opened}");
+    assert!(
+        opened["data"]["changed_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("location")),
+        "a location that appeared is a change with a name: {opened}"
+    );
+
+    // And the description is still nowhere, at either setting: the switch
+    // governs the location and nothing else (#351).
+    assert!(!opened.to_string().contains(DESCRIPTION), "{opened}");
 
     // Bob — withheld from the first publication — is in no log line and
     // in no stored byte; the description neither.

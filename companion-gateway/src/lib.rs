@@ -163,6 +163,7 @@ pub mod bridge;
 pub mod bridge_http;
 pub mod bridge_status;
 pub mod bridge_status_http;
+pub mod calendar_location;
 pub mod config;
 pub mod connection_status;
 pub mod connections;
@@ -195,6 +196,7 @@ pub mod static_files;
 pub mod store;
 pub mod suggestions;
 pub mod suggestions_http;
+pub mod switch;
 pub mod trace;
 
 /// The Gateway's version, as the health endpoint reports it: the package

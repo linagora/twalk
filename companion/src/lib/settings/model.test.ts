@@ -8,11 +8,13 @@ import { describe, expect, it } from 'vitest';
 import {
 	credentialState,
 	disclosureDate,
+	calendarLocationRecord,
 	disclosureRecord,
 	formOf,
 	PROBE_FAILURE_COPY,
 	REFUSAL_COPY,
 	requestOf,
+	type CalendarLocationState,
 	type DisclosureState,
 	type ModelConfiguration
 } from './model';
@@ -158,6 +160,7 @@ describe('the disclosure record (#121)', () => {
 		});
 	});
 
+
 	it('keeps "turned back on" apart from "never turned off"', () => {
 		const record = disclosureRecord({ ...off, enabled: true }, 'fr');
 		expect(record.kind).toBe('on');
@@ -268,5 +271,45 @@ describe('every refusal the Gateway describes has a sentence', () => {
 			'endpoint_refused',
 			'endpoint_not_compatible'
 		]);
+	});
+});
+
+describe('the calendar location record (#354)', () => {
+	/** The switch as a decision left it: allowed, dated, attributed. */
+	const allowed: CalendarLocationState = {
+		enabled: true,
+		since: '2026-09-20T08:05:00Z',
+		actor: '@owner:test.twalk',
+		reason: null
+	};
+
+	it('is the disclosure record with its emphasis reversed', () => {
+		// The same three shapes with the alarming state the other way round.
+		// Off with no date is how a deployment ships — "nobody decided" — and
+		// it is the *on* state the card marks, because that is the direction
+		// in which a place leaves the machine.
+		const shipped = calendarLocationRecord(
+			{ enabled: false, since: null, actor: null, reason: null },
+			'en'
+		);
+		expect(shipped).toEqual({
+			kind: 'quiet',
+			key: 'settings.calendarLocation.record.off',
+			values: {}
+		});
+
+		const sending = calendarLocationRecord(allowed, 'en');
+		expect(sending.kind).toBe('sending');
+		expect(sending.key).toBe('settings.calendarLocation.record.on');
+		expect(sending.values).toEqual({
+			date: disclosureDate('2026-09-20T08:05:00Z', 'en'),
+			actor: '@owner:test.twalk'
+		});
+
+		// Withheld *again* is dated and attributed, and still quiet: it is
+		// the state that sends nothing.
+		const withheld = calendarLocationRecord({ ...allowed, enabled: false }, 'en');
+		expect(withheld.kind).toBe('quiet');
+		expect(withheld.key).toBe('settings.calendarLocation.record.offSince');
 	});
 });

@@ -761,6 +761,29 @@ fn open_consent(
         }
         Err(error) => warn!(%error, "failed to read the disclosure journal"),
     }
+    // And where a meeting is (#354), said at startup for the same reason:
+    // a deployment that sends its locations to a model did decide to, and
+    // the log is where that decision stays visible.
+    match store.calendar_location_state() {
+        Ok(state) if state.enabled => {
+            metrics.set_calendar_location_enabled(true);
+            warn!(
+                since = state.since.as_deref().unwrap_or_default(),
+                actor = state.actor.as_deref().unwrap_or_default(),
+                "the calendar location is ON: calendar events carry where a meeting is, \
+                 including meetings a third party organised, by a decision recorded in the \
+                 calendar location journal. PUT /api/settings/calendar-location turns it off"
+            );
+        }
+        Ok(_) => {
+            metrics.set_calendar_location_enabled(false);
+            info!(
+                "the calendar location is off: no calendar event carries where a meeting is \
+                 (ADR 0012, ADR 0028)"
+            );
+        }
+        Err(error) => warn!(%error, "failed to read the calendar location journal"),
+    }
     let pending = store
         .unpublished_count()
         .context("failed to count the consent outbox")?;

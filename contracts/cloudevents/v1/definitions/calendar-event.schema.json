@@ -30,6 +30,11 @@
       "maxLength": 1024,
       "description": "The SUMMARY, as the owner wrote or accepted it. The owner's own words about their own time, published to their own infrastructure — except that the title of an invitation is the organizer's words: when the organizer is withheld (see `organizer`), the title is withheld with them and is empty here. Empty too when the event has none."
     },
+    "location": {
+      "type": ["string", "null"],
+      "maxLength": 1024,
+      "description": "Optional. Where the meeting is (the LOCATION), or null. Null unless the owner has decided their assistant may read it: the collector withholds every location until the deployment's calendar-location switch is on, which is how it ships (issue #354, issue #351). Null too when the event has none, and \u2014 for the reason `title` is \u2014 when the organizer is withheld, because the location of an invitation is the organizer's words about a place, not the owner's. A location is published as the calendar holds it and is never parsed, geocoded or completed: what a consumer receives is a string somebody typed. There is no member for the DESCRIPTION and none for an ATTACHMENT, and there will not be: a description is a free-text box written by whoever created the meeting, which on an invitation is a third party who decided nothing about this deployment (ADR 0012, ADR 0028). What an agent needs of them it asks for as facts (issue #355), never as text. Its addition to this v1 schema, closed with additionalProperties: false, is a deliberate exception to the new-suffix rule this schema's own type field states, recorded and accepted in ADR 0012's amendment of 2026-09-24 \u2014 the same exception ADR 0031 made for the reply's disclosure. Optional rather than required for that reason: an event published before #354 carries no such member, and absent means the producer predates the decision, where null means the decision was taken and the location withheld."
+    },
     "start": {
       "type": "string",
       "anyOf": [

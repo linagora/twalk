@@ -102,6 +102,10 @@ What a consent decision is scoped to — always a connection. It is half of what
 A component that turns one source into contract events. The Sensor is the Matrix collector — the role it always had, with one sense. A collector observes by **subscription and not by filtering**: it receives only what it subscribed to rather than receiving everything and discarding, which is as close to a structural property as a source without Matrix membership allows (ADR 0033).
 _Avoid_: calling one a bridge, which connects a network to Matrix rather than a source to the bus
 
+**Collection settings**:
+The owner's decisions about **what a collector may carry**, as distinct from what it may observe. Consent decides whose messages are read; these decide which fields of the owner's own data a published event carries — today one, whether a calendar event says where a meeting is (#354, ADR 0012's amendment). Answered to a collector on `GET /api/settings/collection` under the service token, as the state alone: who decided it and when are the owner's, and are on their own screen.
+_Avoid_: calling one a preference or a flag — each is a dated, attributed decision in an append-only journal, the disclosure's shape (ADR 0019)
+
 **Consent**:
 **The user's** decision about whether a contact's messages, or a whole network's, may be processed: `granted`, `pending`, or `revoked`. A decision is scoped to a **connection** and not to a network, since a person may reach the user through two of them (ADR 0033). A connection-level decision is the default there; a per-contact decision always overrides it. A person reached through two sources is **two subjects the user may declare linked**, never merged by inference — ADR 0018's rule about the owner's own identities, applied to a third party, where a wrong merge grants somebody else's consent. Personas must not process events whose consent is not `granted`. The Companion Gateway is the single writer of consent state; Messagr and Buzz only render it.
 

@@ -103,6 +103,11 @@ pub fn routes() -> Router<Gateway> {
             "/api/settings/disclosure",
             get(read_disclosure).put(write_disclosure),
         )
+        .route(
+            "/api/settings/calendar-location",
+            get(read_calendar_location).put(write_calendar_location),
+        )
+        .route("/api/settings/collection", get(collection_settings))
         .route("/api/settings/runtime", get(runtime_settings))
 }
 
@@ -486,20 +491,7 @@ async fn write_language(
 /// is the default state — `enabled: true` — and not a gap: the record
 /// answers "since when and who" for a decision, and there was none.
 async fn read_disclosure(State(gateway): State<Gateway>) -> Response {
-    let Some(consent) = gateway.consent() else {
-        return disclosure_not_configured();
-    };
-    match consent.store().disclosure_state() {
-        Ok(state) => Json(disclosure_json(&state)).into_response(),
-        Err(error) => {
-            error!(%error, "failed to read the disclosure journal");
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_unavailable",
-                "the disclosure journal could not be read",
-            )
-        }
-    }
+    read_switch(&gateway, Kind::Disclosure).await
 }
 
 /// `PUT /api/settings/disclosure` — `{"enabled": false, "reason": "…"}`.
@@ -512,10 +504,197 @@ async fn write_disclosure(
     Extension(device): Extension<Device>,
     body: String,
 ) -> Response {
-    let Some(consent) = gateway.consent() else {
-        return disclosure_not_configured();
+    write_switch(&gateway, &device, Kind::Disclosure, &body).await
+}
+
+/// `GET /api/settings/calendar-location` — whether a calendar event may
+/// carry where the meeting is (#354, #351).
+///
+/// The disclosure's shape, member for member, because it is the same kind
+/// of thing: one decision for the deployment, recorded with who and when.
+/// The default is the other way — `enabled: false`, and `since`, `actor`
+/// and `reason` `null`, which says "as it shipped" and not "somebody turned
+/// it off".
+async fn read_calendar_location(State(gateway): State<Gateway>) -> Response {
+    read_switch(&gateway, Kind::CalendarLocation).await
+}
+
+/// `PUT /api/settings/calendar-location` — `{"enabled": true, "reason": "…"}`.
+///
+/// Appends a row and answers the state it left behind, as the disclosure
+/// does. Opening it is the noisier direction here: what it lets leave the
+/// machine is a place, and on an invitation a place somebody else wrote.
+async fn write_calendar_location(
+    State(gateway): State<Gateway>,
+    Extension(device): Extension<Device>,
+    body: String,
+) -> Response {
+    write_switch(&gateway, &device, Kind::CalendarLocation, &body).await
+}
+
+/// `GET /api/settings/collection` — what a service that **collects** the
+/// owner's own data needs to know before it publishes (#354).
+///
+/// The collector's seam, and it takes the service token, as the runtime
+/// settings and the consent snapshot do. A route of its own rather than a
+/// member on `/api/settings/runtime`: that document carries the model's API
+/// key, and a collector has no business holding one. Answering the question
+/// it asks means handing it the answer and nothing else.
+///
+/// ```json
+/// { "calendar_location": { "enabled": false } }
+/// ```
+///
+/// Only what a decision *is*, never who decided it or when: that belongs to
+/// the owner's screen, and a collector reading it would be a collector
+/// holding a fact about the owner it has no use for.
+async fn collection_settings(State(gateway): State<Gateway>, headers: HeaderMap) -> Response {
+    let Some(service_token) = gateway.snapshots() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_token_not_configured",
+            "this Gateway serves no collection settings: set GATEWAY_SERVICE_TOKEN to the same \
+             value the collector is configured with",
+        );
     };
-    let body: Value = match serde_json::from_str(&body) {
+    if !service_token.authenticates(&headers) {
+        warn!("refused a collection settings read: the service token is missing or wrong");
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "the collection settings take this Gateway's service token as an \
+             Authorization: Bearer credential; a device token is not accepted here",
+        );
+    }
+    let Some(consent) = gateway.consent() else {
+        return switch_not_configured(Kind::CalendarLocation);
+    };
+    match consent.store().calendar_location_state() {
+        Ok(state) => Json(json!({
+            "calendar_location": { "enabled": state.enabled },
+        }))
+        .into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the calendar location journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the calendar location journal could not be read",
+            )
+        }
+    }
+}
+
+/// Which of the owner's two recorded switches a request is about (#121,
+/// #354). The routes differ in their journal, their parser, their gauge and
+/// the two sentences the log says either way; everything else — reading the
+/// store, stamping the actor, appending, answering — is one piece of code,
+/// because the decision is the same kind of act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Disclosure,
+    CalendarLocation,
+}
+
+impl Kind {
+    /// What a failure names the journal by.
+    fn journal(self) -> &'static str {
+        match self {
+            Self::Disclosure => "disclosure",
+            Self::CalendarLocation => "calendar location",
+        }
+    }
+
+    fn state(self, store: &crate::store::Store) -> anyhow::Result<crate::switch::State> {
+        match self {
+            Self::Disclosure => store.disclosure_state(),
+            Self::CalendarLocation => store.calendar_location_state(),
+        }
+    }
+
+    fn parse(self, body: &Value) -> Result<crate::switch::Update, crate::switch::Invalid> {
+        match self {
+            Self::Disclosure => crate::disclosure::parse_update(body),
+            Self::CalendarLocation => crate::calendar_location::parse_update(body),
+        }
+    }
+
+    fn record(
+        self,
+        store: &crate::store::Store,
+        update: &crate::switch::Update,
+        occurred_at: &str,
+        actor: &str,
+    ) -> anyhow::Result<crate::switch::State> {
+        let reason = update.reason.as_deref();
+        match self {
+            Self::Disclosure => {
+                store.record_disclosure_decision(update.enabled, occurred_at, actor, reason)
+            }
+            Self::CalendarLocation => {
+                store.record_calendar_location_decision(update.enabled, occurred_at, actor, reason)
+            }
+        }
+    }
+
+    fn observe(self, metrics: &crate::metrics::Metrics, enabled: bool) {
+        match self {
+            Self::Disclosure => metrics.set_disclosure_enabled(enabled),
+            Self::CalendarLocation => metrics.set_calendar_location_enabled(enabled),
+        }
+    }
+
+    /// The one line the log says, and whether it is the noteworthy
+    /// direction. They are opposite directions: a reply going out
+    /// undisclosed is what somebody should notice, and so is a location
+    /// starting to leave the machine.
+    fn said(self, enabled: bool) -> (bool, &'static str) {
+        match (self, enabled) {
+            (Self::Disclosure, true) => (
+                false,
+                "the disclosure is on: every approved reply carries the sentence ADR 0019 \
+                 requires, after the body, in the language the reply was written in",
+            ),
+            (Self::Disclosure, false) => (
+                true,
+                "the disclosure was turned OFF: approved replies go out without the sentence \
+                 ADR 0019 requires until it is turned on again. Recorded in the disclosure \
+                 journal with who decided and when",
+            ),
+            (Self::CalendarLocation, true) => (
+                true,
+                "the calendar location is ON: calendar events now carry where a meeting is, \
+                 including meetings a third party organised. Recorded in the calendar location \
+                 journal with who decided and when",
+            ),
+            (Self::CalendarLocation, false) => (
+                false,
+                "the calendar location is off: no calendar event carries where a meeting is",
+            ),
+        }
+    }
+}
+
+/// One switch, read.
+async fn read_switch(gateway: &Gateway, kind: Kind) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return switch_not_configured(kind);
+    };
+    match kind.state(consent.store()) {
+        Ok(state) => Json(switch_json(&state)).into_response(),
+        Err(error) => {
+            error!(%error, journal = kind.journal(), "failed to read a switch journal");
+            switch_store_unavailable(kind, "read")
+        }
+    }
+}
+
+/// One decision, appended, and the state it left behind.
+async fn write_switch(gateway: &Gateway, device: &Device, kind: Kind, body: &str) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return switch_not_configured(kind);
+    };
+    let body: Value = match serde_json::from_str(body) {
         Ok(body) => body,
         Err(error) => {
             return api_error(
@@ -525,13 +704,14 @@ async fn write_disclosure(
             )
         }
     };
-    let update = match crate::disclosure::parse_update(&body) {
+    let update = match kind.parse(&body) {
         Ok(update) => update,
         Err(invalid) => {
             debug!(
                 code = invalid.code(),
                 device = %device.id,
-                "refused a disclosure decision"
+                journal = kind.journal(),
+                "refused a switch decision"
             );
             return api_error(StatusCode::BAD_REQUEST, invalid.code(), invalid.message());
         }
@@ -540,44 +720,22 @@ async fn write_disclosure(
     // take this decision (ADR 0011), and never a name the body supplies.
     let actor = gateway.owner();
     let occurred_at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
-    let state = match consent.store().record_disclosure_decision(
-        update.enabled,
-        &occurred_at,
-        &actor,
-        update.reason.as_deref(),
-    ) {
+    let state = match kind.record(consent.store(), &update, &occurred_at, &actor) {
         Ok(state) => state,
         Err(error) => {
-            error!(%error, "failed to record the disclosure decision");
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "store_unavailable",
-                "the disclosure decision could not be recorded; nothing was changed",
-            );
+            error!(%error, journal = kind.journal(), "failed to record a switch decision");
+            return switch_store_unavailable(kind, "record");
         }
     };
-    gateway.metrics().set_disclosure_enabled(state.enabled);
-    if state.enabled {
-        info!(
-            actor = %actor,
-            device = %device.id,
-            "the disclosure is on: every approved reply carries the sentence ADR 0019 \
-             requires, after the body, in the language the reply was written in"
-        );
+    kind.observe(gateway.metrics(), state.enabled);
+    // `warn` for the direction somebody should notice, `info` for the other.
+    let (noteworthy, sentence) = kind.said(state.enabled);
+    if noteworthy {
+        warn!(actor = %actor, device = %device.id, reason = update.reason.is_some(), "{sentence}");
     } else {
-        // `warn`, not `info`: a reply going out undisclosed is a legitimate
-        // decision and a fact an operator reading the log should not have to
-        // look for.
-        warn!(
-            actor = %actor,
-            device = %device.id,
-            reason = update.reason.is_some(),
-            "the disclosure was turned OFF: approved replies go out without the sentence ADR \
-             0019 requires until it is turned on again. Recorded in the disclosure journal \
-             with who decided and when"
-        );
+        info!(actor = %actor, device = %device.id, "{sentence}");
     }
-    Json(disclosure_json(&state)).into_response()
+    Json(switch_json(&state)).into_response()
 }
 
 /// `GET /api/settings/runtime` — everything the Hermes runtime injects into
@@ -676,7 +834,10 @@ fn language_json(language: Option<Language>) -> Value {
 }
 
 /// The switch, as both routes answer it: `openapi.yaml`'s `DisclosureState`.
-fn disclosure_json(state: &crate::disclosure::DisclosureState) -> Value {
+/// A switch as both of them are answered: the state, and the decision that
+/// left it — `null` for all three when nobody decided, which is a fact and
+/// not a gap.
+fn switch_json(state: &crate::switch::State) -> Value {
     json!({
         "enabled": state.enabled,
         "since": state.since,
@@ -736,12 +897,32 @@ fn store_unavailable() -> Response {
 /// when the bus is configured — and with no bus there is no approval path
 /// for the switch to govern. The consent routes' own code, so a client
 /// learns one fact under one word.
-fn disclosure_not_configured() -> Response {
+/// A switch this deployment cannot hold, named by its journal (#121, #354).
+fn switch_not_configured(kind: Kind) -> Response {
     api_error(
         StatusCode::SERVICE_UNAVAILABLE,
         "consent_not_configured",
-        "this Gateway has no consent store, so it keeps no disclosure journal and approves \
-         nothing the switch could govern: set GATEWAY_NATS_URL (and GATEWAY_OWNER)",
+        &format!(
+            "this Gateway has no consent store, so it keeps no {} journal and nothing the \
+             switch could govern: set GATEWAY_NATS_URL (and GATEWAY_OWNER)",
+            kind.journal()
+        ),
+    )
+}
+
+/// A journal that could not be read, or a decision that could not be
+/// written. `what` is the verb, so the sentence says which half failed.
+fn switch_store_unavailable(kind: Kind, what: &str) -> Response {
+    let journal = kind.journal();
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "store_unavailable",
+        &match what {
+            "record" => {
+                format!("the {journal} decision could not be recorded; nothing was changed")
+            }
+            _ => format!("the {journal} journal could not be read"),
+        },
     )
 }
 
@@ -882,14 +1063,14 @@ mod tests {
 
     #[test]
     fn the_disclosure_document_says_on_with_nobody_deciding_and_off_with_who_and_when() {
-        use crate::disclosure::DisclosureState;
+        use crate::switch::State as SwitchState;
         assert_eq!(
-            disclosure_json(&DisclosureState::DEFAULT),
+            switch_json(&crate::disclosure::DEFAULT),
             json!({ "enabled": true, "since": null, "actor": null, "reason": null }),
             "the default is on, and the nulls say nobody decided rather than that nothing is known"
         );
         assert_eq!(
-            disclosure_json(&DisclosureState {
+            switch_json(&SwitchState {
                 enabled: false,
                 since: Some("2026-09-20T10:04:37.000Z".to_owned()),
                 actor: Some("@michel:example.com".to_owned()),

@@ -50,16 +50,19 @@
 	import { locale, setLocale, t, LOCALES, type Locale } from '$lib/i18n';
 	import {
 		forgetModel,
+		loadCalendarLocation,
 		loadDisclosure,
 		loadLanguage,
 		loadModel,
 		probeModel,
+		saveCalendarLocation,
 		saveDisclosure,
 		saveLanguage,
 		saveModel,
 		type Refused
 	} from '$lib/settings/api';
 	import {
+		calendarLocationRecord,
 		credentialState,
 		disclosureRecord,
 		formOf,
@@ -67,6 +70,7 @@
 		probeFailureCopy,
 		refusalCopy,
 		requestOf,
+		type CalendarLocationState,
 		type CredentialState,
 		type DisclosureState,
 		type FormProblem,
@@ -90,7 +94,9 @@
 	let form = $state<ModelForm>({ baseUrl: '', model: '', credential: '', params: '' });
 	let advanced = $state(false);
 	let formProblems = $state<FormProblem[]>([]);
-	let busy = $state<'save' | 'forget' | 'probe' | 'language' | 'disclosure' | null>(null);
+	let busy = $state<
+		'save' | 'forget' | 'probe' | 'language' | 'disclosure' | 'calendar-location' | null
+	>(null);
 	let outcome = $state<ModelOutcome | null>(null);
 
 	let language = $state<Language | null>(null);
@@ -103,10 +109,21 @@
 	let disclosureReason = $state('');
 	let disclosureOutcome = $state<'saved' | { refused: Refused } | null>(null);
 
+	// Where a meeting is (#354): the same three pieces of state as the
+	// disclosure's, because it is the same kind of decision — one switch,
+	// one note, one outcome — with the opposite default.
+	let calendarLocation = $state<CalendarLocationState | null>(null);
+	let calendarLocationProblem = $state<Refused | null>(null);
+	let calendarLocationReason = $state('');
+	let calendarLocationOutcome = $state<'saved' | { refused: Refused } | null>(null);
+
 	const credential = $derived<CredentialState | null>(
 		configuration === null ? null : credentialState(configuration)
 	);
 	const record = $derived(disclosure === null ? null : disclosureRecord(disclosure, $locale));
+	const locationRecord = $derived(
+		calendarLocation === null ? null : calendarLocationRecord(calendarLocation, $locale)
+	);
 	const problemOf = $derived(
 		(field: FormProblem['field']) => formProblems.find((problem) => problem.field === field) ?? null
 	);
@@ -116,10 +133,11 @@
 	});
 
 	async function load() {
-		const [model, preference, switched] = await Promise.all([
+		const [model, preference, switched, located] = await Promise.all([
 			loadModel(),
 			loadLanguage(),
-			loadDisclosure()
+			loadDisclosure(),
+			loadCalendarLocation()
 		]);
 		if (model.ok) {
 			configuration = model.configuration;
@@ -141,6 +159,12 @@
 			disclosureProblem = null;
 		} else {
 			disclosureProblem = switched;
+		}
+		if (located.ok) {
+			calendarLocation = located.state;
+			calendarLocationProblem = null;
+		} else {
+			calendarLocationProblem = located;
 		}
 		loaded = true;
 	}
@@ -232,6 +256,28 @@
 			disclosureOutcome = 'saved';
 		} else {
 			disclosureOutcome = { refused: answer };
+		}
+	}
+
+	/**
+	 * The one press that lets calendar events carry where a meeting is, or
+	 * stops them (#354). The disclosure's shape exactly: a decision appended
+	 * to a journal, and the state drawn afterwards is the Gateway's answer.
+	 */
+	async function switchCalendarLocation() {
+		if (calendarLocation === null) {
+			return;
+		}
+		calendarLocationOutcome = null;
+		busy = 'calendar-location';
+		const answer = await saveCalendarLocation(!calendarLocation.enabled, calendarLocationReason);
+		busy = null;
+		if (answer.ok) {
+			calendarLocation = answer.state;
+			calendarLocationReason = '';
+			calendarLocationOutcome = 'saved';
+		} else {
+			calendarLocationOutcome = { refused: answer };
 		}
 	}
 
@@ -585,6 +631,105 @@
 			{:else if disclosureOutcome !== null}
 				<p class="card card--warning small" role="alert" data-testid="disclosure-outcome" data-kind="refused">
 					{refusalText(disclosureOutcome.refused)}
+				</p>
+			{/if}
+		{/if}
+	</section>
+
+	<!-- Where a meeting is (#354, #351): off as this ships, and on only on
+	     the record. Placed after the disclosure because it is the same kind
+	     of decision, and its emphasis is the mirror image — here the state
+	     worth noticing is the one that sends something. -->
+	<section class="card stack" data-testid="settings-calendar-location" aria-busy={!loaded}>
+		<h2 class="card__title">
+			<Icon name="calendar" size="dense" />
+			{$t('settings.calendarLocation.title')}
+		</h2>
+		<p class="small">{$t('settings.calendarLocation.intro')}</p>
+		<p class="small muted">{$t('settings.calendarLocation.whatLeaves')}</p>
+		<p class="small muted">{$t('settings.calendarLocation.whatNeverLeaves')}</p>
+
+		{#if calendarLocationProblem !== null}
+			<p
+				class="card card--warning small"
+				role="alert"
+				data-testid="calendar-location-problem"
+				data-code={calendarLocationProblem.code}
+			>
+				{refusalText(calendarLocationProblem)}
+			</p>
+		{:else if loaded && calendarLocation !== null && locationRecord !== null}
+			<div class="switch-row">
+				<button
+					id="calendar-location-switch"
+					class="switch"
+					type="button"
+					role="switch"
+					aria-checked={calendarLocation.enabled}
+					aria-labelledby="calendar-location-switch-label"
+					disabled={busy !== null}
+					onclick={switchCalendarLocation}
+					data-testid="calendar-location-switch"
+				>
+					<span class="switch__knob" aria-hidden="true"></span>
+				</button>
+				<label class="label" id="calendar-location-switch-label" for="calendar-location-switch">
+					{$t('settings.calendarLocation.switch')}
+					<span class="small muted">
+						— {calendarLocation.enabled
+							? $t('settings.calendarLocation.switchOn')
+							: $t('settings.calendarLocation.switchOff')}
+					</span>
+				</label>
+			</div>
+
+			<p
+				class="small {locationRecord.kind === 'sending' ? 'card card--warning' : 'muted'}"
+				data-testid="calendar-location-record"
+				data-enabled={calendarLocation.enabled ? 'yes' : 'no'}
+			>
+				{#if locationRecord.kind === 'sending'}<Icon name="warning" size="dense" />{/if}
+				{$t(locationRecord.key, locationRecord.values)}
+			</p>
+			{#if calendarLocation.reason !== null && calendarLocation.reason !== ''}
+				<p class="small muted" data-testid="calendar-location-reason-given">
+					{$t('settings.calendarLocation.record.reason', { reason: calendarLocation.reason })}
+				</p>
+			{/if}
+
+			<label class="field">
+				<span class="small">{$t('settings.calendarLocation.reason.label')}</span>
+				<input
+					class="input"
+					type="text"
+					autocomplete="off"
+					maxlength="1024"
+					bind:value={calendarLocationReason}
+					disabled={busy !== null}
+					data-testid="calendar-location-reason"
+				/>
+				<span class="small muted">{$t('settings.calendarLocation.reason.help')}</span>
+			</label>
+
+			<p class="small muted">{$t('settings.calendarLocation.notRetroactive')}</p>
+
+			{#if calendarLocationOutcome === 'saved'}
+				<p
+					class="card card--info small"
+					role="status"
+					data-testid="calendar-location-outcome"
+					data-kind="saved"
+				>
+					{$t('settings.calendarLocation.saved')}
+				</p>
+			{:else if calendarLocationOutcome !== null}
+				<p
+					class="card card--warning small"
+					role="alert"
+					data-testid="calendar-location-outcome"
+					data-kind="refused"
+				>
+					{refusalText(calendarLocationOutcome.refused)}
 				</p>
 			{/if}
 		{/if}

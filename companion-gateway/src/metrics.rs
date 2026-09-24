@@ -60,6 +60,9 @@ pub struct Metrics {
     /// "are replies going out undisclosed right now?", and `None` until
     /// consent is configured, since the journal lives in that store.
     disclosure_enabled: Mutex<Option<bool>>,
+    /// Whether a calendar event may carry where a meeting is (#354). Set
+    /// from the journal at start and on every decision, like the one above.
+    calendar_location_enabled: Mutex<Option<bool>>,
     /// Bridge states observed (#56), by the channel they arrived on
     /// (`webhook`, `startup`) and what they said: one of the contract's five
     /// states, `unchanged` when the bridge reported the state it was already
@@ -197,6 +200,7 @@ impl Metrics {
             owner_decision_refusals: Mutex::new(0),
             owner_consent_rows: Mutex::new(None),
             disclosure_enabled: Mutex::new(None),
+            calendar_location_enabled: Mutex::new(None),
             bridge_statuses: Mutex::new(BTreeMap::new()),
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             hermes_answers: Mutex::new(BTreeMap::new()),
@@ -346,6 +350,13 @@ impl Metrics {
     pub fn set_disclosure_enabled(&self, enabled: bool) {
         *self
             .disclosure_enabled
+            .lock()
+            .expect("the metrics mutex is never poisoned") = Some(enabled);
+    }
+
+    pub fn set_calendar_location_enabled(&self, enabled: bool) {
+        *self
+            .calendar_location_enabled
             .lock()
             .expect("the metrics mutex is never poisoned") = Some(enabled);
     }
@@ -564,6 +575,22 @@ impl Metrics {
                 out.push_str(&format!(
                     "twalk_companion_gateway_disclosure_enabled {}\n",
                     u8::from(disclosure)
+                ));
+            }
+            // Where a meeting is (#354), beside it and for the same reason:
+            // a deployment sending locations to its model is a fact an
+            // operator should be able to read off `/metrics` rather than
+            // infer from the events.
+            let location = *self
+                .calendar_location_enabled
+                .lock()
+                .expect("the metrics mutex is never poisoned");
+            if let Some(location) = location {
+                out.push_str("# HELP twalk_companion_gateway_calendar_location_enabled Whether a calendar event carries where the meeting is: 1 while the owner's switch is on, 0 while it is off, which is how a deployment ships.\n");
+                out.push_str("# TYPE twalk_companion_gateway_calendar_location_enabled gauge\n");
+                out.push_str(&format!(
+                    "twalk_companion_gateway_calendar_location_enabled {}\n",
+                    u8::from(location)
                 ));
             }
             // The approval series (#24), inside the same guard: approvals

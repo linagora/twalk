@@ -159,11 +159,16 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
         (&Method::GET, "/api/consent/snapshot") => Requirement::ServiceToken,
         // The runtime settings (ticket #98): the same token, and for the
         // same reason — the Hermes runtime is a service, not one of the
-        // owner's browsers. It is the second row of this table's service
-        // half, and the only other endpoint that credential opens; a
-        // persona is handed neither it nor this URL, because the token that
-        // reads the model also reads the list of every contact (ADR 0015).
+        // owner's browsers. A persona is handed neither it nor this URL,
+        // because the token that reads the model also reads the list of
+        // every contact (ADR 0015).
         (&Method::GET, "/api/settings/runtime") => Requirement::ServiceToken,
+        // The collection settings (#354): the collector, which is a service
+        // too. A row of its own rather than a member on the runtime's
+        // document, because that one carries the model's API key and a
+        // collector has no business holding one — the same token opens both,
+        // so what keeps them apart is which answer each route gives.
+        (&Method::GET, "/api/settings/collection") => Requirement::ServiceToken,
         _ => Requirement::DeviceToken,
     }
 }
