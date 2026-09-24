@@ -363,9 +363,10 @@ impl Which {
     /// The journal consumer's second subject arrived with #311, and a
     /// durable keeps the configuration it was created with (see [`open`]):
     /// on a deployment that already ran the clerk, `nats consumer rm twalk
-    /// clerk-journal` before the restart is what makes it read `.dead` at
-    /// all. The clerk's README says so under "Three decisions worth
-    /// arguing with".
+    /// clerk-journal` is what makes it read `.dead` at all — removed with
+    /// this process **stopped**, or the running one rebuilds it from its
+    /// own configuration before the upgrade lands. The clerk's README says
+    /// so under "Three decisions worth arguing with".
     fn config(self, config: &Config) -> pull::Config {
         let (filter_subject, filter_subjects, deliver_policy) = match self {
             Self::Suggestions => (
@@ -418,6 +419,14 @@ fn dead_subject(config: &Config) -> String {
 /// created, so a change to [`ACK_WAIT`], [`MAX_DELIVER`] or the filter
 /// subjects in this binary does not reach a consumer that already exists —
 /// `nats consumer rm <stream> <durable>` and a restart is what applies it.
+///
+/// In that order, and with this process stopped. [`drain`] ends when its
+/// consumer goes away, [`consume`] waits [`CONSUMER_RECONNECT_DELAY`] and
+/// calls this function again — so removing a durable under a **running**
+/// clerk has the old binary recreate it with the old configuration within
+/// seconds, and the container started next adopts what it finds. The
+/// upgrade then looks applied and is not: `deploy/README.md` gives the
+/// three steps and the `nats consumer info` that checks them.
 async fn open(
     clerk: &Clerk,
     jetstream: &async_nats::jetstream::Context,

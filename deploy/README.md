@@ -175,7 +175,23 @@ What is still to run with a person in front of it is proof 3's other half — a 
 
 **What an operator should take from this run.** The mail half works against the real TMail, push included — but not on the first afternoon: reading a mailbox worked immediately, and *answering* one took three fixes, each found by a person looking at a real mailbox rather than by a suite. The lesson is written into the tests rather than into a warning: where the fake cannot demonstrate that a real server accepts what it accepts, it refuses. The calendar half was written against an assumption about the side service that this deployment does not meet, and that is the kind of thing only a production run finds. Read `authorize`'s two whoami lines carefully: they are the cheapest place where a wrong address or an unreachable service says so.
 
-**Upgrading the clerk past #311 needs one command.** Its `journal` channel now carries a line for a reply that **never left** — the Sensor or the collector gave up and dead-lettered it — as well as one for a reply that went out. A durable consumer keeps the configuration it was created with, so a clerk that already ran on this deployment keeps reading only the `.posted` subject until the durable is removed: `nats consumer rm twalk clerk-journal`, then restart the clerk. Nothing already on the relay is lost — the clerk holds no state of its own (ADR 0035) — but a report published while the durable is gone is one the journal will not carry, so do it while nothing is being approved.
+**Upgrading the clerk past #311 takes three steps, and their order is the whole point.** Its `journal` channel now carries a line for a reply that **never left** — the Sensor or the collector gave up and dead-lettered it — as well as one for a reply that went out. A durable consumer keeps the configuration it was created with, so a clerk that already ran on this deployment keeps reading only the `.posted` subject until its durable is removed. Remove it with the clerk **stopped**:
+
+```sh
+docker compose stop clerk
+nats consumer rm twalk clerk-journal
+docker compose start clerk
+```
+
+Removing it while the clerk runs does not work, and fails in a way that looks like success: the running clerk notices its consumer has gone, rebuilds it within seconds — from **its own binary's** configuration, which on a not-yet-upgraded container is the single `.posted` subject — and the new container then adopts that durable and leaves it alone, because a durable that exists is returned as it is. Measured on the reference deployment on 2026-09-24, upgrading to #311: every container was new, every image was right, and the journal still read one subject.
+
+So check rather than assume. `nats consumer info twalk clerk-journal` must answer two of them:
+
+```
+Filter Subjects: twalk.persona.reply.approved.v1.posted, twalk.persona.reply.approved.v1.dead
+```
+
+Nothing already on the relay is lost — the clerk holds no state of its own (ADR 0035) — but a report published while the durable is gone is one the journal will not carry, so do it while nothing is being approved.
 
 ## What is where
 
