@@ -26,21 +26,17 @@ use crate::http::Gateway;
 pub fn routes() -> Router<Gateway> {
     // Written out, not `FREEBUSY_PATH`: `tests/openapi.rs` reads this crate's
     // source for `.route("…")` literals. The two are asserted equal below.
-    Router::new().route("/_twalk/hermes/freebusy", get(read_free_busy))
+    Router::new()
+        .route("/_twalk/hermes/freebusy", get(read_free_busy))
+        .route("/_twalk/hermes/event-facts", get(read_event_facts))
 }
 
-async fn read_free_busy(
-    State(gateway): State<Gateway>,
-    OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
-) -> Response {
-    let Some(reads) = gateway.reads() else {
-        return refuse(&gateway, ReadRefusal::SeamNotConfigured);
-    };
-    // The members are read off the same string the signature covers, by
-    // hand: an extractor would refuse a malformed query in its own words,
-    // before the signature was checked and without a record — and every
-    // read is recorded, the malformed ones included.
+/// The members a read carries, read off the same string the signature
+/// covers — by hand, for the reason the free/busy read does it by hand: an
+/// extractor would refuse a malformed query in its own words, before the
+/// signature was checked and without a record, and every read is recorded,
+/// the malformed ones included.
+fn request_of(uri: &axum::http::Uri, headers: &HeaderMap) -> ReadRequest {
     let query = uri.query().unwrap_or_default().to_owned();
     let mut request = ReadRequest {
         query: query.clone(),
@@ -53,6 +49,7 @@ async fn read_free_busy(
             "connection" => request.connection = Some(value),
             "from" => request.from = Some(value),
             "to" => request.to = Some(value),
+            "uid" => request.uid = Some(value),
             _ => {}
         }
     }
@@ -65,6 +62,46 @@ async fn read_free_busy(
     request.timestamp = header(TIMESTAMP_HEADER);
     request.signature = header(SIGNATURE_HEADER);
     request.delivery = header(DELIVERY_HEADER);
+    request
+}
+
+/// `GET /_twalk/hermes/event-facts` — what one of the owner's events
+/// carries, and never what it says (#355).
+async fn read_event_facts(
+    State(gateway): State<Gateway>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(reads) = gateway.reads() else {
+        return refuse(&gateway, ReadRefusal::SeamNotConfigured);
+    };
+    let request = request_of(&uri, &headers);
+    match reads.event_facts(&request).await {
+        Ok(facts) => (
+            StatusCode::OK,
+            Json(json!({
+                "connection": request.connection,
+                "uid": request.uid,
+                "found": facts.found,
+                "conference": facts.conference,
+                "description_characters": facts.description_characters,
+                "attachments": facts.attachments,
+            })),
+        )
+            .into_response(),
+        Err(refusal) => refuse(&gateway, refusal),
+    }
+}
+
+async fn read_free_busy(
+    State(gateway): State<Gateway>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    let Some(reads) = gateway.reads() else {
+        return refuse(&gateway, ReadRefusal::SeamNotConfigured);
+    };
+    let request = request_of(&uri, &headers);
     match reads.read(&request).await {
         Ok(busy) => (
             StatusCode::OK,
@@ -102,10 +139,17 @@ fn refuse(gateway: &Gateway, refusal: ReadRefusal) -> Response {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_route_and_the_constant_are_one_path() {
+    fn the_routes_and_the_constants_are_the_same_paths() {
+        // The router spells them out so `tests/openapi.rs` can read them
+        // out of this source; these assertions are what keeps the two
+        // spellings one.
         assert_eq!(
             crate::hermes_freebusy::FREEBUSY_PATH,
             "/_twalk/hermes/freebusy"
+        );
+        assert_eq!(
+            crate::hermes_freebusy::EVENT_FACTS_PATH,
+            "/_twalk/hermes/event-facts"
         );
     }
 }

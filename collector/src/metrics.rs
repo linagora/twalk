@@ -30,6 +30,11 @@ pub struct Metrics {
     /// agenda is counted, since a read nobody can see is the thing #281
     /// exists to prevent.
     freebusy_reads: Mutex<BTreeMap<&'static str, u64>>,
+    /// Reads of what one event carries (#355), counted apart from the
+    /// free/busy series above: they answer different questions of
+    /// different shapes, and one series holding both would make "how often
+    /// was my agenda pulled" unanswerable.
+    event_fact_reads: Mutex<BTreeMap<&'static str, u64>>,
     /// Whether the push socket to the mail server is open (#277): 1 when a
     /// delivery wakes the poll, 0 when the poll is on its own.
     push_connected: AtomicU64,
@@ -52,9 +57,19 @@ impl Metrics {
             last_renewal_unix_seconds: AtomicU64::new(0),
             mails_dropped: Mutex::new(BTreeMap::new()),
             freebusy_reads: Mutex::new(BTreeMap::new()),
+            event_fact_reads: Mutex::new(BTreeMap::new()),
             push_connected: AtomicU64::new(0),
             push_wakes: AtomicU64::new(0),
         }
+    }
+
+    pub fn record_event_fact_read(&self, outcome: &'static str) {
+        *self
+            .event_fact_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
     }
 
     pub fn record_freebusy_read(&self, outcome: &'static str) {
@@ -194,6 +209,19 @@ impl Metrics {
             ));
         }
         drop(reads);
+        out.push_str("# HELP twalk_collector_event_fact_reads_total Reads of what one event carries — a conference link, a description's length, a count of attachments — by outcome: served, or the refusal's code. Never the description itself (#355).\n");
+        out.push_str("# TYPE twalk_collector_event_fact_reads_total counter\n");
+        let facts = self
+            .event_fact_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        for outcome in crate::http::EVENT_FACT_OUTCOMES {
+            out.push_str(&format!(
+                "twalk_collector_event_fact_reads_total{{outcome=\"{outcome}\"}} {}\n",
+                facts.get(outcome).copied().unwrap_or(0)
+            ));
+        }
+        drop(facts);
         out.push_str("# HELP twalk_collector_push_connected Whether the push socket to the mail server is open: 1 when a delivery wakes the poll, 0 when the poll is on its own.\n");
         out.push_str("# TYPE twalk_collector_push_connected gauge\n");
         out.push_str(&format!(

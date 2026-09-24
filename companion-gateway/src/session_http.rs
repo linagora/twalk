@@ -137,7 +137,10 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
     // Hermes's free/busy read (ticket #281): the one pull, signed with the
     // same secret as the answers, over the request line since a GET has no
     // body. In the table for the same reason as the answers.
-    if path == crate::hermes_freebusy::FREEBUSY_PATH && method == Method::GET {
+    if method == Method::GET
+        && (path == crate::hermes_freebusy::FREEBUSY_PATH
+            || path == crate::hermes_freebusy::EVENT_FACTS_PATH)
+    {
         return Requirement::HermesSignature;
     }
     match (method, path) {

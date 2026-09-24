@@ -258,6 +258,20 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "502",
         "collector_unreachable needs a connected connection and a collector that does not answer; `hermes_freebusy.rs` stages it",
     ),
+    // The read of what an event carries (#355) needs the same staging, and
+    // `tests/hermes_freebusy.rs` does it for both.
+    (
+        "get",
+        "/_twalk/hermes/event-facts",
+        "200",
+        "a served read needs a connected calendar connection and a collector to relay to; `hermes_freebusy.rs::a_signed_read_says_what_an_event_carries_and_never_what_it_says` stages both",
+    ),
+    (
+        "get",
+        "/_twalk/hermes/event-facts",
+        "502",
+        "collector_unreachable needs a connected connection and a collector that does not answer; `hermes_freebusy.rs` stages it",
+    ),
     (
         "post",
         "/_twalk/bridges/{bridge_id}/status",
@@ -4756,6 +4770,155 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         )
         .await?;
     assert_eq!(refused.body["state"], "unknown", "{}", refused.body);
+
+    // --- and the second governed pull (#355), on the same Gateway: the
+    // same credential and the same connection checks, its own path inside
+    // the signed line, and its own `uid`.
+    let event_facts_query = harness::event_facts_query;
+    let event_facts_signature = harness::event_facts_signature;
+    let an_event = event_facts_query("calendar", "8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8");
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{an_event}"),
+        &[],
+        "",
+        401,
+        Some("unsigned"),
+    )
+    .await?;
+    // The property that matters most, and the reason the path is in the
+    // signed line: a signature minted for the free/busy read does not open
+    // this one, however well-formed it is.
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{an_event}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                freebusy_signature(&an_event, &now).as_str(),
+            ),
+        ],
+        "",
+        401,
+        Some("bad_signature"),
+    )
+    .await?;
+    let stale = "2026-09-17T10:00:00Z";
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{an_event}"),
+        &[
+            ("X-Hermes-Timestamp", stale),
+            (
+                "X-Hermes-Signature-256",
+                event_facts_signature(&an_event, stale).as_str(),
+            ),
+        ],
+        "",
+        401,
+        Some("stale_timestamp"),
+    )
+    .await?;
+    // No uid, and a uid too long for one.
+    let uidless = "connection=calendar";
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{uidless}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                event_facts_signature(uidless, &now).as_str(),
+            ),
+        ],
+        "",
+        400,
+        Some("invalid_uid"),
+    )
+    .await?;
+    let overlong = event_facts_query("calendar", &"u".repeat(513));
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{overlong}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                event_facts_signature(&overlong, &now).as_str(),
+            ),
+        ],
+        "",
+        400,
+        Some("invalid_uid"),
+    )
+    .await?;
+    let connectionless = "uid=8f3a2b1c";
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{connectionless}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                event_facts_signature(connectionless, &now).as_str(),
+            ),
+        ],
+        "",
+        400,
+        Some("invalid_request"),
+    )
+    .await?;
+    let bridged = event_facts_query("whatsapp", "8f3a2b1c");
+    call.check_raw(
+        Method::GET,
+        &hermes_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{bridged}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                event_facts_signature(&bridged, &now).as_str(),
+            ),
+        ],
+        "",
+        404,
+        Some("connection_unknown"),
+    )
+    .await?;
+    let unspoken_event = event_facts_query("calendar-unspoken", "8f3a2b1c");
+    let refused = call
+        .check_raw(
+            Method::GET,
+            &hermes_base,
+            "/_twalk/hermes/event-facts",
+            &format!("/_twalk/hermes/event-facts?{unspoken_event}"),
+            &[
+                ("X-Hermes-Timestamp", now.as_str()),
+                (
+                    "X-Hermes-Signature-256",
+                    event_facts_signature(&unspoken_event, &now).as_str(),
+                ),
+            ],
+            "",
+            409,
+            Some("connection_not_connected"),
+        )
+        .await?;
+    assert_eq!(refused.body["state"], "unknown", "{}", refused.body);
     hermes.stop().await;
 
     // And the same route on a Gateway that configured no seam: the variable
@@ -4775,6 +4938,23 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             harness::hermes_signature(&seamless).as_str(),
         )],
         &seamless,
+        503,
+        Some("hermes_answers_not_configured"),
+    )
+    .await?;
+    call.check_raw(
+        Method::GET,
+        &seamless_base,
+        "/_twalk/hermes/event-facts",
+        &format!("/_twalk/hermes/event-facts?{an_event}"),
+        &[
+            ("X-Hermes-Timestamp", now.as_str()),
+            (
+                "X-Hermes-Signature-256",
+                event_facts_signature(&an_event, &now).as_str(),
+            ),
+        ],
+        "",
         503,
         Some("hermes_answers_not_configured"),
     )

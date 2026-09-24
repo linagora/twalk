@@ -22,7 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -39,6 +39,29 @@ pub const READ_OUTCOMES: [&str; 8] = [
     "connection_unknown",
     "invalid_window",
     "window_too_wide",
+    "connection_not_connected",
+    "caldav_refused",
+    "caldav_unreachable",
+];
+
+/// Which of the endpoint's two reads a refusal belongs to (#355). They
+/// share their shape and their refusal codes and are counted apart, because
+/// "how often was my agenda pulled" and "how often was an event asked
+/// about" are two questions an owner asks separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Read {
+    FreeBusy,
+    EventFacts,
+}
+
+/// Every outcome a read of one event's facts is counted under (#355).
+/// `served` covers an event this collector holds and one it does not: what
+/// differs there is the answer's `found`, not whether the read worked.
+pub const EVENT_FACT_OUTCOMES: [&str; 7] = [
+    "served",
+    "unauthenticated",
+    "connection_unknown",
+    "invalid_uid",
     "connection_not_connected",
     "caldav_refused",
     "caldav_unreachable",
@@ -68,7 +91,24 @@ pub struct Endpoint {
 pub fn router(endpoint: Endpoint) -> Router {
     Router::new()
         .route("/freebusy", get(free_busy))
+        .route("/event-facts", get(event_facts))
         .with_state(endpoint)
+}
+
+/// Whether a request carries this collector's own service token — the
+/// Gateway's, and nobody else's. Compared as digests, in constant time: the
+/// Companion Gateway's habit with this token (`consent_snapshot.rs`), kept
+/// on this side, and one function so the two routes cannot drift into two
+/// standards.
+fn authenticated(endpoint: &Endpoint, headers: &HeaderMap) -> bool {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim);
+    let presented = bearer.map(|token| Sha256::digest(token.as_bytes()));
+    let expected = Sha256::digest(endpoint.service_token.as_bytes());
+    presented.is_some_and(|presented| presented == expected)
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,18 +123,10 @@ async fn free_busy(
     headers: HeaderMap,
     Query(query): Query<FreeBusyQuery>,
 ) -> Response {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim);
-    // Compared as digests, in constant time — the Companion Gateway's own
-    // habit with this token (`consent_snapshot.rs`), kept on this side.
-    let presented = bearer.map(|token| Sha256::digest(token.as_bytes()));
-    let expected = Sha256::digest(endpoint.service_token.as_bytes());
-    if presented.is_none_or(|presented| presented != expected) {
+    if !authenticated(&endpoint, &headers) {
         return refuse(
             &endpoint,
+            Read::FreeBusy,
             StatusCode::UNAUTHORIZED,
             "unauthenticated",
             "this endpoint answers the Companion Gateway's service token and nothing else",
@@ -109,6 +141,7 @@ async fn free_busy(
     else {
         return refuse(
             &endpoint,
+            Read::FreeBusy,
             StatusCode::NOT_FOUND,
             "connection_unknown",
             &format!("this collector holds no calendar connection named {connection:?}"),
@@ -123,6 +156,7 @@ async fn free_busy(
         Err(error) => {
             return refuse(
                 &endpoint,
+                Read::FreeBusy,
                 StatusCode::BAD_REQUEST,
                 error.code(),
                 &error.message(),
@@ -145,6 +179,7 @@ async fn free_busy(
                 .unwrap_or("unknown");
             return refuse(
                 &endpoint,
+                Read::FreeBusy,
                 StatusCode::CONFLICT,
                 "connection_not_connected",
                 &format!(
@@ -178,6 +213,7 @@ async fn free_busy(
         }
         Err(SideError::Refused { status, .. }) => refuse(
             &endpoint,
+            Read::FreeBusy,
             StatusCode::BAD_GATEWAY,
             "caldav_refused",
             &format!("the calendar service refused the free-busy report with HTTP {status}"),
@@ -185,9 +221,138 @@ async fn free_busy(
         ),
         Err(SideError::Unreachable { detail }) => refuse(
             &endpoint,
+            Read::FreeBusy,
             StatusCode::BAD_GATEWAY,
             "caldav_unreachable",
             &format!("the calendar service did not answer the free-busy report: {detail}"),
+            None,
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FactsQuery {
+    connection: Option<String>,
+    uid: Option<String>,
+}
+
+/// `GET /event-facts?connection=&uid=` — what one of the owner's events
+/// carries, without its words (#355).
+///
+/// The same terms as `/freebusy` above, and for the same reasons: the
+/// Gateway's service token and nothing else, the internal network, and the
+/// record of who asked and for what is the Gateway's, because that is where
+/// Hermes's signature was checked.
+///
+/// What it answers is counts, one flag's worth of knowledge and at most one
+/// URL — never the description, never an attachment's name. An event this
+/// collector never published is one it does not answer about: `null`, said
+/// as `found: false`, so a persona learns "I hold nothing about that" and
+/// not "that meeting carries nothing".
+async fn event_facts(
+    State(endpoint): State<Endpoint>,
+    headers: HeaderMap,
+    Query(query): Query<FactsQuery>,
+) -> Response {
+    if !authenticated(&endpoint, &headers) {
+        return refuse(
+            &endpoint,
+            Read::EventFacts,
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "this endpoint answers the Companion Gateway's service token and nothing else",
+            None,
+        );
+    }
+    let connection = query.connection.unwrap_or_default();
+    let Some(calendars) = endpoint
+        .calendars
+        .as_ref()
+        .filter(|calendars| calendars.connection == connection)
+    else {
+        return refuse(
+            &endpoint,
+            Read::EventFacts,
+            StatusCode::NOT_FOUND,
+            "connection_unknown",
+            &format!("this collector holds no calendar connection named {connection:?}"),
+            None,
+        );
+    };
+    let uid = query.uid.unwrap_or_default();
+    if uid.is_empty() || uid.chars().count() > 512 {
+        return refuse(
+            &endpoint,
+            Read::EventFacts,
+            StatusCode::BAD_REQUEST,
+            "invalid_uid",
+            "uid is the event's iCalendar UID, between 1 and 512 characters",
+            None,
+        );
+    }
+    let calendar = endpoint.calendar_access.read().await.clone();
+    let token = endpoint.access.read().await.clone();
+    let (owner_id, token) = match (calendar.state, calendar.owner_id, token) {
+        (Some("connected"), Some(owner_id), Some(token)) => (owner_id, token),
+        (state, _, _) => {
+            let state = state
+                .filter(|state| *state != "connected")
+                .unwrap_or("unknown");
+            return refuse(
+                &endpoint,
+                Read::EventFacts,
+                StatusCode::CONFLICT,
+                "connection_not_connected",
+                &format!(
+                    "the calendar connection {connection:?} is {state}; an event cannot be read \
+                     until it is connected"
+                ),
+                Some(state),
+            );
+        }
+    };
+    match calendars.facts_about(&uid, &owner_id, &token).await {
+        Ok(facts) => {
+            endpoint.metrics.record_event_fact_read("served");
+            info!(
+                connection,
+                found = facts.is_some(),
+                "the facts about an event were served"
+            );
+            let body = match facts {
+                Some(facts) => json!({
+                    "connection": connection,
+                    "uid": uid,
+                    "found": true,
+                    "conference": facts.conference,
+                    "description_characters": facts.description_characters,
+                    "attachments": facts.attachments,
+                }),
+                None => json!({
+                    "connection": connection,
+                    "uid": uid,
+                    "found": false,
+                    "conference": Value::Null,
+                    "description_characters": Value::Null,
+                    "attachments": 0,
+                }),
+            };
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(SideError::Refused { status, .. }) => refuse(
+            &endpoint,
+            Read::EventFacts,
+            StatusCode::BAD_GATEWAY,
+            "caldav_refused",
+            &format!("the calendar service refused the read with HTTP {status}"),
+            None,
+        ),
+        Err(SideError::Unreachable { detail }) => refuse(
+            &endpoint,
+            Read::EventFacts,
+            StatusCode::BAD_GATEWAY,
+            "caldav_unreachable",
+            &format!("the calendar service did not answer the read: {detail}"),
             None,
         ),
     }
@@ -198,12 +363,16 @@ async fn free_busy(
 /// it when that is what was refused.
 fn refuse(
     endpoint: &Endpoint,
+    read: Read,
     status: StatusCode,
     code: &'static str,
     detail: &str,
     state: Option<&str>,
 ) -> Response {
-    endpoint.metrics.record_freebusy_read(code);
+    match read {
+        Read::FreeBusy => endpoint.metrics.record_freebusy_read(code),
+        Read::EventFacts => endpoint.metrics.record_event_fact_read(code),
+    }
     warn!(%code, status = status.as_u16(), state, detail, "a free/busy read was refused");
     let mut body = json!({ "error": code, "detail": detail });
     if let Some(state) = state {
