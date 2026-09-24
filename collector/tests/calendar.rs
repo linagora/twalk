@@ -98,9 +98,16 @@ async fn what_the_calendar_held_is_not_published_and_create_change_remove_are_th
     // consumer learns "not published", not "no such thing".
     assert_eq!(created["data"]["location"], Value::Null, "{created}");
     assert!(!created.to_string().contains(LOCATION), "{created}");
+    // The event's identity is derived from the resource's **href** and its
+    // ETag — the href the service answered with, which on the reference
+    // deployment (and now on this fake) is relative to sabre's own root and
+    // carries no `/dav` prefix, while the collection asked about does.
+    let href_root = collection
+        .strip_prefix("/dav")
+        .expect("the collection is under the DAV mount");
     assert_eq!(
         created["id"],
-        sha256_hex(&format!("caldav:{collection}weekly.ics:{first_etag}"))
+        sha256_hex(&format!("caldav:{href_root}weekly.ics:{first_etag}"))
     );
     assert_eq!(
         events_of(&bus, &run, "created").await?.len(),
@@ -135,7 +142,7 @@ async fn what_the_calendar_held_is_not_published_and_create_change_remove_are_th
     );
     assert_eq!(
         weekly["id"],
-        sha256_hex(&format!("caldav:{collection}weekly.ics:{second_etag}"))
+        sha256_hex(&format!("caldav:{href_root}weekly.ics:{second_etag}"))
     );
     let standing = changed
         .iter()
@@ -159,7 +166,7 @@ async fn what_the_calendar_held_is_not_published_and_create_change_remove_are_th
     );
     assert_eq!(
         removed["id"],
-        sha256_hex(&format!("caldav:{collection}weekly.ics:removed:{ctag}"))
+        sha256_hex(&format!("caldav:{href_root}weekly.ics:removed:{ctag}"))
     );
     assert!(!removed.to_string().contains("alice"), "{removed}");
 

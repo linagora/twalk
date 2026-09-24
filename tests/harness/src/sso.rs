@@ -1023,10 +1023,12 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
             }),
         ));
     }
-    // `<owner>/<calendar>/`: the collection.
-    let mut parts = rest.trim_end_matches('/').splitn(2, '/');
+    // `<owner>/<calendar>/`: the collection — or, with a third segment,
+    // one resource in it, which a `GET` reads as ordinary HTTP (#355).
+    let mut parts = rest.trim_end_matches('/').splitn(3, '/');
     let owner = parts.next().unwrap_or_default();
     let calendar_id = parts.next().unwrap_or_default();
+    let resource_name = parts.next().unwrap_or_default().to_owned();
     if owner != OWNER_ID || calendar_id.contains('/') {
         return not_found();
     }
@@ -1034,18 +1036,43 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
         return not_found();
     };
     let collection = format!("/dav/calendars/{OWNER_ID}/{calendar_id}/");
+    // The hrefs this fake answers with, which are **not** the collection it
+    // is asked about. The reference deployment relays `/dav/` to a sabre
+    // mounted at `/`, so a listing there returns
+    // `/calendars/<owner>/<calendar>/<name>.ics` while the request went to
+    // `/dav/calendars/…`. A fake whose hrefs matched its own base let a
+    // collector paste one onto the base and get a 404 in production and a
+    // pass here (#355). Faithful now, so that cannot happen again.
+    let href_root = collection
+        .strip_prefix("/dav")
+        .expect("the collection is under the DAV mount")
+        .to_owned();
+    if !resource_name.is_empty() {
+        // One calendar object resource. Only `GET` is served: nothing in
+        // this project writes to a calendar.
+        if request.method != "GET" {
+            return Some(Response::json(
+                "405 Method Not Allowed",
+                json!({ "error": "method_not_allowed", "detail": format!("{} on a calendar resource", request.method) }),
+            ));
+        }
+        return match calendar.resources.get(&resource_name) {
+            Some((_, ics)) => Some(Response::calendar("200 OK", ics.clone())),
+            None => not_found(),
+        };
+    }
     match request.method.as_str() {
         "PROPFIND" => {
             let mut body = String::from(
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:cs=\"http://calendarserver.org/ns/\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n",
             );
             body.push_str(&format!(
-                "<d:response><d:href>{collection}</d:href><d:propstat><d:prop><cs:getctag>{}</cs:getctag><d:resourcetype><d:collection/><cal:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
+                "<d:response><d:href>{href_root}</d:href><d:propstat><d:prop><cs:getctag>{}</cs:getctag><d:resourcetype><d:collection/><cal:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
                 xml_escape(&calendar.ctag)
             ));
             for (name, (etag, _)) in &calendar.resources {
                 body.push_str(&format!(
-                    "<d:response><d:href>{collection}{name}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><cs:getctag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
+                    "<d:response><d:href>{href_root}{name}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><cs:getctag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
                     xml_escape(etag)
                 ));
             }
@@ -1108,7 +1135,7 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
                     continue;
                 }
                 body.push_str(&format!(
-                    "<d:response><d:href>{collection}{name}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n",
+                    "<d:response><d:href>{href_root}{name}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n",
                     xml_escape(etag)
                 ));
             }
@@ -1130,7 +1157,12 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n",
             );
             for href in asked {
-                let name = href.strip_prefix(collection.as_str()).unwrap_or_default();
+                // Either spelling: the href this fake hands out (relative
+                // to sabre's root) or the collection it was asked about.
+                let name = href
+                    .strip_prefix(href_root.as_str())
+                    .or_else(|| href.strip_prefix(collection.as_str()))
+                    .unwrap_or_default();
                 match calendar.resources.get(name) {
                     Some((etag, ics)) => body.push_str(&format!(
                         "<d:response><d:href>{}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag><cal:calendar-data>{}</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n",
