@@ -885,7 +885,7 @@ pub fn diff(cursor: &Cursor, listing: &Listing) -> Changes {
 /// The published fields that differ between two publications of one event,
 /// by the contract's names. `participants_withheld` is not one of them: a
 /// withheld participant's answer is not the consumer's to know.
-pub fn changed_fields(before: &Value, after: &Value) -> Vec<&'static str> {
+pub fn changed_fields<'a>(before: &'a Value, after: &'a Value) -> Vec<&'static str> {
     [
         "title",
         "location",
@@ -899,7 +899,18 @@ pub fn changed_fields(before: &Value, after: &Value) -> Vec<&'static str> {
         "participants",
     ]
     .into_iter()
-    .filter(|field| before.get(field) != after.get(field))
+    // An **absent** member and a `null` one are the same absence, and
+    // comparing `Option<&Value>` makes them differ. That matters once: a
+    // copy published before a member existed has no such key, so the first
+    // poll after the upgrade would name the new member as one that moved —
+    // on the reference deployment, 194 events whose location nobody
+    // touched, each about to say `changed_fields: ["location"]` (#354).
+    // A `changed` event that names a field nobody changed is a false
+    // statement in the owner's own journal.
+    .filter(|field| {
+        let read = |event: &'a Value| event.get(field).cloned().unwrap_or(Value::Null);
+        read(before) != read(after)
+    })
     .collect()
 }
 
@@ -1212,6 +1223,37 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             reduced["participants_withheld"], 3,
             "two attendees and the organizer"
         );
+    }
+
+    #[test]
+    fn a_member_an_older_copy_never_had_is_not_a_field_that_moved() {
+        // Measured on the reference deployment the day #354 shipped: 194
+        // events published before `location` existed, each about to
+        // announce `changed_fields: ["location"]` on the next poll for a
+        // location nobody touched — because the older copy has no such key
+        // and the new one has `null`.
+        let event = parse_vevent(WEEKLY).unwrap();
+        let after = reduce(&event, "michel@example.com", Location::Withheld, |_| {
+            Consent::Granted
+        });
+        let mut before = after.clone();
+        before
+            .as_object_mut()
+            .expect("the published event is an object")
+            .remove("location");
+        assert!(
+            changed_fields(&before, &after).is_empty(),
+            "an absent member and a null one are the same absence"
+        );
+
+        // And the other direction, which is the same statement: a member
+        // that goes from a value to absent is a change, and to null is the
+        // same change.
+        let carried = reduce(&event, "michel@example.com", Location::Carried, |_| {
+            Consent::Granted
+        });
+        assert_eq!(changed_fields(&before, &carried), vec!["location"]);
+        assert_eq!(changed_fields(&after, &carried), vec!["location"]);
     }
 
     #[test]
