@@ -241,7 +241,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
     let other_dir = tempfile::tempdir()?;
     let other_client = Client::discover(settings(&other, other_dir.path())?).await?;
     let other_grant = authorize(&other_client, &other).await?;
-    let Renewal::Renewed { access, .. } = other_client.renew(&other_grant).await? else {
+    let Renewal::Renewed { access: _, .. } = other_client.renew(&other_grant).await? else {
         panic!("renews");
     };
     let other_services = twalk_collector::oidc::Services {

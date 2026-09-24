@@ -89,6 +89,17 @@ pub struct Config {
     /// (`COLLECTOR_MAIL_POLL_SECONDS`, 60 by default; #277 makes the push
     /// the rule and this the fallback).
     pub mail_poll_interval: std::time::Duration,
+    /// The window of a calendar the collector watches (#348): this many
+    /// days behind `now` and this many ahead (`COLLECTOR_CALENDAR_WINDOW_BACK_DAYS`,
+    /// 7; `COLLECTOR_CALENDAR_WINDOW_AHEAD_DAYS`, 120).
+    ///
+    /// A calendar is a history and the collector is not a mirror of it: a
+    /// bounded question is the only one a real calendar answers in time
+    /// (#348), and it bounds what the cursor remembers as well as what the
+    /// server has to compute. An event that moves out of the window reads
+    /// as removed, which from the perimeter's point of view it is.
+    pub calendar_window_back_days: i64,
+    pub calendar_window_ahead_days: i64,
     /// The retry policy for an approved reply the mailbox would not take
     /// (`COLLECTOR_SEND_RETRY_BASE_MS`, 1000; `COLLECTOR_SEND_RETRY_MAX_ATTEMPTS`,
     /// 5) — the Sensor's variables, on this side.
@@ -249,6 +260,8 @@ impl Config {
                     None => 60,
                 },
             ),
+            calendar_window_back_days: days("COLLECTOR_CALENDAR_WINDOW_BACK_DAYS", 7)?,
+            calendar_window_ahead_days: days("COLLECTOR_CALENDAR_WINDOW_AHEAD_DAYS", 120)?,
             send_retry_base: std::time::Duration::from_millis(
                 match optional_string("COLLECTOR_SEND_RETRY_BASE_MS") {
                     Some(value) => value.parse().with_context(|| {
@@ -350,6 +363,8 @@ mod tests {
             log_level: "info".to_owned(),
             health_interval: std::time::Duration::from_secs(60),
             calendar_poll_interval: std::time::Duration::from_secs(60),
+            calendar_window_back_days: 7,
+            calendar_window_ahead_days: 120,
             mail_poll_interval: std::time::Duration::from_secs(60),
             send_retry_base: std::time::Duration::from_millis(1000),
             send_retry_max_attempts: 5,
@@ -423,6 +438,21 @@ fn oidc_settings(state_dir: &std::path::Path) -> Result<Settings> {
             .collect(),
         grant_file: state_dir.join("oidc").join("grant.json"),
     })
+}
+
+/// A number of days, or the default. Refused rather than guessed: a
+/// window nobody can read is a perimeter nobody can state.
+fn days(name: &str, default: i64) -> Result<i64> {
+    match optional_string(name) {
+        None => Ok(default),
+        Some(value) => {
+            let days: i64 = value
+                .parse()
+                .with_context(|| format!("{name} is not a number of days: {value:?}"))?;
+            anyhow::ensure!(days > 0, "{name} is {days}: a window is at least one day");
+            Ok(days)
+        }
+    }
 }
 
 fn required(name: &str) -> Result<String> {

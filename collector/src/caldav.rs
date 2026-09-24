@@ -96,11 +96,50 @@ pub fn collection_path(owner_id: &str, calendar_id: &str) -> String {
 }
 
 /// The `PROPFIND` body: the collection's CTag, every resource's ETag.
-pub const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
-  <d:prop><d:getetag/><cs:getctag/><d:resourcetype/></d:prop>
-</d:propfind>
-"#;
+/// The `REPORT calendar-query` body listing the etags of the events in a
+/// window (RFC 4791 §7.8).
+///
+/// This replaces the `PROPFIND Depth: 1` this collector used to send
+/// (#348). That question — *every resource of this collection and its
+/// etag* — is unbounded: on the reference deployment's real calendar it
+/// did not answer inside thirty seconds, while a bounded question on the
+/// same server, on the same credential, answered in the same second. A
+/// calendar is a history; what a persona needs is what is happening
+/// around now.
+///
+/// The window is the collector's perimeter, and it has a consequence
+/// worth stating rather than discovering: an event **moved out** of the
+/// window reads as removed, because from inside the perimeter it is gone.
+pub fn calendar_query_body(from: &str, to: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop><d:getetag/></d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:time-range start="{}" end="{}"/>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>
+"#,
+        caldav_instant(from),
+        caldav_instant(to)
+    )
+}
+
+/// An RFC 3339 instant as CalDAV writes one: `20260924T050000Z`.
+fn caldav_instant(rfc3339: &str) -> String {
+    // The fraction goes first: filtering digits out of `…:00.123Z` would
+    // otherwise fold the milliseconds into the seconds.
+    let without_fraction = rfc3339.split('.').next().unwrap_or_default();
+    let digits: String = without_fraction
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == 'T')
+        .collect();
+    format!("{digits}Z")
+}
 
 /// The `REPORT calendar-multiget` body for the resources named.
 pub fn multiget_body(hrefs: &[String]) -> String {
@@ -785,6 +824,33 @@ impl Envelopes {
             "connection": self.connection,
             "data": data,
         })
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// #348: the question the collector asks a calendar is bounded, and
+    /// the instants it writes are CalDAV's, not RFC 3339's.
+    #[test]
+    fn a_calendar_query_names_a_window_in_the_form_caldav_reads() {
+        assert_eq!(caldav_instant("2026-09-24T05:00:00Z"), "20260924T050000Z");
+        assert_eq!(
+            caldav_instant("2026-09-24T05:00:00.123Z"),
+            "20260924T050000Z",
+            "a fraction is dropped, never folded into the seconds"
+        );
+        let body = calendar_query_body("2026-09-17T00:00:00Z", "2027-01-15T00:00:00Z");
+        assert!(body.contains("<c:comp-filter name=\"VEVENT\">"), "{body}");
+        assert!(
+            body.contains("start=\"20260917T000000Z\" end=\"20270115T000000Z\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("<d:getetag/>") && !body.contains("calendar-data"),
+            "the listing asks for etags and never for a word of an event: {body}"
+        );
     }
 }
 
