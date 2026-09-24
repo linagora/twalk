@@ -84,6 +84,10 @@ struct State {
     /// the shape of a service that is not an OAuth resource server at all,
     /// where a deployment expected one. `401`, no `WWW-Authenticate`.
     refusing_silently: Vec<&'static str>,
+    /// Services that take **Basic** and nothing else (#342): the shape the
+    /// ESN's sabre showed under #320 — `WWW-Authenticate: Basic
+    /// realm="ESN"`, and a bearer is worth nothing there.
+    basic: Vec<(&'static str, String, String)>,
     /// Services told not to answer at all (`unreachable`): the connection is
     /// accepted and closed.
     silent: Vec<&'static str>,
@@ -287,6 +291,14 @@ impl FakeSso {
     /// (#320): `401` and no `WWW-Authenticate`, the way a service that is
     /// not an OAuth resource server answers a bearer it never asked for.
     /// The operator's next step is the URL, not their SSO.
+    /// Makes one service take a username and a password, as the ESN's
+    /// sabre does, and refuse every bearer (#342).
+    pub fn require_basic(&self, service: &'static str, user: &str, password: &str) {
+        self.lock()
+            .basic
+            .push((service, user.to_owned(), password.to_owned()));
+    }
+
     pub fn refuse_without_challenge(&self, service: &'static str) {
         self.lock().refusing_silently.push(service);
     }
@@ -302,6 +314,7 @@ impl FakeSso {
     pub fn restore(&self, service: &'static str) {
         let mut guard = self.lock();
         guard.refusing.retain(|s| *s != service);
+        guard.basic.retain(|(held, _, _)| *held != service);
         guard.refusing_silently.retain(|s| *s != service);
         guard.silent.retain(|s| *s != service);
     }
@@ -654,11 +667,33 @@ fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<Response> 
         return Some(response);
     }
     match service_of(path) {
+        Some(service) if guard.basic.iter().any(|(held, _, _)| *held == service) => {
+            Some(response.challenging("Basic realm=\"ESN\", charset=\"UTF-8\""))
+        }
         Some(service) if !guard.refusing_silently.contains(&service) => {
             Some(response.challenging("Bearer realm=\"twalk\", error=\"insufficient_scope\""))
         }
         _ => Some(response),
     }
+}
+
+/// Standard base64, for the Basic credential this fake checks.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let triple = u32::from(buffer[0]) << 16 | u32::from(buffer[1]) << 8 | u32::from(buffer[2]);
+        for position in 0..4 {
+            if position <= chunk.len() {
+                out.push(ALPHABET[((triple >> (18 - 6 * position)) & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Which resource service a path belongs to: the mailbox's routes are
@@ -883,6 +918,23 @@ fn admit(name: &'static str, request: &RawRequest, guard: &State) -> Admission {
             "403 Forbidden",
             json!({ "error": "forbidden", "detail": format!("{name} wants an audience this token does not carry") }),
         );
+    }
+    // A service the test made Basic takes that and nothing else, with the
+    // challenge a real one offers (#342).
+    if let Some((_, user, password)) = guard.basic.iter().find(|(held, _, _)| *held == name) {
+        let expected = format!(
+            "Basic {}",
+            base64_standard(format!("{user}:{password}").as_bytes())
+        );
+        return match request.authorization.as_deref() {
+            Some(offered) if offered.trim() == expected => {
+                Admission::Account(guard.account.clone())
+            }
+            _ => Admission::Refused(
+                "401 Unauthorized",
+                json!({ "error": "unauthenticated", "detail": format!("{name} takes a username and a password") }),
+            ),
+        };
     }
     let bearer = request
         .authorization

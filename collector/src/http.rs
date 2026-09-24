@@ -30,7 +30,6 @@ use tracing::{info, warn};
 use crate::calendars::Calendars;
 use crate::freebusy::Window;
 use crate::metrics::Metrics;
-use crate::replies::SharedAccess;
 use crate::side::SideError;
 
 /// Every outcome a read is counted under, `served` first.
@@ -62,7 +61,7 @@ pub struct Endpoint {
     pub service_token: String,
     pub calendars: Option<Arc<Calendars>>,
     pub calendar_access: SharedCalendarAccess,
-    pub access: SharedAccess,
+    pub access: crate::replies::SharedCredential,
     pub metrics: Arc<Metrics>,
 }
 
@@ -133,7 +132,7 @@ async fn free_busy(
     };
     // The connection's state as the run loop last observed it, and the two
     // things a read needs that the loop holds — the owner's id on the side
-    // service and the access token. A state of `connected` with either
+    // service and the credential. A state of `connected` with either
     // missing is a round that has not completed yet: `unknown`, not
     // `connected`, since "connected but unreadable" is not a state.
     let calendar = endpoint.calendar_access.read().await.clone();
@@ -156,7 +155,7 @@ async fn free_busy(
             );
         }
     };
-    match calendars.free_busy(&owner_id, &token.token, &window).await {
+    match calendars.free_busy(&owner_id, &token, &window).await {
         Ok(busy) => {
             endpoint.metrics.record_freebusy_read("served");
             info!(

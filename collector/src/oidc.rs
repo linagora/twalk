@@ -593,13 +593,13 @@ impl Services {
     /// Asks the services of the connections this process holds who the
     /// token belongs to, with a fresh token — and asks nothing of a service
     /// it does not read (#321).
-    pub async fn whoami(&self, access: &AccessToken) -> Result<Identities> {
+    pub async fn whoami(&self, credential: &crate::side::Credential) -> Result<Identities> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()?;
         let jmap = match &self.jmap_session_url {
             Some(url) => Some(
-                ask(&http, "jmap", url, access, |body| {
+                ask(&http, "jmap", url, credential, |body| {
                     body.get("username")
                         .and_then(|v| v.as_str())
                         .map(str::to_owned)
@@ -616,7 +616,7 @@ impl Services {
             Some(url) => {
                 let caldav_user = format!("{}/api/user", url.trim_end_matches('/'));
                 Some(
-                    ask(&http, "caldav", &caldav_user, access, |body| {
+                    ask(&http, "caldav", &caldav_user, credential, |body| {
                         body.get("preferredEmail")
                             .and_then(|v| v.as_str())
                             .map(|email| {
@@ -648,12 +648,10 @@ async fn ask<T>(
     http: &reqwest::Client,
     service: &str,
     url: &str,
-    access: &AccessToken,
+    credential: &crate::side::Credential,
     account_of: impl Fn(&serde_json::Value) -> Option<T>,
 ) -> Result<T, ServiceRefusal> {
-    let response = http
-        .get(url)
-        .bearer_auth(&access.token)
+    let response = crate::side::authorize(http.get(url), credential)
         .header("accept", "application/json")
         .send()
         .await

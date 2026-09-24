@@ -29,8 +29,6 @@ use tracing::{debug, info, warn};
 
 use crate::jmap::{PushEndpoint, Session};
 use crate::metrics::Metrics;
-use crate::oidc::AccessToken;
-use crate::replies::SharedAccess;
 
 /// The longest wait between two attempts to open the socket.
 const MAX_RECONNECT: Duration = Duration::from_secs(60);
@@ -42,7 +40,7 @@ const NO_PUSH_RECHECK: Duration = Duration::from_secs(300);
 /// account.
 pub async fn listen(
     session_url: String,
-    access: SharedAccess,
+    access: crate::replies::SharedCredential,
     wake: Arc<Notify>,
     metrics: Arc<Metrics>,
 ) {
@@ -57,11 +55,11 @@ pub async fn listen(
     let mut said_no_push = false;
     let mut opened_before = false;
     loop {
-        let Some(token) = access.read().await.clone() else {
+        let Some(credential) = access.read().await.clone() else {
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         };
-        let session = match session(&http, &session_url, &token).await {
+        let session = match session(&http, &session_url, &credential).await {
             Ok(session) => session,
             Err(error) => {
                 failures += 1;
@@ -82,7 +80,7 @@ pub async fn listen(
         match subscribe(
             &http,
             endpoint,
-            &token,
+            &credential,
             &session.account_id,
             &wake,
             &metrics,
@@ -109,10 +107,14 @@ fn backoff(failures: u32) -> Duration {
     Duration::from_secs(2u64.saturating_pow(failures.min(6))).min(MAX_RECONNECT)
 }
 
-async fn session(http: &reqwest::Client, url: &str, token: &AccessToken) -> Result<Session> {
+async fn session(
+    http: &reqwest::Client,
+    url: &str,
+    credential: &crate::side::Credential,
+) -> Result<Session> {
     let document: Value = crate::side::send(
         http.get(url).header("accept", "application/json"),
-        &token.token,
+        credential,
         "jmap",
     )
     .await
@@ -131,7 +133,7 @@ async fn session(http: &reqwest::Client, url: &str, token: &AccessToken) -> Resu
 async fn subscribe(
     http: &reqwest::Client,
     endpoint: &PushEndpoint,
-    token: &AccessToken,
+    credential: &crate::side::Credential,
     account: &str,
     wake: &Notify,
     metrics: &Metrics,
@@ -149,7 +151,7 @@ async fn subscribe(
     match &endpoint.ticket_url {
         Some(ticket_url) => {
             // TMail's ticket: one POST with the bearer, one ticket, one socket.
-            let ticket: Value = crate::side::send(http.post(ticket_url), &token.token, "jmap")
+            let ticket: Value = crate::side::send(http.post(ticket_url), credential, "jmap")
                 .await
                 .map_err(|error| anyhow::anyhow!("the ticket endpoint refused: {error}"))?
                 .json()
@@ -168,13 +170,15 @@ async fn subscribe(
             *request.uri_mut() = url.parse().context("the ticketed URL is not a URI")?;
         }
         None => {
+            // No ticket endpoint: the handshake carries the credential
+            // itself. A `Basic` one is as valid a header here as a bearer
+            // — the server decides, not this client (#342).
             request.headers_mut().insert(
                 "authorization",
-                tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&format!(
-                    "Bearer {}",
-                    token.token
-                ))
-                .context("the token is not a header value")?,
+                tokio_tungstenite::tungstenite::http::HeaderValue::from_str(
+                    &credential.header_value(),
+                )
+                .context("the credential is not a header value")?,
             );
         }
     }

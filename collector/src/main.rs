@@ -48,21 +48,31 @@ async fn main() -> Result<()> {
 /// to open and reads the callback URL from stdin; prints the two `whoami`s
 /// and never a token.
 async fn authorize(config: &Config, renew: bool) -> Result<()> {
-    let client = Client::discover(config.oidc.clone()).await?;
-    if let Some(existing) = Grant::read(&config.oidc.grant_file)? {
+    // #342: `authorize` obtains a grant, and a `basic` collector has none
+    // to obtain. Refused here rather than half-run: the operator's next
+    // step is a password file, not a browser.
+    let Some(oidc) = config.oidc.clone() else {
+        anyhow::bail!(
+            "this collector's credential is COLLECTOR_CREDENTIAL=basic: there is no grant to \
+             obtain and no SSO to sign in to. Its password lives in \
+             COLLECTOR_BASIC_PASSWORD_FILE, and the service is read as COLLECTOR_BASIC_USER"
+        );
+    };
+    let client = Client::discover(oidc.clone()).await?;
+    if let Some(existing) = Grant::read(&oidc.grant_file)? {
         if !renew {
             eprintln!(
                 "A grant for {} at {} is already in {} (obtained {}). Nothing to do; pass --renew to replace it.",
                 existing.client_id,
                 existing.issuer,
-                config.oidc.grant_file.display(),
+                oidc.grant_file.display(),
                 existing.obtained_at
             );
             return Ok(());
         }
         eprintln!(
             "Replacing the grant in {} (--renew).",
-            config.oidc.grant_file.display()
+            oidc.grant_file.display()
         );
     }
     let started = client.begin_authorization()?;
@@ -77,7 +87,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
     eprintln!(
         "2. The SSO will redirect the browser to {} — nothing listens there. Copy the whole \
          address from the address bar and paste it here, then press Enter:",
-        config.oidc.redirect_uri
+        oidc.redirect_uri
     );
     eprintln!();
     let mut callback = String::new();
@@ -90,7 +100,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
     eprintln!();
     eprintln!(
         "Grant written to {} (mode 0600).",
-        config.oidc.grant_file.display()
+        oidc.grant_file.display()
     );
 
     // The two whoamis: the grant must be the owner's, or the collector will
@@ -103,7 +113,12 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
             anyhow::bail!("the grant just obtained could not be renewed: {detail}");
         }
     };
-    let identities = config.services.whoami(&access).await?;
+    let identities = config
+        .services
+        .whoami(&twalk_collector::side::Credential::Bearer(
+            access.token.clone(),
+        ))
+        .await?;
     let mut unanswered = Vec::new();
     for (service, identity) in identities.by_service() {
         match identity {
@@ -119,10 +134,10 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
         // Not kept: a stranger's grant on disk would be protected by the
         // next run's idempotence, and would be renewed for as long as the
         // collector ran. The SSO still holds it until its owner revokes it.
-        std::fs::remove_file(&config.oidc.grant_file).with_context(|| {
+        std::fs::remove_file(&oidc.grant_file).with_context(|| {
             format!(
                 "failed to remove the refused grant {}",
-                config.oidc.grant_file.display()
+                oidc.grant_file.display()
             )
         })?;
         anyhow::bail!(
@@ -135,7 +150,7 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
                 .map(|(service, account)| format!("{service} answers as {account}"))
                 .collect::<Vec<_>>()
                 .join(", "),
-            config.oidc.grant_file.display()
+            oidc.grant_file.display()
         );
     }
     if unanswered.is_empty() {
@@ -167,7 +182,19 @@ async fn authorize(config: &Config, renew: bool) -> Result<()> {
 /// The run loop: the grant kept fresh, the services asked whose it is, and
 /// each connection's state on the bus.
 async fn run(config: Config) -> Result<()> {
-    info!(issuer = %config.oidc.issuer, connections = ?config.connections.iter().map(|c| &c.id).collect::<Vec<_>>(), "collector starting");
+    info!(
+        credential = %config
+            .oidc
+            .as_ref()
+            .map(|oidc| format!("a grant at {}", oidc.issuer))
+            .unwrap_or_else(|| config
+                .basic
+                .as_ref()
+                .map(|basic| format!("{basic:?}"))
+                .unwrap_or_default()),
+        connections = ?config.connections.iter().map(|c| &c.id).collect::<Vec<_>>(),
+        "collector starting"
+    );
     let metrics = Arc::new(Metrics::new());
     if let Some(listen) = config.metrics_listen {
         let listener = tokio::net::TcpListener::bind(listen)
@@ -265,7 +292,10 @@ async fn run(config: Config) -> Result<()> {
     // The access token, shared with the reply consumer (#278): the run loop
     // keeps it fresh, the consumer sends with whatever is current, and
     // waits when there is none.
-    let shared_access: twalk_collector::replies::SharedAccess = Arc::default();
+    // What every task proves itself with (#342). An OIDC connection
+    // replaces it at each renewal below; a `Basic` one sets it once,
+    // because there is nothing to renew and no grant to reconnect.
+    let shared_access: twalk_collector::replies::SharedCredential = Arc::default();
     // The free/busy endpoint (#281): the calendar connection's state and the
     // owner's id on the side service, as the loop last observed them, for a
     // read to check before it asks.
@@ -333,7 +363,11 @@ async fn run(config: Config) -> Result<()> {
         .iter()
         .map(|held| Tracker::new(&held.id, held.kind, &config.host))
         .collect();
-    let mut grant = Grant::read(&config.oidc.grant_file)?;
+    // The grant, when this collector's credential is one (#342).
+    let mut grant = match &config.oidc {
+        Some(oidc) => Grant::read(&oidc.grant_file)?,
+        None => None,
+    };
     // The calendars are polled on their own interval (#251: every 60 s),
     // not on every health round.
     let mut last_calendar_poll: Option<std::time::Instant> = None;
@@ -353,18 +387,61 @@ async fn run(config: Config) -> Result<()> {
         // again for an SSO that was merely down.
         let mut sso_unreachable = false;
         let mut caldav_owner_id: Option<String> = None;
-        let observation = match &grant {
-            None => Observation {
+        let observation = match (&config.basic, &grant) {
+            // A credential of the operator's own (#342): no SSO to renew
+            // against, so what the services answer **is** the state. A
+            // `basic` connection is `connected`, `pending_operator` or
+            // `unreachable`; it can never be `reconnect_required`, because
+            // there is no grant to reconnect.
+            (Some(basic), _) => {
+                let credential = twalk_collector::side::Credential::Basic {
+                    user: basic.user.clone(),
+                    password: basic.password.clone(),
+                };
+                let identities = config.services.whoami(&credential).await;
+                match identities {
+                    Ok(identities) => {
+                        caldav_owner_id = identities.caldav_owner_id.clone();
+                        let mismatched = identities.owner_mismatch(&config.owner_email);
+                        if mismatched.is_empty() {
+                            observe_services(&config, &identities)
+                        } else {
+                            for (service, account) in &mismatched {
+                                warn!(%service, %account, "the credential is another account's; nothing is published");
+                            }
+                            Observation {
+                                state: State::PendingOperator,
+                                service: Some(mismatched[0].0),
+                                hint: Some(format!(
+                                    "The credential belongs to another account, not {}. Check \
+                                     COLLECTOR_BASIC_USER and its password file.",
+                                    config.owner_email
+                                )),
+                            }
+                        }
+                    }
+                    Err(error) => Observation {
+                        state: State::Unreachable,
+                        service: None,
+                        hint: Some(format!("the services could not be asked: {error:#}")),
+                    },
+                }
+            }
+            (None, None) => Observation {
                 state: State::ReconnectRequired,
                 service: Some("sso"),
                 hint: Some(format!(
                     "No grant in {}. Run `twalk-collector authorize` — on a compose deployment, \
                      `deploy/docker-compose/provision-connection.sh` — and sign in as {}.",
-                    config.oidc.grant_file.display(),
+                    config
+                        .oidc
+                        .as_ref()
+                        .map(|oidc| oidc.grant_file.display().to_string())
+                        .unwrap_or_default(),
                     config.owner_email
                 )),
             },
-            Some(current) => {
+            (None, Some(current)) => {
                 if access
                     .as_ref()
                     .is_none_or(|token| !token.is_fresh(RENEWAL_MARGIN))
@@ -411,7 +488,12 @@ async fn run(config: Config) -> Result<()> {
                         .clone()
                         .unwrap_or_else(|| reconnect_required(&config)),
                     Some(token) => {
-                        let mut identities = config.services.whoami(token).await;
+                        let mut identities = config
+                            .services
+                            .whoami(&twalk_collector::side::Credential::Bearer(
+                                token.token.clone(),
+                            ))
+                            .await;
                         // A 401 on a token this process believes fresh is
                         // not yet the operator's problem: the SSO may have
                         // revoked the grant under it. Renew first; the SSO's
@@ -432,7 +514,12 @@ async fn run(config: Config) -> Result<()> {
                                     access: fresh,
                                 } => {
                                     metrics.record_renewal("renewed", unix_seconds(now));
-                                    identities = config.services.whoami(&fresh).await;
+                                    identities = config
+                                        .services
+                                        .whoami(&twalk_collector::side::Credential::Bearer(
+                                            fresh.token.clone(),
+                                        ))
+                                        .await;
                                     grant = Some(rotated);
                                     access = Some(fresh);
                                 }
@@ -474,7 +561,18 @@ async fn run(config: Config) -> Result<()> {
                 }
             }
         };
-        *shared_access.write().await = access.clone();
+        *shared_access.write().await = match &config.basic {
+            Some(basic) => Some(twalk_collector::side::Credential::Basic {
+                user: basic.user.clone(),
+                password: basic.password.clone(),
+            }),
+            None => access
+                .as_ref()
+                .map(|access| twalk_collector::side::Credential::Bearer(access.token.clone())),
+        };
+        // What this round's reads prove themselves with: the same value
+        // every task holds, so a round and a reply never disagree (#342).
+        let credential = shared_access.read().await.clone();
         // One observation of the grant, published per connection it holds:
         // a calendar connection whose service refused gets its own words.
         let occurred_at = twalk_collector::oidc::now_rfc3339();
@@ -524,15 +622,15 @@ async fn run(config: Config) -> Result<()> {
         // fails otherwise is said and retried next time.
         let poll_is_due =
             last_calendar_poll.is_none_or(|last| last.elapsed() >= config.calendar_poll_interval);
-        if let (Some(calendars), Some(token), Some(owner_id), true, true) = (
+        if let (Some(calendars), Some(credential), Some(owner_id), true, true) = (
             &calendars,
-            &access,
+            &credential,
             &caldav_owner_id,
             calendar_is_connected,
             poll_is_due,
         ) {
             last_calendar_poll = Some(std::time::Instant::now());
-            match calendars.poll(owner_id, &token.token, &occurred_at).await {
+            match calendars.poll(owner_id, credential, &occurred_at).await {
                 Ok(found) => {
                     debug!(
                         envelopes = found.envelopes.len(),
@@ -585,11 +683,11 @@ async fn run(config: Config) -> Result<()> {
         let mail_poll_is_due = woken_for_mail
             || last_mail_poll.is_none_or(|last| last.elapsed() >= config.mail_poll_interval);
         woken_for_mail = false;
-        if let (Some(mailbox), Some(token), true, true) =
-            (&mailbox, &access, mail_is_connected, mail_poll_is_due)
+        if let (Some(mailbox), Some(credential), true, true) =
+            (&mailbox, &credential, mail_is_connected, mail_poll_is_due)
         {
             last_mail_poll = Some(std::time::Instant::now());
-            match mailbox.poll(&token.token, &occurred_at).await {
+            match mailbox.poll(credential, &occurred_at).await {
                 Ok(found) => {
                     debug!(
                         envelopes = found.envelopes.len(),
@@ -653,7 +751,14 @@ async fn run(config: Config) -> Result<()> {
 async fn renew(client: &mut Option<Client>, config: &Config, grant: &Grant) -> Result<Renewal> {
     let client = match client {
         Some(client) => client,
-        None => match Client::discover(config.oidc.clone()).await {
+        None => match Client::discover(
+            config
+                .oidc
+                .clone()
+                .context("a renewal without an OIDC credential (#342)")?,
+        )
+        .await
+        {
             Ok(discovered) => client.insert(discovered),
             Err(error) => {
                 return Ok(Renewal::Unreachable {

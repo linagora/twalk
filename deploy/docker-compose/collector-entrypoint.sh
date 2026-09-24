@@ -12,6 +12,39 @@
 # `collector` account, and everything after that line runs as that account.
 set -eu
 
+# A collector whose credential is a username and a password (#342) has no
+# client secret and no grant: one file, checked by the same rule, and the
+# OIDC block below is skipped entirely. Two processes, two secrets — the
+# calendar collector's password never sees the mailbox's grant.
+if [ "${COLLECTOR_CREDENTIAL:-oidc}" = "basic" ]; then
+	mount=/run/secrets/collector-basic-password
+	if [ -d "$mount" ]; then
+		echo "collector refuses to start: $mount is a directory. The host path" >&2
+		echo "COLLECTOR_BASIC_PASSWORD_FILE names in .env does not exist, so Docker created a" >&2
+		echo "directory there instead of mounting a file." >&2
+		exit 1
+	fi
+	if [ ! -f "$mount" ] || [ ! -s "$mount" ]; then
+		echo "collector refuses to start: no password at $mount. Put the service account's" >&2
+		echo "password in a file of your own, mode 0600, and name it in .env as" >&2
+		echo "COLLECTOR_BASIC_PASSWORD_FILE (see deploy/docker-compose/.env.example)." >&2
+		exit 1
+	fi
+	mode="$(stat -c %a "$mount")"
+	case "$mode" in
+	*00) ;;
+	*)
+		echo "collector refuses to start: the password file is readable by group or others" >&2
+		echo "(mode $mode). Run \`chmod 0600\` on that host path and start again." >&2
+		exit 1
+		;;
+	esac
+	install -m 0600 -o collector -g collector "$mount" /run/collector/basic-password
+	chown collector:collector /data
+	export COLLECTOR_BASIC_PASSWORD_FILE=/run/collector/basic-password
+	exec setpriv --reuid=collector --regid=collector --clear-groups /usr/local/bin/twalk-collector "$@"
+fi
+
 # Where compose.yaml mounts the host file; one place, on both sides.
 mount=/run/secrets/collector-client-secret
 if [ -d "$mount" ]; then

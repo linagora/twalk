@@ -180,3 +180,37 @@ async fn a_service_that_does_not_answer_is_said_and_does_not_pass_for_an_answer(
     assert!(setup.grant_path().exists());
     Ok(())
 }
+
+/// #342: `authorize` obtains a grant, and a collector whose credential is
+/// a username and a password has none to obtain. It says so and stops,
+/// rather than half-running a browser flow whose result nothing would
+/// read — the operator's next step is a password file.
+#[tokio::test]
+async fn authorize_refuses_a_collector_whose_credential_is_not_a_grant() -> Result<()> {
+    let run = Setup::new(OWNER).await?;
+    let password_file = run.dir.path().join("basic-password");
+    std::fs::write(&password_file, "hunter2\n")?;
+    let output = run
+        .command(false)
+        .env("COLLECTOR_CREDENTIAL", "basic")
+        .env("COLLECTOR_BASIC_USER", "michel")
+        .env("COLLECTOR_BASIC_PASSWORD_FILE", &password_file)
+        .env_remove("COLLECTOR_MAIL_CONNECTION")
+        .output()
+        .await?;
+    assert!(!output.status.success(), "authorize is not a start here");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        printed.contains("COLLECTOR_BASIC_PASSWORD_FILE"),
+        "the refusal says where the credential lives: {printed}"
+    );
+    assert!(
+        !printed.contains("hunter2"),
+        "and never prints it: {printed}"
+    );
+    Ok(())
+}

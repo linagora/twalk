@@ -367,3 +367,64 @@ async fn a_connection_without_its_service_url_is_refused_by_name() -> Result<()>
     );
     Ok(())
 }
+
+/// #342: a connection carries its own credential.
+///
+/// The reference deployment's calendar service challenges `Basic` and
+/// sits behind a different SSO from its mailbox's, so one grant for the
+/// whole collector — true while both services belonged to one
+/// organisation — reads neither. A calendar collector holds a username
+/// and a password of its own, and the mail collector's grant never
+/// touches it: two processes, two secrets, and a compromise of one is not
+/// a compromise of both.
+#[tokio::test]
+async fn a_calendar_collector_holds_a_credential_of_its_own() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("basic").await?;
+    // No `authorize`: this process has no grant and never asks for one.
+    run.sso.require_basic("caldav", "michel", "hunter2");
+    let password_file = run.dir.path().join("basic-password");
+    std::fs::write(&password_file, "hunter2\n")?;
+
+    let mut env = run.env();
+    env.retain(|(name, _)| {
+        !name.starts_with("COLLECTOR_OIDC_")
+            && name != "COLLECTOR_MAIL_CONNECTION"
+            && name != "COLLECTOR_JMAP_SESSION_URL"
+    });
+    env.push(("COLLECTOR_CREDENTIAL".to_owned(), "basic".to_owned()));
+    env.push(("COLLECTOR_BASIC_USER".to_owned(), "michel".to_owned()));
+    env.push((
+        "COLLECTOR_BASIC_PASSWORD_FILE".to_owned(),
+        password_file.to_string_lossy().into_owned(),
+    ));
+    let collector = CollectorProc::start(&env)?;
+
+    let connected = wait_for_state(&bus, &run, &run.calendar, "connected").await?;
+    validate_against_contract(&connected, "connection.status.changed")?;
+    assert_eq!(connected["data"]["kind"], "calendar");
+    assert_eq!(connected["data"]["from_state"], "unknown");
+    collector.assert_never_logged(&["hunter2"]).await;
+    assert!(
+        !run.sso.was_asked("jmap"),
+        "a calendar collector reads no mailbox: {:?}",
+        run.sso.paths()
+    );
+
+    // The password changed under it — the operator's to fix, and never a
+    // grant to reconnect: there is no SSO in this connection at all.
+    run.sso.restore("caldav");
+    run.sso.require_basic("caldav", "michel", "another");
+    let refused = wait_for_state(&bus, &run, &run.calendar, "pending_operator").await?;
+    assert_eq!(refused["data"]["from_state"], "connected");
+    assert!(
+        states_of(&bus, &run, &run.calendar)
+            .await?
+            .iter()
+            .all(|event| event["data"]["to_state"] != "reconnect_required"),
+        "a credential of the operator's own is never a grant to sign in for again"
+    );
+    collector.stop().await;
+    Ok(())
+}

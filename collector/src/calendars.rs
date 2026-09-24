@@ -86,13 +86,13 @@ impl Calendars {
     pub async fn free_busy(
         &self,
         owner_id: &str,
-        token: &str,
+        credential: &crate::side::Credential,
         window: &Window,
     ) -> Result<Vec<Busy>, SideError> {
         let mut answers = Vec::new();
-        for calendar in self.side.calendars(owner_id, token).await? {
+        for calendar in self.side.calendars(owner_id, credential).await? {
             let collection = collection_path(owner_id, &calendar.id);
-            answers.push(self.side.free_busy(&collection, window, token).await?);
+            answers.push(self.side.free_busy(&collection, window, credential).await?);
         }
         Ok(crate::freebusy::merge_answers(answers, window))
     }
@@ -108,9 +108,14 @@ impl Calendars {
 
     /// One poll: every calendar of the owner's, its CTag against the cursor,
     /// and for the ones that moved the listing, the diff and the reads.
-    pub async fn poll(&self, owner_id: &str, token: &str, now: &str) -> Result<Poll, SideError> {
+    pub async fn poll(
+        &self,
+        owner_id: &str,
+        credential: &crate::side::Credential,
+        now: &str,
+    ) -> Result<Poll, SideError> {
         let mut poll = Poll::default();
-        for calendar in self.side.calendars(owner_id, token).await? {
+        for calendar in self.side.calendars(owner_id, credential).await? {
             let cursor = match self.read_cursor(&calendar.id) {
                 Ok(cursor) => cursor,
                 Err(error) => {
@@ -124,14 +129,14 @@ impl Calendars {
                 continue;
             }
             let collection = caldav::collection_path(owner_id, &calendar.id);
-            let listing = self.side.listing(&collection, token).await?;
+            let listing = self.side.listing(&collection, credential).await?;
             if listing.ctag.is_some() && listing.ctag == cursor.ctag {
                 continue;
             }
             let changes = caldav::diff(&cursor, &listing);
             let resources = self
                 .side
-                .read(&collection, &changes.to_read(), token)
+                .read(&collection, &changes.to_read(), credential)
                 .await?;
             let first_poll = cursor.ctag.is_none() && cursor.known.is_empty();
             let (envelopes, next) = self.reconcile(
@@ -276,7 +281,11 @@ impl Side {
         crate::side::host_of(&self.base)
     }
 
-    pub async fn calendars(&self, owner_id: &str, token: &str) -> Result<Vec<Calendar>, SideError> {
+    pub async fn calendars(
+        &self,
+        owner_id: &str,
+        credential: &crate::side::Credential,
+    ) -> Result<Vec<Calendar>, SideError> {
         let url = format!(
             "{}/dav/calendars/{owner_id}.json?personal=true&sharedDelegationStatus=accepted",
             self.base
@@ -284,7 +293,7 @@ impl Side {
         let body = self
             .send(
                 self.http.get(&url).header("accept", "application/json"),
-                token,
+                credential,
             )
             .await?;
         let document: Value =
@@ -294,7 +303,11 @@ impl Side {
         Ok(calendars_in(&document))
     }
 
-    pub async fn listing(&self, collection: &str, token: &str) -> Result<Listing, SideError> {
+    pub async fn listing(
+        &self,
+        collection: &str,
+        credential: &crate::side::Credential,
+    ) -> Result<Listing, SideError> {
         let method = reqwest::Method::from_bytes(b"PROPFIND").expect("a method name");
         let body = self
             .send(
@@ -303,7 +316,7 @@ impl Side {
                     .header("depth", "1")
                     .header("content-type", "application/xml; charset=utf-8")
                     .body(PROPFIND_BODY),
-                token,
+                credential,
             )
             .await?;
         parse_listing(&body, collection).map_err(|error| SideError::Unreachable {
@@ -315,7 +328,7 @@ impl Side {
         &self,
         collection: &str,
         hrefs: &[String],
-        token: &str,
+        credential: &crate::side::Credential,
     ) -> Result<Vec<Resource>, SideError> {
         if hrefs.is_empty() {
             return Ok(Vec::new());
@@ -328,7 +341,7 @@ impl Side {
                     .header("depth", "1")
                     .header("content-type", "application/xml; charset=utf-8")
                     .body(multiget_body(hrefs)),
-                token,
+                credential,
             )
             .await?;
         parse_multiget(&body).map_err(|error| SideError::Unreachable {
@@ -342,7 +355,7 @@ impl Side {
         &self,
         collection: &str,
         window: &Window,
-        token: &str,
+        credential: &crate::side::Credential,
     ) -> Result<Vec<Busy>, SideError> {
         let method = reqwest::Method::from_bytes(b"REPORT").expect("a method name");
         let body = self
@@ -352,7 +365,7 @@ impl Side {
                     .header("depth", "0")
                     .header("content-type", "application/xml; charset=utf-8")
                     .body(window.report_body()),
-                token,
+                credential,
             )
             .await?;
         parse_free_busy(&body, window).map_err(|error| SideError::Unreachable {
@@ -363,9 +376,9 @@ impl Side {
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
-        token: &str,
+        credential: &crate::side::Credential,
     ) -> Result<String, SideError> {
-        crate::side::send(request, token, "caldav")
+        crate::side::send(request, credential, "caldav")
             .await?
             .text()
             .await

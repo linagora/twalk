@@ -162,9 +162,13 @@ impl Mailbox {
     /// nothing) or the changes since the persisted one, read and published.
     /// A state the server no longer serves changes from is recovered by the
     /// look-back window (#277).
-    pub async fn poll(&self, token: &str, now: &str) -> Result<MailPoll, SideError> {
+    pub async fn poll(
+        &self,
+        credential: &crate::side::Credential,
+        now: &str,
+    ) -> Result<MailPoll, SideError> {
         let session =
-            Session::parse(&self.get(&self.session_url, token).await?).map_err(|error| {
+            Session::parse(&self.get(&self.session_url, credential).await?).map_err(|error| {
                 SideError::Unreachable {
                     detail: format!("the JMAP session cannot be read: {error:#}"),
                 }
@@ -184,7 +188,7 @@ impl Mailbox {
             let response = self
                 .call(
                     &session.api_url,
-                    token,
+                    credential,
                     vec![jmap::mailbox_get(account), jmap::email_state(account)],
                 )
                 .await?;
@@ -210,7 +214,7 @@ impl Mailbox {
         let response = self
             .call(
                 &session.api_url,
-                token,
+                credential,
                 vec![jmap::email_changes(account, &previous.state)],
             )
             .await?;
@@ -234,7 +238,11 @@ impl Mailbox {
                     Some(since) => since,
                     None => {
                         let response = self
-                            .call(&session.api_url, token, vec![jmap::email_state(account)])
+                            .call(
+                                &session.api_url,
+                                credential,
+                                vec![jmap::email_state(account)],
+                            )
                             .await?;
                         let state = email_state_of(&method(&response, 0)?);
                         warn!(
@@ -255,7 +263,11 @@ impl Mailbox {
                 // that arrives between the two is in the window and after
                 // the state, read now and not again.
                 let response = self
-                    .call(&session.api_url, token, vec![jmap::email_state(account)])
+                    .call(
+                        &session.api_url,
+                        credential,
+                        vec![jmap::email_state(account)],
+                    )
                     .await?;
                 let state = email_state_of(&method(&response, 0)?);
                 let mut ids: Vec<String> = Vec::new();
@@ -263,7 +275,7 @@ impl Mailbox {
                     let response = self
                         .call(
                             &session.api_url,
-                            token,
+                            credential,
                             vec![jmap::email_received_after(
                                 account,
                                 &previous.inbox_id,
@@ -320,7 +332,7 @@ impl Mailbox {
             let response = self
                 .call(
                     &session.api_url,
-                    token,
+                    credential,
                     vec![jmap::email_mailboxes(account, &created)],
                 )
                 .await?;
@@ -337,7 +349,7 @@ impl Mailbox {
             let response = self
                 .call(
                     &session.api_url,
-                    token,
+                    credential,
                     vec![jmap::email_get(account, &in_inbox)],
                 )
                 .await?;
@@ -381,11 +393,15 @@ impl Mailbox {
     /// `Transient`; what it cannot — the original gone, an address the
     /// server calls invalid, no identity of the owner's — is `Permanent`. A
     /// draft the submission left behind is destroyed on either.
-    pub async fn send_reply(&self, reply: &ApprovedReply, token: &str) -> Result<Sent, SendError> {
+    pub async fn send_reply(
+        &self,
+        reply: &ApprovedReply,
+        credential: &crate::side::Credential,
+    ) -> Result<Sent, SendError> {
         let transient = |error: SideError| SendError::Transient(error.to_string());
         let session = Session::parse(
             &self
-                .get(&self.session_url, token)
+                .get(&self.session_url, credential)
                 .await
                 .map_err(transient)?,
         )
@@ -402,7 +418,7 @@ impl Mailbox {
         let response = self
             .batch(
                 &session.api_url,
-                token,
+                credential,
                 vec![
                     jmap::mailbox_get(account),
                     jmap::identity_get(account),
@@ -425,7 +441,7 @@ impl Mailbox {
         // newest mails rather than by a filter the server may not answer
         // (#331).
         if self
-            .already_answered(&session, token, account, &sent_id, &reply.event_id)
+            .already_answered(&session, credential, account, &sent_id, &reply.event_id)
             .await?
         {
             return Ok(Sent { already_sent: true });
@@ -459,14 +475,14 @@ impl Mailbox {
             // deployment, where the mail was in the owner's inbox, unread,
             // while both queries came back empty (#331).
             None => {
-                self.thread_by_reading_the_mailbox(&session, token, account, reply)
+                self.thread_by_reading_the_mailbox(&session, credential, account, reply)
                     .await?
             }
         };
         let response = self
             .batch(
                 &session.api_url,
-                token,
+                credential,
                 vec![jmap::email_get(account, &candidates)],
             )
             .await?;
@@ -505,7 +521,7 @@ impl Mailbox {
         let response = self
             .batch(
                 &session.api_url,
-                token,
+                credential,
                 outbound::reply_calls(reply, &original, &sender),
             )
             .await?;
@@ -535,7 +551,7 @@ impl Mailbox {
         if let Err(error) = self
             .call(
                 &session.api_url,
-                token,
+                credential,
                 vec![outbound::destroy_draft(account, &draft_id)],
             )
             .await
@@ -550,11 +566,15 @@ impl Mailbox {
         })
     }
 
-    async fn get(&self, url: &str, token: &str) -> Result<Value, SideError> {
+    async fn get(
+        &self,
+        url: &str,
+        credential: &crate::side::Credential,
+    ) -> Result<Value, SideError> {
         json_of(
             side::send(
                 self.http.get(url).header("accept", "application/json"),
-                token,
+                credential,
                 "jmap",
             )
             .await?,
@@ -570,7 +590,7 @@ impl Mailbox {
     async fn already_answered(
         &self,
         session: &Session,
-        token: &str,
+        credential: &crate::side::Credential,
         account: &str,
         sent_id: &str,
         approval_id: &str,
@@ -578,7 +598,7 @@ impl Mailbox {
         let listing = self
             .batch(
                 &session.api_url,
-                token,
+                credential,
                 vec![jmap::newest_in_mailbox(account, sent_id, 0)],
             )
             .await?;
@@ -589,7 +609,7 @@ impl Mailbox {
         let mails = self
             .batch(
                 &session.api_url,
-                token,
+                credential,
                 vec![jmap::approvals_of(account, &ids)],
             )
             .await?;
@@ -611,7 +631,7 @@ impl Mailbox {
     async fn thread_by_reading_the_mailbox(
         &self,
         session: &Session,
-        token: &str,
+        credential: &crate::side::Credential,
         account: &str,
         reply: &ApprovedReply,
     ) -> Result<Vec<String>, SendError> {
@@ -620,7 +640,7 @@ impl Mailbox {
             let listing = self
                 .batch(
                     &session.api_url,
-                    token,
+                    credential,
                     vec![jmap::newest_in_account(account, scanned)],
                 )
                 .await?;
@@ -633,7 +653,7 @@ impl Mailbox {
             let mails = self
                 .batch(
                     &session.api_url,
-                    token,
+                    credential,
                     vec![jmap::message_ids_of(account, &ids)],
                 )
                 .await?;
@@ -663,12 +683,12 @@ impl Mailbox {
     async fn batch(
         &self,
         api_url: &str,
-        token: &str,
+        credential: &crate::side::Credential,
         calls: Vec<(&'static str, Value)>,
     ) -> Result<Batch, SendError> {
         let methods = calls.iter().map(|(method, _)| *method).collect();
         let response = self
-            .call(api_url, token, calls)
+            .call(api_url, credential, calls)
             .await
             .map_err(|error| SendError::Transient(error.to_string()))?;
         Ok(Batch { methods, response })
@@ -677,13 +697,13 @@ impl Mailbox {
     async fn call(
         &self,
         api_url: &str,
-        token: &str,
+        credential: &crate::side::Credential,
         calls: Vec<(&str, Value)>,
     ) -> Result<Value, SideError> {
         json_of(
             side::send(
                 self.http.post(api_url).json(&jmap::request(calls)),
-                token,
+                credential,
                 "jmap",
             )
             .await?,
