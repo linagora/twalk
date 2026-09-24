@@ -448,15 +448,26 @@ async fn a_mails_subject_crosses_and_a_bridged_messages_absence_crosses_too() ->
     )
     .await?;
 
+    // The closed list again, for the shape that has eleven members: this is
+    // the path that grew one, so it is the path where a twelfth could be
+    // added without anybody noticing.
     assert_eq!(
-        wake.body["title"], trigger["data"]["title"],
-        "the mail's subject did not cross the seam, so the agent drafts \
-         without the line the ask often lives on"
-    );
-    assert_eq!(
-        wake.body["template_version"], 2,
-        "a body carrying the subject is version 2, so a route filtering on \
-         version 1 can decline it rather than read a shape it was not written for"
+        wake.body,
+        json!({
+            "event_type": "twalk.message.received",
+            "template_version": 2,
+            "reference": format!("TWALK-REF:{PERSONA_ID}:{trigger_id}:1"),
+            "network": "email",
+            "received_at": trigger["time"],
+            "message": trigger["data"]["body"],
+            "format": "text/plain",
+            "quotes_an_earlier_message": true,
+            "has_attachments": true,
+            "user_language": Value::Null,
+            "title": trigger["data"]["title"],
+        }),
+        "a mail's template is a closed list of eleven named fields, and this \
+         is it — the Subject line crossing, and nothing else crossing with it"
     );
 
     // And the contact is still nowhere near it: a subject crossing is not a

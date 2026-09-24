@@ -15,15 +15,16 @@ therefore builds a fixed, small dictionary out of an
 :class:`~twalk_sdk.trigger.InboundMessage` and nothing else — a persona
 author cannot add a field to it, which is the same reason the consent gate
 lives in the SDK rather than in a persona's handler. What it names is the
-message's *words* — its body and, since #362, a mail's subject, which is
-written in the same breath and often carries the ask — and the shape of the
-conversation around them; what it withholds is everybody's **identity**: the sender's Matrix ID, their
-display name, the network's own identifier for them (a phone number), the
-portal room, the quoted excerpt that belongs to whoever wrote it
-(ADR 0012), and an attachment's name or decryption material. A reply can be
-drafted without any of those. ``tests/test_webhook.py`` asserts the whole
-key set and then searches the serialised body for each withheld value, so
-that adding a field is a deliberate act with a failing test in front of it.
+message's *words* — its body and, since #362, a mail's Subject line, which
+is written in the same breath and often carries the ask — and the shape of
+the conversation around them; what it withholds is everybody's
+**identity**: the sender's Matrix ID, their display name, the network's own
+identifier for them (a phone number), the portal room, the quoted excerpt
+that belongs to whoever wrote it (ADR 0012), and an attachment's name or
+decryption material. A reply can be drafted without any of those.
+``tests/test_webhook.py`` asserts the whole key set and then searches the
+serialised body for each withheld value, so that adding a field is a
+deliberate act with a failing test in front of it.
 
 **TLS by configuration, not by coincidence.** The HMAC authenticates the
 sender and not the content — Nous Research's own documentation says so — so
