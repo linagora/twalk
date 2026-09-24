@@ -28,23 +28,33 @@ Both are governed pulls under ADR 0032, and every read you make — served or re
 
 Do not use either to summarise the owner's day, to find out what a meeting is **about**, or to check on somebody else. The first cannot, the second will not, and the refusal is recorded.
 
+## Never name a time you have not read
+
+A reply that proposes a slot, accepts one, or agrees to move a meeting is a **commitment made in the owner's name**. Read the free/busy first, every time, even when the contact has proposed the slots themselves and all you have to do is pick one — *especially* then, because picking one looks like agreeing and is in fact scheduling.
+
+This is not a precaution against a hypothetical. On 2026-09-24 a draft on a live deployment answered *"Le mardi 13 octobre à 14h me convient très bien"* to a contact who had offered three slots. Nothing had read the calendar; the Gateway's record of reads for that day was empty. The owner would have sent it (#363).
+
+If the read is refused, or you cannot make it, **say so in the reply and choose nothing**: *"je vérifie mon agenda et je te réponds"* is a true sentence a person can send. A guessed time is not, and the owner approving the draft has no way to tell the two apart.
+
 ## How to call it
 
 Run the script beside this file. It signs the request with the same secret your outbound hook signs answers with; the one thing it needs beyond that is where the owner's Companion Gateway is.
 
 ```sh
-./freebusy.sh <connection> <from> <to>
+./freebusy.sh <from> <to>                 # the deployment's own calendar
+./freebusy.sh <connection> <from> <to>    # naming it, when there are two
 ```
 
 (`freebusy.sh` in this skill's directory, wherever it was installed; the examples below write it as `skills/twalk-calendar/freebusy.sh`, its path in the Twalk repository.)
 
-- `connection` — the owner's calendar connection, as the deployment names it (the operator told you; usually `calendar`).
+- `connection` — the owner's calendar connection, as the deployment names it. **Leave it out.** You have no way to know an id: the message that woke you carries the *kind* of connection it arrived on and never an id (ADR 0033), and the calendar's is a different connection from the mail's. With two arguments the script takes it from `TWALK_CALENDAR_CONNECTION`, which the operator set when they installed this skill. Name one only if the operator told you which of two calendars to read; a guess is refused as `connection_unknown` and the refusal is recorded.
 - `from`, `to` — RFC 3339 instants (`2026-09-24T08:00:00Z`), `to` after `from`, at most fourteen days apart. Ask for the days the conversation is about, not for the whole fortnight.
 
-The script needs two environment variables in your `.env`:
+The script needs three environment variables in your `.env`:
 
 - `TWALK_ANSWER_SECRET` — the secret your outbound hook signs with; already there.
 - `TWALK_GATEWAY_URL` — the owner's Companion Gateway, the same origin your outbound hook posts answers to (`https://twalk.example.org`); the operator adds it when they install this skill.
+- `TWALK_CALENDAR_CONNECTION` — the calendar connection this deployment reads, so that you never have to name one (`calendar-linagora`, `calendar`). Added with the other two.
 
 It prints the Gateway's answer as JSON on stdout and exits non-zero on a refusal, with the refusal on stderr.
 
@@ -60,10 +70,11 @@ The owner is busy Thursday 9:00–10:30 and Friday 14:00–15:00 (UTC); every ot
 ### Asking what an event carries
 
 ```sh
-./event-facts.sh <connection> <uid>
+./event-facts.sh <uid>                 # the deployment's own calendar
+./event-facts.sh <connection> <uid>    # naming it, when there are two
 ```
 
-- `connection` — as above.
+- `connection` — as above: leave it out, and it comes from `TWALK_CALENDAR_CONNECTION`.
 - `uid` — the event's iCalendar UID, exactly as `calendar.event.created.v1`, `…changed.v1` or `…removed.v1` carried it in `data.uid`. This route does not search by title or by time: if you do not have the uid, you cannot ask.
 
 ```sh

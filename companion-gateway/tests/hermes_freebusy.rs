@@ -929,9 +929,50 @@ async fn the_skills_script_makes_a_request_the_route_accepts() -> Result<()> {
             .any(|read| read.3.as_deref() == Some("skill-run-1") && read.4 == "served"),
         "the script's delivery is in the record"
     );
+    // The connection may be left out, and that is the point of #363: an agent
+    // drafting a reply has no connection id to name — the message it woke for
+    // carries the kind and never the id (ADR 0033), and the calendar's is a
+    // different connection from the mail's — so the deployment names it once
+    // and the script reads it from there. Same read, same record, one more
+    // line in it.
+    let without_a_connection = tokio::process::Command::new(&script)
+        .arg("2026-09-24T08:00:00Z")
+        .arg("2026-09-26T18:00:00Z")
+        .env("TWALK_GATEWAY_URL", &base)
+        .env("TWALK_ANSWER_SECRET", HERMES_ANSWER_SECRET)
+        .env("TWALK_CALENDAR_CONNECTION", &connection)
+        .env("TWALK_DELIVERY_ID", "skill-run-2")
+        .output()
+        .await
+        .context("the skill's script ran with the connection left out")?;
+    let stdout = String::from_utf8_lossy(&without_a_connection.stdout);
+    let stderr = String::from_utf8_lossy(&without_a_connection.stderr);
+    assert!(
+        without_a_connection.status.success(),
+        "the script was refused with the connection left out:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let answer: Value = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("the script printed the answer as JSON: {stdout}"))?;
+    assert_eq!(answer["connection"], json!(connection));
+    assert_eq!(
+        answer["busy"],
+        json!([{ "start": "2026-09-24T09:00:00Z", "end": "2026-09-24T10:30:00Z" }]),
+        "the read taken from the environment is the read taken from the argument"
+    );
+    assert!(
+        recorded_reads(&state_dir)?
+            .iter()
+            .any(|read| read.3.as_deref() == Some("skill-run-2") && read.4 == "served"),
+        "a read the agent made without naming a connection is in the record like any other"
+    );
+
     // The document's example is the script's own usage line.
     let document = std::fs::read_to_string(script.with_file_name("SKILL.md"))?;
     assert!(document.contains("./freebusy.sh <connection> <from> <to>"));
+    assert!(
+        document.contains("./freebusy.sh <from> <to>"),
+        "the short form the agent is meant to use is not in the document"
+    );
     assert!(document.contains("X-Hermes-Signature-256") && document.contains("X-Hermes-Timestamp"));
     collector.stop();
     gateway.stop().await;

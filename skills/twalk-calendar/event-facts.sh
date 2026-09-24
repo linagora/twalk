@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Ask what one of the owner's events carries (skills/twalk-calendar, #355).
 #
-#   event-facts.sh <connection> <uid>
+#   event-facts.sh <uid>                 # the deployment's own calendar
+#   event-facts.sh <connection> <uid>    # naming it, when there are two
 #
 # Signs `GET /_twalk/hermes/event-facts` with TWALK_ANSWER_SECRET — the
 # secret the outbound hook signs answers with — over the request line, and
@@ -12,15 +13,21 @@
 # The description's text is not readable through this or any other route.
 set -eu
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: $0 <connection> <uid>   (uid: the event's iCalendar UID, as calendar.event.* carried it)" >&2
-  exit 64
-fi
 : "${TWALK_GATEWAY_URL:?TWALK_GATEWAY_URL is the owner's Companion Gateway origin}"
 : "${TWALK_ANSWER_SECRET:?TWALK_ANSWER_SECRET is the secret the outbound hook signs with}"
 
-connection=$1
-uid=$2
+# One argument means the connection comes from the deployment, for the reason
+# `freebusy.sh` states: the agent has no id to name and a guess is refused.
+if [ "$#" -eq 1 ]; then
+  connection=${TWALK_CALENDAR_CONNECTION:?one argument means the connection comes from TWALK_CALENDAR_CONNECTION, which is unset}
+  uid=$1
+elif [ "$#" -eq 2 ]; then
+  connection=$1
+  uid=$2
+else
+  echo "usage: $0 [<connection>] <uid>   (uid: the event's iCalendar UID, as calendar.event.* carried it; the connection defaults to TWALK_CALENDAR_CONNECTION)" >&2
+  exit 64
+fi
 path=/_twalk/hermes/event-facts
 # The query string is signed exactly as sent, so it is built once and used
 # twice. A UID is opaque and may carry anything, so it is encoded the same

@@ -1,23 +1,36 @@
 #!/usr/bin/env sh
 # Read the owner's free/busy through their Twalk deployment (skills/twalk-calendar).
 #
-#   freebusy.sh <connection> <from> <to>
+#   freebusy.sh <from> <to>                 # the deployment's own calendar
+#   freebusy.sh <connection> <from> <to>    # naming it, when there are two
 #
 # Signs `GET /_twalk/hermes/freebusy` with TWALK_ANSWER_SECRET — the secret
 # the outbound hook signs answers with — over the request line, and prints
 # the Gateway's JSON answer. Needs curl and openssl.
+#
+# The connection may be left out because an agent drafting a reply has no way
+# to know one: the message it was woken for carries the *kind* of connection
+# it arrived on and never an id (ADR 0033), and the calendar's is a different
+# connection anyway. So the deployment names it once, beside the two values
+# this script already needs, and the agent asks the question rather than
+# guessing an answer the Gateway would refuse (#363).
 set -eu
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: $0 <connection> <from> <to>   (from/to: RFC 3339, at most 14 days apart)" >&2
-  exit 64
-fi
 : "${TWALK_GATEWAY_URL:?TWALK_GATEWAY_URL is the owner's Companion Gateway origin}"
 : "${TWALK_ANSWER_SECRET:?TWALK_ANSWER_SECRET is the secret the outbound hook signs with}"
 
-connection=$1
-from=$2
-to=$3
+if [ "$#" -eq 2 ]; then
+  connection=${TWALK_CALENDAR_CONNECTION:?two arguments means the connection comes from TWALK_CALENDAR_CONNECTION, which is unset}
+  from=$1
+  to=$2
+elif [ "$#" -eq 3 ]; then
+  connection=$1
+  from=$2
+  to=$3
+else
+  echo "usage: $0 [<connection>] <from> <to>   (from/to: RFC 3339, at most 14 days apart; the connection defaults to TWALK_CALENDAR_CONNECTION)" >&2
+  exit 64
+fi
 path=/_twalk/hermes/freebusy
 # The query string is signed exactly as sent, so it is built once and used
 # twice: RFC 3339 instants carry ':' and '+', which are percent-encoded here
