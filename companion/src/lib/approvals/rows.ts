@@ -118,6 +118,14 @@ export interface Row {
 	 * contact are two sentences on this screen, by construction.
 	 */
 	posted: Posted | null;
+	/**
+	 * What the component that had to send it said when it gave up (#311),
+	 * or `null` while nothing has been given up on. A third state, not the
+	 * absence of the second: until this existed, a reply that could never
+	 * be sent read as "published" for ever, and an owner was told "sent"
+	 * for a message that never left.
+	 */
+	givenUp: Suggestion['given_up'];
 	actions: Action[];
 }
 
@@ -163,6 +171,7 @@ export function toRow(suggestion: Suggestion): Row {
 			suggestion.standing === 'approved' && suggestion.approval?.publication === 'unpublished',
 		delivery: suggestion.delivery,
 		posted: suggestion.posted,
+		givenUp: suggestion.given_up,
 		actions: actionsFor(suggestion)
 	};
 }
@@ -201,7 +210,30 @@ export function deliveryDetailKey(delivery: Delivery): MessageKey {
  * either the certainty the screen already had (`cannot_reach`) or the honest
  * "not yet". It is never derived from `approval.publication`.
  */
-export function postedCopy(row: Pick<Row, 'delivery' | 'posted'>): MessageKey {
+/**
+ * Whether the component that had to send this reply gave up on it (#311).
+ * One predicate, because the screen asks it three times — the sentence, the
+ * warning card, the icon — and three spellings of the same question drift.
+ */
+export function gaveUp(row: Pick<Row, 'givenUp'>): boolean {
+	return row.givenUp !== null && row.givenUp !== undefined;
+}
+
+export function postedCopy(row: Pick<Row, 'delivery' | 'posted' | 'givenUp'>): MessageKey {
+	// What was given up on is read first (#311). One approval has exactly
+	// one sender — the Sensor takes the Matrix connections and the collector
+	// the mail ones, each acking the other's untouched — so a reply cannot
+	// today be both posted and given up on. The order is stated anyway,
+	// because if the two ever did arrive together, "it went nowhere" is the
+	// one a person deciding whether to send again has to read.
+	if (gaveUp(row)) {
+		// A sender older than #311 set no reason, and the Gateway says so
+		// with a null rather than inventing English prose for a screen that
+		// speaks five languages. The sentence is this catalogue's to write.
+		return row.givenUp?.reason
+			? 'approvals.posted.givenUp'
+			: 'approvals.posted.givenUp.unexplained';
+	}
 	if (row.posted !== null) {
 		return row.posted.reach === 'contact'
 			? 'approvals.posted.contact'

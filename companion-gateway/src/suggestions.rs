@@ -94,8 +94,8 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::approval::{
-    has_passed, Content, Format, Posted, Refusal, POSTED_AS_HEADER, POSTED_REACH_HEADER,
-    REPLY_APPROVED_TYPE, SUGGEST_PRODUCED_TYPE,
+    has_passed, reason_of, Content, Format, GivenUp, Posted, Refusal, POSTED_AS_HEADER,
+    POSTED_REACH_HEADER, REPLY_APPROVED_TYPE, SUGGEST_PRODUCED_TYPE,
 };
 use crate::consent::{bus_subject, Network, State, STREAM_NAME};
 use crate::portals::{Delivery, Portals};
@@ -219,6 +219,15 @@ pub struct Listed {
     /// and it is never the same member as `approval.publication`: published
     /// on the bus and delivered to the contact are two things (#216).
     pub posted: Option<Posted>,
+    /// What the component that had to send it said when it gave up
+    /// (`twalk.persona.reply.approved.v1.dead`, #311): the reason, capped
+    /// as the sender capped it, and where on the bus the dead letter
+    /// landed. `None` while nothing has been given up on.
+    ///
+    /// Its own fact, beside `approval.publication` and `posted`, never
+    /// folded into either: see [`GivenUp`] for why it is not a variant of
+    /// them and why it is not called "undelivered".
+    pub given_up: Option<GivenUp>,
 }
 
 /// The stretch of the stream a read covered, reported so the bound is
@@ -520,17 +529,22 @@ impl Suggestions {
                 why: "trigger_out_of_reach",
             },
             posted: None,
+            given_up: None,
         })
     }
 
-    /// Fills in the two facts about delivery that the suggestion event
-    /// itself cannot carry (issue #216): what a reply *would* reach, from the
-    /// room the trigger arrived in and the owner's membership of it, and —
-    /// for an approved suggestion — what the Sensor said the reply *did*
-    /// reach.
+    /// Fills in the facts about delivery that the suggestion event itself
+    /// cannot carry (issue #216): what a reply *would* reach, from the room
+    /// the trigger arrived in and the owner's membership of it; and — for
+    /// an approved suggestion — what the Sensor said the reply *did* reach,
+    /// and whether the component that had to send it gave up on it (#311).
+    ///
+    /// The last two are read from two subjects, not one, because they are
+    /// not opposites: posted, given up on, or neither yet are three answers,
+    /// and only the third may be drawn as waiting.
     ///
     /// Best effort by design: a listing that could be read is answered even
-    /// when the second read fails, with `unknown` and the reason, because a
+    /// when a later read fails, with `unknown` and the reason, because a
     /// screen that cannot draw is worse than one that says it cannot tell.
     async fn say_what_a_reply_would_reach(
         &self,
@@ -644,12 +658,50 @@ impl Suggestions {
             Ok(reports) => reports,
             Err(error) => {
                 warn!(%error, "the Sensor's reports of posted replies could not be read");
-                return;
+                HashMap::new()
             }
         };
         for listed in suggestions.iter_mut() {
             if let Some(approval) = &listed.approval {
                 listed.posted = reports.get(&approval.event_id).cloned();
+            }
+        }
+        // And what was given up on (#311), read the same way from the
+        // subject the senders dead-letter to. Read **whatever the first
+        // read did**: a `.posted` subject the bus would not answer must not
+        // silence this one, or a reply that was given up on shows as "not
+        // posted yet" — which is the very sentence #311 exists to replace.
+        // Each read that fails leaves its own member empty and says so.
+        let dead = match self
+            .collect(
+                jetstream,
+                &format!("{}.dead", bus_subject(REPLY_APPROVED_TYPE)),
+                start,
+                u64::MAX,
+                &wanted,
+                |message| {
+                    let envelope: PostedEnvelope = serde_json::from_slice(&message.payload).ok()?;
+                    let sequence = message.info().map(|info| info.stream_sequence).ok()?;
+                    Some((
+                        envelope.id,
+                        GivenUp {
+                            reason: reason_of(message.headers.as_ref()),
+                            stream_sequence: sequence,
+                        },
+                    ))
+                },
+            )
+            .await
+        {
+            Ok(dead) => dead,
+            Err(error) => {
+                warn!(%error, "the dead letters of approved replies could not be read");
+                HashMap::new()
+            }
+        };
+        for listed in suggestions.iter_mut() {
+            if let Some(approval) = &listed.approval {
+                listed.given_up = dead.get(&approval.event_id).cloned();
             }
         }
     }

@@ -33,6 +33,20 @@ pub fn dead_letter_subject() -> String {
 /// [`dead_letter_msg_id`]), so the event id needs somewhere to stay visible.
 pub const EVENT_ID_HEADER: &str = "event-id";
 
+/// Header carrying **why** the Sensor gave up, on a dead-letter copy
+/// (#311). The collector has set it since #278; the Sensor did not, and a
+/// screen that says a reply did not leave has to say what stopped it —
+/// otherwise the owner is told "it failed" and has to read a log they do
+/// not have to learn anything more. The sender caps it (the collector at
+/// 512 characters), and it names the failure, never the reply's words.
+pub const REASON_HEADER: &str = "reason";
+
+/// How much of a reason is kept. The collector caps it the same way
+/// (`collector/src/outbound.rs`), for the same purpose: the reason is read
+/// by a person on the approval screen, and a service's whole answer pasted
+/// into a line is not read at all.
+pub const REASON_CAP: usize = 512;
+
 /// The subject the Sensor reports **what a posted reply reached** on
 /// (issue #216): `<source subject>.posted`, inside the twalk stream like the
 /// dead-letter subject beside it.

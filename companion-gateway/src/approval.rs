@@ -636,6 +636,49 @@ pub struct Posted {
 pub const POSTED_REACH_HEADER: &str = "reach";
 pub const POSTED_AS_HEADER: &str = "posted-as";
 
+/// A reply the component that had to send it gave up on (#311): the
+/// approval republished unchanged on `twalk.persona.reply.approved.v1.dead`
+/// by the Sensor or the collector, once a post can never succeed or has
+/// burned its attempts.
+///
+/// A thing of its own beside `publication` and [`Posted`], not a variant of
+/// either. `CONTEXT.md` fixes the three facts about a reply that went out —
+/// published on your bus, posted into a room, delivered to your contact —
+/// and this is the fourth, about a reply that did **not**: its send was
+/// abandoned. Folding it into the first is what made such a reply read as
+/// `published` for ever.
+///
+/// Note that it is not "undelivered": by the glossary, a reply whose reach
+/// is `nobody` is undelivered too, and that one was posted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GivenUp {
+    /// Why, in the sender's own words — the [`REASON_HEADER`] of the dead
+    /// letter, capped by the sender. Neither sender quotes the reply's body
+    /// in it.
+    ///
+    /// `None` when the sender set none: a Sensor older than #311 published
+    /// dead letters without the header. The Gateway answers the absence
+    /// rather than a sentence of its own, because the screen that renders
+    /// it speaks five languages and the one thing the Gateway must not do
+    /// is put English prose where a translation belongs.
+    pub reason: Option<String>,
+    pub stream_sequence: u64,
+}
+
+/// The header both senders put the reason in (`sensor/src/outbound.rs`,
+/// `collector/src/outbound.rs`).
+pub const REASON_HEADER: &str = "reason";
+
+/// The reason a dead letter carries, if it carries one. An empty header is
+/// no reason. One function, because the listing and the single record must
+/// not answer two different things about the same dead letter.
+pub fn reason_of(headers: Option<&async_nats::HeaderMap>) -> Option<String> {
+    headers
+        .and_then(|headers| headers.get(REASON_HEADER))
+        .map(|reason| reason.as_str().trim().to_owned())
+        .filter(|reason| !reason.is_empty())
+}
+
 /// The report's envelope: the approval's own id, and nothing else read.
 #[derive(Debug, Deserialize)]
 struct PostedEnvelope {
@@ -1403,6 +1446,73 @@ impl Approvals {
             Ok(posted) => posted,
             Err(error) => {
                 warn!(%error, "the Sensor's posted reports could not be read");
+                None
+            }
+        }
+    }
+
+    /// Whether the component that had to send this reply gave up on it
+    /// (#311), read from the publication's position forward on the `.dead`
+    /// sibling subject — exactly as [`Self::posted`] reads the `.posted`
+    /// one, and for the same reason: the dead letter follows the reply.
+    ///
+    /// Both are read on every request, because they are not opposites. A
+    /// bus that cannot be reached is `None` and logged, since this is a
+    /// fact *about* a record already read.
+    pub async fn given_up(&self, recorded: &RecordedApproval) -> Option<GivenUp> {
+        self.sibling_report(recorded, "dead", |message| {
+            let stream_sequence = message.info().map(|info| info.stream_sequence).ok()?;
+            Some(GivenUp {
+                reason: reason_of(message.headers.as_ref()),
+                stream_sequence,
+            })
+        })
+        .await
+    }
+
+    /// One report about one published reply, read off a sibling subject of
+    /// the approval's own — `.posted` or `.dead` — from the publication's
+    /// position forward, since a report follows the reply it is about. The
+    /// copy carries the approval **unchanged**, so `id` is what identifies
+    /// it; `read` says what the report means.
+    ///
+    /// `None` for all the reasons a fact *about* an already-read record may
+    /// be missing, none of which may turn that read into a refusal: no
+    /// report yet, a report beyond the window, a bus that did not answer —
+    /// the last two logged.
+    async fn sibling_report<T>(
+        &self,
+        recorded: &RecordedApproval,
+        sibling: &str,
+        read: impl Fn(&async_nats::jetstream::Message) -> Option<T>,
+    ) -> Option<T> {
+        let sequence = recorded.stream_sequence?;
+        let jetstream = match self.jetstream().await {
+            Ok(jetstream) => jetstream,
+            Err(error) => {
+                warn!(%error, %sibling, "the bus did not answer a read of an approval's reports");
+                return None;
+            }
+        };
+        let wanted = recorded.event_id.clone();
+        let found = self
+            .scan_forward(
+                jetstream,
+                &format!("{}.{sibling}", bus_subject(REPLY_APPROVED_TYPE)),
+                sequence,
+                |message| {
+                    let envelope: PostedEnvelope = serde_json::from_slice(&message.payload).ok()?;
+                    if envelope.id != wanted {
+                        return None;
+                    }
+                    read(message)
+                },
+            )
+            .await;
+        match found {
+            Ok(report) => report,
+            Err(error) => {
+                warn!(%error, %sibling, "an approval's reports could not be read");
                 None
             }
         }

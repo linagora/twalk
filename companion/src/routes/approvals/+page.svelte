@@ -111,6 +111,7 @@
 	import {
 		deliveryCopy,
 		deliveryDetailKey,
+		gaveUp,
 		goneStale,
 		noticesFor,
 		postedCopy,
@@ -594,9 +595,15 @@
 					<p>{$t('approvals.lost.body')}</p>
 				</div>
 			{:else if row.standing === 'approved' && row.approval !== null}
-				<p class="small" data-testid="already-sent">
-					<Icon name="ok" size="dense" />
-					{$t('approvals.sent.body', {
+				{@const givenUp = gaveUp(row)}
+				<!-- What the record says, and only that. Its usual sentence ends
+				     "your Sensor posts it into the conversation from there, then
+				     says who received it" — a promise that has already been
+				     broken once the reply was given up on (#311), so such a row
+				     gets the record without the promise, and no tick. -->
+				<p class="small" data-testid="already-sent" data-record={givenUp ? 'only' : 'full'}>
+					{#if !givenUp}<Icon name="ok" size="dense" />{/if}
+					{$t(givenUp ? 'approvals.sent.recordOnly' : 'approvals.sent.body', {
 						owner: row.approval.approved_by,
 						sequence: row.approval.stream_sequence ?? 0
 					})}
@@ -606,13 +613,17 @@
 				     Sensor's own report when there is one, and never from the
 				     approval's `publication`. -->
 				<p
-					class="small {row.posted?.reach === 'nobody' ? 'card card--warning' : ''}"
+					class="small {givenUp || row.posted?.reach === 'nobody' ? 'card card--warning' : ''}"
 					data-testid="delivered"
-					data-reach={row.posted?.reach ?? 'pending'}
+					data-reach={givenUp ? 'given_up' : (row.posted?.reach ?? 'pending')}
 				>
-					<Icon name={row.posted?.reach === 'nobody' ? 'warning' : 'ok'} size="dense" />
+					<Icon
+						name={givenUp || row.posted?.reach === 'nobody' ? 'warning' : 'ok'}
+						size="dense"
+					/>
 					{$t(postedCopy(row), {
 						postedAs: row.posted?.posted_as ?? '',
+						reason: row.givenUp?.reason ?? '',
 						detail: $t(deliveryDetailKey(row.delivery))
 					})}
 				</p>

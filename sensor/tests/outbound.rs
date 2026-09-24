@@ -181,6 +181,23 @@ fn assert_dead_letter_headers(dead: &harness::StoredMessage, approved_id: &str) 
     );
     assert_eq!(dead.header("network"), Some("whatsapp"));
     assert_eq!(dead.header("consent"), Some("granted"));
+    // And **why** (#311): the approval screen says what stopped the reply,
+    // and it can only say what this header carries. Asserted as deliberately
+    // as its absence was before: a reason that is there, capped, and that
+    // names the failure — never a word of the reply, which is the promise
+    // `clerk/README.md` makes about the line this ends up on.
+    let reason = dead
+        .header("reason")
+        .expect("a dead letter says why the Sensor gave up");
+    assert!(!reason.trim().is_empty(), "the reason is not blank");
+    assert!(
+        reason.chars().count() <= 512,
+        "the reason is capped at 512 characters, not a service's whole answer: {reason}"
+    );
+    assert!(
+        !reason.contains("Pas de problème, à 20h !"),
+        "the reason names the failure and never quotes the reply: {reason}"
+    );
 }
 
 /// A reply that can never be posted is dead-lettered on its first delivery —

@@ -794,6 +794,7 @@
 	"approvals.approvedText.original": "Ce que votre assistant proposait",
 	"approvals.sent.title": "Publiée",
 	"approvals.sent.body": "Approuvée en tant que {owner} et publiée sur votre flux d’événements à la position {sequence}. C’est tout ce que votre serveur peut dire de lui-même : votre Sensor la poste dans la conversation depuis là, puis dit qui l’a reçue.",
+	"approvals.sent.recordOnly": "Approuvée en tant que {owner} et publiée sur votre flux d’événements à la position {sequence}.",
 	"approvals.sent.edited": "Vous l’avez modifiée avant de l’approuver.",
 	"approvals.sent.unedited": "Publiée telle que votre assistant l’avait écrite.",
 
@@ -812,6 +813,8 @@
 	"approvals.posted.contact": "Remise : votre Sensor l’a postée en tant que {postedAs} dans la conversation, et le réseau l’a relayée au contact.",
 	"approvals.posted.nobody": "Personne ne l’a reçue : votre Sensor l’a postée en tant que {postedAs}, un compte que le bridge de cette conversation ignore parce que ce n’est pas le vôtre (#123). Elle existe dans une salle que le contact ne voit pas.",
 	"approvals.posted.pending": "Votre Sensor ne l’a pas encore postée — ou l’a fait au-delà de la portion du flux que votre serveur relit.",
+	"approvals.posted.givenUp": "Le service qui devait l’envoyer a abandonné : {reason}",
+	"approvals.posted.givenUp.unexplained": "Le service qui devait l’envoyer a abandonné, sans dire pourquoi.",
 
 	"approvals.lost.title": "Cette réponse n’est pas partie",
 	"approvals.lost.body": "Votre serveur a enregistré votre approbation et le flux d’événements n’a jamais accusé réception de la réponse : elle n’a donc jamais été postée. L’approuver de nouveau republie exactement la même réponse — elle ne peut pas partir deux fois, quoi qu’il arrive.",

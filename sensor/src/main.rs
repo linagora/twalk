@@ -2489,7 +2489,14 @@ async fn run_approved_reply_consumer(
                 // A malformed event can never be delivered: dead-letter it
                 // on the spot instead of burning retries.
                 error!(%error, "unusable persona.reply.approved event, dead-lettering");
-                dead_letter(&jetstream, &dead_letter_subject, &message, metrics).await;
+                dead_letter(
+                    &jetstream,
+                    &dead_letter_subject,
+                    &message,
+                    &format!("the event could not be read: {error:#}"),
+                    metrics,
+                )
+                .await;
                 continue;
             }
         };
@@ -2536,12 +2543,26 @@ async fn run_approved_reply_consumer(
             Err(PostError::Permanent(error)) => {
                 metrics.record_outbound_send_failure();
                 error!(id = %job.event_id, room = %job.room_id, %error, "approved reply can never be posted, dead-lettering");
-                dead_letter(&jetstream, &dead_letter_subject, &message, metrics).await;
+                dead_letter(
+                    &jetstream,
+                    &dead_letter_subject,
+                    &message,
+                    &format!("the reply can never be posted: {error:#}"),
+                    metrics,
+                )
+                .await;
             }
             Err(PostError::Transient(error)) if delivered >= max_attempts => {
                 metrics.record_outbound_send_failure();
                 error!(id = %job.event_id, room = %job.room_id, %error, %delivered, "approved reply exhausted its retries, dead-lettering");
-                dead_letter(&jetstream, &dead_letter_subject, &message, metrics).await;
+                dead_letter(
+                    &jetstream,
+                    &dead_letter_subject,
+                    &message,
+                    &format!("the reply exhausted its {delivered} attempts: {error:#}"),
+                    metrics,
+                )
+                .await;
             }
             Err(PostError::Transient(error)) => {
                 metrics.record_outbound_send_failure();
@@ -2901,9 +2922,18 @@ async fn dead_letter(
     jetstream: &async_nats::jetstream::Context,
     subject: &str,
     message: &async_nats::jetstream::Message,
+    reason: &str,
     metrics: &Metrics,
 ) {
     let mut headers = async_nats::header::HeaderMap::new();
+    headers.insert(
+        outbound::REASON_HEADER,
+        reason
+            .chars()
+            .take(outbound::REASON_CAP)
+            .collect::<String>()
+            .as_str(),
+    );
     let event = serde_json::from_slice::<serde_json::Value>(&message.message.payload).ok();
     // A malformed event may carry no usable id: fall back to the id it was
     // published under, if any.

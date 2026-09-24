@@ -336,6 +336,46 @@ pub fn journal_line(
     }
 }
 
+/// One `journal` line for a reply that never left (#311): which network it
+/// was meant for, what stopped it, which approval — and no text.
+///
+/// It reads as a failure, not as a variant of "sent": the whole defect this
+/// answers is that an approval whose reply was given up on looked posted.
+/// The reason is the sender's own words, capped by the sender; a report
+/// without one still gets a line, because "it did not leave" is the fact
+/// that matters and the log holds the rest.
+pub fn journal_undelivered_line(
+    l: Lang,
+    network: &str,
+    reason: Option<&str>,
+    approval_id: &str,
+    at: &str,
+) -> String {
+    let network = network_name(network);
+    let approval = short_id(approval_id);
+    let when = if at.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", clock_utc(at).unwrap_or_else(|| at.to_owned()))
+    };
+    let because = match (l, reason) {
+        (Lang::Fr, Some(reason)) => format!(" · cause : {reason}"),
+        (Lang::Fr, None) => " · cause non indiquée".to_owned(),
+        (Lang::En, Some(reason)) => format!(" · cause: {reason}"),
+        (Lang::En, None) => " · no cause was given".to_owned(),
+    };
+    match l {
+        Lang::Fr => format!(
+            "Non partie · {network} · abandonnée par le service qui devait l’envoyer{because} \
+             · approbation {approval}{when}"
+        ),
+        Lang::En => format!(
+            "Never sent · {network} · the service that had to send it gave up{because} · \
+             approval {approval}{when}"
+        ),
+    }
+}
+
 /// A bridge's state change. The bridge is named by its id alone — a
 /// deployment's bridge instance, never a network (ADR 0005), and by the
 /// contract's own pattern always `bridge-…`, so a word "Bridge" before it
@@ -685,6 +725,38 @@ mod tests {
         );
         assert!(post.contains(body), "{post}");
         assert_eq!(post.lines().last(), Some(REFERENCE));
+    }
+
+    #[test]
+    fn the_journal_line_of_a_reply_that_never_left_reads_as_a_failure() {
+        // #311: never a variant of "sent" — an approval whose reply was
+        // given up on read as posted for ever, which is the defect.
+        let fr = journal_undelivered_line(
+            Lang::Fr,
+            "whatsapp",
+            Some("le serveur JMAP a répondu unknownMethod"),
+            APPROVAL_ID,
+            "2026-09-17T21:41:00Z",
+        );
+        assert_eq!(
+            fr,
+            "Non partie · WhatsApp · abandonnée par le service qui devait l’envoyer · cause : le serveur JMAP a répondu unknownMethod · approbation 8d3fb3fe9d2d… · 21:41 UTC"
+        );
+        assert!(!fr.contains("Partie ·"), "{fr}");
+
+        let en = journal_undelivered_line(
+            Lang::En,
+            "whatsapp",
+            None,
+            APPROVAL_ID,
+            "2026-09-17T21:41:00Z",
+        );
+        assert!(en.starts_with("Never sent · WhatsApp"), "{en}");
+        assert!(en.contains("no cause was given"), "{en}");
+        assert!(
+            en.contains("8d3fb3fe9d2d…") && !en.contains(APPROVAL_ID),
+            "{en}"
+        );
     }
 
     #[test]
