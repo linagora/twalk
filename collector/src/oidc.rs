@@ -350,7 +350,10 @@ impl Client {
             Ok(response) => response,
             Err(error) => {
                 return Ok(Renewal::Unreachable {
-                    detail: format!("the SSO's token endpoint did not answer: {error}"),
+                    detail: format!(
+                        "the SSO's token endpoint did not answer: {}",
+                        crate::side::because(&error)
+                    ),
                 })
             }
         };
@@ -656,7 +659,10 @@ async fn ask<T>(
         .send()
         .await
         .map_err(|error| ServiceRefusal::Unreachable {
-            detail: format!("{service} did not answer at {url}: {error}"),
+            detail: format!(
+                "{service} did not answer at {url}: {}",
+                crate::side::because(&error)
+            ),
         })?;
     let status = response.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
