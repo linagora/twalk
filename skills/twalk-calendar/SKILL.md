@@ -104,8 +104,9 @@ That meeting has a join link you may offer, an agenda of about 340 characters yo
 
 1. Convert to the owner's time zone before you speak (the operator told you which; if not, say the zone you are using).
 2. Propose **up to three** slots inside working hours that fall entirely in gaps, leaving a margin around busy intervals. Never propose a slot that overlaps one.
-3. Say nothing about *why* the owner is busy — you do not know, and the answer does not carry it. "Thursday morning is taken" is right; "Thursday morning she has a meeting" is a guess.
-4. If the window you need is wider than fourteen days, ask about the nearest fortnight first.
+3. **Up to three means fewer when there are fewer.** A contact who asked for three has asked for three times, not for three sentences: if the week holds one decent slot, offer that one and say the week is full — *"je n'ai que jeudi 12h30 cette semaine-là, sinon la suivante"*. Measured on 2026-09-24: asked for three, an agent with one good gap filled the other two with 8:00 and 19:30 on a Friday. Both were genuinely free and neither is a time a person offers a colleague.
+4. Say nothing about *why* the owner is busy — you do not know, and the answer does not carry it. "Thursday morning is taken" is right; "Thursday morning she has a meeting" is a guess.
+5. If the window you need is wider than fourteen days, ask about the nearest fortnight first.
 
 ## Refusals you may see
 
