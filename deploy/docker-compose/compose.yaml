@@ -948,18 +948,25 @@ services:
       nats:
         condition: service_started
     volumes:
-      # The service account's password, a file of the operator's own at
-      # 0600 — the entrypoint refuses anything looser, as it does the
-      # client secret.
+      # Whichever secret this collector's credential needs, each a file of
+      # the operator's own at 0600 — the entrypoint refuses anything
+      # looser. The unused one mounts /dev/null and is never read.
       - ${CALENDAR_COLLECTOR_BASIC_PASSWORD_FILE:-/dev/null}:/run/secrets/collector-basic-password:ro
+      - ${CALENDAR_COLLECTOR_OIDC_CLIENT_SECRET_FILE:-/dev/null}:/run/secrets/collector-client-secret:ro
       - collector-calendar-data:/data
     environment:
       COLLECTOR_STATE_DIR: /data
       COLLECTOR_NATS_URL: nats://nats:4222
       COLLECTOR_HOST: collector-calendar
-      # The credential: a username and a password, never an SSO grant.
-      COLLECTOR_CREDENTIAL: basic
+      # The credential this connection carries (#342). `basic` for a
+      # service that challenges it; `oidc` for one behind an SSO of its
+      # own — which is not the mailbox's, or this would be one collector.
+      COLLECTOR_CREDENTIAL: ${CALENDAR_COLLECTOR_CREDENTIAL:-basic}
       COLLECTOR_BASIC_USER: ${CALENDAR_COLLECTOR_BASIC_USER:-}
+      COLLECTOR_OIDC_ISSUER: ${CALENDAR_COLLECTOR_OIDC_ISSUER:-}
+      COLLECTOR_OIDC_CLIENT_ID: ${CALENDAR_COLLECTOR_OIDC_CLIENT_ID:-}
+      COLLECTOR_OIDC_REDIRECT_URI: ${CALENDAR_COLLECTOR_OIDC_REDIRECT_URI:-}
+      COLLECTOR_OIDC_SCOPES: ${CALENDAR_COLLECTOR_OIDC_SCOPES:-openid profile email offline_access}
       COLLECTOR_CALDAV_URL: ${CALENDAR_COLLECTOR_CALDAV_URL:-}
       COLLECTOR_CALENDAR_CONNECTION: ${CALENDAR_COLLECTOR_CONNECTION:-}
       COLLECTOR_OWNER_EMAIL: ${CALENDAR_COLLECTOR_OWNER_EMAIL:-${COLLECTOR_OWNER_EMAIL:-}}
