@@ -1163,7 +1163,7 @@ async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> 
 /// `publication: published`, which is true and is not the question the
 /// owner is asking, and the screen showed a reply that never left as sent.
 ///
-/// So the listing and the record both carry `undelivered`, read from the
+/// So the listing and the record both carry `given_up`, read from the
 /// publication's own position forward the way `posted` is. Asserted on both
 /// documents, because a screen that reads one and a script that reads the
 /// other must not learn two different things about the same reply.
@@ -1171,7 +1171,7 @@ async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> 
 async fn a_reply_that_was_given_up_on_says_so_rather_than_staying_published() -> Result<()> {
     ensure_stack().await?;
     let bus = bus().await?;
-    let running = Running::start("suggestions-undelivered").await?;
+    let running = Running::start("suggestions-given_up").await?;
     let talk = conversation(
         &running,
         &bus,
@@ -1191,7 +1191,7 @@ async fn a_reply_that_was_given_up_on_says_so_rather_than_staying_published() ->
     assert_eq!(status, reqwest::StatusCode::CREATED, "{approved}");
     let (_text, before, _) = running.listed(&talk.suggestion_id).await?;
     assert_eq!(
-        before["undelivered"],
+        before["given_up"],
         Value::Null,
         "nothing has been given up on yet, and the member says so with a null rather than \
          being absent: {before}"
@@ -1218,45 +1218,45 @@ async fn a_reply_that_was_given_up_on_says_so_rather_than_staying_published() ->
     )
     .await?;
 
-    let undelivered = poll_until(
+    let given_up = poll_until(
         || async {
             let (status, record) = running
                 .get(&format!("/api/approvals/{}", talk.suggestion_id))
                 .await
                 .ok()?;
-            (status == reqwest::StatusCode::OK && !record["undelivered"].is_null())
+            (status == reqwest::StatusCode::OK && !record["given_up"].is_null())
                 .then_some(record.clone())
         },
         "the dead letter on the approval record",
     )
     .await?;
     assert_eq!(
-        undelivered["undelivered"]["reason"],
+        given_up["given_up"]["reason"],
         json!("the JMAP server answered unknownMethod"),
         "the sender's own words, so the owner learns what stopped it rather than only that \
-         something did: {undelivered}"
+         something did: {given_up}"
     );
     assert!(
-        undelivered["undelivered"]["stream_sequence"]
+        given_up["given_up"]["stream_sequence"]
             .as_u64()
             .unwrap_or_default()
             > approved["stream_sequence"].as_u64().unwrap_or_default(),
-        "the dead letter follows the reply on the bus: {undelivered}"
+        "the dead letter follows the reply on the bus: {given_up}"
     );
     // The publication still says what it said. Three facts, three members:
     // the Gateway does not rewrite one because another arrived, and the
     // screen is the one that decides which sentence wins.
-    assert_eq!(undelivered["publication"], json!("published"));
+    assert_eq!(given_up["publication"], json!("published"));
     assert_eq!(
-        undelivered["posted"],
+        given_up["posted"],
         Value::Null,
-        "a reply given up on was never posted: {undelivered}"
+        "a reply given up on was never posted: {given_up}"
     );
 
     // And the listing says the same thing about the same suggestion.
     let (_text, listed, _) = running.listed(&talk.suggestion_id).await?;
     assert_eq!(listed["standing"], json!("approved"));
-    assert_eq!(listed["undelivered"], undelivered["undelivered"]);
+    assert_eq!(listed["given_up"], given_up["given_up"]);
     assert_eq!(listed["approval"]["publication"], json!("published"));
     Ok(())
 }

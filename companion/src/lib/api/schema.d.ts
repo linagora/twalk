@@ -1841,6 +1841,20 @@ export interface components {
              *     message the bus already holds instead of sending a second reply.
              */
             event_id: string;
+            /**
+             * @description The sender gave up on this reply (#311), or `null` while it has
+             *     not. Present on `GET /api/approvals/{id}` for the reason
+             *     `posted` is, and absent from the `POST` answer for the same
+             *     reason: at that moment nothing has been attempted.
+             *
+             *     The third of three — recorded (`publication`), delivered
+             *     (`posted`), given up on (this). A record whose `publication` is
+             *     `published` and whose `given_up` is set is a reply that
+             *     reached the bus and never reached the contact; rendering the
+             *     first without reading the third is what told an owner "sent"
+             *     for a message that never left.
+             */
+            given_up?: null | components["schemas"]["GivenUpReport"];
             /** @description The network the reply goes out on. */
             network: components["schemas"]["Network"];
             /** @description The persona that proposed the reply. */
@@ -1874,20 +1888,6 @@ export interface components {
             stream_sequence?: number | null;
             /** @description The suggestion that was approved. */
             suggestion_event_id: string;
-            /**
-             * @description The sender gave up on this reply (#311), or `null` while it has
-             *     not. Present on `GET /api/approvals/{id}` for the reason
-             *     `posted` is, and absent from the `POST` answer for the same
-             *     reason: at that moment nothing has been attempted.
-             *
-             *     The third of three — recorded (`publication`), delivered
-             *     (`posted`), given up on (this). A record whose `publication` is
-             *     `published` and whose `undelivered` is set is a reply that
-             *     reached the bus and never reached the contact; rendering the
-             *     first without reading the third is what told an owner "sent"
-             *     for a message that never left.
-             */
-            undelivered?: null | components["schemas"]["UndeliveredReport"];
             /**
              * @description Whose words went out (#327): the persona's draft, corrections
              *     included, or the reply the owner wrote in its place. What the
@@ -2825,6 +2825,39 @@ export interface components {
              * @enum {string}
              */
             state?: "unknown" | "unreachable" | "reconnect_required" | "pending_operator";
+        };
+        /**
+         * @description What the component that had to send an approved reply said when it
+         *     gave up on it (#311): the approval republished unchanged on
+         *     `twalk.persona.reply.approved.v1.dead` by the Sensor or the
+         *     collector, the reason in a header, and this is what the Gateway
+         *     reads off it.
+         *
+         *     Why a subject of the senders' own rather than a field: the same
+         *     reason `.posted` is one (see `PostedReport`) — the answer is a
+         *     property of the *send*, not of the approval, and every v1 schema is
+         *     `additionalProperties: false`.
+         */
+        GivenUpReport: {
+            /**
+             * @description Why the sender gave up, in its own words — the `reason` header of
+             *     the dead letter, capped by the sender (512 characters). Neither
+             *     the Sensor nor the collector quotes the reply's body in it.
+             *
+             *     `null` when the sender set none: a Sensor older than #311
+             *     published dead letters with no such header. The Gateway answers
+             *     the absence rather than a sentence of its own — a client renders
+             *     it in the user's language, and English prose from the Gateway
+             *     would end up inside a French one. The reply still did not leave,
+             *     which is what the member's presence says.
+             */
+            reason: null | string;
+            /**
+             * @description Where the dead letter landed on the bus. Always after the
+             *     publication's own position: the sender reads the reply before it
+             *     gives up on it.
+             */
+            stream_sequence: number;
         };
         Health: {
             /**
@@ -3847,6 +3880,30 @@ export interface components {
              *     date.
              */
             expires_at: string | null;
+            /**
+             * @description The reply was given up on (#311): the Sensor or the collector
+             *     exhausted its retries, or was refused for good, and
+             *     dead-lettered the approval on
+             *     `twalk.persona.reply.approved.v1.dead`.
+             *
+             *     A fact of its own, beside `approval.publication` and `posted`,
+             *     and never a variant of either: those two say where a reply that
+             *     went out got to, and this one says it did not go out. Until this
+             *     member existed, an approval whose reply could never be sent read
+             *     as `published` for ever — the silence #216 was written against,
+             *     and the one that told an owner "sent" for a message that never
+             *     left.
+             *
+             *     A screen that shows `approval.publication: published` without
+             *     reading this one is telling the user something that may have
+             *     stopped being true.
+             *
+             *     Deliberately **not** called `undelivered`: by this project's
+             *     glossary a reply whose `reach` is `nobody` is undelivered too,
+             *     and that one was posted. `given_up` names what happened — the
+             *     sender abandoned the send.
+             */
+            given_up: null | components["schemas"]["GivenUpReport"];
             /** @description The network the message it answers arrived on. */
             network: components["schemas"]["Network"];
             /** @description The persona that proposed it. */
@@ -3907,24 +3964,6 @@ export interface components {
                 format: "text/plain" | "text/markdown" | "text/html";
             };
             trigger: components["schemas"]["SuggestionTrigger"];
-            /**
-             * @description The reply was given up on (#311): the Sensor or the collector
-             *     exhausted its retries, or was refused for good, and
-             *     dead-lettered the approval on
-             *     `twalk.persona.reply.approved.v1.dead`.
-             *
-             *     A **third** fact, beside `approval.publication` and `posted`,
-             *     because they are three: recorded on the bus, delivered to the
-             *     contact, and given up on. Until this member existed, an approval
-             *     whose reply could never be sent read as `published` for ever —
-             *     the silence #216 was written against, and the one that told an
-             *     owner "sent" for a message that never left.
-             *
-             *     A screen that shows `approval.publication: published` without
-             *     reading this one is telling the user something that may have
-             *     stopped being true.
-             */
-            undelivered: null | components["schemas"]["UndeliveredReport"];
         };
         /**
          * @description The suggestions in the read window, newest first, and what the read
@@ -3999,39 +4038,6 @@ export interface components {
              *     `fr.linagora.twalk.inbound.message.received.v1`.
              */
             event_type: string;
-        };
-        /**
-         * @description What the component that had to send an approved reply said when it
-         *     gave up on it (#311): the approval republished unchanged on
-         *     `twalk.persona.reply.approved.v1.dead` by the Sensor or the
-         *     collector, the reason in a header, and this is what the Gateway
-         *     reads off it.
-         *
-         *     Why a subject of the senders' own rather than a field: the same
-         *     reason `.posted` is one (see `PostedReport`) — the answer is a
-         *     property of the *send*, not of the approval, and every v1 schema is
-         *     `additionalProperties: false`.
-         */
-        UndeliveredReport: {
-            /**
-             * @description Why the sender gave up, in its own words — the `reason` header of
-             *     the dead letter, capped by the sender (512 characters). Neither
-             *     the Sensor nor the collector quotes the reply's body in it.
-             *
-             *     `null` when the sender set none: a Sensor older than #311
-             *     published dead letters with no such header. The Gateway answers
-             *     the absence rather than a sentence of its own — a client renders
-             *     it in the user's language, and English prose from the Gateway
-             *     would end up inside a French one. The reply still did not leave,
-             *     which is what the member's presence says.
-             */
-            reason: null | string;
-            /**
-             * @description Where the dead letter landed on the bus. Always after the
-             *     publication's own position: the sender reads the reply before it
-             *     gives up on it.
-             */
-            stream_sequence: number;
         };
     };
     responses: {

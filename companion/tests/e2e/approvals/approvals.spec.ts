@@ -204,15 +204,20 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 	const givenUp = page
 		.getByTestId(`suggestion-${published.suggestionId}`)
 		.getByTestId('delivered');
-	await expect(givenUp).toHaveAttribute('data-reach', 'undelivered');
+	await expect(givenUp).toHaveAttribute('data-reach', 'given_up');
 	// Either catalogue: this journey runs in whichever language the browser
 	// asks for, and the sentence is the deployment's, not the test's.
 	await expect(givenUp).toContainText(/gave up|abandonné/);
-	// The approval record still says what it said: the screen shows the
-	// failure, and never rewrites the publication it recorded.
-	await expect(
-		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('already-sent')
-	).toBeVisible();
+	// The approval record still says what it said — the screen shows the
+	// failure and never rewrites the publication it recorded — but it says
+	// only that. Its usual sentence ends "then says who received it", a
+	// promise already broken here, so the row carries the record alone.
+	const record = page
+		.getByTestId(`suggestion-${published.suggestionId}`)
+		.getByTestId('already-sent');
+	await expect(record).toBeVisible();
+	await expect(record).toHaveAttribute('data-record', 'only');
+	await expect(record).not.toContainText(/who received it|qui l’a reçue/);
 });
 
 test('nothing is approved by a keystroke, and nothing approves a list', async ({

@@ -2926,12 +2926,13 @@ async fn dead_letter(
     metrics: &Metrics,
 ) {
     let mut headers = async_nats::header::HeaderMap::new();
-    // Capped where the collector caps it, for the same reason: a reason is
-    // read by a human on the approval screen (#311), and an error that
-    // arrived with a service's whole answer in it would fill the line.
     headers.insert(
         outbound::REASON_HEADER,
-        reason.chars().take(512).collect::<String>().as_str(),
+        reason
+            .chars()
+            .take(outbound::REASON_CAP)
+            .collect::<String>()
+            .as_str(),
     );
     let event = serde_json::from_slice::<serde_json::Value>(&message.message.payload).ok();
     // A malformed event may carry no usable id: fall back to the id it was

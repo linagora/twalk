@@ -111,6 +111,7 @@
 	import {
 		deliveryCopy,
 		deliveryDetailKey,
+		gaveUp,
 		goneStale,
 		noticesFor,
 		postedCopy,
@@ -594,9 +595,15 @@
 					<p>{$t('approvals.lost.body')}</p>
 				</div>
 			{:else if row.standing === 'approved' && row.approval !== null}
-				<p class="small" data-testid="already-sent">
-					<Icon name="ok" size="dense" />
-					{$t('approvals.sent.body', {
+				{@const givenUp = gaveUp(row)}
+				<!-- What the record says, and only that. Its usual sentence ends
+				     "your Sensor posts it into the conversation from there, then
+				     says who received it" — a promise that has already been
+				     broken once the reply was given up on (#311), so such a row
+				     gets the record without the promise, and no tick. -->
+				<p class="small" data-testid="already-sent" data-record={givenUp ? 'only' : 'full'}>
+					{#if !givenUp}<Icon name="ok" size="dense" />{/if}
+					{$t(givenUp ? 'approvals.sent.recordOnly' : 'approvals.sent.body', {
 						owner: row.approval.approved_by,
 						sequence: row.approval.stream_sequence ?? 0
 					})}
@@ -605,11 +612,10 @@
 				<!-- Published is not delivered (#216): a second sentence, from the
 				     Sensor's own report when there is one, and never from the
 				     approval's `publication`. -->
-				{@const givenUp = row.undelivered !== null && row.undelivered !== undefined}
 				<p
 					class="small {givenUp || row.posted?.reach === 'nobody' ? 'card card--warning' : ''}"
 					data-testid="delivered"
-					data-reach={givenUp ? 'undelivered' : (row.posted?.reach ?? 'pending')}
+					data-reach={givenUp ? 'given_up' : (row.posted?.reach ?? 'pending')}
 				>
 					<Icon
 						name={givenUp || row.posted?.reach === 'nobody' ? 'warning' : 'ok'}
@@ -617,7 +623,7 @@
 					/>
 					{$t(postedCopy(row), {
 						postedAs: row.posted?.posted_as ?? '',
-						reason: row.undelivered?.reason ?? '',
+						reason: row.givenUp?.reason ?? '',
 						detail: $t(deliveryDetailKey(row.delivery))
 					})}
 				</p>
@@ -686,7 +692,6 @@
 					<p class="small muted" data-testid="delivered" data-reach="pending">
 						{$t(postedCopy(row), {
 							postedAs: '',
-							reason: row.undelivered?.reason ?? '',
 							detail: $t(deliveryDetailKey(row.delivery))
 						})}
 					</p>

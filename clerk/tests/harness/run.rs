@@ -348,13 +348,34 @@ impl Run {
     /// header, under `Nats-Msg-Id` `<id>:dead` as both senders set it.
     /// `reason` is `None` for a Sensor older than #311, which set none.
     pub async fn publish_dead_report(&self, approval: &Value, reason: Option<&str>) -> Result<()> {
+        self.publish_dead_report_as(approval, reason, "dead").await
+    }
+
+    /// The same dead letter a second time, under a **different**
+    /// `Nats-Msg-Id`: what a redelivery looks like to the clerk is the same
+    /// approval and headers twice.
+    pub async fn publish_dead_report_again(
+        &self,
+        approval: &Value,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        self.publish_dead_report_as(approval, reason, "dead-again")
+            .await
+    }
+
+    async fn publish_dead_report_as(
+        &self,
+        approval: &Value,
+        reason: Option<&str>,
+        msg_id_suffix: &str,
+    ) -> Result<()> {
         validate_against_contract(approval, "persona.reply.approved")?;
         let mut headers = async_nats::HeaderMap::new();
         if let Some(reason) = reason {
             headers.insert("reason", reason);
         }
         self.bus
-            .publish_event_with_headers(&self.dead_subject(), "dead", headers, approval)
+            .publish_event_with_headers(&self.dead_subject(), msg_id_suffix, headers, approval)
             .await
     }
 

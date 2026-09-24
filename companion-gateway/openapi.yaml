@@ -4920,7 +4920,7 @@ components:
                 draft is answered as `persona`: a claim of authorship is not
                 a way to send the persona's own words undisclosed.
 
-    UndeliveredReport:
+    GivenUpReport:
       type: object
       description: |
         What the component that had to send an approved reply said when it
@@ -5000,10 +5000,10 @@ components:
             `publication` says the reply reached the bus, `posted` says what
             it reached from there. A client must never render one as the
             other.
-        undelivered:
+        given_up:
           oneOf:
             - type: "null"
-            - $ref: "#/components/schemas/UndeliveredReport"
+            - $ref: "#/components/schemas/GivenUpReport"
           description: |
             The sender gave up on this reply (#311), or `null` while it has
             not. Present on `GET /api/approvals/{id}` for the reason
@@ -5012,7 +5012,7 @@ components:
 
             The third of three — recorded (`publication`), delivered
             (`posted`), given up on (this). A record whose `publication` is
-            `published` and whose `undelivered` is set is a reply that
+            `published` and whose `given_up` is set is a reply that
             reached the bus and never reached the contact; rendering the
             first without reading the third is what told an owner "sent"
             for a message that never left.
@@ -5212,7 +5212,7 @@ components:
           approval,
           delivery,
           posted,
-          undelivered,
+          given_up,
         ]
       additionalProperties: false
       properties:
@@ -5254,26 +5254,32 @@ components:
             /api/approvals`, the moment it matters.
         delivery:
           $ref: "#/components/schemas/Delivery"
-        undelivered:
+        given_up:
           oneOf:
             - type: "null"
-            - $ref: "#/components/schemas/UndeliveredReport"
+            - $ref: "#/components/schemas/GivenUpReport"
           description: |
             The reply was given up on (#311): the Sensor or the collector
             exhausted its retries, or was refused for good, and
             dead-lettered the approval on
             `twalk.persona.reply.approved.v1.dead`.
 
-            A **third** fact, beside `approval.publication` and `posted`,
-            because they are three: recorded on the bus, delivered to the
-            contact, and given up on. Until this member existed, an approval
-            whose reply could never be sent read as `published` for ever —
-            the silence #216 was written against, and the one that told an
-            owner "sent" for a message that never left.
+            A fact of its own, beside `approval.publication` and `posted`,
+            and never a variant of either: those two say where a reply that
+            went out got to, and this one says it did not go out. Until this
+            member existed, an approval whose reply could never be sent read
+            as `published` for ever — the silence #216 was written against,
+            and the one that told an owner "sent" for a message that never
+            left.
 
             A screen that shows `approval.publication: published` without
             reading this one is telling the user something that may have
             stopped being true.
+
+            Deliberately **not** called `undelivered`: by this project's
+            glossary a reply whose `reach` is `nobody` is undelivered too,
+            and that one was posted. `given_up` names what happened — the
+            sender abandoned the send.
         posted:
           oneOf:
             - type: "null"

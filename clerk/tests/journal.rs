@@ -199,5 +199,34 @@ async fn a_redelivered_report_is_still_one_line() -> Result<()> {
     run.assert_metric("twalk_clerk_posts_total{channel=\"journal\"} 2")
         .await?;
 
+    // And a redelivered **dead letter** is one line too (#311) — kept
+    // separate from the posted one, because its reference is its own
+    // (`<approval>:dead`). A line saying a reply was posted must never
+    // suppress one saying another reply never left.
+    let given_up = approval(&run.id, 3)?;
+    let given_up_id = given_up["id"].as_str().unwrap().to_owned();
+    run.publish_dead_report(&given_up, Some("the JMAP server answered unknownMethod"))
+        .await?;
+    run.wait_for_line(&run.channels.journal, &given_up_id[..12])
+        .await?;
+    run.publish_dead_report_again(&given_up, Some("the JMAP server answered unknownMethod"))
+        .await?;
+    let after = approval(&run.id, 4)?;
+    run.publish_posted_report(&after, "contact", OWNER).await?;
+    run.wait_for_line(&run.channels.journal, &after["id"].as_str().unwrap()[..12])
+        .await?;
+
+    let about_dead: Vec<_> = run
+        .lines_in(&run.channels.journal)
+        .await?
+        .into_iter()
+        .filter(|line| line_references_event(line, &format!("{given_up_id}:dead")))
+        .collect();
+    assert_eq!(
+        about_dead.len(),
+        1,
+        "a redelivered dead letter is still one line: {about_dead:?}"
+    );
+
     run.shutdown().await
 }

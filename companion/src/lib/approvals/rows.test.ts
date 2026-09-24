@@ -46,7 +46,7 @@ function suggestion(over: Partial<Suggestion> = {}): Suggestion {
 		approval: null,
 		delivery: { reach: 'unknown', detail: 'not_a_known_portal' },
 		posted: null,
-		undelivered: null,
+		given_up: null,
 		...over
 	} as Suggestion;
 }
@@ -312,10 +312,10 @@ describe('published is not delivered (#216)', () => {
 			suggestion({
 				standing: 'approved',
 				approval: approval(),
-				undelivered: { reason: 'the JMAP server answered unknownMethod', stream_sequence: 91 }
+				given_up: { reason: 'the JMAP server answered unknownMethod', stream_sequence: 91 }
 			})
 		);
-		expect(postedCopy(givenUp)).toBe('approvals.posted.undelivered');
+		expect(postedCopy(givenUp)).toBe('approvals.posted.givenUp');
 
 		// And it wins over a report: the Sensor may have reached a room
 		// while the collector gave up on the mail half, and "it went
@@ -325,10 +325,10 @@ describe('published is not delivered (#216)', () => {
 				standing: 'approved',
 				approval: approval(),
 				posted: { reach: 'contact', posted_as: 'mailto:michel@example.com', stream_sequence: 90 },
-				undelivered: { reason: 'exhausted its retries', stream_sequence: 91 }
+				given_up: { reason: 'exhausted its retries', stream_sequence: 91 }
 			})
 		);
-		expect(postedCopy(bothSaid)).toBe('approvals.posted.undelivered');
+		expect(postedCopy(bothSaid)).toBe('approvals.posted.givenUp');
 
 		// And a sender that said nothing still gets a sentence, in this
 		// catalogue's words rather than the Gateway's: a Sensor older than
@@ -337,10 +337,10 @@ describe('published is not delivered (#216)', () => {
 			suggestion({
 				standing: 'approved',
 				approval: approval(),
-				undelivered: { reason: null, stream_sequence: 91 }
+				given_up: { reason: null, stream_sequence: 91 }
 			})
 		);
-		expect(postedCopy(unexplained)).toBe('approvals.posted.undelivered.unexplained');
+		expect(postedCopy(unexplained)).toBe('approvals.posted.givenUp.unexplained');
 	});
 
 	it('never turns the approval record into a delivery sentence', () => {

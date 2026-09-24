@@ -641,12 +641,17 @@ pub const POSTED_AS_HEADER: &str = "posted-as";
 /// by the Sensor or the collector, once a post can never succeed or has
 /// burned its attempts.
 ///
-/// A third thing beside `publication` and [`Posted`], not a variant of
-/// either: recorded on the bus, delivered to the contact, and given up on
-/// are three states, and folding the third into the first is what made an
-/// undeliverable reply read as `published` for ever.
+/// A thing of its own beside `publication` and [`Posted`], not a variant of
+/// either. `CONTEXT.md` fixes the three facts about a reply that went out —
+/// published on your bus, posted into a room, delivered to your contact —
+/// and this is the fourth, about a reply that did **not**: its send was
+/// abandoned. Folding it into the first is what made such a reply read as
+/// `published` for ever.
+///
+/// Note that it is not "undelivered": by the glossary, a reply whose reach
+/// is `nobody` is undelivered too, and that one was posted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Undelivered {
+pub struct GivenUp {
     /// Why, in the sender's own words — the [`REASON_HEADER`] of the dead
     /// letter, capped by the sender. Neither sender quotes the reply's body
     /// in it.
@@ -1454,12 +1459,38 @@ impl Approvals {
     /// Both are read on every request, because they are not opposites. A
     /// bus that cannot be reached is `None` and logged, since this is a
     /// fact *about* a record already read.
-    pub async fn undelivered(&self, recorded: &RecordedApproval) -> Option<Undelivered> {
+    pub async fn given_up(&self, recorded: &RecordedApproval) -> Option<GivenUp> {
+        self.sibling_report(recorded, "dead", |message| {
+            let stream_sequence = message.info().map(|info| info.stream_sequence).ok()?;
+            Some(GivenUp {
+                reason: reason_of(message.headers.as_ref()),
+                stream_sequence,
+            })
+        })
+        .await
+    }
+
+    /// One report about one published reply, read off a sibling subject of
+    /// the approval's own — `.posted` or `.dead` — from the publication's
+    /// position forward, since a report follows the reply it is about. The
+    /// copy carries the approval **unchanged**, so `id` is what identifies
+    /// it; `read` says what the report means.
+    ///
+    /// `None` for all the reasons a fact *about* an already-read record may
+    /// be missing, none of which may turn that read into a refusal: no
+    /// report yet, a report beyond the window, a bus that did not answer —
+    /// the last two logged.
+    async fn sibling_report<T>(
+        &self,
+        recorded: &RecordedApproval,
+        sibling: &str,
+        read: impl Fn(&async_nats::jetstream::Message) -> Option<T>,
+    ) -> Option<T> {
         let sequence = recorded.stream_sequence?;
         let jetstream = match self.jetstream().await {
             Ok(jetstream) => jetstream,
             Err(error) => {
-                warn!(%error, "the bus did not answer a read of the dead letters");
+                warn!(%error, %sibling, "the bus did not answer a read of an approval's reports");
                 return None;
             }
         };
@@ -1467,25 +1498,21 @@ impl Approvals {
         let found = self
             .scan_forward(
                 jetstream,
-                &format!("{}.dead", bus_subject(REPLY_APPROVED_TYPE)),
+                &format!("{}.{sibling}", bus_subject(REPLY_APPROVED_TYPE)),
                 sequence,
                 |message| {
                     let envelope: PostedEnvelope = serde_json::from_slice(&message.payload).ok()?;
                     if envelope.id != wanted {
                         return None;
                     }
-                    let stream_sequence = message.info().map(|info| info.stream_sequence).ok()?;
-                    Some(Undelivered {
-                        reason: reason_of(message.headers.as_ref()),
-                        stream_sequence,
-                    })
+                    read(message)
                 },
             )
             .await;
         match found {
-            Ok(undelivered) => undelivered,
+            Ok(report) => report,
             Err(error) => {
-                warn!(%error, "the dead letters of approved replies could not be read");
+                warn!(%error, %sibling, "an approval's reports could not be read");
                 None
             }
         }

@@ -41,6 +41,12 @@ pub const EVENT_ID_HEADER: &str = "event-id";
 /// 512 characters), and it names the failure, never the reply's words.
 pub const REASON_HEADER: &str = "reason";
 
+/// How much of a reason is kept. The collector caps it the same way
+/// (`collector/src/outbound.rs`), for the same purpose: the reason is read
+/// by a person on the approval screen, and a service's whole answer pasted
+/// into a line is not read at all.
+pub const REASON_CAP: usize = 512;
+
 /// The subject the Sensor reports **what a posted reply reached** on
 /// (issue #216): `<source subject>.posted`, inside the twalk stream like the
 /// dead-letter subject beside it.

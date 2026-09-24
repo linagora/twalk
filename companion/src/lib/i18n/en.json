@@ -795,6 +795,7 @@
 	"approvals.approvedText.original": "What your assistant had proposed",
 	"approvals.sent.title": "Published",
 	"approvals.sent.body": "Approved as {owner} and published on your event stream at position {sequence}. That is all your server can say by itself: your Sensor posts it into the conversation from there, then says who received it.",
+	"approvals.sent.recordOnly": "Approved as {owner} and published on your event stream at position {sequence}.",
 	"approvals.sent.edited": "You edited it before approving.",
 	"approvals.sent.unedited": "Published as your assistant wrote it.",
 
@@ -813,8 +814,8 @@
 	"approvals.posted.contact": "Delivered: your Sensor posted it as {postedAs} into the conversation, and the network relayed it to the contact.",
 	"approvals.posted.nobody": "Nobody received it: your Sensor posted it as {postedAs}, an account the conversation's bridge ignores because it is not yours (#123). It exists in a room the contact cannot see.",
 	"approvals.posted.pending": "Your Sensor has not posted it yet — or did so beyond the stretch of the stream your server reads.",
-	"approvals.posted.undelivered": "The service that had to send it gave up: {reason}",
-	"approvals.posted.undelivered.unexplained": "The service that had to send it gave up, without saying why.",
+	"approvals.posted.givenUp": "The service that had to send it gave up: {reason}",
+	"approvals.posted.givenUp.unexplained": "The service that had to send it gave up, without saying why.",
 
 	"approvals.lost.title": "This reply did not go out",
 	"approvals.lost.body": "Your server recorded your approval and the event stream never acknowledged the reply, so it was never posted. Approving again republishes the very same reply — it cannot be sent twice, whatever happens.",

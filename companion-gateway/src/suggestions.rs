@@ -94,7 +94,7 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 
 use crate::approval::{
-    has_passed, reason_of, Content, Format, Posted, Refusal, Undelivered, POSTED_AS_HEADER,
+    has_passed, reason_of, Content, Format, GivenUp, Posted, Refusal, POSTED_AS_HEADER,
     POSTED_REACH_HEADER, REPLY_APPROVED_TYPE, SUGGEST_PRODUCED_TYPE,
 };
 use crate::consent::{bus_subject, Network, State, STREAM_NAME};
@@ -224,13 +224,10 @@ pub struct Listed {
     /// as the sender capped it, and where on the bus the dead letter
     /// landed. `None` while nothing has been given up on.
     ///
-    /// A third fact, beside `approval.publication` and `posted`, because
-    /// they are three: recorded, delivered, and given up on. Folding this
-    /// into either is the silence #216 was written against — until this,
-    /// an approval whose reply could never be sent read as `published`
-    /// for ever, and the owner was told "sent" three times for a message
-    /// that never left.
-    pub undelivered: Option<Undelivered>,
+    /// Its own fact, beside `approval.publication` and `posted`, never
+    /// folded into either: see [`GivenUp`] for why it is not a variant of
+    /// them and why it is not called "undelivered".
+    pub given_up: Option<GivenUp>,
 }
 
 /// The stretch of the stream a read covered, reported so the bound is
@@ -532,7 +529,7 @@ impl Suggestions {
                 why: "trigger_out_of_reach",
             },
             posted: None,
-            undelivered: None,
+            given_up: None,
         })
     }
 
@@ -661,7 +658,7 @@ impl Suggestions {
             Ok(reports) => reports,
             Err(error) => {
                 warn!(%error, "the Sensor's reports of posted replies could not be read");
-                return;
+                HashMap::new()
             }
         };
         for listed in suggestions.iter_mut() {
@@ -670,10 +667,11 @@ impl Suggestions {
             }
         }
         // And what was given up on (#311), read the same way from the
-        // subject the senders dead-letter to. Both are read because they
-        // are not opposites: a reply can be posted, or given up on, or
-        // neither yet — and "neither yet" is the only one that may show as
-        // waiting.
+        // subject the senders dead-letter to. Read **whatever the first
+        // read did**: a `.posted` subject the bus would not answer must not
+        // silence this one, or a reply that was given up on shows as "not
+        // posted yet" — which is the very sentence #311 exists to replace.
+        // Each read that fails leaves its own member empty and says so.
         let dead = match self
             .collect(
                 jetstream,
@@ -686,7 +684,7 @@ impl Suggestions {
                     let sequence = message.info().map(|info| info.stream_sequence).ok()?;
                     Some((
                         envelope.id,
-                        Undelivered {
+                        GivenUp {
                             reason: reason_of(message.headers.as_ref()),
                             stream_sequence: sequence,
                         },
@@ -698,12 +696,12 @@ impl Suggestions {
             Ok(dead) => dead,
             Err(error) => {
                 warn!(%error, "the dead letters of approved replies could not be read");
-                return;
+                HashMap::new()
             }
         };
         for listed in suggestions.iter_mut() {
             if let Some(approval) = &listed.approval {
-                listed.undelivered = dead.get(&approval.event_id).cloned();
+                listed.given_up = dead.get(&approval.event_id).cloned();
             }
         }
     }

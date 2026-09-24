@@ -834,10 +834,12 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
 
 /// One `.dead` report (#311): a line in `journal` saying the reply did not
 /// leave and what stopped it. Deduplicated by the `r` tag exactly as a
-/// `.posted` line is — and against the same tag, the approval's id, so a
-/// deployment whose reply was posted *and* later dead-lettered (which the
-/// senders do not do) would keep the first line rather than contradict it
-/// in two.
+/// `.posted` line is, but against a tag of its own — `<approval id>:dead`
+/// — so a redelivered dead letter is still one line while a posted line
+/// about the same approval never suppresses it. One approval has one
+/// sender today, so the two cannot both arrive; if they ever did, the
+/// channel would carry both facts rather than silently keep the cheerful
+/// one.
 async fn handle_dead_report(clerk: &Clerk, message: &Message) -> Result<(), RelayError> {
     let Some(report) = events::dead_report(&message.payload, message.headers.as_ref()) else {
         skip(
@@ -855,8 +857,8 @@ async fn handle_dead_report(clerk: &Clerk, message: &Message) -> Result<(), Rela
         &report.approval_id,
         &report.time,
     );
-    let Some(published) =
-        journal_line(clerk, "dead-letter report", &report.approval_id, &line).await?
+    let reference = format!("{}:dead", report.approval_id);
+    let Some(published) = journal_line(clerk, "dead-letter report", &reference, &line).await?
     else {
         return Ok(());
     };
@@ -872,34 +874,30 @@ async fn handle_dead_report(clerk: &Clerk, message: &Message) -> Result<(), Rela
 }
 
 /// One line in `journal`, whichever report asked for it: the relay queried
-/// for a line already tagged with this approval, the line written when
-/// there is none, and the post counted. `None` when the relay already held
-/// one — `skipped{duplicate}`, named by `what`.
+/// for a line already carrying `reference`, the line written when there is
+/// none, and the post counted. `None` when the relay already held one —
+/// `skipped{duplicate}`, named by `what`.
 ///
-/// One function for both reports because both are the same fact about the
-/// same approval, deduplicated against the same tag: a reply that was
-/// posted and later dead-lettered — which neither sender does — would keep
-/// its first line rather than contradict itself in two.
+/// One function for both reports because writing a line is the same act
+/// either way; what differs is the `reference` each deduplicates against,
+/// which is why it is a parameter and not derived here.
 async fn journal_line(
     clerk: &Clerk,
     what: &str,
-    approval_id: &str,
+    reference: &str,
     line: &str,
 ) -> Result<Option<JournalledLine>, RelayError> {
     let journal = clerk.config.channel_journal.as_str();
-    if already_lined(clerk, journal, approval_id).await? {
+    if already_lined(clerk, journal, reference).await? {
         skip(
             clerk,
             Skipped::Duplicate,
             what,
-            &format!("approval_id={approval_id}"),
+            &format!("reference={reference}"),
         );
         return Ok(None);
     }
-    let published = clerk
-        .relay
-        .stream_message(journal, line, approval_id)
-        .await?;
+    let published = clerk.relay.stream_message(journal, line, reference).await?;
     Ok(Some(JournalledLine {
         event_id: published.event_id,
         total: clerk.metrics.record_post(Channel::Journal),

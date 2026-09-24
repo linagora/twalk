@@ -291,7 +291,7 @@ fn suggestion_json(listed: &Listed) -> Value {
         // And what was given up on (#311): the third fact, never folded
         // into the other two. A reply that could not be sent showed as
         // `published` for ever until this member existed.
-        "undelivered": listed.undelivered.as_ref().map(undelivered_json),
+        "given_up": listed.given_up.as_ref().map(given_up_json),
     })
 }
 
@@ -307,10 +307,10 @@ pub fn posted_json(posted: &crate::approval::Posted) -> Value {
 
 /// A dead letter, as both the listing and `GET /api/approvals/{id}` render
 /// it (#311).
-pub fn undelivered_json(undelivered: &crate::approval::Undelivered) -> Value {
+pub fn given_up_json(given_up: &crate::approval::GivenUp) -> Value {
     json!({
-        "reason": undelivered.reason,
-        "stream_sequence": undelivered.stream_sequence,
+        "reason": given_up.reason,
+        "stream_sequence": given_up.stream_sequence,
     })
 }
 
@@ -390,7 +390,7 @@ mod tests {
                 why: "trigger_out_of_reach",
             },
             posted: None,
-            undelivered: None,
+            given_up: None,
         }
     }
 
@@ -427,16 +427,16 @@ mod tests {
     #[test]
     fn a_reply_that_was_given_up_on_is_a_member_of_its_own() {
         let quiet = suggestion_json(&listed(Standing::Approvable, None));
-        assert_eq!(quiet["undelivered"], Value::Null);
+        assert_eq!(quiet["given_up"], Value::Null);
 
         let mut given_up = listed(Standing::Approved, Some(recorded()));
-        given_up.undelivered = Some(crate::approval::Undelivered {
+        given_up.given_up = Some(crate::approval::GivenUp {
             reason: Some("the JMAP server answered unknownMethod".to_owned()),
             stream_sequence: 91,
         });
         let rendered = suggestion_json(&given_up);
         assert_eq!(
-            rendered["undelivered"],
+            rendered["given_up"],
             json!({
                 "reason": "the JMAP server answered unknownMethod",
                 "stream_sequence": 91,
@@ -451,12 +451,12 @@ mod tests {
         // dead letter all the same, and the Gateway renders the absence
         // rather than an English sentence the screen would have to show
         // inside a French one.
-        given_up.undelivered = Some(crate::approval::Undelivered {
+        given_up.given_up = Some(crate::approval::GivenUp {
             reason: None,
             stream_sequence: 92,
         });
         assert_eq!(
-            suggestion_json(&given_up)["undelivered"],
+            suggestion_json(&given_up)["given_up"],
             json!({ "reason": Value::Null, "stream_sequence": 92 })
         );
     }
