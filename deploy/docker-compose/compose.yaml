@@ -924,6 +924,56 @@ services:
     # still say.
     restart: unless-stopped
 
+  # The calendar collector (#342), under a profile of its own.
+  #
+  # A second process rather than a second credential in the first, because
+  # the two services this deployment reads do not share an SSO: the mailbox
+  # answers an OIDC grant from the organisation's, the calendar side service
+  # challenges `Basic` and sits behind another. One collector holds one
+  # credential, and the calendar's password never sees the mailbox's grant —
+  # a compromise of one is not a compromise of both. The bus makes this free:
+  # each collector consumes approvals under a durable consumer named for its
+  # own connection and leaves the other's alone (`collector/src/outbound.rs`).
+  #
+  # Every variable is this service's own (`CALENDAR_COLLECTOR_*`), mapped onto
+  # the container's `COLLECTOR_*` here, so one .env configures two processes
+  # without either reading the other's.
+  collector-calendar:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/collector.Dockerfile
+    image: ${TWALK_COLLECTOR_IMAGE:-twalk/collector:local}
+    profiles: [collector-calendar]
+    depends_on:
+      nats:
+        condition: service_started
+    volumes:
+      # The service account's password, a file of the operator's own at
+      # 0600 — the entrypoint refuses anything looser, as it does the
+      # client secret.
+      - ${CALENDAR_COLLECTOR_BASIC_PASSWORD_FILE:-/dev/null}:/run/secrets/collector-basic-password:ro
+      - collector-calendar-data:/data
+    environment:
+      COLLECTOR_STATE_DIR: /data
+      COLLECTOR_NATS_URL: nats://nats:4222
+      COLLECTOR_HOST: collector-calendar
+      # The credential: a username and a password, never an SSO grant.
+      COLLECTOR_CREDENTIAL: basic
+      COLLECTOR_BASIC_USER: ${CALENDAR_COLLECTOR_BASIC_USER:-}
+      COLLECTOR_CALDAV_URL: ${CALENDAR_COLLECTOR_CALDAV_URL:-}
+      COLLECTOR_CALENDAR_CONNECTION: ${CALENDAR_COLLECTOR_CONNECTION:-}
+      COLLECTOR_OWNER_EMAIL: ${CALENDAR_COLLECTOR_OWNER_EMAIL:-${COLLECTOR_OWNER_EMAIL:-}}
+      COLLECTOR_GATEWAY_URL: ${COLLECTOR_GATEWAY_URL:-${GATEWAY_SERVICE_TOKEN:+http://companion-gateway:8080}}
+      COLLECTOR_GATEWAY_SERVICE_TOKEN: ${COLLECTOR_GATEWAY_SERVICE_TOKEN:-${GATEWAY_SERVICE_TOKEN:-}}
+      COLLECTOR_HEALTH_INTERVAL_SECONDS: ${COLLECTOR_HEALTH_INTERVAL_SECONDS:-}
+      COLLECTOR_CALENDAR_POLL_SECONDS: ${COLLECTOR_CALENDAR_POLL_SECONDS:-}
+      COLLECTOR_METRICS_LISTEN: ${CALENDAR_COLLECTOR_METRICS_LISTEN:-}
+      # The free/busy endpoint is this process's when it holds the calendar:
+      # GATEWAY_COLLECTOR_URL points at whichever collector does.
+      COLLECTOR_HTTP_LISTEN: ${CALENDAR_COLLECTOR_HTTP_LISTEN:-${GATEWAY_SERVICE_TOKEN:+0.0.0.0:8090}}
+      COLLECTOR_LOG_LEVEL: ${COLLECTOR_LOG_LEVEL:-info}
+    restart: unless-stopped
+
   # --- Bridges: mautrix-whatsapp, -signal, -gmessages and -telegram --------
   #
   # All eight services below carry `profiles: [bridges]`, so a plain
@@ -1224,6 +1274,7 @@ volumes:
   # The collector's grant (#274). Deleting it is revoking the collector's
   # access from this side; the SSO still holds the grant until the owner
   # revokes it there.
+  collector-calendar-data:
   collector-data:
   # Written by the bridges' registration one-shots, read by Synapse. Shared
   # on purpose: it is the one piece of state a bridge and the homeserver must

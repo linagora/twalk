@@ -39,13 +39,19 @@ pub struct RetryPolicy {
 /// The access token the run loop keeps fresh, read by the consumer.
 pub type SharedAccess = Arc<tokio::sync::RwLock<Option<AccessToken>>>;
 
+/// What this process proves itself with, shared by every task that asks a
+/// service (#342). An OIDC connection replaces it at every renewal; a
+/// `Basic` one sets it once at start and never again, because there is
+/// nothing to renew.
+pub type SharedCredential = Arc<tokio::sync::RwLock<Option<crate::side::Credential>>>;
+
 /// Never returns: a consumer that fails is rebuilt after a short delay.
 pub async fn consume_approvals(
     jetstream: async_nats::jetstream::Context,
     mailbox: Arc<Mailbox>,
     held: Vec<String>,
     owner_email: String,
-    access: SharedAccess,
+    access: SharedCredential,
     metrics: Arc<Metrics>,
     retry: RetryPolicy,
 ) {
@@ -73,7 +79,7 @@ async fn run(
     mailbox: &Mailbox,
     held: &[String],
     owner_email: &str,
-    access: &SharedAccess,
+    access: &SharedCredential,
     metrics: &Metrics,
     retry: RetryPolicy,
 ) -> Result<()> {
@@ -157,7 +163,7 @@ async fn run(
             }
             continue;
         };
-        match mailbox.send_reply(&reply, &token.token).await {
+        match mailbox.send_reply(&reply, &token).await {
             Ok(sent) => {
                 metrics.record_published("persona.reply.approved.posted");
                 report_posted(jetstream, &message, &reply.event_id, owner_email).await;
@@ -195,22 +201,22 @@ async fn run(
     Ok(())
 }
 
-/// The access token, waited for up to a minute with the bus told every few
+/// The credential, waited for up to a minute with the bus told every few
 /// seconds that the message is being worked on.
 async fn wait_for_token(
-    access: &SharedAccess,
+    access: &SharedCredential,
     message: &async_nats::jetstream::Message,
     event_id: &str,
-) -> Option<AccessToken> {
+) -> Option<crate::side::Credential> {
     const WAIT: Duration = Duration::from_secs(60);
     const PROGRESS_EVERY: Duration = Duration::from_secs(5);
     let started = std::time::Instant::now();
     loop {
-        if let Some(token) = access.read().await.clone() {
-            return Some(token);
+        if let Some(credential) = access.read().await.clone() {
+            return Some(credential);
         }
         if started.elapsed() >= WAIT {
-            warn!(id = %event_id, "no access token to send the reply with after a minute; the approval waits for the grant");
+            warn!(id = %event_id, "no credential to send the reply with after a minute; the approval waits for the grant");
             return None;
         }
         if let Err(error) = message

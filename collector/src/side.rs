@@ -37,6 +37,95 @@ impl std::fmt::Display for SideError {
 
 impl std::error::Error for SideError {}
 
+/// How a request to a service proves who it is (#342).
+///
+/// One OIDC grant for the whole collector (ADR 0038) was true while a
+/// deployment's mailbox and calendar belonged to one organisation's SSO.
+/// It is not true of the reference deployment, whose calendar service
+/// answers `WWW-Authenticate: Basic realm="ESN"` and sits behind a
+/// different SSO from its mailbox's — so the credential belongs to the
+/// connection, and a process holds one connection's worth of it.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Credential {
+    /// An access token from this connection's OIDC grant.
+    Bearer(String),
+    /// A username and a password the operator holds, for a service that
+    /// challenges `Basic`. No SSO, so nothing to renew and no grant to
+    /// reconnect: such a connection is `connected` or it is not.
+    Basic { user: String, password: String },
+}
+
+impl Credential {
+    /// The `Authorization` header this credential makes, for a place that
+    /// builds its own request — the WebSocket handshake of #277's push,
+    /// which is not a `reqwest` builder.
+    pub fn header_value(&self) -> String {
+        match self {
+            Self::Bearer(token) => format!("Bearer {token}"),
+            Self::Basic { user, password } => {
+                format!("Basic {}", base64(format!("{user}:{password}").as_bytes()))
+            }
+        }
+    }
+
+    pub(crate) fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self {
+            Self::Bearer(token) => request.bearer_auth(token),
+            Self::Basic { user, password } => request.basic_auth(user, Some(password)),
+        }
+    }
+
+    /// What a log may say about it: the scheme, and for `Basic` the user —
+    /// which is not a secret and is what an operator needs to recognise
+    /// the account. Never the token, never the password.
+    pub fn described(&self) -> String {
+        match self {
+            Self::Bearer(_) => "a bearer from the connection's grant".to_owned(),
+            Self::Basic { user, .. } => format!("basic as {user}"),
+        }
+    }
+}
+
+/// Redacted, deliberately: a credential that printed itself would end up
+/// in a log the day something else went wrong.
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.described())
+    }
+}
+
+/// A request that proves itself, for a caller building its own.
+pub fn authorize(
+    request: reqwest::RequestBuilder,
+    credential: &Credential,
+) -> reqwest::RequestBuilder {
+    credential.apply(request)
+}
+
+/// Standard base64 (RFC 4648 §4), for the one header that is written by
+/// hand rather than by `reqwest`. The collector already carries a
+/// base64**url** encoder for PKCE (`oidc.rs`), which is a different
+/// alphabet and no padding — near enough to be worth saying why they are
+/// two functions.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let triple = u32::from(buffer[0]) << 16 | u32::from(buffer[1]) << 8 | u32::from(buffer[2]);
+        for position in 0..4 {
+            if position <= chunk.len() {
+                let index = (triple >> (18 - 6 * position)) & 0x3f;
+                out.push(ALPHABET[index as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// The HTTP client both services are asked through: one timeout, rustls.
 pub fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
@@ -73,12 +162,12 @@ pub fn host_of(url: &str) -> String {
 /// `401`/`403` is a refusal of the token, any other failure is unreachable.
 pub async fn send(
     request: reqwest::RequestBuilder,
-    token: &str,
+    credential: &Credential,
     service: &str,
 ) -> Result<reqwest::Response, SideError> {
     let response =
-        request
-            .bearer_auth(token)
+        credential
+            .apply(request)
             .send()
             .await
             .map_err(|error| SideError::Unreachable {

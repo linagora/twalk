@@ -18,13 +18,34 @@ pub struct HeldConnection {
     pub kind: &'static str,
 }
 
+/// A credential the operator holds, for a service that challenges `Basic`
+/// rather than reading the SSO's tokens (#342). The password lives in a
+/// file of its own at 0600, never in `.env` — the rule #239 established
+/// for the OIDC client's secret, for the same reason.
+#[derive(Clone)]
+pub struct Basic {
+    pub user: String,
+    pub password: String,
+}
+
+/// Redacted: a struct that printed its password would end up in a log.
+impl std::fmt::Debug for Basic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "basic as {}", self.user)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The SSO and the client (`COLLECTOR_OIDC_ISSUER`,
     /// `COLLECTOR_OIDC_CLIENT_ID`, `COLLECTOR_OIDC_CLIENT_SECRET_FILE`,
     /// `COLLECTOR_OIDC_REDIRECT_URI`, `COLLECTOR_OIDC_SCOPES`), and where the
     /// grant lives (`COLLECTOR_STATE_DIR/oidc/grant.json`).
-    pub oidc: Settings,
+    pub oidc: Option<Settings>,
+    /// The credential when it is not an OIDC grant (#342): a username and
+    /// a password, for a service that challenges `Basic`. Exactly one of
+    /// this and `oidc` is set, which `COLLECTOR_CREDENTIAL` decides.
+    pub basic: Option<Basic>,
     /// The services the grant opens, one per connection held
     /// (`COLLECTOR_JMAP_SESSION_URL` with a mail connection,
     /// `COLLECTOR_CALDAV_URL` with a calendar one) — and none for a service
@@ -78,22 +99,49 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let state_dir = PathBuf::from(required("COLLECTOR_STATE_DIR")?);
-        let oidc = Settings {
-            issuer: required("COLLECTOR_OIDC_ISSUER")?
-                .trim_end_matches('/')
-                .to_owned(),
-            client_id: required("COLLECTOR_OIDC_CLIENT_ID")?,
-            client_secret_file: PathBuf::from(required("COLLECTOR_OIDC_CLIENT_SECRET_FILE")?),
-            redirect_uri: required("COLLECTOR_OIDC_REDIRECT_URI")?,
-            scopes: optional_string("COLLECTOR_OIDC_SCOPES")
-                .unwrap_or_else(|| "openid profile email offline_access".to_owned())
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect(),
-            grant_file: state_dir.join("oidc").join("grant.json"),
+        // Which kind of credential this process holds (#342). `oidc` is the
+        // default and what every deployment before this one had; `basic` is
+        // for a service that challenges `Basic` and does not read the SSO's
+        // tokens at all — the ESN's sabre, measured under #320. One process
+        // holds one, which is why the two blocks below are exclusive: a
+        // second connection on a second credential is a second collector,
+        // and its secret does not see this one's.
+        let kind = optional_string("COLLECTOR_CREDENTIAL").unwrap_or_else(|| "oidc".to_owned());
+        let (oidc, basic) = match kind.as_str() {
+            "basic" => {
+                let password_file = PathBuf::from(required("COLLECTOR_BASIC_PASSWORD_FILE")?);
+                let password = std::fs::read_to_string(&password_file)
+                    .with_context(|| {
+                        format!(
+                            "failed to read COLLECTOR_BASIC_PASSWORD_FILE {}",
+                            password_file.display()
+                        )
+                    })?
+                    .trim()
+                    .to_owned();
+                anyhow::ensure!(
+                    !password.is_empty(),
+                    "COLLECTOR_BASIC_PASSWORD_FILE {} is empty",
+                    password_file.display()
+                );
+                (
+                    None,
+                    Some(Basic {
+                        user: required("COLLECTOR_BASIC_USER")?,
+                        password,
+                    }),
+                )
+            }
+            "oidc" => (Some(oidc_settings(&state_dir)?), None),
+            other => anyhow::bail!(
+                "COLLECTOR_CREDENTIAL is {other:?}: it is \"oidc\" — an SSO grant, the default — \
+                 or \"basic\", a username and a password file for a service that challenges Basic"
+            ),
         };
+
         anyhow::ensure!(
-            oidc.scopes.iter().any(|scope| scope == "offline_access"),
+            oidc.as_ref()
+                .is_none_or(|oidc| oidc.scopes.iter().any(|scope| scope == "offline_access")),
             "COLLECTOR_OIDC_SCOPES must include offline_access: without it the SSO issues no \
              refresh token and the collector would stop in an hour"
         );
@@ -144,6 +192,7 @@ impl Config {
         };
         Ok(Self {
             oidc,
+            basic,
             services: Services {
                 jmap_session_url: url_for("email", "COLLECTOR_JMAP_SESSION_URL")?,
                 caldav_url: url_for("calendar", "COLLECTOR_CALDAV_URL")?,
@@ -276,14 +325,15 @@ mod tests {
 
     fn config(connections: Vec<HeldConnection>) -> Config {
         Config {
-            oidc: Settings {
+            basic: None,
+            oidc: Some(Settings {
                 issuer: "https://sso.example".to_owned(),
                 client_id: "c".to_owned(),
                 client_secret_file: PathBuf::from("/nonexistent"),
                 redirect_uri: "http://localhost:1/callback".to_owned(),
                 scopes: vec!["offline_access".to_owned()],
                 grant_file: PathBuf::from("/nonexistent/grant.json"),
-            },
+            }),
             services: Services {
                 jmap_session_url: Some("https://mail.example/jmap/session".to_owned()),
                 caldav_url: Some("https://calendar.example/".to_owned()),
@@ -355,6 +405,24 @@ mod tests {
 
 fn optional_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// The SSO and the client, when this collector's credential is a grant.
+fn oidc_settings(state_dir: &std::path::Path) -> Result<Settings> {
+    Ok(Settings {
+        issuer: required("COLLECTOR_OIDC_ISSUER")?
+            .trim_end_matches('/')
+            .to_owned(),
+        client_id: required("COLLECTOR_OIDC_CLIENT_ID")?,
+        client_secret_file: PathBuf::from(required("COLLECTOR_OIDC_CLIENT_SECRET_FILE")?),
+        redirect_uri: required("COLLECTOR_OIDC_REDIRECT_URI")?,
+        scopes: optional_string("COLLECTOR_OIDC_SCOPES")
+            .unwrap_or_else(|| "openid profile email offline_access".to_owned())
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+        grant_file: state_dir.join("oidc").join("grant.json"),
+    })
 }
 
 fn required(name: &str) -> Result<String> {

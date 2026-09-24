@@ -188,11 +188,12 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
         panic!("renews");
     };
 
+    let bearer = twalk_collector::side::Credential::Bearer(access.token.clone());
     let services = twalk_collector::oidc::Services {
         jmap_session_url: Some(sso.jmap_session_url()),
         caldav_url: Some(sso.caldav_url()),
     };
-    let identities = services.whoami(&access).await?;
+    let identities = services.whoami(&bearer).await?;
     let answered = |identity: &Option<Result<String, twalk_collector::oidc::ServiceRefusal>>| {
         identity
             .as_ref()
@@ -206,7 +207,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
     // wants something the client does not carry — the operator changes the
     // client, not the grant. Named, so the operator knows which.
     sso.refuse("caldav");
-    let identities = services.whoami(&access).await?;
+    let identities = services.whoami(&bearer).await?;
     assert_eq!(answered(&identities.jmap).as_deref(), Some(OWNER));
     assert!(
         matches!(&identities.caldav, Some(Err(why)) if why.pending_operator()),
@@ -220,7 +221,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
         jmap_session_url: Some(sso.jmap_session_url()),
         caldav_url: None,
     };
-    let identities = mail_only.whoami(&access).await?;
+    let identities = mail_only.whoami(&bearer).await?;
     assert_eq!(answered(&identities.jmap).as_deref(), Some(OWNER));
     assert!(
         identities.caldav.is_none(),
@@ -247,7 +248,7 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
         jmap_session_url: Some(other.jmap_session_url()),
         caldav_url: Some(other.caldav_url()),
     };
-    let identities = other_services.whoami(&access).await?;
+    let identities = other_services.whoami(&bearer).await?;
     assert_eq!(
         identities.owner_mismatch(OWNER),
         vec![
