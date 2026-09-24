@@ -122,7 +122,7 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 120,
-              "description": "Optional. The contact's display name as the trigger carried it, so an approval surface can say who is being answered without anyone reopening the message (#160's decision, #334)."
+              "description": "Optional. The contact's display name as the trigger carried it (`data.contact.display_name`), so an approval surface can say who is being answered without anyone reopening the message (#160's decision, #334). **Written by this side**, never by an agent: a persona publishing through the SDK has read the message; the Companion Gateway, publishing an answer that came back from Hermes (#360), reads that one member of the trigger and nothing else of its `data` — not the body, not an attachment, not the `network_identifier` beside it, which the contract populates only when consent allows. The name and not the identity, because on a bridged network the identity is a phone number inside a Matrix ID and the screen is read by a human. Absent when the trigger carried none: an approval that says what is asked without saying by whom is worth more than one that says neither, and a name invented from an identity would be an assertion nobody made."
             },
             "summary": {
               "type": "string",

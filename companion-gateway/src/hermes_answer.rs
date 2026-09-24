@@ -203,7 +203,20 @@ pub struct Answer {
     /// The contract's sentence for that language: what the suggestion
     /// carries as `data.disclosure` (ticket #121).
     pub disclosure: &'static str,
+    /// What the message asks, in Hermes's own words (#360): the half of
+    /// `data.context` only the component that read the message can write.
+    ///
+    /// Optional, and `None` from a Hermes older than #360 — an agent that
+    /// predates a member is not a broken one, and a suggestion with no
+    /// context is the screen as it was. What is refused is a summary that
+    /// is *there* and unusable: empty, or longer than the contract allows.
+    pub summary: Option<String>,
 }
+
+/// The most a summary may carry, as `persona.suggest.produced.v1`'s
+/// `data.context.summary` allows. Two sentences, which is what the member
+/// was specified as and what an approval surface can show above a draft.
+pub const MAX_SUMMARY: usize = 280;
 
 /// `TWALK-REF:<persona_id>:<trigger event id>:<attempt>` — the three facts the
 /// suggestion's envelope is keyed on. Parsed and validated here; every one of
@@ -328,11 +341,37 @@ pub fn parse_answer(written: &str) -> Result<Answer, AnswerRefusal> {
     if reply.chars().count() > MAX_BODY {
         return Err(AnswerRefusal::ReplyTooLong(reply.chars().count()));
     }
+    // What the message asks, in Hermes's own words (#360). Absent is
+    // allowed and is how every answer read before this member existed; a
+    // member that is there and unusable is refused rather than trimmed,
+    // because a summary cut mid-sentence is worse on an approval screen
+    // than none at all.
+    let summary = match object.get("summary") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(summary)) => {
+            let summary = summary.trim();
+            if summary.is_empty() {
+                return Err(AnswerRefusal::EmptySummary);
+            }
+            if summary.chars().count() > MAX_SUMMARY {
+                return Err(AnswerRefusal::SummaryTooLong(summary.chars().count()));
+            }
+            Some(summary.to_owned())
+        }
+        Some(_) => {
+            return Err(AnswerRefusal::Unreadable(
+                "the answer's summary is a string when it is there: what the message asks, in \
+                 your own words"
+                    .to_owned(),
+            ))
+        }
+    };
     Ok(Answer {
         reference,
         reply,
         language,
         disclosure,
+        summary,
     })
 }
 
@@ -405,6 +444,10 @@ pub enum AnswerRefusal {
     LanguageUnsupported(String),
     EmptyReply,
     ReplyTooLong(usize),
+    /// A `summary` that is there and says nothing (#360).
+    EmptySummary,
+    /// A `summary` longer than the contract's member allows.
+    SummaryTooLong(usize),
     /// A fact the approval path establishes the same way.
     Shared(Refusal),
 }
@@ -428,6 +471,8 @@ impl AnswerRefusal {
             AnswerRefusal::LanguageUnsupported(_) => "hermes_answer_language_unsupported",
             AnswerRefusal::EmptyReply => "hermes_answer_is_empty",
             AnswerRefusal::ReplyTooLong(_) => "hermes_answer_too_long",
+            AnswerRefusal::EmptySummary => "hermes_answer_summary_is_empty",
+            AnswerRefusal::SummaryTooLong(_) => "hermes_answer_summary_too_long",
             AnswerRefusal::Shared(refusal) => refusal.code(),
         }
     }
@@ -448,7 +493,9 @@ impl AnswerRefusal {
             | AnswerRefusal::LanguageUnreadable(_)
             | AnswerRefusal::LanguageUnsupported(_)
             | AnswerRefusal::EmptyReply
-            | AnswerRefusal::ReplyTooLong(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | AnswerRefusal::ReplyTooLong(_)
+            | AnswerRefusal::EmptySummary
+            | AnswerRefusal::SummaryTooLong(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AnswerRefusal::Shared(refusal) => refusal.status(),
         }
     }
@@ -501,6 +548,18 @@ impl AnswerRefusal {
                  with nothing in it, which is worse than no suggestion at all."
                     .to_owned()
             }
+            AnswerRefusal::EmptySummary => {
+                "the answer's summary is there and empty. Leave it out, or say what the message \
+                 asks — an approval screen showing a blank line where the context should be is \
+                 the silence this member exists to end."
+                    .to_owned()
+            }
+            AnswerRefusal::SummaryTooLong(length) => format!(
+                "the answer's summary is {length} characters and the limit is {MAX_SUMMARY}: it \
+                 is two sentences about what the message asks, read above a draft, and not a \
+                 retelling of it. Refused rather than cut, because a summary trimmed mid-sentence \
+                 is worse on that screen than none."
+            ),
             AnswerRefusal::ReplyTooLong(length) => format!(
                 "the answer's reply is {length} characters and the limit is {MAX_BODY}: the \
                  contract allows {CONTRACT_MAX_BODY}, less the line the disclosure is appended \
@@ -732,6 +791,34 @@ impl Answers {
                 "expires_at": expires_at,
             }
         });
+        // What the reply answers (#360), when Hermes said: its summary, and
+        // the contact **this Gateway** already holds and has just checked
+        // the consent of.
+        //
+        // Split that way on purpose. Hermes is the only component that read
+        // the message, so the summary is its to write; naming a contact is
+        // not, and the Gateway has the identity from the trigger it
+        // validated. Letting the agent name the person is what #160
+        // declined to open, and it would be a name nothing on this side
+        // could check.
+        //
+        // The **name**, not the identity. On a mail connection the two are
+        // close; on a bridged one the identity is a phone number inside a
+        // Matrix ID (`@whatsapp_33612345678:…`), and a screen read by a
+        // human would say nothing. The name is a structured member the
+        // Sensor resolved from membership state — not anything the contact
+        // wrote — and it is read from the trigger and from nowhere else.
+        //
+        // `null` when the trigger gave none: an approval that says what is
+        // asked without saying by whom is still worth more than one that
+        // says neither, and inventing a name from an identity would be this
+        // Gateway asserting something it was not told.
+        if let Some(summary) = &answer.summary {
+            event["data"]["context"] = json!({ "summary": summary });
+            if let Some(name) = &trigger.display_name {
+                event["data"]["context"]["contact"] = json!(name);
+            }
+        }
         if let Some(traceparent) = &trigger.traceparent {
             event["traceparent"] = Value::String(traceparent.clone());
         }
@@ -935,6 +1022,64 @@ mod tests {
             "the tag became the contract's sentence (#121)"
         );
         assert_eq!(answer.reference.attempt, 1);
+    }
+
+    #[test]
+    fn a_summary_is_read_when_it_is_there_and_refused_when_it_says_nothing() {
+        // #360: the half of the context only the component that read the
+        // message can write.
+        let answer = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"D'accord, à 20h !","language":"fr","summary":"Christelle demande si le dîner de mardi tient toujours."}}"#
+        ))
+        .expect("a summary beside the reply");
+        assert_eq!(
+            answer.summary.as_deref(),
+            Some("Christelle demande si le dîner de mardi tient toujours.")
+        );
+
+        // Absent is how every answer read before this member existed, and
+        // an agent that predates a member is not a broken one.
+        let older = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"D'accord !","language":"fr"}}"#
+        ))
+        .expect("a Hermes older than #360 still answers");
+        assert_eq!(older.summary, None);
+        assert_eq!(
+            parse_answer(&format!(
+                r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"D'accord !","language":"fr","summary":null}}"#
+            ))
+            .expect("an explicit null is an absence")
+            .summary,
+            None
+        );
+
+        // There and unusable is refused, not trimmed: a blank line where
+        // the context should be, or a summary cut mid-sentence, is worse
+        // on an approval screen than none.
+        let blank = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"D'accord !","language":"fr","summary":"   "}}"#
+        ))
+        .expect_err("an empty summary is refused");
+        assert_eq!(blank.code(), "hermes_answer_summary_is_empty");
+
+        let long = "é".repeat(MAX_SUMMARY + 1);
+        let refusal = parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"D'accord !","language":"fr","summary":"{long}"}}"#
+        ))
+        .expect_err("a summary over the contract's limit is refused");
+        assert_eq!(refusal.code(), "hermes_answer_summary_too_long");
+        // Counted in characters, as the contract counts them.
+        assert!(
+            refusal
+                .message()
+                .contains(&format!("{} characters", MAX_SUMMARY + 1)),
+            "{refusal:?}"
+        );
+        assert!(parse_answer(&format!(
+            r#"{{"reference":"TWALK-REF:assistant:{TRIGGER}:1","reply":"D'accord !","language":"fr","summary":"{}"}}"#,
+            "é".repeat(MAX_SUMMARY)
+        ))
+        .is_ok());
     }
 
     #[test]

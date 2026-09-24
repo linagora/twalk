@@ -4564,6 +4564,36 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         unsupported.body
     );
 
+    // A summary that is there and unusable (#360). Refused before the bus
+    // is asked anything, like the two above, and for the same kind of
+    // reason: a context nobody can read is worse on an approval screen than
+    // none at all.
+    for (summary, code) in [
+        ("   ", "hermes_answer_summary_is_empty"),
+        (&"é".repeat(281), "hermes_answer_summary_too_long"),
+    ] {
+        let push = harness::hermes_push(&harness::hermes_answer_saying(
+            &good_reference,
+            "See you at 8",
+            Some("en"),
+            Some(summary),
+        ));
+        call.check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/answers",
+            "/_twalk/hermes/answers",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&push).as_str(),
+            )],
+            &push,
+            422,
+            Some(code),
+        )
+        .await?;
+    }
+
     // A push over the endpoint's limit. Signed, so that what is being
     // asserted is the limit and not the credential.
     let fat = harness::hermes_push(&harness::hermes_answer(

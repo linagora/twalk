@@ -215,7 +215,19 @@ impl Running {
 
     /// One answer from Hermes, signed as its outbound hook signs one.
     async fn answer(&self, reference: &str, language: Option<&str>) -> Result<(u16, Value)> {
-        let push = hermes_push(&hermes_answer(reference, REPLY, language));
+        self.answer_saying(reference, language, None).await
+    }
+
+    /// The same, with what Hermes says the message asks (#360).
+    async fn answer_saying(
+        &self,
+        reference: &str,
+        language: Option<&str>,
+        summary: Option<&str>,
+    ) -> Result<(u16, Value)> {
+        let push = hermes_push(&harness::hermes_answer_saying(
+            reference, REPLY, language, summary,
+        ));
         let response =
             post_hermes_answer(&self.base, Some(&hermes_signature(&push)), &push).await?;
         let status = response.status().as_u16();
@@ -307,6 +319,14 @@ async fn an_answer_from_hermes_becomes_a_suggestion_the_approval_screen_can_read
     assert_eq!(
         event["data"]["trigger"]["event_type"].as_str(),
         Some(INBOUND_TYPE)
+    );
+    // An answer that said nothing about what it answers publishes no
+    // context (#360): a Hermes older than that member is not a broken one,
+    // and a suggestion with none is the screen as it was.
+    assert_eq!(
+        event["data"].get("context"),
+        None,
+        "no summary, no context member: {event}"
     );
 
     // The language became the sentence (#121): what the SDK publishes, in
@@ -460,6 +480,94 @@ async fn a_language_the_contract_has_no_sentence_for_is_refused_counted_and_neve
         Some(1),
         "the refusal is counted under its own code: {metrics}"
     );
+    Ok(())
+}
+
+/// #360: what a suggestion answers, on the path this deployment runs.
+///
+/// #334 gave `persona.suggest.produced.v1` a `context` and built everything
+/// that reads it. On a deployment where a persona wakes Hermes, the persona
+/// does not publish the suggestion — the Gateway does, when the answer comes
+/// home — so the member could only ever be null there, and was, on all 35
+/// suggestions of the reference deployment the day this was found.
+///
+/// The halves are split by what each component has the right to know: the
+/// summary is Hermes's, which read the message; the contact is the
+/// Gateway's, from the trigger it validated.
+#[tokio::test]
+async fn a_suggestion_says_what_it_answers_and_who_asked() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-context").await?;
+    let (contact, room) = conversation("context");
+
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    let summary = "Aïcha demande si le dîner de mardi tient toujours.";
+    let reference = hermes_reference("assistant", &trigger_id, 1);
+    let (status, body) = running
+        .answer_saying(&reference, Some(LANGUAGE), Some(summary))
+        .await?;
+    assert_eq!(status, 200, "the answer was refused: {body}");
+
+    let sequence = body["stream_sequence"].as_u64().context("a sequence")?;
+    let stored = bus
+        .consume_from(STREAM, SUGGEST_SUBJECT, sequence, 1)
+        .await?
+        .into_iter()
+        .next()
+        .context("the suggestion the answer said it published")?;
+    let event = &stored.payload;
+    validate_against_contract(event, "persona.suggest.produced")
+        .context("a suggestion carrying a context is one the contract allows")?;
+    assert_eq!(
+        event["data"]["context"]["summary"].as_str(),
+        Some(summary),
+        "Hermes's own account of what was asked: {event}"
+    );
+    assert_eq!(
+        event["data"]["context"]["contact"].as_str(),
+        Some("Aicha Benali D206"),
+        "who is answered is the **name** the trigger carried, written by this side from the \
+         trigger it validated — never a name the agent supplied: {event}"
+    );
+    assert!(
+        !event.to_string().contains(contact.as_str()),
+        "and the identity is not the thing a human reads on an approval screen: on a bridged \
+         network it is a phone number inside a Matrix ID: {event}"
+    );
+    assert!(
+        !event.to_string().contains("+33612345678"),
+        "nor the network identifier beside the name in the trigger, which the contract \
+         populates only when consent allows: {event}"
+    );
+
+    // A summary that is there and unusable is refused, and nothing is
+    // published: a blank line where the context should be is the silence
+    // this member exists to end.
+    let second = hermes_reference("assistant", &trigger_id, 2);
+    let (status, body) = running
+        .answer_saying(&second, Some(LANGUAGE), Some("   "))
+        .await?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(
+        body["error"].as_str(),
+        Some("hermes_answer_summary_is_empty")
+    );
+
+    let third = hermes_reference("assistant", &trigger_id, 3);
+    let (status, body) = running
+        .answer_saying(&third, Some(LANGUAGE), Some(&"é".repeat(281)))
+        .await?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(
+        body["error"].as_str(),
+        Some("hermes_answer_summary_too_long")
+    );
+
     Ok(())
 }
 

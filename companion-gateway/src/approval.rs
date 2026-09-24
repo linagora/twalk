@@ -818,6 +818,16 @@ pub struct TriggerEnvelope {
     /// The sender's Matrix user ID: the contact whose consent is checked
     /// again at the moment the answer comes home.
     pub contact: String,
+    /// How the network names that contact, as the trigger carried it
+    /// (`data.contact.display_name`) — what an approval surface says who is
+    /// being answered with (#334, #360). `None` when the trigger gave none.
+    ///
+    /// The name and not the identity, because on a bridged network the
+    /// identity is a phone number inside a Matrix ID
+    /// (`@whatsapp_33612345678:…`), which is not something a person reading
+    /// an approval recognises. On a mail connection the two are close; on
+    /// WhatsApp they are not, and the screen is read by a human either way.
+    pub display_name: Option<String>,
     pub network: Network,
     /// The consent label the Sensor stamped when it observed the message. An
     /// audit fact, copied onto the suggestion — never a substitute for the
@@ -827,8 +837,18 @@ pub struct TriggerEnvelope {
 }
 
 /// What the Gateway reads of the trigger event on the answer path. No
-/// `source` and no `data`: one names a room this path never posts into, the
-/// other holds somebody's words.
+/// `source`, which names a room this path never posts into, and **one**
+/// member of `data`: `contact.display_name`.
+///
+/// That one and nothing else (#360). `data` is where somebody's words are —
+/// the body, an excerpt, an attachment's caption — and reopening an inbound
+/// event to draw an approval screen is what #110 closed. A display name is
+/// none of those: it is a structured member the Sensor resolved from Matrix
+/// membership state, or the collector from a `From` header, and it is how
+/// the network names a person rather than anything that person wrote. The
+/// contract governs it as such, and `network_identifier` beside it is
+/// "populated only when consent allows" — which is why this reads the name
+/// and never its sibling.
 #[derive(Debug, Deserialize)]
 struct TriggerEnvelopeDocument {
     #[serde(default)]
@@ -841,6 +861,21 @@ struct TriggerEnvelopeDocument {
     consent: String,
     #[serde(default)]
     traceparent: Option<String>,
+    #[serde(default)]
+    data: Option<TriggerDataDocument>,
+}
+
+/// The one part of a trigger's `data` this path reads.
+#[derive(Debug, Deserialize)]
+struct TriggerDataDocument {
+    #[serde(default)]
+    contact: Option<TriggerContactDocument>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TriggerContactDocument {
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1315,6 +1350,12 @@ impl Approvals {
             event_id: document.id,
             event_type: document.event_type,
             contact: document.subject,
+            display_name: document
+                .data
+                .and_then(|data| data.contact)
+                .and_then(|contact| contact.display_name)
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty()),
             network,
             consent_label,
             traceparent: document.traceparent,

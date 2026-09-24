@@ -1312,9 +1312,24 @@ pub fn hermes_push_at(response_text: &str, timestamp: &str) -> String {
 /// The answer a route's prompt asks Hermes for: a reference, a reply, and the
 /// language the reply is written in.
 pub fn hermes_answer(reference: &str, reply: &str, language: Option<&str>) -> String {
+    hermes_answer_saying(reference, reply, language, None)
+}
+
+/// The same, with what Hermes says the message asks (#360). `None` is a
+/// Hermes older than that member, which is a case this deployment must keep
+/// answering.
+pub fn hermes_answer_saying(
+    reference: &str,
+    reply: &str,
+    language: Option<&str>,
+    summary: Option<&str>,
+) -> String {
     let mut answer = serde_json::json!({ "reference": reference, "reply": reply });
     if let Some(language) = language {
         answer["language"] = serde_json::Value::String(language.to_owned());
+    }
+    if let Some(summary) = summary {
+        answer["summary"] = serde_json::Value::String(summary.to_owned());
     }
     answer.to_string()
 }
