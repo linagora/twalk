@@ -260,6 +260,10 @@ pub struct Participant {
 pub struct Vevent {
     pub uid: String,
     pub title: String,
+    /// The LOCATION, as somebody typed it, or `None` when the event has
+    /// none. Read here and published only when the owner's switch is open
+    /// (#354): parsing it is not the decision, [`reduce`] is.
+    pub location: Option<String>,
     pub start: String,
     pub end: String,
     pub all_day: bool,
@@ -271,8 +275,12 @@ pub struct Vevent {
 }
 
 /// Reads the master VEVENT of an iCalendar text (RFC 5545): the one without
-/// a RECURRENCE-ID, or the first one when every VEVENT is an exception. The
-/// description, the location, alarms and attachments are not read at all.
+/// a RECURRENCE-ID, or the first one when every VEVENT is an exception.
+///
+/// The LOCATION is read, because the owner may decide it travels (#354).
+/// The DESCRIPTION, the alarms and the attachments are **not read at all**,
+/// which is stronger than not publishing them: what a process never holds
+/// it cannot leak by a later mistake (ADR 0012, ADR 0028).
 pub fn parse_vevent(ics: &str) -> Result<Vevent> {
     let lines = unfold(ics);
     let mut events: Vec<Vec<ContentLine>> = Vec::new();
@@ -308,6 +316,10 @@ pub fn parse_vevent(ics: &str) -> Result<Vevent> {
     let title = property("SUMMARY")
         .map(|line| unescape_text(&line.value))
         .unwrap_or_default();
+    let location = property("LOCATION")
+        .map(|line| unescape_text(&line.value))
+        .map(|location| location.trim().to_owned())
+        .filter(|location| !location.is_empty());
     let dtstart = property("DTSTART").context("the VEVENT has no DTSTART")?;
     let all_day = dtstart.is_date();
     let timezone = dtstart.param("TZID").filter(|_| !all_day);
@@ -385,6 +397,7 @@ pub fn parse_vevent(ics: &str) -> Result<Vevent> {
     Ok(Vevent {
         uid,
         title,
+        location,
         start: start.render(),
         end: end.render(),
         all_day,
@@ -623,7 +636,12 @@ pub(crate) fn parse_duration(value: &str) -> Result<ChronoDuration> {
 /// on the mail connection; a deployment with no mail connection decides
 /// nothing about anybody, and `Consent::Pending` — labelled by nothing,
 /// reduced by nothing — is what such a closure answers.
-pub fn reduce(event: &Vevent, owner: &str, decide: impl Fn(&str) -> Consent) -> Value {
+pub fn reduce(
+    event: &Vevent,
+    owner: &str,
+    carry_location: bool,
+    decide: impl Fn(&str) -> Consent,
+) -> Value {
     let owner = owner_mailto(owner);
     let mut withheld = 0u64;
     let mut withhold = |identity: &str| -> bool {
@@ -651,17 +669,37 @@ pub fn reduce(event: &Vevent, owner: &str, decide: impl Fn(&str) -> Consent) -> 
         .collect();
     // A withheld organizer's title goes with them: the title of an
     // invitation is the organizer's words on the owner's agenda.
-    let (organizer, title) = match &event.organizer {
-        Some(person) if withhold(&person.identity) => (Value::Null, String::new()),
-        Some(person) => (
+    let organizer_withheld = event
+        .organizer
+        .as_ref()
+        .is_some_and(|person| withhold(&person.identity));
+    let (organizer, title) = match (&event.organizer, organizer_withheld) {
+        (Some(_), true) => (Value::Null, String::new()),
+        (Some(person), false) => (
             json!({ "identity": person.identity, "name": person.name }),
             event.title.clone(),
         ),
-        None => (Value::Null, event.title.clone()),
+        (None, _) => (Value::Null, event.title.clone()),
+    };
+    // Where the meeting is, on two conditions and never on one (#354).
+    // `carry_location` is the owner's switch, off as a deployment ships;
+    // and a withheld organizer takes the location with them for the reason
+    // they take the title, because the location of an invitation is their
+    // words about a place and not the owner's. Asked of the organizer and
+    // not of the title, because an event with no SUMMARY has an empty title
+    // and nothing was withheld from it.
+    let location = match (carry_location, organizer_withheld) {
+        (true, false) => event
+            .location
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
     };
     json!({
         "uid": event.uid,
         "title": title,
+        "location": location,
         "start": event.start,
         "end": event.end,
         "all_day": event.all_day,
@@ -734,6 +772,7 @@ pub fn diff(cursor: &Cursor, listing: &Listing) -> Changes {
 pub fn changed_fields(before: &Value, after: &Value) -> Vec<&'static str> {
     [
         "title",
+        "location",
         "start",
         "end",
         "all_day",
@@ -858,7 +897,7 @@ mod window_tests {
 mod tests {
     use super::*;
 
-    const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8\r\nSUMMARY:Weekly sync\\, with commas\\; and more\r\nDESCRIPTION:Pasted notes nobody decided to share\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:Michel@Example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=\"Martin, Alice\";ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nATTENDEE;CUTYPE=ROOM;CN=Salle B:urn:uuid:room-b\r\nATTACH:https://files.example/secret.pdf\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8\r\nSUMMARY:Weekly sync\\, with commas\\; and more\r\nDESCRIPTION:Pasted notes nobody decided to share\r\nLOCATION:Salle B\\, 4e étage\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:Michel@Example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=\"Martin, Alice\";ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nATTENDEE;CUTYPE=ROOM;CN=Salle B:urn:uuid:room-b\r\nATTACH:https://files.example/secret.pdf\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
     #[test]
     fn a_vevent_is_read_as_the_contract_publishes_it_and_nothing_else() {
@@ -1019,7 +1058,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             // is never asked, and this answer would be wrong to use.
             _ => Consent::Revoked,
         };
-        let published = reduce(&event, "Michel@example.com", decide);
+        let published = reduce(&event, "Michel@example.com", false, decide);
         let participants = published["participants"].as_array().unwrap();
         assert_eq!(participants.len(), 2);
         assert!(participants
@@ -1038,7 +1077,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         assert!(!text.contains("bob"), "{text}");
 
         // Nobody decided: nobody withheld, pending is not a reduction.
-        let untouched = reduce(&event, "michel@example.com", |_| Consent::Pending);
+        let untouched = reduce(&event, "michel@example.com", false, |_| Consent::Pending);
         assert_eq!(untouched["participants"].as_array().unwrap().len(), 3);
         assert_eq!(untouched["participants_withheld"], 0);
         // A revoked organizer who is not the owner: null, and counted.
@@ -1047,7 +1086,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             identity: "mailto:carol@example.org".to_owned(),
             name: None,
         });
-        let reduced = reduce(&foreign, "michel@example.com", |_| Consent::Revoked);
+        let reduced = reduce(&foreign, "michel@example.com", false, |_| Consent::Revoked);
         assert!(reduced["organizer"].is_null());
         assert_eq!(
             reduced["participants_withheld"], 3,
@@ -1056,17 +1095,74 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
     }
 
     #[test]
+    fn the_location_travels_only_when_the_owner_has_opened_the_switch() {
+        // #354: the field the owner asked for, and the two conditions on
+        // it. The ICS fixture has a LOCATION, a DESCRIPTION and an ATTACH;
+        // only the first is ever readable, and only then.
+        let event = parse_vevent(WEEKLY).unwrap();
+        assert_eq!(event.location.as_deref(), Some("Salle B, 4e étage"));
+
+        let shut = reduce(&event, "michel@example.com", false, |_| Consent::Granted);
+        assert_eq!(
+            shut["location"],
+            Value::Null,
+            "a deployment ships with the switch off, and an off switch sends no place"
+        );
+        let open = reduce(&event, "michel@example.com", true, |_| Consent::Granted);
+        assert_eq!(
+            open["location"], "Salle B, 4e étage",
+            "opened, it carries the place as the calendar holds it — unescaped, not parsed"
+        );
+
+        // The organizer's rule reaches it: the location of an invitation is
+        // their words about a place. A revoked organizer takes it with the
+        // title, switch or no switch.
+        let foreign =
+            parse_vevent(&WEEKLY.replace("mailto:Michel@Example.com", "mailto:zoe@example.org"))
+                .unwrap();
+        let withheld = reduce(&foreign, "michel@example.com", true, |_| Consent::Revoked);
+        assert_eq!(withheld["title"], "");
+        assert_eq!(
+            withheld["location"],
+            Value::Null,
+            "the place goes with the words of whoever wrote them"
+        );
+
+        // And what is never read is never published, at any setting.
+        for published in [&shut, &open, &withheld] {
+            let text = serde_json::to_string(published).unwrap();
+            assert!(!text.contains("Pasted notes"), "no DESCRIPTION: {text}");
+            assert!(!text.contains("secret.pdf"), "no ATTACH: {text}");
+            assert!(
+                published.get("description").is_none() && published.get("attachments").is_none(),
+                "and no member for either: {published}"
+            );
+        }
+
+        // A location that moved is a change with a name (#354), so an owner
+        // reading their journal sees which field moved rather than "the
+        // event changed".
+        let mut moved = event.clone();
+        moved.location = Some("Salle A".to_owned());
+        let after = reduce(&moved, "michel@example.com", true, |_| Consent::Granted);
+        assert_eq!(changed_fields(&open, &after), vec!["location"]);
+        // With the switch shut, nothing moved, because nothing was said.
+        let after_shut = reduce(&moved, "michel@example.com", false, |_| Consent::Granted);
+        assert!(changed_fields(&shut, &after_shut).is_empty());
+    }
+
+    #[test]
     fn changed_fields_name_what_moved_and_the_envelopes_carry_the_contracts_ids() {
         let event = parse_vevent(WEEKLY).unwrap();
-        let before = reduce(&event, "michel@example.com", |_| Consent::Pending);
+        let before = reduce(&event, "michel@example.com", false, |_| Consent::Pending);
         let mut moved = event.clone();
         moved.start = "2026-10-05T10:00:00+02:00".to_owned();
         moved.end = "2026-10-05T10:30:00+02:00".to_owned();
-        let after = reduce(&moved, "michel@example.com", |_| Consent::Pending);
+        let after = reduce(&moved, "michel@example.com", false, |_| Consent::Pending);
         assert_eq!(changed_fields(&before, &after), ["start", "end"]);
         assert!(changed_fields(&before, &before).is_empty());
         // A participant newly revoked moves the count and nothing named.
-        let fewer = reduce(&event, "michel@example.com", |id| {
+        let fewer = reduce(&event, "michel@example.com", false, |id| {
             if id == "mailto:bob@example.org" {
                 Consent::Revoked
             } else {

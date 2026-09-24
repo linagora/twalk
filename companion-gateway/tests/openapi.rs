@@ -195,6 +195,27 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "500",
         "store_unavailable, as above",
     ),
+    // The calendar-location journal (#354) is in the same store, so its
+    // 500 is out of reach here for the same reason. `store::tests` covers
+    // the journal and `settings_http::tests` the shapes.
+    (
+        "get",
+        "/api/settings/calendar-location",
+        "500",
+        "store_unavailable, as the disclosure's above",
+    ),
+    (
+        "put",
+        "/api/settings/calendar-location",
+        "500",
+        "store_unavailable, as the disclosure's above",
+    ),
+    (
+        "get",
+        "/api/settings/collection",
+        "500",
+        "store_unavailable, as the disclosure's above",
+    ),
     // Hermes's answer webhook (#206). What this suite reaches without bus
     // state is exercised above; the four below need a bus in a particular
     // state, and `tests/hermes_answers.rs` puts it there.
@@ -1644,12 +1665,27 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/disclosure",
             "/api/settings/disclosure",
         ),
+        (
+            Method::GET,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+        ),
         // As the snapshot above: a different reason — no service token
         // rather than no device token — and deliberately the same answer.
         (
             Method::GET,
             "/api/settings/runtime",
             "/api/settings/runtime",
+        ),
+        (
+            Method::GET,
+            "/api/settings/collection",
+            "/api/settings/collection",
         ),
     ] {
         call.check(
@@ -2299,15 +2335,27 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     // consent store, and this Gateway has no bus and therefore none — nor
     // an approval path for the switch to govern. The consent routes' own
     // word, so a client learns one fact under one code.
-    for (method, body) in [
-        (Method::GET, None),
-        (Method::PUT, Some(json!({ "enabled": false }))),
+    for (method, template, body) in [
+        (Method::GET, "/api/settings/disclosure", None),
+        (
+            Method::PUT,
+            "/api/settings/disclosure",
+            Some(json!({ "enabled": false })),
+        ),
+        // #354's switch is in the same journal, so it is missing for the
+        // same reason and says so with the same word.
+        (Method::GET, "/api/settings/calendar-location", None),
+        (
+            Method::PUT,
+            "/api/settings/calendar-location",
+            Some(json!({ "enabled": true })),
+        ),
     ] {
         call.check(
             method,
             &base,
-            "/api/settings/disclosure",
-            "/api/settings/disclosure",
+            template,
+            template,
             &settings_cookie,
             body,
             503,
@@ -2315,6 +2363,21 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         )
         .await?;
     }
+    // And the collector's seam, which needs the service token first: with
+    // one, on a Gateway with no consent store, it is the same missing
+    // journal under the same code.
+    call.check_with_bearer(
+        Method::GET,
+        &base,
+        "/api/settings/collection",
+        "/api/settings/collection",
+        &[],
+        Some(SERVICE_TOKEN),
+        None,
+        503,
+        Some("consent_not_configured"),
+    )
+    .await?;
 
     gateway.stop().await;
 
@@ -2425,6 +2488,21 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::PUT,
             "/api/settings/disclosure",
             "/api/settings/disclosure",
+        ),
+        (
+            Method::GET,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+        ),
+        (
+            Method::GET,
+            "/api/settings/collection",
+            "/api/settings/collection",
         ),
     ] {
         call.check(
@@ -3163,6 +3241,100 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         .await?;
     assert_eq!(on.body["enabled"], json!(true));
     assert_eq!(on.body["reason"], Value::Null);
+
+    // --- where a meeting is (#354), the disclosure's mirror image on the
+    // same journal store: **off** with nobody having decided, on as a
+    // dated attributed row, and the same closed object on the way in.
+    let located = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        located.body,
+        json!({ "enabled": false, "since": null, "actor": null, "reason": null }),
+        "a deployment ships with the location withheld, and the nulls say nobody decided: {}",
+        located.body
+    );
+    let allowed = call
+        .check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+            &deciding_cookie,
+            Some(json!({ "enabled": true, "reason": "the conformance suite" })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(allowed.body["enabled"], json!(true));
+    assert_eq!(
+        allowed.body["actor"].as_str(),
+        Some(owner.user_id.as_str()),
+        "the actor is the owner, stamped by the Gateway: {}",
+        allowed.body
+    );
+    assert!(allowed.body["since"].is_string(), "{}", allowed.body);
+    call.check(
+        Method::PUT,
+        &consenting_base,
+        "/api/settings/calendar-location",
+        "/api/settings/calendar-location",
+        &deciding_cookie,
+        Some(json!({ "location": true })),
+        400,
+        Some("malformed_request"),
+    )
+    .await?;
+    // The collector's seam sees the decision that was just taken, and sees
+    // only the decision: no actor, no date, no reason.
+    let collection = call
+        .check_with_bearer(
+            Method::GET,
+            &consenting_base,
+            "/api/settings/collection",
+            "/api/settings/collection",
+            &[],
+            Some(SERVICE_TOKEN),
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        collection.body,
+        json!({ "calendar_location": { "enabled": true } }),
+        "what a collector is told is what it may publish, and nothing about the owner: {}",
+        collection.body
+    );
+    // Back off, so nothing this suite runs afterwards publishes a location
+    // on the shared bus by a decision the suite took.
+    let withheld = call
+        .check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/calendar-location",
+            "/api/settings/calendar-location",
+            &deciding_cookie,
+            Some(json!({ "enabled": false })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(withheld.body["enabled"], json!(false));
+    assert!(
+        withheld.body["since"].is_string(),
+        "withheld again is a decision, dated: {}",
+        withheld.body
+    );
 
     // --- reading suggestions (#97), on the same Gateway and the same bus:
     // the listing the approval screen draws from, and one suggestion by id.

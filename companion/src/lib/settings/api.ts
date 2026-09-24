@@ -114,6 +114,37 @@ export async function loadDisclosure(): Promise<DisclosureAnswer> {
  * and the instant it was taken; `reason` is the user's own note, kept with
  * the decision and read back on the card. Never per message (ADR 0019).
  */
+/** Whether a calendar event carries where the meeting is (#354). */
+export async function loadCalendarLocation(): Promise<DisclosureAnswer> {
+	const answer = await gateway.GET('/api/settings/calendar-location').catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, state: answer.data };
+	}
+	return refused(answer);
+}
+
+/**
+ * One decision about the calendar location: every event published from now
+ * on carries where the meeting is, or none does. Appended to the Gateway's
+ * journal with the owner as actor and the instant it was taken. Never per
+ * meeting, and never retroactive in either direction.
+ */
+export async function saveCalendarLocation(
+	enabled: boolean,
+	reason?: string
+): Promise<DisclosureAnswer> {
+	const note = reason?.trim() ?? '';
+	const answer = await gateway
+		.PUT('/api/settings/calendar-location', {
+			body: note === '' ? { enabled } : { enabled, reason: note }
+		})
+		.catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, state: answer.data };
+	}
+	return refused(answer);
+}
+
 export async function saveDisclosure(enabled: boolean, reason?: string): Promise<DisclosureAnswer> {
 	const note = reason?.trim() ?? '';
 	const answer = await gateway

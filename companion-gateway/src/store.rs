@@ -73,6 +73,7 @@ use crate::consent::{
 };
 use crate::disclosure::DisclosureState;
 use crate::owner::Owner;
+use crate::switch::State as SwitchState;
 
 /// The store's file inside the Gateway's state directory. A companion `-wal`
 /// and `-shm` sit next to it: the journal is opened in WAL mode, so a reader
@@ -83,7 +84,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 12] = [
+pub const MIGRATIONS: [&str; 13] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -722,7 +723,69 @@ pub const MIGRATIONS: [&str; 12] = [
     r#"
     ALTER TABLE approval ADD COLUMN written_by TEXT NOT NULL DEFAULT 'persona';
     "#,
+    // v13 — whether a calendar event may carry where the meeting is
+    // (#354, #351). A sibling of `disclosure_decision` down to its
+    // triggers, and for the same reason: this is a decision the owner
+    // takes, not a preference they hold, so what it leaves behind is a
+    // dated act with an actor.
+    //
+    // A table of its own rather than a `kind` column on the disclosure's,
+    // because an append-only journal with a discriminator is a place where
+    // one switch's migration breaks the other's, and because the two
+    // default the opposite way — which a shared table would have to carry
+    // as data instead of as code.
+    //
+    // No row means **off**, and that is the difference from v10 worth
+    // stating: the disclosure ships on because ADR 0019 wants a reply to
+    // disclose itself unless somebody decided otherwise, and this ships off
+    // because a location can be a home address and, on an invitation,
+    // belongs to whoever organised the meeting (ADR 0012, ADR 0028). A
+    // deployment that never opened the settings screen sends no location.
+    r#"
+    CREATE TABLE calendar_location_decision (
+        sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+        new_state   TEXT NOT NULL CHECK (new_state IN ('on', 'off')),
+        occurred_at TEXT NOT NULL,
+        actor       TEXT NOT NULL,
+        reason      TEXT
+    );
+
+    CREATE TRIGGER calendar_location_decision_no_delete BEFORE DELETE ON calendar_location_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the calendar location decision journal is append-only');
+    END;
+    CREATE TRIGGER calendar_location_decision_no_update BEFORE UPDATE ON calendar_location_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the calendar location decision journal is append-only');
+    END;
+    "#,
 ];
+
+/// One switch's journal: the table its rows live in, the noun a failure
+/// names it by, and what it ships as. Not a string a caller passes — the
+/// two constants below are every value this type takes, which is what lets
+/// [`Store::switch_state`] interpolate the table name into its SQL.
+#[derive(Debug, Clone, Copy)]
+struct Switch {
+    table: &'static str,
+    name: &'static str,
+    shipped_enabled: bool,
+}
+
+/// On unless the owner turned it off (ADR 0031).
+const DISCLOSURE: Switch = Switch {
+    table: "disclosure_decision",
+    name: "disclosure",
+    shipped_enabled: true,
+};
+
+/// Off unless the owner turned it on (#351): a location can be a home
+/// address, and on an invitation it belongs to whoever organised it.
+const CALENDAR_LOCATION: Switch = Switch {
+    table: "calendar_location_decision",
+    name: "calendar location",
+    shipped_enabled: false,
+};
 
 /// One conversation's move, as the register decided it (issue #255).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -2079,25 +2142,80 @@ impl Store {
         actor: &str,
         reason: Option<&str>,
     ) -> Result<DisclosureState> {
-        self.connection()
-            .execute(
-                "INSERT INTO disclosure_decision (new_state, occurred_at, actor, reason) \
-                 VALUES (?, ?, ?, ?)",
-                rusqlite::params![DisclosureState::word(enabled), occurred_at, actor, reason],
-            )
-            .context("failed to record the disclosure decision")?;
-        self.disclosure_state()
+        self.record_switch_decision(DISCLOSURE, enabled, occurred_at, actor, reason)
     }
 
     /// The switch as it stands: the journal's last row, or the default when
     /// the journal is empty — **on**, since nobody decided otherwise
     /// (ADR 0031).
     pub fn disclosure_state(&self) -> Result<DisclosureState> {
+        self.switch_state(DISCLOSURE)
+    }
+
+    // -----------------------------------------------------------------
+    // Whether a calendar event carries where the meeting is (#354)
+    // -----------------------------------------------------------------
+
+    /// Appends one decision to the calendar-location journal and answers
+    /// the state it leaves behind.
+    pub fn record_calendar_location_decision(
+        &self,
+        enabled: bool,
+        occurred_at: &str,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<SwitchState> {
+        self.record_switch_decision(CALENDAR_LOCATION, enabled, occurred_at, actor, reason)
+    }
+
+    /// The switch as it stands: the journal's last row, or **off**, since a
+    /// deployment where nobody decided sends no location (#351).
+    pub fn calendar_location_state(&self) -> Result<SwitchState> {
+        self.switch_state(CALENDAR_LOCATION)
+    }
+
+    // -----------------------------------------------------------------
+    // What the two switches share
+    // -----------------------------------------------------------------
+
+    /// Appends one decision to a switch's journal and answers the state it
+    /// leaves behind.
+    ///
+    /// Every call appends, including one that restates the current state:
+    /// "the user confirmed it is on, on this date" is a fact the journal may
+    /// hold, and collapsing it would make the journal a projection of itself.
+    fn record_switch_decision(
+        &self,
+        switch: Switch,
+        enabled: bool,
+        occurred_at: &str,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<SwitchState> {
+        self.connection()
+            .execute(
+                // The table name is this binary's, never a caller's: the
+                // two constants below are the only values `switch` takes.
+                &format!(
+                    "INSERT INTO {} (new_state, occurred_at, actor, reason) VALUES (?, ?, ?, ?)",
+                    switch.table
+                ),
+                rusqlite::params![SwitchState::word(enabled), occurred_at, actor, reason],
+            )
+            .with_context(|| format!("failed to record the {} decision", switch.name))?;
+        self.switch_state(switch)
+    }
+
+    /// A switch as it stands: its journal's last row, or what it ships as.
+    fn switch_state(&self, switch: Switch) -> Result<SwitchState> {
         let connection = self.connection();
         let row = connection
             .query_row(
-                "SELECT new_state, occurred_at, actor, reason FROM disclosure_decision \
-                 ORDER BY sequence DESC LIMIT 1",
+                &format!(
+                    "SELECT new_state, occurred_at, actor, reason FROM {} \
+                     ORDER BY sequence DESC LIMIT 1",
+                    switch.table
+                ),
                 [],
                 |row| {
                     Ok((
@@ -2109,14 +2227,14 @@ impl Store {
                 },
             )
             .optional()
-            .context("failed to read the disclosure journal")?;
+            .with_context(|| format!("failed to read the {} journal", switch.name))?;
         let Some((new_state, occurred_at, actor, reason)) = row else {
-            return Ok(DisclosureState::DEFAULT);
+            return Ok(SwitchState::shipped_as(switch.shipped_enabled));
         };
-        let enabled = DisclosureState::enabled_from(&new_state).ok_or_else(|| {
-            anyhow::anyhow!("the disclosure journal holds the state {new_state:?}")
+        let enabled = SwitchState::enabled_from(&new_state).ok_or_else(|| {
+            anyhow::anyhow!("the {} journal holds the state {new_state:?}", switch.name)
         })?;
-        Ok(DisclosureState {
+        Ok(SwitchState {
             enabled,
             since: Some(occurred_at),
             actor: Some(actor),
@@ -3076,7 +3194,7 @@ mod tests {
         let store = store("disclosure");
         assert_eq!(
             store.disclosure_state().unwrap(),
-            DisclosureState::DEFAULT,
+            crate::disclosure::DEFAULT,
             "no row is on, and nobody decided (ADR 0031)"
         );
 
@@ -3115,6 +3233,64 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rows, 2);
+    }
+
+    #[test]
+    fn the_calendar_location_ships_off_and_is_a_journal_like_the_disclosure() {
+        let store = store("calendar-location");
+        // #351: a deployment nobody decided on sends no location. The
+        // difference from the disclosure is the default and nothing else,
+        // and "off because it shipped off" is not "off because somebody
+        // turned it off" — a screen says those differently.
+        let shipped = store.calendar_location_state().unwrap();
+        assert!(!shipped.enabled);
+        assert_eq!(shipped.since, None);
+        assert_eq!(shipped.actor, None);
+
+        let on = store
+            .record_calendar_location_decision(
+                true,
+                "2026-09-24T10:00:00.000Z",
+                OWNER,
+                Some("I want travel time"),
+            )
+            .unwrap();
+        assert!(on.enabled);
+        assert_eq!(on.since.as_deref(), Some("2026-09-24T10:00:00.000Z"));
+        assert_eq!(on.actor.as_deref(), Some(OWNER));
+        assert_eq!(on.reason.as_deref(), Some("I want travel time"));
+        assert_eq!(store.calendar_location_state().unwrap(), on);
+
+        // Two journals, not one table with a kind: a decision about one
+        // switch says nothing about the other.
+        assert!(
+            store.disclosure_state().unwrap().enabled,
+            "opening the location left the disclosure as it shipped"
+        );
+        store
+            .record_disclosure_decision(false, "2026-09-24T10:01:00.000Z", OWNER, None)
+            .unwrap();
+        assert!(
+            store.calendar_location_state().unwrap().enabled,
+            "turning the disclosure off left the location where the owner put it"
+        );
+
+        let connection = store.connection();
+        assert!(
+            connection
+                .execute("DELETE FROM calendar_location_decision", [])
+                .is_err(),
+            "a calendar location decision cannot be deleted"
+        );
+        assert!(
+            connection
+                .execute(
+                    "UPDATE calendar_location_decision SET new_state = 'off'",
+                    []
+                )
+                .is_err(),
+            "a calendar location decision cannot be rewritten"
+        );
     }
 
     #[test]

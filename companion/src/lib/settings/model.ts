@@ -254,6 +254,50 @@ export function disclosureRecord(state: DisclosureState, locale: string): Disclo
 		: { kind: 'off', key: 'settings.disclosure.record.off', values };
 }
 
+/** The calendar-location record line's three shapes (#354). */
+export type CalendarLocationRecord =
+	/** Off, and nobody ever decided: how a deployment ships. */
+	| { kind: 'quiet'; key: 'settings.calendarLocation.record.off'; values: Record<string, never> }
+	/** Off again, since a dated, attributed decision. */
+	| {
+			kind: 'quiet';
+			key: 'settings.calendarLocation.record.offSince';
+			values: { date: string; actor: string };
+	  }
+	/** On, since a dated, attributed decision. */
+	| {
+			kind: 'sending';
+			key: 'settings.calendarLocation.record.on';
+			values: { date: string; actor: string };
+	  };
+
+/**
+ * The one line the calendar-location card reads back (#354). The
+ * disclosure's shape with its emphasis reversed, and the reversal is the
+ * point: there, the noteworthy state is **off**, because a reply going out
+ * undisclosed is what ADR 0019 wants somebody to notice. Here it is **on**,
+ * because that is the direction in which something leaves the machine.
+ *
+ * Off with no date is how a deployment ships, said in its own words — "no
+ * decision was taken" is not "somebody turned it off", and dating a default
+ * would invent a decision nobody made.
+ */
+export function calendarLocationRecord(
+	state: DisclosureState,
+	locale: string
+): CalendarLocationRecord {
+	if (!state.enabled && (state.since === null || state.actor === null)) {
+		return { kind: 'quiet', key: 'settings.calendarLocation.record.off', values: {} };
+	}
+	const values = {
+		date: state.since === null ? '' : disclosureDate(state.since, locale),
+		actor: state.actor ?? ''
+	};
+	return state.enabled
+		? { kind: 'sending', key: 'settings.calendarLocation.record.on', values }
+		: { kind: 'quiet', key: 'settings.calendarLocation.record.offSince', values };
+}
+
 /**
  * The Gateway's refusal codes for the two writes and the probe, each a
  * sentence the user can act on — the ones #98 handed over in #101's comment.

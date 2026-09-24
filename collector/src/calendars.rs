@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -39,7 +41,18 @@ pub struct Calendars {
     pub side: Side,
     pub state_dir: PathBuf,
     pub consent: ConsentCache,
+    /// Whether a published event may carry where the meeting is (#354):
+    /// the owner's switch, read from the Companion Gateway and shared with
+    /// the run loop that refreshes it. Off until something says otherwise —
+    /// a deployment with no Gateway configured has no decision to read, and
+    /// no decision is not permission.
+    pub location: SharedSwitch,
 }
+
+/// A switch the run loop refreshes and the poll reads. An atomic rather
+/// than a lock: one bool, read on every resource of every round, written
+/// once a round at most.
+pub type SharedSwitch = Arc<AtomicBool>;
 
 /// What one poll found: the envelopes to publish, in order, and the cursors
 /// to write once they are on the bus.
@@ -254,9 +267,12 @@ impl Calendars {
     /// one that is not a VEVENT this collector can read.
     fn publishable(&self, resource: &Resource) -> Option<Value> {
         match caldav::parse_vevent(&resource.ics) {
-            Ok(event) => Some(caldav::reduce(&event, &self.owner_email, |identity| {
-                self.decide(identity)
-            })),
+            Ok(event) => Some(caldav::reduce(
+                &event,
+                &self.owner_email,
+                self.location.load(Ordering::Relaxed),
+                |identity| self.decide(identity),
+            )),
             Err(error) => {
                 warn!(href = %resource.href, error = %format!("{error:#}"), "the resource is not a VEVENT this collector reads; nothing published");
                 None

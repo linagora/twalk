@@ -9,6 +9,7 @@
 //! registry does not know, and refuse to publish anything when the grant
 //! turns out to be for another account — both said in words, once.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -209,14 +210,27 @@ async fn run(config: Config) -> Result<()> {
     // decision governs (ADR 0033). Refused at start, in words.
     // The same document carries the consent state the participants of a
     // meeting are labelled by (#280), so it is read once.
+    // Whether a calendar event may carry where a meeting is (#354) is the
+    // owner's decision and is read from the same place, with the same
+    // token, at the same moment.
+    let location_enabled = Arc::new(AtomicBool::new(false));
     let snapshot = match (&config.gateway_url, &config.gateway_service_token) {
         (Some(url), Some(token)) => {
             let document = consent_snapshot(url, token).await?;
             config.refuse_unknown_connections(&registry_ids(&document))?;
+            let enabled = calendar_location_enabled(url, token).await?;
+            location_enabled.store(enabled, Ordering::Relaxed);
+            if enabled {
+                warn!("the calendar location is ON: published events carry where a meeting is, by a decision recorded on the Companion Gateway. Turn it off there to stop it");
+            } else {
+                info!(
+                    "the calendar location is off: no published event carries where a meeting is"
+                );
+            }
             Some(document)
         }
         _ => {
-            warn!("COLLECTOR_GATEWAY_URL is not set: the connections are not checked against the registry, and no consent decision is known");
+            warn!("COLLECTOR_GATEWAY_URL is not set: the connections are not checked against the registry, no consent decision is known, and no event carries where a meeting is — a decision this process cannot read is not a decision it may act on (#354)");
             None
         }
     };
@@ -264,6 +278,7 @@ async fn run(config: Config) -> Result<()> {
                 )?,
                 state_dir: config.state_dir.clone(),
                 consent: consent.clone(),
+                location: location_enabled.clone(),
             })
         })
         .transpose()?;
@@ -630,6 +645,29 @@ async fn run(config: Config) -> Result<()> {
             poll_is_due,
         ) {
             last_calendar_poll = Some(std::time::Instant::now());
+            // What the owner has decided since the last round (#354). Read
+            // before the poll, so the events this round publishes follow
+            // the switch as it stands rather than as it stood at start; a
+            // read that fails keeps the last answer, which is why the
+            // failure is a `warn` and not a silent default.
+            if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
+                match calendar_location_enabled(url, token).await {
+                    Ok(enabled) => {
+                        if location_enabled.swap(enabled, Ordering::Relaxed) != enabled {
+                            if enabled {
+                                warn!("the calendar location was turned ON: published events now carry where a meeting is");
+                            } else {
+                                info!("the calendar location was turned off: no published event carries where a meeting is");
+                            }
+                        }
+                    }
+                    Err(error) => warn!(
+                        error = %format!("{error:#}"),
+                        enabled = location_enabled.load(Ordering::Relaxed),
+                        "the calendar location switch could not be read this round; the last answer stands"
+                    ),
+                }
+            }
             // The window this round asks about (#348): bounded, so a real
             // calendar answers and the cursor stays a cursor.
             let window = twalk_collector::freebusy::Window::around(
@@ -898,6 +936,43 @@ async fn publish(
 /// (`GET /api/consent/snapshot`, as `companion-gateway/openapi.yaml`
 /// describes it), with the same service token: the registry is its
 /// `connections[]`, the decisions its `entries[]`.
+/// Whether a calendar event may carry where the meeting is, as the owner
+/// decided it on the Companion Gateway (#354): `GET /api/settings/collection`,
+/// the service token the registry read already uses.
+///
+/// Read at start, where an unreadable Gateway is fatal exactly as it is for
+/// the registry — a collector that cannot learn what it is allowed to
+/// publish should not publish — and refreshed on every calendar round, where
+/// a failed read **keeps the state it last read** rather than slamming the
+/// switch shut. That is deliberate: a Gateway that blinks would otherwise
+/// have the collector withhold locations it had been publishing, and a
+/// `changed` event naming `location` would go out for a meeting nobody
+/// moved. The owner's decision does not change because a health check
+/// failed; what a blink costs is learning about a decision taken during it,
+/// and the next round pays that back.
+async fn calendar_location_enabled(gateway_url: &str, service_token: &str) -> Result<bool> {
+    let url = format!(
+        "{}/api/settings/collection",
+        gateway_url.trim_end_matches('/')
+    );
+    let document: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(service_token)
+        .send()
+        .await
+        .with_context(|| format!("the Companion Gateway did not answer at {url}"))?
+        .error_for_status()
+        .with_context(|| format!("the Companion Gateway refused the collection read at {url}"))?
+        .json()
+        .await
+        .context("the Companion Gateway's collection settings are not JSON")?;
+    document
+        .get("calendar_location")
+        .and_then(|switch| switch.get("enabled"))
+        .and_then(serde_json::Value::as_bool)
+        .context("the collection settings do not say whether the calendar location is enabled")
+}
+
 async fn consent_snapshot(gateway_url: &str, service_token: &str) -> Result<serde_json::Value> {
     let url = format!("{}/api/consent/snapshot", gateway_url.trim_end_matches('/'));
     reqwest::Client::new()

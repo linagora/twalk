@@ -103,6 +103,11 @@ pub fn routes() -> Router<Gateway> {
             "/api/settings/disclosure",
             get(read_disclosure).put(write_disclosure),
         )
+        .route(
+            "/api/settings/calendar-location",
+            get(read_calendar_location).put(write_calendar_location),
+        )
+        .route("/api/settings/collection", get(collection_settings))
         .route("/api/settings/runtime", get(runtime_settings))
 }
 
@@ -580,6 +585,162 @@ async fn write_disclosure(
     Json(disclosure_json(&state)).into_response()
 }
 
+/// `GET /api/settings/calendar-location` — whether a calendar event may
+/// carry where the meeting is (#354, #351).
+///
+/// The disclosure's shape, member for member, because it is the same kind
+/// of thing: one decision for the deployment, recorded with who and when.
+/// The default is the other way — `enabled: false`, and `since`, `actor`
+/// and `reason` `null`, which says "as it shipped" and not "somebody turned
+/// it off".
+async fn read_calendar_location(State(gateway): State<Gateway>) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return calendar_location_not_configured();
+    };
+    match consent.store().calendar_location_state() {
+        Ok(state) => Json(switch_json(&state)).into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the calendar location journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the calendar location journal could not be read",
+            )
+        }
+    }
+}
+
+/// `PUT /api/settings/calendar-location` — `{"enabled": true, "reason": "…"}`.
+///
+/// Appends a row and answers the state it left behind, as the disclosure
+/// does. Opening it is the noisier direction here: what it lets leave the
+/// machine is a place, and on an invitation a place somebody else wrote.
+async fn write_calendar_location(
+    State(gateway): State<Gateway>,
+    Extension(device): Extension<Device>,
+    body: String,
+) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return calendar_location_not_configured();
+    };
+    let body: Value = match serde_json::from_str(&body) {
+        Ok(body) => body,
+        Err(error) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "malformed_request",
+                &format!("the request body is not JSON: {error}"),
+            )
+        }
+    };
+    let update = match crate::calendar_location::parse_update(&body) {
+        Ok(update) => update,
+        Err(invalid) => {
+            debug!(
+                code = invalid.code(),
+                device = %device.id,
+                "refused a calendar location decision"
+            );
+            return api_error(StatusCode::BAD_REQUEST, invalid.code(), invalid.message());
+        }
+    };
+    let actor = gateway.owner();
+    let occurred_at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    let state = match consent.store().record_calendar_location_decision(
+        update.enabled,
+        &occurred_at,
+        &actor,
+        update.reason.as_deref(),
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            error!(%error, "failed to record the calendar location decision");
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the calendar location decision could not be recorded; nothing was changed",
+            );
+        }
+    };
+    gateway
+        .metrics()
+        .set_calendar_location_enabled(state.enabled);
+    if state.enabled {
+        // `warn` on the way open, which is the mirror of the disclosure's
+        // `warn` on the way shut: in both cases it is the direction that
+        // sends more to somebody else, and an operator reading the log
+        // should not have to go looking for it.
+        warn!(
+            actor = %actor,
+            device = %device.id,
+            reason = update.reason.is_some(),
+            "the calendar location is ON: calendar events now carry where a meeting is, \
+             including meetings a third party organised. Recorded in the calendar location \
+             journal with who decided and when"
+        );
+    } else {
+        info!(
+            actor = %actor,
+            device = %device.id,
+            "the calendar location is off: no calendar event carries where a meeting is"
+        );
+    }
+    Json(switch_json(&state)).into_response()
+}
+
+/// `GET /api/settings/collection` — what a service that **collects** the
+/// owner's own data needs to know before it publishes (#354).
+///
+/// The collector's seam, and it takes the service token, as the runtime
+/// settings and the consent snapshot do. A route of its own rather than a
+/// member on `/api/settings/runtime`: that document carries the model's API
+/// key, and a collector has no business holding one. Answering the question
+/// it asks means handing it the answer and nothing else.
+///
+/// ```json
+/// { "calendar_location": { "enabled": false } }
+/// ```
+///
+/// Only what a decision *is*, never who decided it or when: that belongs to
+/// the owner's screen, and a collector reading it would be a collector
+/// holding a fact about the owner it has no use for.
+async fn collection_settings(State(gateway): State<Gateway>, headers: HeaderMap) -> Response {
+    let Some(service_token) = gateway.snapshots() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service_token_not_configured",
+            "this Gateway serves no collection settings: set GATEWAY_SERVICE_TOKEN to the same \
+             value the collector is configured with",
+        );
+    };
+    if !service_token.authenticates(&headers) {
+        warn!("refused a collection settings read: the service token is missing or wrong");
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "the collection settings take this Gateway's service token as an \
+             Authorization: Bearer credential; a device token is not accepted here",
+        );
+    }
+    let Some(consent) = gateway.consent() else {
+        return calendar_location_not_configured();
+    };
+    match consent.store().calendar_location_state() {
+        Ok(state) => Json(json!({
+            "calendar_location": { "enabled": state.enabled },
+        }))
+        .into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the calendar location journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the calendar location journal could not be read",
+            )
+        }
+    }
+}
+
 /// `GET /api/settings/runtime` — everything the Hermes runtime injects into
 /// a persona's environment, in one read.
 ///
@@ -676,7 +837,14 @@ fn language_json(language: Option<Language>) -> Value {
 }
 
 /// The switch, as both routes answer it: `openapi.yaml`'s `DisclosureState`.
-fn disclosure_json(state: &crate::disclosure::DisclosureState) -> Value {
+fn disclosure_json(state: &crate::switch::State) -> Value {
+    switch_json(state)
+}
+
+/// A switch as both of them are answered: the state, and the decision that
+/// left it — `null` for all three when nobody decided, which is a fact and
+/// not a gap.
+fn switch_json(state: &crate::switch::State) -> Value {
     json!({
         "enabled": state.enabled,
         "since": state.since,
@@ -742,6 +910,15 @@ fn disclosure_not_configured() -> Response {
         "consent_not_configured",
         "this Gateway has no consent store, so it keeps no disclosure journal and approves \
          nothing the switch could govern: set GATEWAY_NATS_URL (and GATEWAY_OWNER)",
+    )
+}
+
+fn calendar_location_not_configured() -> Response {
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "consent_not_configured",
+        "this Gateway has no consent store, so it keeps no calendar location journal: set \
+         GATEWAY_NATS_URL (and GATEWAY_OWNER)",
     )
 }
 
@@ -884,7 +1061,7 @@ mod tests {
     fn the_disclosure_document_says_on_with_nobody_deciding_and_off_with_who_and_when() {
         use crate::disclosure::DisclosureState;
         assert_eq!(
-            disclosure_json(&DisclosureState::DEFAULT),
+            disclosure_json(&crate::disclosure::DEFAULT),
             json!({ "enabled": true, "since": null, "actor": null, "reason": null }),
             "the default is on, and the nulls say nobody decided rather than that nothing is known"
         );

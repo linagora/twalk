@@ -15,7 +15,8 @@
     "recurrence",
     "organizer",
     "participants",
-    "participants_withheld"
+    "participants_withheld",
+    "location"
   ],
   "additionalProperties": false,
   "properties": {
@@ -30,19 +31,35 @@
       "maxLength": 1024,
       "description": "The SUMMARY, as the owner wrote or accepted it. The owner's own words about their own time, published to their own infrastructure — except that the title of an invitation is the organizer's words: when the organizer is withheld (see `organizer`), the title is withheld with them and is empty here. Empty too when the event has none."
     },
+    "location": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 1024,
+      "description": "Where the meeting is (the LOCATION), or null. Null unless the owner has decided their assistant may read it: the collector withholds every location until the deployment's calendar-location switch is on, which is how it ships (issue #354, issue #351). Null too when the event has none, and — for the reason `title` is — when the organizer is withheld, because the location of an invitation is the organizer's words about a place, not the owner's. A location is published as the calendar holds it and is never parsed, geocoded or completed: what a consumer receives is a string somebody typed. There is no member for the DESCRIPTION and none for an ATTACHMENT, and there will not be: a description is a free-text box written by whoever created the meeting, which on an invitation is a third party who decided nothing about this deployment (ADR 0012, ADR 0028). What an agent needs of them it asks for as facts (issue #355), never as text."
+    },
     "start": {
       "type": "string",
       "anyOf": [
-        { "format": "date-time" },
-        { "format": "date" }
+        {
+          "format": "date-time"
+        },
+        {
+          "format": "date"
+        }
       ],
       "description": "When the event starts: an RFC 3339 date-time for a timed event (with its offset, in the event's own zone — `timezone` names it — so that a 09:00 meeting reads as 09:00), or a plain `YYYY-MM-DD` date when `all_day` is true, exactly as RFC 5545 distinguishes DATE-TIME from DATE."
     },
     "end": {
       "type": "string",
       "anyOf": [
-        { "format": "date-time" },
-        { "format": "date" }
+        {
+          "format": "date-time"
+        },
+        {
+          "format": "date"
+        }
       ],
       "description": "When the event ends, in the same form as `start`. Exclusive, as DTEND is: an all-day event on the 3rd has `start` 2026-10-03 and `end` 2026-10-04. Derived from DURATION when the source gives one instead of DTEND, and equal to `start` when it gives neither (RFC 5545 §3.6.1: a DATE-TIME start with no end occupies no time)."
     },
@@ -51,24 +68,38 @@
       "description": "Whether `start` and `end` are dates rather than instants. Said outright rather than inferred from the string, so a consumer never guesses from a shape."
     },
     "timezone": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "maxLength": 128,
       "description": "The IANA zone the event was scheduled in (the TZID of DTSTART), or null for an all-day event, a floating time, or a time given in UTC — the offset in `start` is authoritative either way; this is what lets a consumer say 'Paris time' rather than '+02:00'."
     },
     "status": {
       "type": "string",
-      "enum": ["confirmed", "tentative", "cancelled"],
+      "enum": [
+        "confirmed",
+        "tentative",
+        "cancelled"
+      ],
       "description": "The STATUS (RFC 5545 §3.8.1.11), lower-cased; `confirmed` when the source states none, which is what the RFC has a consumer assume. A `cancelled` event is a `changed` event with this field among `changed_fields`, not a `removed` one: the resource is still in the calendar, and that difference is the organizer's, not Twalk's."
     },
     "recurrence": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "maxLength": 1024,
       "description": "The RRULE (RFC 5545 §3.8.5.3) as written, e.g. `FREQ=WEEKLY;BYDAY=MO`, or null for an event that happens once. Carried verbatim rather than expanded: expansion is the consumer's question (which occurrences, in which window) and its answer is not content. One event of a recurring series is one resource with one UID, and this is its rule; an exception the organizer made to one occurrence (RECURRENCE-ID) is folded into the same resource by the server and is not published on its own in v1."
     },
     "organizer": {
       "oneOf": [
-        { "type": "null" },
-        { "$ref": "#/$defs/person" }
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/person"
+        }
       ],
       "description": "Who scheduled the event (ORGANIZER), or null when the source names none — a personal entry the owner made for themselves. A person, so the participant rule below applies to it: an organizer whose consent on the owner's mail connection is `revoked` is published as null and counted in `participants_withheld`, and the event's `title` — their words — goes with them."
     },
@@ -77,25 +108,44 @@
       "maxItems": 512,
       "items": {
         "type": "object",
-        "required": ["identity", "name", "role", "partstat"],
+        "required": [
+          "identity",
+          "name",
+          "role",
+          "partstat"
+        ],
         "additionalProperties": false,
         "properties": {
           "identity": {
             "$ref": "#/$defs/mailto"
           },
           "name": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "maxLength": 512,
             "description": "The CN parameter, or null when the source gives none. The person's name as the organizer's client had it — a display name, not a verified identity."
           },
           "role": {
             "type": "string",
-            "enum": ["chair", "required", "optional", "non-participant"],
+            "enum": [
+              "chair",
+              "required",
+              "optional",
+              "non-participant"
+            ],
             "description": "The ROLE parameter (RFC 5545 §3.2.16), in words: CHAIR, REQ-PARTICIPANT, OPT-PARTICIPANT, NON-PARTICIPANT. `required` when the source states none, as the RFC has it."
           },
           "partstat": {
             "type": "string",
-            "enum": ["needs-action", "accepted", "declined", "tentative", "delegated"],
+            "enum": [
+              "needs-action",
+              "accepted",
+              "declined",
+              "tentative",
+              "delegated"
+            ],
             "description": "The PARTSTAT parameter (RFC 5545 §3.2.12), lower-cased: whether this person has answered the invitation. `needs-action` when the source states none."
           }
         }
@@ -117,12 +167,20 @@
     },
     "person": {
       "type": "object",
-      "required": ["identity", "name"],
+      "required": [
+        "identity",
+        "name"
+      ],
       "additionalProperties": false,
       "properties": {
-        "identity": { "$ref": "#/$defs/mailto" },
+        "identity": {
+          "$ref": "#/$defs/mailto"
+        },
         "name": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "maxLength": 512,
           "description": "The CN parameter, or null when the source gives none."
         }

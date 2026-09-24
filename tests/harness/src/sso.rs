@@ -108,6 +108,10 @@ struct State {
     /// `/api/consent/snapshot`, when a test stands this fake in for the
     /// Gateway too; `None` answers 404 there, an unreadable registry.
     gateway_snapshot: Option<Value>,
+    /// The owner's calendar-location decision (#354), as the Gateway's
+    /// `/api/settings/collection` answers it. `false` unless a test opens
+    /// it, which is how a deployment ships.
+    calendar_location: bool,
     /// One counter for every CTag and ETag the fake ever hands out, so no
     /// two versions of anything share one.
     versions: u64,
@@ -386,6 +390,13 @@ impl FakeSso {
     /// `next_stream_sequence`), with any bearer.
     pub fn serve_gateway_snapshot(&self, document: Value) {
         self.lock().gateway_snapshot = Some(document);
+    }
+
+    /// The owner's calendar-location decision, as `GET
+    /// /api/settings/collection` answers it (#354). Off until a test says
+    /// otherwise, which is how a deployment ships.
+    pub fn set_calendar_location(&self, enabled: bool) {
+        self.lock().calendar_location = enabled;
     }
 
     /// Delivers a mail into the owner's INBOX on the fake JMAP server:
@@ -777,6 +788,21 @@ fn respond_json(
         ("GET", "/api/consent/snapshot") => Some(match guard.gateway_snapshot.clone() {
             Some(document) => ("200 OK", document),
             None => (
+                "404 Not Found",
+                json!({ "error": "not_found", "detail": "this fake stands in for no Companion Gateway" }),
+            ),
+        }),
+        // The collection settings (#354): whether a calendar event may
+        // carry where the meeting is. Answered whenever this fake stands in
+        // for the Gateway at all, because the collector reads it at start
+        // and a fake that served the snapshot but not this one would be a
+        // Gateway that cannot exist.
+        ("GET", "/api/settings/collection") => Some(match guard.gateway_snapshot.is_some() {
+            true => (
+                "200 OK",
+                json!({ "calendar_location": { "enabled": guard.calendar_location } }),
+            ),
+            false => (
                 "404 Not Found",
                 json!({ "error": "not_found", "detail": "this fake stands in for no Companion Gateway" }),
             ),

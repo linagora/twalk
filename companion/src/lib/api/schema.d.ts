@@ -1330,6 +1330,110 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/calendar-location": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Whether a calendar event carries where the meeting is, and who last decided.
+         * @description The owner's decision about one field of their own agenda
+         *     (issue #354, issue #351). A calendar event reaches the persona with
+         *     a title, its times and the participants consent allows; **where** the
+         *     meeting is travels only when this is on.
+         *
+         *     It ships **off**, which is the difference from the disclosure and the
+         *     reason this is a switch at all. A location is short and usually a
+         *     place, which is what makes it defensible where a description is not —
+         *     but it can be a home address, and on an invitation it was written by
+         *     whoever organised the meeting, who decided nothing about this
+         *     deployment (ADR 0012, ADR 0028). So the owner decides, once, for
+         *     every event: never per contact and never per meeting, because a
+         *     switch that can be flipped for one case is one whose state nobody can
+         *     state.
+         *
+         *     `enabled: false` with `since`, `actor` and `reason` all `null` is the
+         *     shipped state and not a gap: it says nobody decided, which is
+         *     different from somebody having turned it off.
+         *
+         *     The record is an append-only journal in the consent store, a sibling
+         *     of the disclosure's and of the consent journal itself — same shape,
+         *     same triggers, and deliberately not the settings table, which would
+         *     forget who decided and what was before.
+         *
+         *     What this does **not** govern: the DESCRIPTION and the attachments,
+         *     which no setting publishes. The collector never reads them at all,
+         *     and what an agent needs of them it asks for as facts
+         *     (issue #355), never as text.
+         */
+        get: operations["getCalendarLocationState"];
+        /**
+         * Let calendar events carry where the meeting is, or stop them, as a recorded decision.
+         * @description Appends one decision to the calendar-location journal and answers the
+         *     state it leaves behind. `actor` is stamped by the Gateway — this
+         *     deployment's owner, from configuration — and `reason` is the user's
+         *     own note, optional and at most 1 024 characters.
+         *
+         *     Nothing is retroactive in either direction. Events published while
+         *     the switch was off carry `location: null` for ever; turning it on
+         *     does not republish them, and turning it off does not unsay what a
+         *     consumer already holds. What changes is what the **next** poll
+         *     publishes — within one calendar round, since the collector reads
+         *     this decision before each poll rather than at its start.
+         */
+        put: operations["putCalendarLocationState"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/collection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What a collecting service must know before it publishes.
+         * @description The collector's seam (issue #354). It takes this Gateway's **service
+         *     token**, as the consent snapshot and the runtime settings do, and it
+         *     is not a device route: a browser has no use for it, and the owner's
+         *     own view of the same decision is
+         *     `GET /api/settings/calendar-location`.
+         *
+         *     A route of its own rather than a member on `/api/settings/runtime`
+         *     because that document carries the model's API key, and a collector
+         *     has no business holding one. The same token opens both; what keeps
+         *     them apart is what each answers.
+         *
+         *     It carries what a decision **is** and never who took it or when: that
+         *     is the owner's business and the settings screen's, and a collector
+         *     holding it would be a collector holding a fact about the owner it has
+         *     no use for.
+         *
+         *     The collector reads this at start — where an unreadable Gateway is
+         *     fatal, exactly as it is for the registry — and again before every
+         *     calendar poll, so a decision taken on the screen reaches the next
+         *     round without a restart. A read that fails on a later round leaves
+         *     the last answer standing rather than slamming the switch shut: a
+         *     Gateway that blinks would otherwise have events go out with the
+         *     location withheld, and a `changed` event naming `location` for a
+         *     meeting nobody moved.
+         */
+        get: operations["getCollectionSettings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/settings/disclosure": {
         parameters: {
             query?: never;
@@ -2298,6 +2402,60 @@ export interface components {
             user_action?: "OPEN_NATIVE" | "RELOGIN" | "RESTART";
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * @description The calendar-location switch as the journal answers it (issue #354):
+         *     on or off, and — when somebody decided — since when, by whom and why.
+         *     All three are `null` in the shipped state, which is **off**.
+         */
+        CalendarLocationState: {
+            /**
+             * @description The Matrix ID of who decided: this deployment's owner, stamped
+             *     by the Gateway. `null` when nobody has.
+             */
+            actor: string | null;
+            /**
+             * @description `true`: a calendar event carries where the meeting is, when the
+             *     calendar holds a location and the event's organizer was not
+             *     withheld. `false`: none does, whatever the calendar holds.
+             */
+            enabled: boolean;
+            /** @description The note given with the decision, if one was. */
+            reason: string | null;
+            /**
+             * Format: date-time
+             * @description When the current state was decided; `null` when never.
+             */
+            since: string | null;
+        };
+        /** @description One decision about the calendar location. A closed object. */
+        CalendarLocationUpdate: {
+            /**
+             * @description `true` lets every calendar event published from now on carry
+             *     where the meeting is; `false` keeps every location on the
+             *     machine that read it. Never per meeting.
+             */
+            enabled: boolean;
+            /**
+             * @description Why, in the user's own words. Optional, kept with the decision,
+             *     and shown back on the settings screen.
+             */
+            reason?: string | null;
+        };
+        /**
+         * @description What a collecting service must know before it publishes (issue
+         *     #354). One member today; a decision that governs what a collector
+         *     may carry belongs here rather than in the runtime's document.
+         */
+        CollectionSettings: {
+            calendar_location: {
+                /**
+                 * @description Whether a calendar event may carry where the meeting is.
+                 *     The state alone: who decided it and when are the owner's,
+                 *     and are on `GET /api/settings/calendar-location`.
+                 */
+                enabled: boolean;
+            };
         };
         ConfiguredBridge: {
             /**
@@ -4107,6 +4265,21 @@ export interface components {
                 "application/json": components["schemas"]["Error"] & {
                     /** @enum {unknown} */
                     error?: "bridge_unreachable" | "bridge_refused" | "bridge_answer_unusable" | "bridge_request_unusable";
+                };
+            };
+        };
+        /**
+         * @description `store_unavailable` — the calendar-location journal could not be
+         *     read, or the decision could not be recorded; nothing was changed.
+         */
+        CalendarLocationStoreUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"] & {
+                    /** @enum {unknown} */
+                    error?: "store_unavailable";
                 };
             };
         };
@@ -6730,6 +6903,129 @@ export interface operations {
                 };
             };
             503: components["responses"]["SignInNotConfigured"];
+        };
+    };
+    getCalendarLocationState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The switch, and the last decision about it if any. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CalendarLocationState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["CalendarLocationStoreUnavailable"];
+            503: components["responses"]["DisclosureNotConfigured"];
+        };
+    };
+    putCalendarLocationState: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CalendarLocationUpdate"];
+            };
+        };
+        responses: {
+            /** @description The switch as it now stands, with this decision as its record. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CalendarLocationState"];
+                };
+            };
+            /**
+             * @description `malformed_request` — the body is not JSON, is not an object,
+             *     is missing `enabled`, has an `enabled` that is not a boolean, a
+             *     `reason` that is not a string or is over 1 024 characters, or
+             *     carries another member. `detail` names which.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            500: components["responses"]["CalendarLocationStoreUnavailable"];
+            503: components["responses"]["DisclosureNotConfigured"];
+        };
+    };
+    getCollectionSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The collection decisions, as they stand. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CollectionSettings"];
+                };
+            };
+            /**
+             * @description `unauthenticated` — this route takes the service token and
+             *     nothing else; a device token is refused here.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unauthenticated";
+                    };
+                };
+            };
+            500: components["responses"]["CalendarLocationStoreUnavailable"];
+            /**
+             * @description - `sign_in_not_configured` — this deployment has no owner
+             *       (`GATEWAY_OWNER` is unset), so its whole API is closed and the
+             *       guard answers before this route does, service token or not.
+             *     - `service_token_not_configured` — `GATEWAY_SERVICE_TOKEN` is
+             *       unset, so this Gateway serves no service-token route at all.
+             *     - `consent_not_configured` — there is no consent store and so no
+             *       journal to read the decision from.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "sign_in_not_configured" | "service_token_not_configured" | "consent_not_configured";
+                    };
+                };
+            };
         };
     };
     getDisclosureState: {

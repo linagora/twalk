@@ -11,6 +11,7 @@
   "data": {
     "uid": "8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8",
     "title": "Weekly sync",
+    "location": "Salle B, 4e étage",
     "start": "2026-10-05T09:00:00+02:00",
     "end": "2026-10-05T09:30:00+02:00",
     "all_day": false,

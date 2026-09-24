@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	credentialState,
 	disclosureDate,
+	calendarLocationRecord,
 	disclosureRecord,
 	formOf,
 	PROBE_FAILURE_COPY,
@@ -156,6 +157,36 @@ describe('the disclosure record (#121)', () => {
 			date: disclosureDate('2026-09-20T08:05:00Z', 'en'),
 			actor: '@owner:test.twalk'
 		});
+	});
+
+	it('mirrors the disclosure for the calendar location, emphasis and all', () => {
+		// #354: the same three shapes with the alarming state the other way
+		// round. Off with no date is how a deployment ships — "nobody
+		// decided" — and it is the *on* state that the card marks, because
+		// that is the direction in which a place leaves the machine.
+		const shipped = calendarLocationRecord(
+			{ enabled: false, since: null, actor: null, reason: null },
+			'en'
+		);
+		expect(shipped).toEqual({
+			kind: 'quiet',
+			key: 'settings.calendarLocation.record.off',
+			values: {}
+		});
+
+		const allowed = calendarLocationRecord({ ...off, enabled: true }, 'en');
+		expect(allowed.kind).toBe('sending');
+		expect(allowed.key).toBe('settings.calendarLocation.record.on');
+		expect(allowed.values).toEqual({
+			date: disclosureDate('2026-09-20T08:05:00Z', 'en'),
+			actor: '@owner:test.twalk'
+		});
+
+		// Withheld *again* is dated and attributed, and still quiet: it is
+		// the state that sends nothing.
+		const withheld = calendarLocationRecord(off, 'en');
+		expect(withheld.kind).toBe('quiet');
+		expect(withheld.key).toBe('settings.calendarLocation.record.offSince');
 	});
 
 	it('keeps "turned back on" apart from "never turned off"', () => {
