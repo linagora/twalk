@@ -80,6 +80,17 @@ fn revoked_message(marker: &str) -> Result<Value> {
     Ok(event)
 }
 
+fn mail(marker: &str) -> Result<Value> {
+    let mut event = contract_variant_fixture("inbound.message.received", "email")?;
+    let id = sha256_hex(marker);
+    event["id"] = json!(id);
+    event["traceparent"] = json!(traceparent_for(&id));
+    event["data"]["body"] = json!(format!("On se voit lundi ? [{marker}]"));
+    event["data"]["title"] = json!(format!("Point hebdo [{marker}]"));
+    validate_against_contract(&event, "inbound.message.received")?;
+    Ok(event)
+}
+
 fn event_id(event: &Value) -> String {
     event["id"].as_str().expect("a string id").to_owned()
 }
@@ -122,7 +133,7 @@ async fn a_granted_message_wakes_hermes_with_a_narrow_template_and_nothing_else(
         wake.body,
         json!({
             "event_type": "twalk.message.received",
-            "template_version": 1,
+            "template_version": 2,
             "reference": format!("TWALK-REF:{PERSONA_ID}:{trigger_id}:1"),
             "network": "whatsapp",
             "received_at": trigger["time"],
@@ -401,5 +412,68 @@ async fn a_hermes_that_is_not_there_does_not_stop_the_persona() -> Result<()> {
         1,
         "the trigger is on the bus once"
     );
+    run.shutdown().await
+}
+
+// ---------------------------------------------------------------------------
+// 1 again, for a mail: the subject is the sender's words and crosses with them
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_mails_subject_crosses_and_a_bridged_messages_absence_crosses_too() -> Result<()> {
+    // Found live on 2026-09-24 (#362): a mail whose ask was in its subject
+    // reached the drafting agent with the subject removed, and the draft
+    // answered a question nobody had asked. A subject is written in the same
+    // breath as the body and belongs on the body's side of ADR 0012's line.
+    let marker = "d362-subject";
+    let hermes = StubHermes::start().await?;
+    let run = PersonaRun::start_with_hermes(
+        "hermes-seam-subject",
+        "a reply this persona must not produce",
+        &hermes.route_url(),
+    )
+    .await?;
+
+    let trigger = mail(marker)?;
+    let trigger_id = event_id(&trigger);
+    run.publish_inbound(&trigger).await?;
+    run.wait_for(THINKING_TYPE, &trigger_id).await?;
+
+    let wake = harness::poll_until(
+        || async {
+            let wakes = hermes.wakes();
+            (!wakes.is_empty()).then(|| wakes[0].clone())
+        },
+        "the wake the persona posted to Hermes",
+    )
+    .await?;
+
+    assert_eq!(
+        wake.body["title"], trigger["data"]["title"],
+        "the mail's subject did not cross the seam, so the agent drafts \
+         without the line the ask often lives on"
+    );
+    assert_eq!(
+        wake.body["template_version"], 2,
+        "a body carrying the subject is version 2, so a route filtering on \
+         version 1 can decline it rather than read a shape it was not written for"
+    );
+
+    // And the contact is still nowhere near it: a subject crossing is not a
+    // door for the name attached to it.
+    let sent = serde_json::to_string(&wake.body)?;
+    for absent in [
+        trigger["subject"].as_str().expect("a sender"),
+        trigger["data"]["contact"]["display_name"]
+            .as_str()
+            .expect("a display name"),
+    ] {
+        assert!(
+            !sent.contains(absent),
+            "{absent:?} reached Hermes beside the subject; its memory never \
+             expires what it is shown"
+        );
+    }
+
     run.shutdown().await
 }

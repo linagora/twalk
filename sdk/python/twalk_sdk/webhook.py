@@ -15,8 +15,9 @@ therefore builds a fixed, small dictionary out of an
 :class:`~twalk_sdk.trigger.InboundMessage` and nothing else — a persona
 author cannot add a field to it, which is the same reason the consent gate
 lives in the SDK rather than in a persona's handler. What it names is the
-message's *words* and the shape of the conversation around them; what it
-withholds is everybody's **identity**: the sender's Matrix ID, their
+message's *words* — its body and, since #362, a mail's subject, which is
+written in the same breath and often carries the ask — and the shape of the
+conversation around them; what it withholds is everybody's **identity**: the sender's Matrix ID, their
 display name, the network's own identifier for them (a phone number), the
 portal room, the quoted excerpt that belongs to whoever wrote it
 (ADR 0012), and an attachment's name or decryption material. A reply can be
@@ -69,7 +70,12 @@ MESSAGE_RECEIVED_EVENT = "twalk.message.received"
 #: the Hermes host, which Twalk may not own (ADR 0032), so the two sides are
 #: deployed separately and a prompt template written for version 1 must be
 #: able to *see* that it is being handed version 2.
-TEMPLATE_VERSION = 1
+#:
+#: Version 2 carries a mail's subject (#362). It is a breaking change for a
+#: route configured to filter on version 1 — that route stops matching, and
+#: a deployment that updates the persona before its Hermes answers nothing
+#: at all — which is exactly the reason the version is in the body.
+TEMPLATE_VERSION = 2
 
 #: The token that brings the answer home. It is deliberately a single opaque
 #: string rather than three fields: it travels through Hermes's *prompt*, is
@@ -241,7 +247,7 @@ def webhook_body(
     deliberate, and ``tests/test_webhook.py`` for the assertion that keeps
     them absent.
     """
-    return {
+    body = {
         "event_type": MESSAGE_RECEIVED_EVENT,
         "template_version": TEMPLATE_VERSION,
         "reference": reference(persona_id, trigger.event_id, attempt),
@@ -266,6 +272,15 @@ def webhook_body(
         # default.
         "user_language": user_language,
     }
+    # A subject is the sender's own words, written in the same breath as the
+    # body, and it is often where the ask lives — *"RDV ?"* over four lines
+    # of pleasantries. It crosses for the same reason ``message`` does, and
+    # it is **absent** rather than empty when there is none: a bridged
+    # message has no subject and a revoked sender's mail carries none, and
+    # an empty string would say instead that somebody sent a blank one.
+    if trigger.title:
+        body["title"] = trigger.title
+    return body
 
 
 def signed_headers(

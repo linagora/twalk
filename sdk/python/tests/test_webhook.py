@@ -31,7 +31,7 @@ import hmac
 import json
 import unittest
 
-from fixtures import fixture
+from fixtures import fixture, variant_fixture
 
 from twalk_sdk.config import Config, ConfigError
 from twalk_sdk.envelope import suggest_id
@@ -111,6 +111,22 @@ class TheTemplate(unittest.TestCase):
                 "user_language": "fr",
             },
         )
+
+    def test_a_mails_subject_crosses_beside_its_body(self) -> None:
+        """A subject line is the sender's own words, written in the same
+        breath as the body (#362). It belongs on the body's side of
+        ADR 0012's line, not with the identity that stays behind."""
+        body = self.body(trigger=InboundMessage(variant_fixture(
+            "inbound.message.received", "email"
+        )))
+        self.assertEqual(body["title"], "Re: Point hebdo")
+
+    def test_a_message_with_no_subject_carries_no_member_at_all(self) -> None:
+        """A bridged message has no subject, and a revoked sender's mail
+        carries none either. An absent member says that; an empty string
+        says there was a subject and it was blank, which is a different
+        message and a lie about this one (#359's rule, other door)."""
+        self.assertNotIn("title", self.body())
 
     def test_nothing_identifying_anybody_crosses_the_seam(self) -> None:
         sent = encode_body(self.body()).decode("utf-8")

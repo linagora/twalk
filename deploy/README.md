@@ -140,6 +140,21 @@ Answer with ONE JSON object and nothing else, no code fence:
 ```
 
 Until that line changes, answers keep working and the suggestion carries no context, which is the screen as it was before: an agent that predates a member is not a broken one. A summary that arrives empty or over 280 characters is refused with its own code and nothing is published — a blank line where the context should be is the silence the member exists to end.
+
+   **What the agent is given to answer with** (#362): a mail's **subject** crosses the seam beside its body, because it is the sender's own words written in the same breath and it is often where the ask lives — *"RDV ?"* over four lines of pleasantries. A message with no subject (any bridged network, and a revoked sender's mail) carries no member at all rather than an empty one. **This moves the template to version 2, and that is a breaking change in one direction: a route whose `filters` pin `template_version` to `1` stops matching and answers nothing.** So update the Hermes side first and the personas second. In `config.yaml`, under `platforms.webhook.extra.routes.<your route>`, the filter and the prompt change together:
+
+```yaml
+filters:
+  - field: template_version
+    equals: 2
+```
+
+```
+The message: {message}
+Its subject, when it has one (a mail does, a bridged message does not): {title}
+```
+
+   A prompt that never mentions `{title}` keeps working on version 2 — the member is simply unread, which is the same silence as before this ticket — so the filter is the one line that must move.
 3. **A change in your calendar is an event, its participants reduced as you decided.** Create a meeting in your calendar with a contact you granted on the mail connection and one you revoked: within `COLLECTOR_CALENDAR_POLL_SECONDS` the bus carries `calendar.event.created.v1` (`published fr.linagora.twalk.calendar.event.created.v1` in the log) with the granted participant named and `participants_withheld` counting the revoked one; move it, and `calendar.event.changed.v1` names the fields that moved; delete it, and `calendar.event.removed.v1` carries the title. No description and no attachment leaves the collector at any point, and no location either until you say so: **where** a meeting is travels only once the owner turns it on in the Companion's settings (#354), off as this ships. Opening it takes effect on the next calendar poll — the collector reads the decision before each one — and the log says which way it went, at `warn` when it is on, because that is the direction in which something leaves the machine.
 4. **"Are you free Thursday?" is answered with slots that are really free.** Install the skill on Hermes's side: copy `skills/twalk-calendar/` into its skills directory and add `TWALK_GATEWAY_URL` (the Gateway's origin) beside `TWALK_ANSWER_SECRET` in its `.env`. Have a granted contact ask, on any network, when you are free. Hermes reads your free/busy through the Gateway (`hermes read the owner's free/busy` in the Gateway's log, `twalk_companion_gateway_hermes_reads_total{outcome="served"}` moves, a `hermes_read` row in its store; `a free/busy read was served` in the collector's log) and its suggestion proposes times that fall in the gaps of your calendar and none that overlap a busy interval. A read refused — a window wider than fourteen days, a calendar connection not connected — is a row with its code and a suggestion that says the calendar could not be checked, never a guess.
 
