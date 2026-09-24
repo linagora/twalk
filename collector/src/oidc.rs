@@ -491,15 +491,23 @@ fn refusal_words(body: &serde_json::Value) -> String {
     }
 }
 
-/// The two services a grant opens, and the one question asked of each.
-#[derive(Debug, Clone)]
+/// The services a grant opens, and the one question asked of each — one
+/// entry per **connection this process holds** (#321).
+///
+/// A collector that holds a mailbox and no calendar asks the mailbox and
+/// nothing else: it sends no request to a calendar service on somebody
+/// else's production host every health round, and `authorize` prints no
+/// refusal about a service the deployment decided not to read. A service
+/// nobody reads has no state to be in.
+#[derive(Debug, Clone, Default)]
 pub struct Services {
     /// TMail's JMAP session resource (`COLLECTOR_JMAP_SESSION_URL`): its
-    /// `username` is the account.
-    pub jmap_session_url: String,
+    /// `username` is the account. `None` when no mail connection is held.
+    pub jmap_session_url: Option<String>,
     /// The calendar side service's root (`COLLECTOR_CALDAV_URL`): `/api/user`
-    /// answers the account's `email`.
-    pub caldav_url: String,
+    /// answers the account's `email`. `None` when no calendar connection is
+    /// held.
+    pub caldav_url: Option<String>,
 }
 
 /// Why a service did not answer the account.
@@ -529,8 +537,11 @@ impl ServiceRefusal {
 /// What each service says the account is.
 #[derive(Debug, Clone)]
 pub struct Identities {
-    pub jmap: Result<String, ServiceRefusal>,
-    pub caldav: Result<String, ServiceRefusal>,
+    /// What the mailbox answered, or `None` when this process holds no
+    /// mail connection and asked nothing (#321).
+    pub jmap: Option<Result<String, ServiceRefusal>>,
+    /// The same for the calendar side service.
+    pub caldav: Option<Result<String, ServiceRefusal>>,
     /// The owner's id on the calendar side service (`/api/user`'s `_id`),
     /// which their calendar collections are under. `None` when the side
     /// service did not answer, or answered without one.
@@ -543,8 +554,14 @@ impl Identities {
     /// names the account so the operator sees whose it was.
     /// The two answers, each with the service's name, in the order they
     /// are reported.
-    pub fn by_service(&self) -> [(&'static str, &Result<String, ServiceRefusal>); 2] {
-        [("jmap", &self.jmap), ("caldav", &self.caldav)]
+    pub fn by_service(&self) -> Vec<(&'static str, &Result<String, ServiceRefusal>)> {
+        [
+            ("jmap", self.jmap.as_ref()),
+            ("caldav", self.caldav.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(service, identity)| identity.map(|identity| (service, identity)))
+        .collect()
     }
 
     /// Whether a service answered `401` — the token itself refused, which
@@ -573,36 +590,51 @@ impl Identities {
 }
 
 impl Services {
-    /// Asks both services who the token belongs to, with a fresh token.
+    /// Asks the services of the connections this process holds who the
+    /// token belongs to, with a fresh token — and asks nothing of a service
+    /// it does not read (#321).
     pub async fn whoami(&self, access: &AccessToken) -> Result<Identities> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()?;
-        let jmap = ask(&http, "jmap", &self.jmap_session_url, access, |body| {
-            body.get("username")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        })
-        .await;
+        let jmap = match &self.jmap_session_url {
+            Some(url) => Some(
+                ask(&http, "jmap", url, access, |body| {
+                    body.get("username")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .await,
+            ),
+            None => None,
+        };
         // The side service's `/api/user` is the OpenPaaS one: the owner's
         // `_id`, which the calendar collections are under (#280), beside
         // `preferredEmail`. Both are read here so the calendar half asks
         // nothing more.
-        let caldav_user = format!("{}/api/user", self.caldav_url.trim_end_matches('/'));
-        let caldav_document = ask(&http, "caldav", &caldav_user, access, |body| {
-            body.get("preferredEmail")
-                .and_then(|v| v.as_str())
-                .map(|email| {
-                    (
-                        email.to_owned(),
-                        body.get("_id").and_then(|v| v.as_str()).map(str::to_owned),
-                    )
-                })
-        })
-        .await;
+        let caldav_document = match &self.caldav_url {
+            Some(url) => {
+                let caldav_user = format!("{}/api/user", url.trim_end_matches('/'));
+                Some(
+                    ask(&http, "caldav", &caldav_user, access, |body| {
+                        body.get("preferredEmail")
+                            .and_then(|v| v.as_str())
+                            .map(|email| {
+                                (
+                                    email.to_owned(),
+                                    body.get("_id").and_then(|v| v.as_str()).map(str::to_owned),
+                                )
+                            })
+                    })
+                    .await,
+                )
+            }
+            None => None,
+        };
         let (caldav, caldav_owner_id) = match caldav_document {
-            Ok((email, id)) => (Ok(email), id),
-            Err(refusal) => (Err(refusal), None),
+            Some(Ok((email, id))) => (Some(Ok(email)), id),
+            Some(Err(refusal)) => (Some(Err(refusal)), None),
+            None => (None, None),
         };
         Ok(Identities {
             jmap,

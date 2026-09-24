@@ -189,24 +189,51 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
     };
 
     let services = twalk_collector::oidc::Services {
-        jmap_session_url: sso.jmap_session_url(),
-        caldav_url: sso.caldav_url(),
+        jmap_session_url: Some(sso.jmap_session_url()),
+        caldav_url: Some(sso.caldav_url()),
     };
     let identities = services.whoami(&access).await?;
-    assert_eq!(identities.jmap.as_deref().ok(), Some(OWNER));
-    assert_eq!(identities.caldav.as_deref().ok(), Some(OWNER));
+    let answered = |identity: &Option<Result<String, twalk_collector::oidc::ServiceRefusal>>| {
+        identity
+            .as_ref()
+            .and_then(|answer| answer.as_deref().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(answered(&identities.jmap).as_deref(), Some(OWNER));
+    assert_eq!(answered(&identities.caldav).as_deref(), Some(OWNER));
 
     // A service that refuses a fresh token: the grant stands, the service
     // wants something the client does not carry — the operator changes the
     // client, not the grant. Named, so the operator knows which.
     sso.refuse("caldav");
     let identities = services.whoami(&access).await?;
-    assert_eq!(identities.jmap.as_deref().ok(), Some(OWNER));
+    assert_eq!(answered(&identities.jmap).as_deref(), Some(OWNER));
     assert!(
-        matches!(&identities.caldav, Err(why) if why.pending_operator()),
+        matches!(&identities.caldav, Some(Err(why)) if why.pending_operator()),
         "{:?}",
         identities.caldav
     );
+
+    // #321: a process that holds no calendar connection asks no calendar
+    // service — nothing is sent to it, and it has no state to be in.
+    let mail_only = twalk_collector::oidc::Services {
+        jmap_session_url: Some(sso.jmap_session_url()),
+        caldav_url: None,
+    };
+    let identities = mail_only.whoami(&access).await?;
+    assert_eq!(answered(&identities.jmap).as_deref(), Some(OWNER));
+    assert!(
+        identities.caldav.is_none(),
+        "a service this collector does not read is not asked: {:?}",
+        identities.caldav
+    );
+    assert_eq!(
+        identities.by_service().len(),
+        1,
+        "and it is not reported either"
+    );
+    assert!(!identities.unauthenticated());
+    assert!(identities.owner_mismatch("somebody@example.com").len() == 1);
 
     // A token for another account is nothing to publish from.
     let other = FakeSso::start("somebody@example.com").await?;
@@ -217,8 +244,8 @@ async fn the_two_whoamis_must_name_the_owner_and_a_refusal_names_the_service() -
         panic!("renews");
     };
     let other_services = twalk_collector::oidc::Services {
-        jmap_session_url: other.jmap_session_url(),
-        caldav_url: other.caldav_url(),
+        jmap_session_url: Some(other.jmap_session_url()),
+        caldav_url: Some(other.caldav_url()),
     };
     let identities = other_services.whoami(&access).await?;
     assert_eq!(

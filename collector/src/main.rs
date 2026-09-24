@@ -225,7 +225,16 @@ async fn run(config: Config) -> Result<()> {
                     .iter()
                     .find(|held| held.kind == "email")
                     .map(|held| held.id.clone()),
-                side: twalk_collector::calendars::Side::new(&config.services.caldav_url)?,
+                side: twalk_collector::calendars::Side::new(
+                    config
+                        .services
+                        .caldav_url
+                        .as_deref()
+                        // Config pairs a URL with its connection (#321), so
+                        // this cannot fire; it says which pairing broke if
+                        // one day it does.
+                        .context("a calendar connection is held with no COLLECTOR_CALDAV_URL")?,
+                )?,
                 state_dir: config.state_dir.clone(),
                 consent: consent.clone(),
             })
@@ -242,7 +251,11 @@ async fn run(config: Config) -> Result<()> {
             twalk_collector::mails::Mailbox::new(
                 &held.id,
                 &config.owner_email,
-                &config.services.jmap_session_url,
+                config
+                    .services
+                    .jmap_session_url
+                    .as_deref()
+                    .context("a mail connection is held with no COLLECTOR_JMAP_SESSION_URL")?,
                 &config.state_dir,
                 consent.clone(),
             )
@@ -298,7 +311,11 @@ async fn run(config: Config) -> Result<()> {
         // Push (#277): the server's doorbell, ringing the mail poll ahead of
         // its interval. The poll stays as the fallback.
         tokio::spawn(twalk_collector::push::listen(
-            config.services.jmap_session_url.clone(),
+            config
+                .services
+                .jmap_session_url
+                .clone()
+                .expect("a mailbox is held, so its session URL is configured (#321)"),
             shared_access.clone(),
             mail_wake.clone(),
             metrics.clone(),
@@ -539,7 +556,7 @@ async fn run(config: Config) -> Result<()> {
                         service: Some("caldav"),
                         hint: Some(twalk_collector::oidc::refusal_detail(
                             "caldav",
-                            &config.services.caldav_url,
+                            config.services.caldav_url.as_deref().unwrap_or_default(),
                             status,
                             challenge.as_deref(),
                         )),
@@ -598,7 +615,11 @@ async fn run(config: Config) -> Result<()> {
                         service: Some("jmap"),
                         hint: Some(twalk_collector::oidc::refusal_detail(
                             "jmap",
-                            &config.services.jmap_session_url,
+                            config
+                                .services
+                                .jmap_session_url
+                                .as_deref()
+                                .unwrap_or_default(),
                             status,
                             challenge.as_deref(),
                         )),

@@ -25,8 +25,10 @@ pub struct Config {
     /// `COLLECTOR_OIDC_REDIRECT_URI`, `COLLECTOR_OIDC_SCOPES`), and where the
     /// grant lives (`COLLECTOR_STATE_DIR/oidc/grant.json`).
     pub oidc: Settings,
-    /// The two services the grant opens (`COLLECTOR_JMAP_SESSION_URL`,
-    /// `COLLECTOR_CALDAV_URL`).
+    /// The services the grant opens, one per connection held
+    /// (`COLLECTOR_JMAP_SESSION_URL` with a mail connection,
+    /// `COLLECTOR_CALDAV_URL` with a calendar one) — and none for a service
+    /// this process does not read (#321).
     pub services: Services,
     /// The account both services must answer as (`COLLECTOR_OWNER_EMAIL`):
     /// a grant for anybody else publishes nothing.
@@ -128,11 +130,23 @@ impl Config {
             ),
             _ => {}
         }
+        // A URL per connection held, and none for a service this process
+        // does not read (#321): a mail-only collector neither needs a
+        // calendar URL nor may be refused for the lack of one, and a
+        // calendar-only collector is the shape #342 needs to exist at all.
+        let url_for = |kind: &str, variable: &str| -> Result<Option<String>> {
+            if !connections.iter().any(|held| held.kind == kind) {
+                return Ok(None);
+            }
+            Ok(Some(required(variable).with_context(|| {
+                format!("a {kind} connection is declared, so {variable} says where to read it")
+            })?))
+        };
         Ok(Self {
             oidc,
             services: Services {
-                jmap_session_url: required("COLLECTOR_JMAP_SESSION_URL")?,
-                caldav_url: required("COLLECTOR_CALDAV_URL")?,
+                jmap_session_url: url_for("email", "COLLECTOR_JMAP_SESSION_URL")?,
+                caldav_url: url_for("calendar", "COLLECTOR_CALDAV_URL")?,
             },
             owner_email: required("COLLECTOR_OWNER_EMAIL")?,
             connections,
@@ -271,8 +285,8 @@ mod tests {
                 grant_file: PathBuf::from("/nonexistent/grant.json"),
             },
             services: Services {
-                jmap_session_url: "https://mail.example/jmap/session".to_owned(),
-                caldav_url: "https://calendar.example/".to_owned(),
+                jmap_session_url: Some("https://mail.example/jmap/session".to_owned()),
+                caldav_url: Some("https://calendar.example/".to_owned()),
             },
             owner_email: "michel@example.com".to_owned(),
             connections,

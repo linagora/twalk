@@ -303,3 +303,67 @@ async fn a_registry_that_cannot_be_read_is_refused_at_start() -> Result<()> {
     );
     Ok(())
 }
+
+/// #321: a collector that holds a mailbox and no calendar asks the
+/// mailbox and nothing else.
+///
+/// The cost of asking anyway was not hypothetical: on the reference
+/// deployment the calendar service is somebody else's production host,
+/// and the collector was sending it a request every health round and
+/// reporting its refusal as a state — for a connection the deployment had
+/// decided not to hold. A service nobody reads has no state to be in, and
+/// no URL to configure either.
+#[tokio::test]
+async fn a_collector_holding_one_connection_asks_one_service() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("mail-only").await?;
+    run.authorize().await?;
+    // The calendar service would refuse if it were asked, which is what
+    // makes the silence load-bearing: a request would be a state on the
+    // bus, and there is none.
+    run.sso.refuse("caldav");
+    let mut env = run.env();
+    env.retain(|(name, _)| {
+        name != "COLLECTOR_CALENDAR_CONNECTION" && name != "COLLECTOR_CALDAV_URL"
+    });
+    let collector = CollectorProc::start(&env)?;
+
+    let connected = wait_for_state(&bus, &run, &run.mail, "connected").await?;
+    assert_eq!(connected["data"]["kind"], "email");
+    assert!(
+        states_of(&bus, &run, &run.calendar).await?.is_empty(),
+        "a connection this process does not hold has no state on the bus"
+    );
+    assert!(
+        !run.sso.was_asked("caldav"),
+        "the calendar service was asked for: {:?}",
+        run.sso.paths()
+    );
+    assert!(run.sso.was_asked("jmap"), "{:?}", run.sso.paths());
+    collector.stop().await;
+    Ok(())
+}
+
+/// And the configuration follows the connections: a calendar connection
+/// with no URL to read it at is refused by name, rather than a process
+/// that starts and asks nothing (#321, and #342 which needs a
+/// calendar-only collector to exist at all).
+#[tokio::test]
+async fn a_connection_without_its_service_url_is_refused_by_name() -> Result<()> {
+    ensure_stack().await?;
+    let run = Run::prepare("no-url").await?;
+    run.authorize().await?;
+    let mut env = run.env();
+    env.retain(|(name, _)| name != "COLLECTOR_CALDAV_URL");
+    let mut collector = CollectorProc::start(&env)?;
+    let status = collector.exit_status().await?;
+    assert!(!status.success(), "a connection with no URL is not a start");
+    let logs = collector.logs().await;
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("COLLECTOR_CALDAV_URL") && line.contains("calendar")),
+        "the refusal names the variable and the connection that wants it: {logs:?}"
+    );
+    Ok(())
+}
