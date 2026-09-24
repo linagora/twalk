@@ -71,7 +71,6 @@ use crate::bridge_status::ContractState;
 use crate::consent::{
     Decision, Effective, Network, OldState, Recorded, State, Subject, SubjectType,
 };
-use crate::disclosure::DisclosureState;
 use crate::owner::Owner;
 use crate::switch::State as SwitchState;
 
@@ -2141,14 +2140,14 @@ impl Store {
         occurred_at: &str,
         actor: &str,
         reason: Option<&str>,
-    ) -> Result<DisclosureState> {
+    ) -> Result<SwitchState> {
         self.record_switch_decision(DISCLOSURE, enabled, occurred_at, actor, reason)
     }
 
     /// The switch as it stands: the journal's last row, or the default when
     /// the journal is empty — **on**, since nobody decided otherwise
     /// (ADR 0031).
-    pub fn disclosure_state(&self) -> Result<DisclosureState> {
+    pub fn disclosure_state(&self) -> Result<SwitchState> {
         self.switch_state(DISCLOSURE)
     }
 
@@ -3208,7 +3207,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             off,
-            DisclosureState {
+            SwitchState {
                 enabled: false,
                 since: Some("2026-09-20T10:00:00.000Z".to_owned()),
                 actor: Some(OWNER.to_owned()),

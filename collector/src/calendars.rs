@@ -46,7 +46,10 @@ pub struct Calendars {
     /// the run loop that refreshes it. Off until something says otherwise —
     /// a deployment with no Gateway configured has no decision to read, and
     /// no decision is not permission.
-    pub location: SharedSwitch,
+    ///
+    /// Named for the decision and not for the field: `self.location` would
+    /// read as a meeting's own place.
+    pub locations_may_travel: SharedSwitch,
 }
 
 /// A switch the run loop refreshes and the poll reads. An atomic rather
@@ -270,7 +273,11 @@ impl Calendars {
             Ok(event) => Some(caldav::reduce(
                 &event,
                 &self.owner_email,
-                self.location.load(Ordering::Relaxed),
+                if self.locations_may_travel.load(Ordering::Relaxed) {
+                    caldav::Location::Carried
+                } else {
+                    caldav::Location::Withheld
+                },
                 |identity| self.decide(identity),
             )),
             Err(error) => {

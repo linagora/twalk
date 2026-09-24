@@ -70,6 +70,7 @@
 		probeFailureCopy,
 		refusalCopy,
 		requestOf,
+		type CalendarLocationState,
 		type CredentialState,
 		type DisclosureState,
 		type FormProblem,
@@ -111,7 +112,7 @@
 	// Where a meeting is (#354): the same three pieces of state as the
 	// disclosure's, because it is the same kind of decision — one switch,
 	// one note, one outcome — with the opposite default.
-	let calendarLocation = $state<DisclosureState | null>(null);
+	let calendarLocation = $state<CalendarLocationState | null>(null);
 	let calendarLocationProblem = $state<Refused | null>(null);
 	let calendarLocationReason = $state('');
 	let calendarLocationOutcome = $state<'saved' | { refused: Refused } | null>(null);

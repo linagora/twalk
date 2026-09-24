@@ -53,6 +53,8 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use crate::switch::{Invalid, Meaning, State, Update};
+
 /// The contract's own table: `contracts/disclosure/v1/sentences.json`, one
 /// sentence per language tag, verbatim.
 pub const SENTENCES_JSON: &str = include_str!("../../contracts/disclosure/v1/sentences.json");
@@ -118,29 +120,21 @@ pub fn append(body: &str, sentence: &str) -> String {
     format!("{body}\n{sentence}")
 }
 
-/// The disclosure switch as the journal answers it. The shape and the
-/// parsing are every switch's ([`crate::switch`]); what is this module's is
-/// the **default**: ADR 0031 ships the sentence on, so a deployment that
-/// never decided discloses.
-pub type DisclosureState = crate::switch::State;
-
-/// One disclosure decision as a client states it.
-pub type DisclosureUpdate = crate::switch::Update;
-
-pub use crate::switch::Invalid;
-
 /// The state a store with no decision in it holds: on, and nobody decided.
-pub const DEFAULT: DisclosureState = DisclosureState::shipped_as(true);
+/// The shape and the parsing are every switch's ([`crate::switch`]); what
+/// is this module's is the **default**: ADR 0031 ships the sentence on, so
+/// a deployment that never decided discloses.
+pub const DEFAULT: State = State::shipped_as(true);
 
 /// What `enabled` means here, for the sentence a refusal gives back.
-const MEANING: crate::switch::Meaning = crate::switch::Meaning {
+const MEANING: Meaning = Meaning {
     decision: "a disclosure decision",
     enabled: "true appends the disclosure to every approved reply, false stops it for every \
               reply until it is turned on again",
 };
 
 /// Parses a disclosure decision: see [`crate::switch::parse_update`].
-pub fn parse_update(body: &Value) -> Result<DisclosureUpdate, Invalid> {
+pub fn parse_update(body: &Value) -> Result<Update, Invalid> {
     crate::switch::parse_update(body, MEANING)
 }
 
@@ -263,14 +257,14 @@ mod tests {
     fn a_decision_is_a_boolean_and_an_optional_reason() {
         assert_eq!(
             parse_update(&json!({ "enabled": false, "reason": "a test" })),
-            Ok(DisclosureUpdate {
+            Ok(Update {
                 enabled: false,
                 reason: Some("a test".to_owned())
             })
         );
         assert_eq!(
             parse_update(&json!({ "enabled": true, "reason": null })),
-            Ok(DisclosureUpdate {
+            Ok(Update {
                 enabled: true,
                 reason: None
             })
@@ -304,17 +298,17 @@ mod tests {
         let state = crate::disclosure::DEFAULT;
         assert_eq!(
             state,
-            DisclosureState {
+            State {
                 enabled: true,
                 since: None,
                 actor: None,
                 reason: None
             }
         );
-        assert_eq!(DisclosureState::word(state.enabled), "on");
-        assert_eq!(DisclosureState::word(false), "off");
-        assert_eq!(DisclosureState::enabled_from("on"), Some(true));
-        assert_eq!(DisclosureState::enabled_from("off"), Some(false));
-        assert_eq!(DisclosureState::enabled_from("ON"), None);
+        assert_eq!(State::word(state.enabled), "on");
+        assert_eq!(State::word(false), "off");
+        assert_eq!(State::enabled_from("on"), Some(true));
+        assert_eq!(State::enabled_from("off"), Some(false));
+        assert_eq!(State::enabled_from("ON"), None);
     }
 }

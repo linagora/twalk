@@ -629,6 +629,19 @@ pub(crate) fn parse_duration(value: &str) -> Result<ChronoDuration> {
     Ok(if negative { -total } else { total })
 }
 
+/// Whether a published event may carry where the meeting is (#354): the
+/// owner's decision, as [`reduce`] is told it. A named pair rather than a
+/// `bool`, because `reduce(&event, owner, false, decide)` at a call site
+/// says nothing about what the `false` refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Location {
+    /// The owner opened the switch: a location travels, unless its
+    /// organizer was withheld.
+    Carried,
+    /// The switch is shut, or could not be read. No location travels.
+    Withheld,
+}
+
 /// The event as the contract publishes it — `definitions/calendar-event` —
 /// after the consent rule: the organizer and each participant whose
 /// decision on the mail connection is `revoked` are withheld whole and
@@ -639,7 +652,7 @@ pub(crate) fn parse_duration(value: &str) -> Result<ChronoDuration> {
 pub fn reduce(
     event: &Vevent,
     owner: &str,
-    carry_location: bool,
+    location: Location,
     decide: impl Fn(&str) -> Consent,
 ) -> Value {
     let owner = owner_mailto(owner);
@@ -688,8 +701,8 @@ pub fn reduce(
     // words about a place and not the owner's. Asked of the organizer and
     // not of the title, because an event with no SUMMARY has an empty title
     // and nothing was withheld from it.
-    let location = match (carry_location, organizer_withheld) {
-        (true, false) => event
+    let location = match (location, organizer_withheld) {
+        (Location::Carried, false) => event
             .location
             .clone()
             .map(Value::String)
@@ -1058,7 +1071,7 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             // is never asked, and this answer would be wrong to use.
             _ => Consent::Revoked,
         };
-        let published = reduce(&event, "Michel@example.com", false, decide);
+        let published = reduce(&event, "Michel@example.com", Location::Withheld, decide);
         let participants = published["participants"].as_array().unwrap();
         assert_eq!(participants.len(), 2);
         assert!(participants
@@ -1077,7 +1090,9 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         assert!(!text.contains("bob"), "{text}");
 
         // Nobody decided: nobody withheld, pending is not a reduction.
-        let untouched = reduce(&event, "michel@example.com", false, |_| Consent::Pending);
+        let untouched = reduce(&event, "michel@example.com", Location::Withheld, |_| {
+            Consent::Pending
+        });
         assert_eq!(untouched["participants"].as_array().unwrap().len(), 3);
         assert_eq!(untouched["participants_withheld"], 0);
         // A revoked organizer who is not the owner: null, and counted.
@@ -1086,7 +1101,9 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             identity: "mailto:carol@example.org".to_owned(),
             name: None,
         });
-        let reduced = reduce(&foreign, "michel@example.com", false, |_| Consent::Revoked);
+        let reduced = reduce(&foreign, "michel@example.com", Location::Withheld, |_| {
+            Consent::Revoked
+        });
         assert!(reduced["organizer"].is_null());
         assert_eq!(
             reduced["participants_withheld"], 3,
@@ -1102,13 +1119,17 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let event = parse_vevent(WEEKLY).unwrap();
         assert_eq!(event.location.as_deref(), Some("Salle B, 4e étage"));
 
-        let shut = reduce(&event, "michel@example.com", false, |_| Consent::Granted);
+        let shut = reduce(&event, "michel@example.com", Location::Withheld, |_| {
+            Consent::Granted
+        });
         assert_eq!(
             shut["location"],
             Value::Null,
             "a deployment ships with the switch off, and an off switch sends no place"
         );
-        let open = reduce(&event, "michel@example.com", true, |_| Consent::Granted);
+        let open = reduce(&event, "michel@example.com", Location::Carried, |_| {
+            Consent::Granted
+        });
         assert_eq!(
             open["location"], "Salle B, 4e étage",
             "opened, it carries the place as the calendar holds it — unescaped, not parsed"
@@ -1120,7 +1141,9 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         let foreign =
             parse_vevent(&WEEKLY.replace("mailto:Michel@Example.com", "mailto:zoe@example.org"))
                 .unwrap();
-        let withheld = reduce(&foreign, "michel@example.com", true, |_| Consent::Revoked);
+        let withheld = reduce(&foreign, "michel@example.com", Location::Carried, |_| {
+            Consent::Revoked
+        });
         assert_eq!(withheld["title"], "");
         assert_eq!(
             withheld["location"],
@@ -1144,25 +1167,33 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
         // event changed".
         let mut moved = event.clone();
         moved.location = Some("Salle A".to_owned());
-        let after = reduce(&moved, "michel@example.com", true, |_| Consent::Granted);
+        let after = reduce(&moved, "michel@example.com", Location::Carried, |_| {
+            Consent::Granted
+        });
         assert_eq!(changed_fields(&open, &after), vec!["location"]);
         // With the switch shut, nothing moved, because nothing was said.
-        let after_shut = reduce(&moved, "michel@example.com", false, |_| Consent::Granted);
+        let after_shut = reduce(&moved, "michel@example.com", Location::Withheld, |_| {
+            Consent::Granted
+        });
         assert!(changed_fields(&shut, &after_shut).is_empty());
     }
 
     #[test]
     fn changed_fields_name_what_moved_and_the_envelopes_carry_the_contracts_ids() {
         let event = parse_vevent(WEEKLY).unwrap();
-        let before = reduce(&event, "michel@example.com", false, |_| Consent::Pending);
+        let before = reduce(&event, "michel@example.com", Location::Withheld, |_| {
+            Consent::Pending
+        });
         let mut moved = event.clone();
         moved.start = "2026-10-05T10:00:00+02:00".to_owned();
         moved.end = "2026-10-05T10:30:00+02:00".to_owned();
-        let after = reduce(&moved, "michel@example.com", false, |_| Consent::Pending);
+        let after = reduce(&moved, "michel@example.com", Location::Withheld, |_| {
+            Consent::Pending
+        });
         assert_eq!(changed_fields(&before, &after), ["start", "end"]);
         assert!(changed_fields(&before, &before).is_empty());
         // A participant newly revoked moves the count and nothing named.
-        let fewer = reduce(&event, "michel@example.com", false, |id| {
+        let fewer = reduce(&event, "michel@example.com", Location::Withheld, |id| {
             if id == "mailto:bob@example.org" {
                 Consent::Revoked
             } else {

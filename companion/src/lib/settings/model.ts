@@ -78,6 +78,14 @@ export type Language = NonNullable<LanguagePreference['language']>;
 export type Probe = components['schemas']['ModelProbe'];
 export type DisclosureState = components['schemas']['DisclosureState'];
 
+/**
+ * The calendar-location switch as the Gateway answers it (#354). Its own
+ * type, not the disclosure's: the two documents are member-for-member alike
+ * and `CONTEXT.md` reserves *disclosure* for the line a persona's reply
+ * carries, so calling this one that would make the glossary say two things.
+ */
+export type CalendarLocationState = components['schemas']['CalendarLocationState'];
+
 /** The five languages, each named in itself — the Companion's own list, so the two cannot drift. */
 export const LANGUAGE_NAMES: Record<Language, string> = LOCALE_NAMES;
 
@@ -283,7 +291,7 @@ export type CalendarLocationRecord =
  * would invent a decision nobody made.
  */
 export function calendarLocationRecord(
-	state: DisclosureState,
+	state: CalendarLocationState,
 	locale: string
 ): CalendarLocationRecord {
 	if (!state.enabled && (state.since === null || state.actor === null)) {

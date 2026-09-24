@@ -278,7 +278,7 @@ async fn run(config: Config) -> Result<()> {
                 )?,
                 state_dir: config.state_dir.clone(),
                 consent: consent.clone(),
-                location: location_enabled.clone(),
+                locations_may_travel: location_enabled.clone(),
             })
         })
         .transpose()?;
@@ -386,6 +386,9 @@ async fn run(config: Config) -> Result<()> {
     // The calendars are polled on their own interval (#251: every 60 s),
     // not on every health round.
     let mut last_calendar_poll: Option<std::time::Instant> = None;
+    // Whether the calendar-location switch is currently unreadable, so the
+    // warning is said once per outage rather than once per round (#354).
+    let mut location_unreadable = false;
     let mut last_mail_poll: Option<std::time::Instant> = None;
     let mut access: Option<twalk_collector::oidc::AccessToken> = None;
     // Why the SSO last refused to renew, when it did: the grant's fault
@@ -646,13 +649,13 @@ async fn run(config: Config) -> Result<()> {
         ) {
             last_calendar_poll = Some(std::time::Instant::now());
             // What the owner has decided since the last round (#354). Read
-            // before the poll, so the events this round publishes follow
-            // the switch as it stands rather than as it stood at start; a
-            // read that fails keeps the last answer, which is why the
-            // failure is a `warn` and not a silent default.
+            // before the poll, so the events this round publishes follow the
+            // switch as it stands rather than as it stood at start.
+            let mut may_publish = true;
             if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
                 match calendar_location_enabled(url, token).await {
                     Ok(enabled) => {
+                        location_unreadable = false;
                         if location_enabled.swap(enabled, Ordering::Relaxed) != enabled {
                             if enabled {
                                 warn!("the calendar location was turned ON: published events now carry where a meeting is");
@@ -661,12 +664,28 @@ async fn run(config: Config) -> Result<()> {
                             }
                         }
                     }
-                    Err(error) => warn!(
-                        error = %format!("{error:#}"),
-                        enabled = location_enabled.load(Ordering::Relaxed),
-                        "the calendar location switch could not be read this round; the last answer stands"
-                    ),
+                    // An unreadable decision is not a decision, so the switch
+                    // shuts. But a round that published with it open and now
+                    // publishes with it shut would say `location` moved on a
+                    // meeting nobody moved — so such a round publishes
+                    // nothing at all and the cursor stays where it is.
+                    // Nothing is lost: the next round reads both.
+                    Err(error) => {
+                        let was_open = location_enabled.swap(false, Ordering::Relaxed);
+                        may_publish = !was_open;
+                        if !location_unreadable {
+                            location_unreadable = true;
+                            warn!(
+                                error = %format!("{error:#}"),
+                                skipped_this_round = was_open,
+                                "the calendar location switch could not be read: no event carries where a meeting is until it can be. Said once, until it answers again"
+                            );
+                        }
+                    }
                 }
+            }
+            if !may_publish {
+                continue;
             }
             // The window this round asks about (#348): bounded, so a real
             // calendar answers and the cursor stays a cursor.
@@ -932,24 +951,26 @@ async fn publish(
     }
 }
 
-/// The Companion Gateway's consent snapshot, the document the Sensor reads too
-/// (`GET /api/consent/snapshot`, as `companion-gateway/openapi.yaml`
-/// describes it), with the same service token: the registry is its
-/// `connections[]`, the decisions its `entries[]`.
 /// Whether a calendar event may carry where the meeting is, as the owner
 /// decided it on the Companion Gateway (#354): `GET /api/settings/collection`,
-/// the service token the registry read already uses.
+/// with the service token the registry read already uses.
 ///
-/// Read at start, where an unreadable Gateway is fatal exactly as it is for
-/// the registry — a collector that cannot learn what it is allowed to
-/// publish should not publish — and refreshed on every calendar round, where
-/// a failed read **keeps the state it last read** rather than slamming the
-/// switch shut. That is deliberate: a Gateway that blinks would otherwise
-/// have the collector withhold locations it had been publishing, and a
-/// `changed` event naming `location` would go out for a meeting nobody
-/// moved. The owner's decision does not change because a health check
-/// failed; what a blink costs is learning about a decision taken during it,
-/// and the next round pays that back.
+/// Read at start and again before every calendar poll, so a decision taken
+/// on the settings screen reaches the next round rather than the next
+/// restart.
+///
+/// **An unreadable decision is not a decision**, either time: the switch
+/// shuts and no event carries a location until this answers again. Not
+/// fatal, though — unlike the registry read, whose failure makes every
+/// event this process would publish wrong. Here withholding is a safe
+/// answer, and taking the mail half down over a calendar field would be a
+/// blast radius nobody asked for.
+///
+/// One thing follows that is easy to miss: a round that had been publishing
+/// locations and can no longer read the switch publishes **nothing**, and
+/// leaves its cursor where it is. Publishing with the switch shut would put
+/// `location` in `changed_fields` for a meeting nobody moved, and the
+/// owner's journal would say something untrue. The next round reads both.
 async fn calendar_location_enabled(gateway_url: &str, service_token: &str) -> Result<bool> {
     let url = format!(
         "{}/api/settings/collection",
@@ -973,6 +994,10 @@ async fn calendar_location_enabled(gateway_url: &str, service_token: &str) -> Re
         .context("the collection settings do not say whether the calendar location is enabled")
 }
 
+/// The Companion Gateway's consent snapshot, the document the Sensor reads too
+/// (`GET /api/consent/snapshot`, as `companion-gateway/openapi.yaml`
+/// describes it), with the same service token: the registry is its
+/// `connections[]`, the decisions its `entries[]`.
 async fn consent_snapshot(gateway_url: &str, service_token: &str) -> Result<serde_json::Value> {
     let url = format!("{}/api/consent/snapshot", gateway_url.trim_end_matches('/'));
     reqwest::Client::new()

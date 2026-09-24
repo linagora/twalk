@@ -2465,9 +2465,9 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "500":
-          $ref: "#/components/responses/DisclosureStoreUnavailable"
+          $ref: "#/components/responses/DisclosureJournalUnavailable"
         "503":
-          $ref: "#/components/responses/DisclosureNotConfigured"
+          $ref: "#/components/responses/SwitchNotConfigured"
     put:
       operationId: putDisclosureState
       tags: [settings]
@@ -2516,9 +2516,9 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "500":
-          $ref: "#/components/responses/DisclosureStoreUnavailable"
+          $ref: "#/components/responses/DisclosureJournalUnavailable"
         "503":
-          $ref: "#/components/responses/DisclosureNotConfigured"
+          $ref: "#/components/responses/SwitchNotConfigured"
 
   /api/settings/calendar-location:
     get:
@@ -2568,7 +2568,7 @@ paths:
         "500":
           $ref: "#/components/responses/CalendarLocationStoreUnavailable"
         "503":
-          $ref: "#/components/responses/DisclosureNotConfigured"
+          $ref: "#/components/responses/SwitchNotConfigured"
     put:
       operationId: putCalendarLocationState
       tags: [settings]
@@ -2619,7 +2619,7 @@ paths:
         "500":
           $ref: "#/components/responses/CalendarLocationStoreUnavailable"
         "503":
-          $ref: "#/components/responses/DisclosureNotConfigured"
+          $ref: "#/components/responses/SwitchNotConfigured"
 
   /api/settings/collection:
     get:
@@ -4374,15 +4374,19 @@ components:
               - properties:
                   error:
                     enum: [store_unavailable]
-    DisclosureNotConfigured:
+    SwitchNotConfigured:
       description: |
+        What either of the owner's recorded switches answers when this
+        deployment cannot hold one — the disclosure (#121) and the calendar
+        location (#354), whose journals live in the same store.
+
         - `sign_in_not_configured` — this deployment has no owner
           (`GATEWAY_OWNER` is unset), so its whole API is closed. This is
           what the guard answers.
         - `consent_not_configured` — `GATEWAY_NATS_URL` is unset, so there
-          is no consent store, no disclosure journal in it, and no approval
-          path for the switch to govern. The consent routes' own code, so a
-          client learns one fact under one word.
+          is no consent store and no journal in it to record a decision.
+          The consent routes' own code, so a client learns one fact under
+          one word.
       content:
         application/json:
           schema:
@@ -4391,7 +4395,7 @@ components:
               - properties:
                   error:
                     enum: [sign_in_not_configured, consent_not_configured]
-    DisclosureStoreUnavailable:
+    DisclosureJournalUnavailable:
       description: |
         `store_unavailable` — the disclosure journal could not be read, or
         the decision could not be recorded; nothing was changed.

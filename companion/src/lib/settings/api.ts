@@ -7,6 +7,7 @@
 import { gateway } from '$lib/api/client';
 import { troubleOf, type ApiTrouble } from '$lib/api/trouble';
 import type {
+	CalendarLocationState,
 	DisclosureState,
 	Language,
 	LanguagePreference,
@@ -45,6 +46,11 @@ export type ModelAnswer = { ok: true; configuration: ModelConfiguration } | Refu
 export type LanguageAnswer = { ok: true; preference: LanguagePreference } | Refused;
 export type ProbeAnswer = { ok: true; probe: Probe } | Refused;
 export type DisclosureAnswer = { ok: true; state: DisclosureState } | Refused;
+
+/** The calendar-location switch, or why it could not be read (#354). */
+export type CalendarLocationAnswer =
+	| { ok: true; state: CalendarLocationState }
+	| Refused;
 
 export async function loadModel(): Promise<ModelAnswer> {
 	const answer = await gateway.GET('/api/settings/model').catch(() => null);
@@ -108,14 +114,8 @@ export async function loadDisclosure(): Promise<DisclosureAnswer> {
 	return refused(answer);
 }
 
-/**
- * One decision about the disclosure: off for every reply approved from now
- * on, or back on. Appended to the Gateway's journal with the owner as actor
- * and the instant it was taken; `reason` is the user's own note, kept with
- * the decision and read back on the card. Never per message (ADR 0019).
- */
 /** Whether a calendar event carries where the meeting is (#354). */
-export async function loadCalendarLocation(): Promise<DisclosureAnswer> {
+export async function loadCalendarLocation(): Promise<CalendarLocationAnswer> {
 	const answer = await gateway.GET('/api/settings/calendar-location').catch(() => null);
 	if (answer?.data !== undefined) {
 		return { ok: true, state: answer.data };
@@ -132,7 +132,7 @@ export async function loadCalendarLocation(): Promise<DisclosureAnswer> {
 export async function saveCalendarLocation(
 	enabled: boolean,
 	reason?: string
-): Promise<DisclosureAnswer> {
+): Promise<CalendarLocationAnswer> {
 	const note = reason?.trim() ?? '';
 	const answer = await gateway
 		.PUT('/api/settings/calendar-location', {
@@ -145,6 +145,12 @@ export async function saveCalendarLocation(
 	return refused(answer);
 }
 
+/**
+ * One decision about the disclosure: off for every reply approved from now
+ * on, or back on. Appended to the Gateway's journal with the owner as actor
+ * and the instant it was taken; `reason` is the user's own note, kept with
+ * the decision and read back on the card. Never per message (ADR 0019).
+ */
 export async function saveDisclosure(enabled: boolean, reason?: string): Promise<DisclosureAnswer> {
 	const note = reason?.trim() ?? '';
 	const answer = await gateway
