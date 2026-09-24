@@ -56,6 +56,8 @@ The script needs three environment variables in your `.env`:
 - `TWALK_GATEWAY_URL` — the owner's Companion Gateway, the same origin your outbound hook posts answers to (`https://twalk.example.org`); the operator adds it when they install this skill.
 - `TWALK_CALENDAR_CONNECTION` — the calendar connection this deployment reads, so that you never have to name one (`calendar-linagora`, `calendar`). Added with the other two.
 
+**Set `TWALK_DELIVERY_ID` to the reference you were given** when you run either script — `TWALK_DELIVERY_ID=TWALK-REF:… ./freebusy.sh 2026-09-29T08:00:00Z 2026-10-03T18:00:00Z`. Every read is a line in the owner's record, and a line that names the message it was made for is a line they can read back: *this draft read my calendar, for that mail*. Left unset, the script invents an id and the read is recorded as belonging to nothing.
+
 It prints the Gateway's answer as JSON on stdout and exits non-zero on a refusal, with the refusal on stderr.
 
 ### Example
@@ -105,6 +107,7 @@ The Gateway answers a JSON error with a code; the script prints it on stderr.
 - `connection_unknown` — the connection name is wrong; ask the operator.
 - `connection_not_connected` — the owner's calendar is not reachable right now (the answer says which state it is in). Say you cannot check the calendar at the moment; do not guess.
 - `unsigned`, `bad_signature`, `stale_timestamp` — your `TWALK_ANSWER_SECRET` or your clock; tell the operator.
+- **Not a refusal but the same conversation**: if the script exits before making any request, saying `TWALK_CALENDAR_CONNECTION` (or `TWALK_GATEWAY_URL`, or `TWALK_ANSWER_SECRET`) is unset, then this deployment never finished installing the skill. Nothing reached the Gateway, so nothing is in the owner's record either — you are the only one who can see it. Say in the reply that you could not check the calendar, and tell the operator which variable is missing, by name.
 - `collector_not_configured`, `collector_unreachable`, `collector_refused` — the deployment's side; tell the operator.
 
 ## The wire, for a client that is not this script

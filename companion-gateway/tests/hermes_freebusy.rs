@@ -966,6 +966,29 @@ async fn the_skills_script_makes_a_request_the_route_accepts() -> Result<()> {
         "a read the agent made without naming a connection is in the record like any other"
     );
 
+    // And when the deployment never set it, the script says which variable is
+    // missing rather than reading somebody's calendar by accident. Nothing
+    // reaches the Gateway on this path, so the message on stderr is the only
+    // thing an operator has: it names the variable (#363's review).
+    let unconfigured = tokio::process::Command::new(&script)
+        .arg("2026-09-24T08:00:00Z")
+        .arg("2026-09-26T18:00:00Z")
+        .env("TWALK_GATEWAY_URL", &base)
+        .env("TWALK_ANSWER_SECRET", HERMES_ANSWER_SECRET)
+        .env_remove("TWALK_CALENDAR_CONNECTION")
+        .output()
+        .await
+        .context("the skill's script ran with nothing to name the connection")?;
+    assert!(
+        !unconfigured.status.success(),
+        "the script read a calendar with no connection named anywhere"
+    );
+    let said = String::from_utf8_lossy(&unconfigured.stderr);
+    assert!(
+        said.contains("TWALK_CALENDAR_CONNECTION"),
+        "the script failed without naming the variable that is missing: {said}"
+    );
+
     // The document's example is the script's own usage line.
     let document = std::fs::read_to_string(script.with_file_name("SKILL.md"))?;
     assert!(document.contains("./freebusy.sh <connection> <from> <to>"));

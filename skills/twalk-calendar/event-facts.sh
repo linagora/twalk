@@ -13,20 +13,45 @@
 # The description's text is not readable through this or any other route.
 set -eu
 
-: "${TWALK_GATEWAY_URL:?TWALK_GATEWAY_URL is the owner's Companion Gateway origin}"
-: "${TWALK_ANSWER_SECRET:?TWALK_ANSWER_SECRET is the secret the outbound hook signs with}"
+# Two ways to fail, and two codes, because a caller who cannot tell them
+# apart cannot act on either: 64 means this call was wrong, 78 means this
+# deployment never finished installing the skill. Written out rather than
+# `${VAR:?...}` because that form carries its message inside `${...}`, where
+# an apostrophe makes the whole file unparseable to bash — and `#!/usr/bin/env
+# sh` is bash on any host whose /bin/sh is one.
+missing() {
+  echo "$0: $1 is unset — $2. This deployment has not finished installing twalk-calendar; nothing was read and nothing reached the Gateway, so this message is the only trace." >&2
+  exit 78
+}
+misused() {
+  echo "$0: $1" >&2
+  echo "usage: $0 [<connection>] $2" >&2
+  exit 64
+}
+
+[ -n "${TWALK_GATEWAY_URL:-}" ] || missing TWALK_GATEWAY_URL "the owner's Companion Gateway origin"
+[ -n "${TWALK_ANSWER_SECRET:-}" ] || missing TWALK_ANSWER_SECRET "the secret the outbound hook signs answers with"
 
 # One argument means the connection comes from the deployment, for the reason
 # `freebusy.sh` states: the agent has no id to name and a guess is refused.
 if [ "$#" -eq 1 ]; then
-  connection=${TWALK_CALENDAR_CONNECTION:?one argument means the connection comes from TWALK_CALENDAR_CONNECTION, which is unset}
+  [ -n "${TWALK_CALENDAR_CONNECTION:-}" ] \
+    || missing TWALK_CALENDAR_CONNECTION "the calendar connection this deployment reads"
+  connection=$TWALK_CALENDAR_CONNECTION
   uid=$1
 elif [ "$#" -eq 2 ]; then
   connection=$1
   uid=$2
 else
-  echo "usage: $0 [<connection>] <uid>   (uid: the event's iCalendar UID, as calendar.event.* carried it; the connection defaults to TWALK_CALENDAR_CONNECTION)" >&2
-  exit 64
+  misused "$# arguments" "<uid>   (the event's iCalendar UID, as calendar.event.* carried it in data.uid)"
+fi
+
+# A two-argument call with its uid dropped leaves the connection standing
+# where the uid should be, and the Gateway answers `found: false` — which
+# reads as "the owner has no such event" and is a different and wrong story.
+if [ "$uid" = "${TWALK_CALENDAR_CONNECTION:-}" ]; then
+  misused "\"$uid\" is this deployment's calendar connection, not an event uid" \
+    "<uid>   (the event's iCalendar UID, as calendar.event.* carried it in data.uid)"
 fi
 path=/_twalk/hermes/event-facts
 # The query string is signed exactly as sent, so it is built once and used

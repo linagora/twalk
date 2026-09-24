@@ -16,11 +16,29 @@
 # guessing an answer the Gateway would refuse (#363).
 set -eu
 
-: "${TWALK_GATEWAY_URL:?TWALK_GATEWAY_URL is the owner's Companion Gateway origin}"
-: "${TWALK_ANSWER_SECRET:?TWALK_ANSWER_SECRET is the secret the outbound hook signs with}"
+# Two ways to fail, and two codes, because a caller who cannot tell them
+# apart cannot act on either: 64 means this call was wrong, 78 means this
+# deployment never finished installing the skill. Written out rather than
+# `${VAR:?...}` because that form carries its message inside `${...}`, where
+# an apostrophe makes the whole file unparseable to bash — and `#!/usr/bin/env
+# sh` is bash on any host whose /bin/sh is one.
+missing() {
+  echo "$0: $1 is unset — $2. This deployment has not finished installing twalk-calendar; nothing was read and nothing reached the Gateway, so this message is the only trace." >&2
+  exit 78
+}
+misused() {
+  echo "$0: $1" >&2
+  echo "usage: $0 [<connection>] $2" >&2
+  exit 64
+}
+
+[ -n "${TWALK_GATEWAY_URL:-}" ] || missing TWALK_GATEWAY_URL "the owner's Companion Gateway origin"
+[ -n "${TWALK_ANSWER_SECRET:-}" ] || missing TWALK_ANSWER_SECRET "the secret the outbound hook signs answers with"
 
 if [ "$#" -eq 2 ]; then
-  connection=${TWALK_CALENDAR_CONNECTION:?two arguments means the connection comes from TWALK_CALENDAR_CONNECTION, which is unset}
+  [ -n "${TWALK_CALENDAR_CONNECTION:-}" ] \
+    || missing TWALK_CALENDAR_CONNECTION "the calendar connection this deployment reads"
+  connection=$TWALK_CALENDAR_CONNECTION
   from=$1
   to=$2
 elif [ "$#" -eq 3 ]; then
@@ -28,9 +46,18 @@ elif [ "$#" -eq 3 ]; then
   from=$2
   to=$3
 else
-  echo "usage: $0 [<connection>] <from> <to>   (from/to: RFC 3339, at most 14 days apart; the connection defaults to TWALK_CALENDAR_CONNECTION)" >&2
-  exit 64
+  misused "$# arguments" "<from> <to>   (RFC 3339, at most 14 days apart; the connection defaults to TWALK_CALENDAR_CONNECTION)"
 fi
+
+# A three-argument call with its connection dropped is a two-argument call
+# with a connection name where an instant should be. Caught here: the Gateway
+# would refuse it as `invalid_window`, which sends the reader to look at
+# their clock instead of at their command line.
+case $from in
+  [0-9][0-9][0-9][0-9]-*) ;;
+  *) misused "\"$from\" is not an RFC 3339 instant (did you mean it as the connection, with the two dates after it?)" \
+       "<from> <to>   (RFC 3339, at most 14 days apart)" ;;
+esac
 path=/_twalk/hermes/freebusy
 # The query string is signed exactly as sent, so it is built once and used
 # twice: RFC 3339 instants carry ':' and '+', which are percent-encoded here
