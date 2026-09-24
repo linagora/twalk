@@ -23,7 +23,7 @@ pub use crate::side::SideError;
 
 use crate::caldav::{
     self, calendars_in, collection_path, multiget_body, parse_listing, parse_multiget, Calendar,
-    Changes, Cursor, Envelopes, Known, Listing, Resource, PROPFIND_BODY,
+    Changes, Cursor, Envelopes, Known, Listing, Resource,
 };
 use crate::freebusy::{parse_free_busy, Busy, Window};
 
@@ -112,6 +112,7 @@ impl Calendars {
         &self,
         owner_id: &str,
         credential: &crate::side::Credential,
+        window: &crate::freebusy::Window,
         now: &str,
     ) -> Result<Poll, SideError> {
         let mut poll = Poll::default();
@@ -129,7 +130,11 @@ impl Calendars {
                 continue;
             }
             let collection = caldav::collection_path(owner_id, &calendar.id);
-            let listing = self.side.listing(&collection, credential).await?;
+            let mut listing = self.side.listing(&collection, window, credential).await?;
+            // A `calendar-query` answers about the events, not about the
+            // collection, so it carries no CTag: the one the HAL list gave
+            // is what the next cursor remembers (#348).
+            listing.ctag = calendar.ctag.clone().or(listing.ctag);
             if listing.ctag.is_some() && listing.ctag == cursor.ctag {
                 continue;
             }
@@ -303,19 +308,31 @@ impl Side {
         Ok(calendars_in(&document))
     }
 
+    /// The etags of the events of a collection **inside a window** (#348).
+    ///
+    /// `PROPFIND Depth: 1` was the obvious question and the wrong one: it
+    /// asks for every resource a calendar has ever held, which on a real
+    /// one does not answer inside the client's timeout. A
+    /// `REPORT calendar-query` bounded by a time range answers in the same
+    /// second on the same server — which is the difference between a
+    /// history and what is happening around now.
     pub async fn listing(
         &self,
         collection: &str,
+        window: &crate::freebusy::Window,
         credential: &crate::side::Credential,
     ) -> Result<Listing, SideError> {
-        let method = reqwest::Method::from_bytes(b"PROPFIND").expect("a method name");
+        let method = reqwest::Method::from_bytes(b"REPORT").expect("a method name");
         let body = self
             .send(
                 self.http
                     .request(method, format!("{}{collection}", self.base))
                     .header("depth", "1")
                     .header("content-type", "application/xml; charset=utf-8")
-                    .body(PROPFIND_BODY),
+                    .body(caldav::calendar_query_body(
+                        &window.from.to_rfc3339(),
+                        &window.to.to_rfc3339(),
+                    )),
                 credential,
             )
             .await?;

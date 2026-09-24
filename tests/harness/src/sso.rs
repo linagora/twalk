@@ -1057,6 +1057,38 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
             body.push_str("END:VFREEBUSY\r\nEND:VCALENDAR\r\n");
             Some(Response::calendar("200 OK", body))
         }
+        "REPORT" if request.body.contains("calendar-query") => {
+            // calendar-query with a time range (RFC 4791 §7.8, #348): the
+            // etags of the events **inside the window**, and nothing of
+            // the ones outside it. A fake that answered the whole
+            // collection whatever was asked is what let an unbounded
+            // PROPFIND ship: this one holds the window, so a test can put
+            // an event a year away and watch it stay out.
+            let attribute = |name: &str| -> String {
+                request
+                    .body
+                    .split(&format!("{name}=\""))
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let (start, end) = (attribute("start"), attribute("end"));
+            let mut body = String::from(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:cs=\"http://calendarserver.org/ns/\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n",
+            );
+            for (name, (etag, ics)) in &calendar.resources {
+                if !occurs_within(ics, &start, &end) {
+                    continue;
+                }
+                body.push_str(&format!(
+                    "<d:response><d:href>{collection}{name}</d:href><d:propstat><d:prop><d:getetag>{}</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\n",
+                    xml_escape(etag)
+                ));
+            }
+            body.push_str("</d:multistatus>\n");
+            Some(Response::xml("207 Multi-Status", body))
+        }
         "REPORT" => {
             // calendar-multiget: every <d:href> asked for, answered with its
             // ETag and its iCalendar text; one not there answers 404 in its
@@ -1100,6 +1132,40 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
 /// read from the `DTSTART`/`DTEND` lines of its iCalendar text — UTC
 /// instants (`…Z`) and whole dates only, which is what the tests write. A
 /// cancelled or transparent event, or one outside the range, is none.
+/// Whether an event overlaps a window, as a `calendar-query` time range
+/// asks (#348). Cancelled and transparent events still *occur* — that
+/// distinction belongs to free/busy, not to what a calendar holds.
+fn occurs_within(ics: &str, range_start: &str, range_end: &str) -> bool {
+    let mut dtstart = None;
+    let mut dtend = None;
+    for line in ics.lines() {
+        let line = line.trim_end();
+        if let Some(value) = line.strip_prefix("DTSTART") {
+            dtstart = value.split(':').next_back().map(str::to_owned);
+        } else if let Some(value) = line.strip_prefix("DTEND") {
+            dtend = value.split(':').next_back().map(str::to_owned);
+        }
+    }
+    let instant = |value: String| -> String {
+        if value.len() == 8 {
+            format!("{value}T000000Z")
+        } else if value.ends_with('Z') {
+            value
+        } else {
+            format!("{value}Z")
+        }
+    };
+    let Some(start) = dtstart.map(instant) else {
+        // An event with no start is in no window: the collector would
+        // have nothing to publish about it either.
+        return false;
+    };
+    let end = dtend.map(instant).unwrap_or_else(|| start.clone());
+    // Overlap, the way a time range is defined: it starts before the
+    // window ends and ends after the window starts.
+    start.as_str() < range_end && end.as_str() > range_start
+}
+
 fn free_busy_period(ics: &str, range_start: &str, range_end: &str) -> Option<String> {
     let mut dtstart = None;
     let mut dtend = None;

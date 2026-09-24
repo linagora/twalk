@@ -257,3 +257,71 @@ async fn a_participant_revoked_on_the_mail_connection_is_withheld_and_one_never_
     collector.stop().await;
     Ok(())
 }
+
+/// #348: the question a collector asks a calendar is bounded.
+///
+/// `PROPFIND Depth: 1` asks for every resource a collection has ever
+/// held. On the reference deployment's real calendar that did not answer
+/// inside thirty seconds, while a bounded question on the same server and
+/// the same credential answered in the same second — and the fake, which
+/// held a handful of events and answered instantly, is what let it ship.
+///
+/// So the listing is a `calendar-query` over a window, and this test puts
+/// the two things that matter side by side: a calendar holding hundreds
+/// of events outside the window, and one inside it. Only the second is
+/// ever seen — not published, not even remembered in the cursor.
+#[tokio::test]
+async fn a_calendar_is_asked_about_a_window_and_the_rest_is_never_read() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("window").await?;
+    run.authorize().await?;
+    run.serve_snapshot(&bus, vec![]).await?;
+
+    run.sso.create_calendar(&run.calendar, "Mine");
+    // Five hundred events years away: the history a real calendar has and
+    // a fake never had.
+    for index in 0..500 {
+        let far = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:far-{index}\r\nSUMMARY:Far away {index}\r\nDTSTART:2029{:02}{:02}T090000Z\r\nDTEND:2029{:02}{:02}T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            (index % 12) + 1,
+            (index % 27) + 1,
+            (index % 12) + 1,
+            (index % 27) + 1
+        );
+        run.sso
+            .put_event(&run.calendar, &format!("far-{index}"), &far);
+    }
+    let collector = run.start()?;
+    collector
+        .wait_logged("calendar taken as it stands", 1)
+        .await?;
+
+    // One event inside the window, created after the collector started.
+    let soon_start = twalk_test_harness::jmap_fake::now_rfc3339();
+    let soon = format!(
+        "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:soon-1\r\nSUMMARY:Point de la semaine\r\nDTSTART:{}\r\nDTEND:{}\r\nATTENDEE;CN=Alice:mailto:alice@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        soon_start.replace(['-', ':'], "").split('.').next().unwrap_or_default(),
+        soon_start.replace(['-', ':'], "").split('.').next().unwrap_or_default()
+    );
+    run.sso.put_event(&run.calendar, "soon-1", &soon);
+
+    let created = wait_for(&bus, &run, "created", 1).await?;
+    assert_eq!(created.len(), 1, "one event, the one in the window");
+    assert_eq!(created[0]["data"]["title"], json!("Point de la semaine"));
+
+    // The five hundred are not published, and not remembered either: a
+    // cursor that held them would be the same unbounded thing one layer
+    // down.
+    let stored = run.stored_bytes()?;
+    assert!(
+        !stored.contains("far-"),
+        "the cursor remembers a calendar's history: it should hold only its window"
+    );
+    assert!(
+        events_of(&bus, &run, "changed").await?.is_empty()
+            && events_of(&bus, &run, "removed").await?.is_empty()
+    );
+    collector.stop().await;
+    Ok(())
+}

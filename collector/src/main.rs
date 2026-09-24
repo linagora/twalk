@@ -630,7 +630,17 @@ async fn run(config: Config) -> Result<()> {
             poll_is_due,
         ) {
             last_calendar_poll = Some(std::time::Instant::now());
-            match calendars.poll(owner_id, credential, &occurred_at).await {
+            // The window this round asks about (#348): bounded, so a real
+            // calendar answers and the cursor stays a cursor.
+            let window = twalk_collector::freebusy::Window::around(
+                std::time::SystemTime::now(),
+                config.calendar_window_back_days,
+                config.calendar_window_ahead_days,
+            );
+            match calendars
+                .poll(owner_id, credential, &window, &occurred_at)
+                .await
+            {
                 Ok(found) => {
                     debug!(
                         envelopes = found.envelopes.len(),

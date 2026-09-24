@@ -71,6 +71,18 @@ impl WindowError {
 }
 
 impl Window {
+    /// The window a calendar poll asks about (#348): so many days behind
+    /// an instant and so many ahead. Not a free/busy window — that one is
+    /// the contact's question and is capped at fourteen days; this one is
+    /// the perimeter the collector watches, and the deployment sets it.
+    pub fn around(at: std::time::SystemTime, back_days: i64, ahead_days: i64) -> Self {
+        let at: DateTime<Utc> = at.into();
+        Self {
+            from: at - chrono::Duration::days(back_days),
+            to: at + chrono::Duration::days(ahead_days),
+        }
+    }
+
     pub fn parse(from: &str, to: &str) -> Result<Self, WindowError> {
         let from = DateTime::parse_from_rfc3339(from.trim())
             .map_err(|_| WindowError::NotAnInstant("from"))?
