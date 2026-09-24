@@ -65,7 +65,23 @@ pub struct Poll {
     pub cursors: Vec<(String, Cursor)>,
 }
 
+/// The zone the owner's agenda is written in, and where that was read.
+///
+/// The source travels with the name because "Europe/Paris" alone cannot be
+/// checked by the person it is about: a zone the *calendar service* declares
+/// is a fact about the owner's own configuration, and one inferred some other
+/// way is a guess of a different rank. The owner sees which one answered
+/// (#369).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Zone {
+    /// An IANA name — `Europe/Paris`, `America/New_York`.
+    pub name: String,
+    /// `calendar`: the collection declares it (`CALDAV:calendar-timezone`).
+    pub source: &'static str,
+}
+
 impl Calendars {
+
     fn cursor_path(&self, calendar_id: &str) -> PathBuf {
         self.state_dir
             .join("caldav")
@@ -99,18 +115,40 @@ impl Calendars {
     /// accepted, the same set whose changes are published — one
     /// `free-busy-query` each, merged. No cursor moves and nothing is
     /// published: a read.
+    ///
+    /// It carries **the zone the agenda is written in** with it (#369). A
+    /// free/busy answer is a list of UTC instants and every sentence a human
+    /// reads is in local time, so something converts; before this, the thing
+    /// converting was a model with nothing to convert *to*, and it guessed.
+    /// Measured on 2026-09-24: a draft searched the machine for a timezone,
+    /// found none, wrote "(Heures de Paris.)" and happened to be right.
     pub async fn free_busy(
         &self,
         owner_id: &str,
         credential: &crate::side::Credential,
         window: &Window,
-    ) -> Result<Vec<Busy>, SideError> {
+    ) -> Result<(Vec<Busy>, Option<Zone>), SideError> {
         let mut answers = Vec::new();
+        let mut zone = None;
         for calendar in self.side.calendars(owner_id, credential).await? {
             let collection = collection_path(owner_id, &calendar.id);
             answers.push(self.side.free_busy(&collection, window, credential).await?);
+            // The first calendar that declares one wins, and the owner's own
+            // comes first in the list the poll reads. A share they accepted
+            // may be written in somebody else's zone, and that is not where
+            // the owner is.
+            if zone.is_none() {
+                zone = self
+                    .side
+                    .calendar_timezone(&collection, credential)
+                    .await?
+                    .map(|name| Zone {
+                        name,
+                        source: "calendar",
+                    });
+            }
         }
-        Ok(crate::freebusy::merge_answers(answers, window))
+        Ok((crate::freebusy::merge_answers(answers, window), zone))
     }
 
     /// What one of the owner's events carries, without its words (#355):
@@ -505,6 +543,40 @@ impl Side {
         })
     }
 
+    /// The zone a collection declares (`CALDAV:calendar-timezone`,
+    /// RFC 4791 §5.2.2), or `None` when it declares none (#369).
+    ///
+    /// The property holds a whole `VTIMEZONE` — rules, offsets, the lot — of
+    /// which the only part anybody here needs is the `TZID` inside it. A
+    /// service that has never been told a zone answers `404 Not Found` for
+    /// the property inside a `207`, which is not an error and must not read
+    /// as one: a calendar with no declared zone is the ordinary case on a
+    /// server whose clients never set it, and the answer to it is to say so
+    /// rather than to invent a zone or to fail the read.
+    pub async fn calendar_timezone(
+        &self,
+        collection: &str,
+        credential: &crate::side::Credential,
+    ) -> Result<Option<String>, SideError> {
+        let method = reqwest::Method::from_bytes(b"PROPFIND").expect("a method name");
+        let body = self
+            .send(
+                self.http
+                    .request(method, format!("{}{collection}", self.base))
+                    .header("depth", "0")
+                    .header("content-type", "application/xml; charset=utf-8")
+                    .body(
+                        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+                         <d:propfind xmlns:d=\"DAV:\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n\
+                         \u{20}\u{20}<d:prop><cal:calendar-timezone/></d:prop>\n\
+                         </d:propfind>\n",
+                    ),
+                credential,
+            )
+            .await?;
+        Ok(tzid_in(&body))
+    }
+
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
@@ -517,5 +589,55 @@ impl Side {
             .map_err(|error| SideError::Unreachable {
                 detail: format!("caldav's answer could not be read: {error}"),
             })
+    }
+}
+
+/// The `TZID` of the first `VTIMEZONE` in a `calendar-timezone` answer.
+///
+/// Read out of the XML as text rather than parsed as iCalendar, because the
+/// property's whole value is a calendar object whose only interesting line is
+/// this one, and because it arrives escaped in several shapes: a real
+/// newline, `&#13;`, `&#xD;`, or the line folding iCalendar allows. What is
+/// wanted is one name, and a name has no spaces.
+fn tzid_in(body: &str) -> Option<String> {
+    let start = body.find("TZID:")? + "TZID:".len();
+    let rest = &body[start..];
+    let end = rest
+        .find(|c: char| c == '\r' || c == '\n' || c == '<' || c == '&')
+        .unwrap_or(rest.len());
+    let name = rest[..end].trim();
+    // A zone is an IANA name, and this is the whole check: anything with a
+    // space or a slash-less shape is something else that happened to follow
+    // the letters TZID — say nothing rather than hand a model a word.
+    (!name.is_empty() && !name.contains(' ') && name.len() < 64).then(|| name.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tzid_in;
+
+    #[test]
+    fn a_zone_is_read_out_of_the_property_however_it_is_escaped() {
+        // sabre answers the whole VTIMEZONE, XML-escaped, with its line
+        // breaks in whichever shape the server chose.
+        assert_eq!(
+            tzid_in("<cal:calendar-timezone>BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\n</cal:calendar-timezone>").as_deref(),
+            Some("Europe/Paris")
+        );
+        assert_eq!(
+            tzid_in("BEGIN:VTIMEZONE&#13;\nTZID:America/New_York&#13;\nEND:VTIMEZONE").as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(tzid_in("TZID:Asia/Tokyo</x>").as_deref(), Some("Asia/Tokyo"));
+
+        // A collection that declares none answers the property `404` inside
+        // the `207`, and there is no TZID anywhere in it.
+        assert_eq!(tzid_in("<d:prop><cal:calendar-timezone/></d:prop>"), None);
+
+        // And a word that follows the letters TZID without being a zone is
+        // not handed to a model to put in a sentence: Windows spells its
+        // zones with spaces, and no converter this side knows them.
+        assert_eq!(tzid_in("TZID: Romance Standard Time\r\n"), None);
+        assert_eq!(tzid_in("TZID:\r\n"), None);
     }
 }

@@ -133,6 +133,11 @@ struct FakeCalendar {
     ctag: String,
     /// Resources by name (`<uid>.ics`): the ETag and the iCalendar text.
     resources: std::collections::BTreeMap<String, (String, String)>,
+    /// The zone this collection declares (`CALDAV:calendar-timezone`), or
+    /// `None` for a calendar nobody ever told one to — which is the ordinary
+    /// state of a collection on a server whose clients never set it, and the
+    /// case a read has to answer honestly rather than invent around (#369).
+    timezone: Option<String>,
 }
 
 /// The owner's id on the side service: what `/api/user` answers as `_id`
@@ -341,6 +346,9 @@ impl FakeSso {
                 name: name.to_owned(),
                 ctag,
                 resources: Default::default(),
+                // The reference deployment's own calendars declare one, so
+                // the fake does too and a test has to ask for the absence.
+                timezone: Some("Europe/Paris".to_owned()),
             },
         );
         format!("/dav/calendars/{OWNER_ID}/{id}/")
@@ -381,6 +389,16 @@ impl FakeSso {
     }
 
     /// A calendar's current CTag.
+    /// Takes the declared zone off a collection, for the test that asks what
+    /// a read says when the calendar has never been told one (#369).
+    pub fn forget_calendar_timezone(&self, calendar: &str) {
+        self.lock()
+            .calendars
+            .get_mut(calendar)
+            .expect("a calendar to forget the zone of")
+            .timezone = None;
+    }
+
     pub fn ctag(&self, calendar: &str) -> String {
         self.lock().calendars[calendar].ctag.clone()
     }
@@ -1066,8 +1084,23 @@ fn dav(request: &RawRequest, rest: &str, guard: &mut State) -> Option<Response> 
             let mut body = String::from(
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<d:multistatus xmlns:d=\"DAV:\" xmlns:cs=\"http://calendarserver.org/ns/\" xmlns:cal=\"urn:ietf:params:xml:ns:caldav\">\n",
             );
+            // A collection that declares a zone answers the whole VTIMEZONE,
+            // escaped, as sabre does; one that declares none answers the
+            // property `404` inside the `207`, which is not an error.
+            let (declared, undeclared) = match &calendar.timezone {
+                Some(zone) => (
+                    format!(
+                        "<cal:calendar-timezone>{}</cal:calendar-timezone>",
+                        xml_escape(&format!(
+                            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\nTZID:{zone}\r\nEND:VTIMEZONE\r\nEND:VCALENDAR\r\n"
+                        ))
+                    ),
+                    String::new(),
+                ),
+                None => (String::new(), "<cal:calendar-timezone/>".to_owned()),
+            };
             body.push_str(&format!(
-                "<d:response><d:href>{href_root}</d:href><d:propstat><d:prop><cs:getctag>{}</cs:getctag><d:resourcetype><d:collection/><cal:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
+                "<d:response><d:href>{href_root}</d:href><d:propstat><d:prop><cs:getctag>{}</cs:getctag>{declared}<d:resourcetype><d:collection/><cal:calendar/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><d:getetag/>{undeclared}</d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n",
                 xml_escape(&calendar.ctag)
             ));
             for (name, (etag, _)) in &calendar.resources {

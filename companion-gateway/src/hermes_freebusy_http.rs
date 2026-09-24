@@ -20,7 +20,9 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::hermes_answer::SIGNATURE_HEADER;
-use crate::hermes_freebusy::{ReadRefusal, ReadRequest, DELIVERY_HEADER, TIMESTAMP_HEADER};
+use crate::hermes_freebusy::{
+    FreeBusy, ReadRefusal, ReadRequest, DELIVERY_HEADER, TIMESTAMP_HEADER,
+};
 use crate::http::Gateway;
 
 pub fn routes() -> Router<Gateway> {
@@ -103,18 +105,34 @@ async fn read_free_busy(
     };
     let request = request_of(&uri, &headers);
     match reads.read(&request).await {
-        Ok(busy) => (
-            StatusCode::OK,
-            Json(json!({
-                "connection": request.connection,
-                "from": request.from,
-                "to": request.to,
-                "busy": busy,
-            })),
-        )
-            .into_response(),
+        Ok(answer) => (StatusCode::OK, Json(answered(&request, answer))).into_response(),
         Err(refusal) => refuse(&gateway, refusal),
     }
+}
+
+/// The answer's body: the window as asked, the intervals, and the owner's
+/// own time when the deployment knows it (#369).
+///
+/// The three members go **together or not at all**. A calendar that declares
+/// no zone, or a collector older than this, produces an answer with none of
+/// them, and the skill tells the agent what to do then: speak in UTC and name
+/// it. Half of them — a zone with no hour, an hour with no zone — would be
+/// worse than none, because each is only usable with the other.
+fn answered(request: &ReadRequest, answer: FreeBusy) -> serde_json::Value {
+    let mut body = json!({
+        "connection": request.connection,
+        "from": request.from,
+        "to": request.to,
+        "busy": answer.busy,
+    });
+    if let (Some(timezone), Some(source), Some(now)) =
+        (answer.timezone, answer.timezone_source, answer.now)
+    {
+        body["timezone"] = json!(timezone);
+        body["timezone_source"] = json!(source);
+        body["now"] = json!(now);
+    }
+    body
 }
 
 /// One refusal, in `openapi.yaml`'s `Error` shape, with the connection's
@@ -151,5 +169,76 @@ mod tests {
             crate::hermes_freebusy::EVENT_FACTS_PATH,
             "/_twalk/hermes/event-facts"
         );
+    }
+
+    use super::*;
+    use crate::hermes_freebusy::Busy;
+
+    fn request() -> ReadRequest {
+        ReadRequest {
+            connection: Some("calendar-linagora".to_owned()),
+            from: Some("2026-09-28T06:00:00Z".to_owned()),
+            to: Some("2026-10-02T18:00:00Z".to_owned()),
+            ..ReadRequest::default()
+        }
+    }
+
+    fn intervals() -> Vec<Busy> {
+        vec![Busy {
+            start: "2026-10-01T07:00:00Z".to_owned(),
+            end: "2026-10-01T10:00:00Z".to_owned(),
+        }]
+    }
+
+    #[test]
+    fn the_owners_own_time_is_answered_when_the_deployment_knows_it() {
+        let body = answered(
+            &request(),
+            FreeBusy {
+                busy: intervals(),
+                timezone: Some("Europe/Paris".to_owned()),
+                timezone_source: Some("calendar".to_owned()),
+                now: Some("2026-09-24T20:36:26+02:00".to_owned()),
+            },
+        );
+        assert_eq!(body["timezone"], "Europe/Paris");
+        assert_eq!(body["timezone_source"], "calendar");
+        assert_eq!(body["now"], "2026-09-24T20:36:26+02:00");
+        assert_eq!(body.as_object().map(|object| object.len()), Some(7));
+    }
+
+    #[test]
+    fn a_deployment_that_knows_no_zone_answers_none_of_the_three() {
+        // A calendar that declares no zone, or a collector older than #369.
+        // Half the members would be worse than none: each is only usable
+        // with the other, and a zone with no hour invites the arithmetic
+        // this ticket exists to stop.
+        let body = answered(
+            &request(),
+            FreeBusy {
+                busy: intervals(),
+                timezone: None,
+                timezone_source: None,
+                now: None,
+            },
+        );
+        for member in ["timezone", "timezone_source", "now"] {
+            assert!(body.get(member).is_none(), "{member} was answered: {body}");
+        }
+        assert_eq!(body.as_object().map(|object| object.len()), Some(4));
+    }
+
+    #[test]
+    fn a_zone_with_no_hour_is_not_half_answered() {
+        let body = answered(
+            &request(),
+            FreeBusy {
+                busy: intervals(),
+                timezone: Some("Europe/Paris".to_owned()),
+                timezone_source: Some("calendar".to_owned()),
+                now: None,
+            },
+        );
+        assert!(body.get("timezone").is_none(), "half of it was answered: {body}");
     }
 }
