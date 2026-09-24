@@ -107,6 +107,25 @@ export interface paths {
          *     French disclosure ends up under an English reply with nothing anywhere
          *     to say so.
          *
+         *     A fourth member is **optional**: `summary`, what the message asks in
+         *     Hermes's own words and never a quotation of it (issue #360). It
+         *     becomes `data.context.summary` on the suggestion, which the approval
+         *     screen and the clerk's post show above the draft, so a decision is
+         *     taken knowing what it answers. Absent is how every answer read
+         *     before the member existed, and an agent that predates it is not a
+         *     broken one; a summary that is **there and unusable** — empty, or
+         *     over the contract's 280 characters — is refused and nothing is
+         *     published.
+         *
+         *     The other half of that context, `contact`, is **not** Hermes's to
+         *     send and is ignored if it does: the Gateway writes it from the
+         *     trigger it validated and whose consent it has just re-read — the
+         *     display name that trigger carried, and nothing else of its `data`.
+         *     Naming a contact is what
+         *     [#160](https://github.com/linagora/twalk/issues/160) declined to let
+         *     an outside agent do, and it would be a name nothing on this side
+         *     could check.
+         *
          *     **The language becomes the disclosure here** (ticket #121). Hermes is
          *     outside this deployment and holds no copy of the contract, so its
          *     answer names a language and the Gateway selects the sentence: the
@@ -4961,6 +4980,12 @@ export interface operations {
              *     - `hermes_answer_too_long` — the reply is over 65 335 characters:
              *       the contract's 65 536 less the line the disclosure is appended
              *       on at approval.
+             *     - `hermes_answer_summary_is_empty` — the optional `summary` is
+             *       there and says nothing (issue #360).
+             *     - `hermes_answer_summary_too_long` — it is over 280 characters,
+             *       the contract's cap on `data.context.summary`. Refused rather
+             *       than cut: a summary trimmed mid-sentence is worse on an
+             *       approval screen than none.
              */
             422: {
                 headers: {
@@ -4969,7 +4994,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long";
+                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long" | "hermes_answer_summary_is_empty" | "hermes_answer_summary_too_long";
                     };
                 };
             };
