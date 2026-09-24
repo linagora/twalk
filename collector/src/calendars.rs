@@ -145,7 +145,18 @@ impl Calendars {
             }) else {
                 continue;
             };
-            let ics = self.side.resource(&href, credential).await?;
+            // The file name is the href's last segment; the collection is
+            // this collector's own, built the way every other request builds
+            // it. See [`Side::resource`] for why not the href itself.
+            let Some(file_name) = href.rsplit('/').find(|part| !part.is_empty()) else {
+                warn!(href = %href, "a cursor holds a resource with no file name; no facts answered");
+                continue;
+            };
+            let collection = collection_path(owner_id, &calendar.id);
+            let ics = self
+                .side
+                .resource(&collection, file_name, credential)
+                .await?;
             return match caldav::facts_of(&ics) {
                 Ok(facts) => Ok(Some(facts)),
                 Err(error) => {
@@ -383,19 +394,31 @@ impl Side {
     /// `REPORT calendar-query` bounded by a time range answers in the same
     /// second on the same server — which is the difference between a
     /// history and what is happening around now.
-    /// One resource, as iCalendar text: a plain `GET` on the href the
-    /// listing gave (RFC 4791 — a calendar object resource is an ordinary
-    /// HTTP resource). Used to answer facts about one event (#355), where
-    /// a windowed `REPORT` would fetch a calendar to read one meeting.
+    /// One resource, as iCalendar text: a plain `GET` (RFC 4791 — a
+    /// calendar object resource is an ordinary HTTP resource). Used to
+    /// answer facts about one event (#355), where a windowed `REPORT`
+    /// would fetch a calendar to read one meeting.
+    ///
+    /// Addressed by its **collection and its file name**, not by the href
+    /// the listing gave. The reference deployment answers hrefs relative to
+    /// sabre's own root — `/calendars/<owner>/<calendar>/<uid>.ics` — while
+    /// the collection this collector asks about is `/dav/calendars/…`,
+    /// because the ESN relays `/dav/` to a sabre mounted at `/`. Pasting
+    /// the href onto the base gave a 404 on the live service and passed
+    /// against a fake whose hrefs happened to match, which is what running
+    /// it in production found. Building the URL the way every other request
+    /// here does is what keeps the two from drifting again.
     pub async fn resource(
         &self,
-        href: &str,
+        collection: &str,
+        file_name: &str,
         credential: &crate::side::Credential,
     ) -> Result<String, SideError> {
-        // The href a listing returns is absolute on the service's own root,
-        // as sabre writes it (`/dav/calendars/<owner>/<calendar>/<uid>.ics`),
-        // so the base carries the scheme and host and the href the rest.
-        let url = format!("{}{href}", self.base);
+        let url = format!(
+            "{}{}/{file_name}",
+            self.base,
+            collection.trim_end_matches('/')
+        );
         let response = crate::side::send(self.http.get(&url), credential, "caldav").await?;
         response
             .text()

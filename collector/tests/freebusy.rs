@@ -20,6 +20,10 @@ const SERVICE_TOKEN: &str = "test-service-token";
 const MEETING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-meeting\r\nSUMMARY:Point budget CONFIDENTIEL\r\nLOCATION:Salle Ada Lovelace\r\nDTSTART:20261006T080000Z\r\nDTEND:20261006T090000Z\r\nATTENDEE;CN=Alice Martin:mailto:alice@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const OVERLAPPING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-overlap\r\nSUMMARY:Entretien\r\nDTSTART:20261006T083000Z\r\nDTEND:20261006T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const CANCELLED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-cancelled\r\nSUMMARY:Annulé\r\nSTATUS:CANCELLED\r\nDTSTART:20261006T140000Z\r\nDTEND:20261006T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+/// An event with everything #355 is about: a join link in the property
+/// meant for it, a description, and an attachment.
+const CARRIES: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d355-carries\r\nSUMMARY:Atelier\r\nDESCRIPTION:Ordre du jour que personne n'a décidé de partager\r\nCONFERENCE;VALUE=URI;FEATURE=VIDEO:https://meet.example/atelier\r\nATTACH:https://files.example/plan.pdf\r\nDTSTART:20261007T080000Z\r\nDTEND:20261007T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
 const ALL_DAY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-allday\r\nSUMMARY:Déplacement\r\nDTSTART;VALUE=DATE:20261008\r\nDTEND;VALUE=DATE:20261009\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
 /// The environment with the endpoint served on a free port, and the
@@ -73,6 +77,18 @@ async fn read(
     Ok((status, body))
 }
 
+async fn facts(port: u16, token: &str, connection: &str, uid: &str) -> Result<(u16, Value)> {
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/event-facts"))
+        .query(&[("connection", connection), ("uid", uid)])
+        .bearer_auth(token)
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
 async fn wait_for_endpoint(port: u16) -> Result<()> {
     poll_until(
         || async {
@@ -86,6 +102,94 @@ async fn wait_for_endpoint(port: u16) -> Result<()> {
         "the free/busy endpoint to answer",
     )
     .await
+}
+
+/// #355: what an event carries, at the collector's process boundary and
+/// against the fake side service.
+///
+/// The reason this test exists rather than the unit test alone: reading
+/// one event means **fetching its resource again**, and the URL that
+/// fetches it is built from a listing's href. The first implementation
+/// pasted the href onto the service's base, which passed against a fake
+/// whose hrefs matched its base and answered `404` on the reference
+/// deployment, where sabre sits behind a `/dav/` relay and returns hrefs
+/// relative to its own root. The fake now answers hrefs the way that
+/// service does, so this test fails if that mistake is made again.
+#[tokio::test]
+async fn a_read_says_what_an_event_carries_and_never_its_words() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("event-facts").await?;
+    run.authorize().await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
+    run.sso.create_calendar(&run.calendar, "Mine");
+    run.sso.put_event(&run.calendar, "carries", CARRIES);
+    run.sso.put_event(&run.calendar, "meeting", MEETING);
+    let port = free_port()?;
+    let metrics_port = free_port()?;
+    let collector = support::CollectorProc::start(&env_with_endpoint(&run, port, metrics_port))?;
+    collector
+        .wait_logged("calendar taken as it stands", 1)
+        .await?;
+    wait_for_endpoint(port).await?;
+
+    let (status, body) = facts(port, SERVICE_TOKEN, &run.calendar, "d355-carries").await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["found"], json!(true), "{body}");
+    assert_eq!(body["conference"], json!("https://meet.example/atelier"));
+    assert_eq!(
+        body["description_characters"],
+        json!("Ordre du jour que personne n'a décidé de partager"
+            .chars()
+            .count())
+    );
+    assert_eq!(body["attachments"], json!(1));
+    // The promise, asserted on the bytes: a length and a count left the
+    // collector, and not one word of the agenda or the file's name.
+    let answered = body.to_string();
+    assert!(!answered.contains("Ordre du jour"), "{answered}");
+    assert!(!answered.contains("plan.pdf"), "{answered}");
+
+    // An event with none of the three says so with absences, not zeroes
+    // that read as facts.
+    let (status, body) = facts(port, SERVICE_TOKEN, &run.calendar, "d281-meeting").await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["found"], json!(true));
+    assert_eq!(body["conference"], Value::Null);
+    assert_eq!(body["description_characters"], Value::Null);
+    assert_eq!(body["attachments"], json!(0));
+
+    // An event this collector never published: `found: false`, which is a
+    // different answer from "it carries nothing".
+    let (status, body) = facts(port, SERVICE_TOKEN, &run.calendar, "never-seen").await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["found"], json!(false), "{body}");
+
+    // And the refusals this endpoint owes: anybody else, a connection it
+    // does not hold, a uid that is not one.
+    let (status, body) = facts(port, "not-the-token", &run.calendar, "d355-carries").await?;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["error"], json!("unauthenticated"));
+    let (status, body) = facts(port, SERVICE_TOKEN, "another-connection", "d355-carries").await?;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"], json!("connection_unknown"));
+    let (status, body) = facts(port, SERVICE_TOKEN, &run.calendar, "").await?;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"], json!("invalid_uid"));
+
+    // Counted on its own series, apart from the free/busy one.
+    let text = reqwest::get(format!("http://127.0.0.1:{metrics_port}/metrics"))
+        .await?
+        .text()
+        .await?;
+    assert!(
+        text.contains("twalk_collector_event_fact_reads_total{outcome=\"served\"} 3"),
+        "three reads served: {text}"
+    );
+    assert!(text.contains("twalk_collector_event_fact_reads_total{outcome=\"invalid_uid\"} 1"));
+
+    collector.stop().await;
+    Ok(())
 }
 
 #[tokio::test]

@@ -313,11 +313,16 @@ impl ReadRefusal {
             Self::StoreUnavailable(detail) => {
                 format!("the connection's state could not be read: {detail}")
             }
+            // "the read" and not "the free/busy read": since #355 two reads
+            // share these refusals, and a sentence naming the wrong one sends
+            // an operator to the wrong log. Found by running the new read
+            // against the live deployment, where the Gateway answered that a
+            // free/busy read had been refused for a read of an event.
             Self::CollectorUnreachable(detail) => {
-                format!("the collector did not answer the free/busy read: {detail}")
+                format!("the collector did not answer the read: {detail}")
             }
             Self::CollectorRefused { status, code } => {
-                format!("the collector refused the free/busy read with HTTP {status} {code}")
+                format!("the collector refused the read with HTTP {status} {code}")
             }
         }
     }
