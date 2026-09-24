@@ -26,6 +26,8 @@
 mod harness;
 
 use std::path::PathBuf;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -856,11 +858,13 @@ async fn a_gateway_with_a_seam_and_no_collector_says_so() -> Result<()> {
     Ok(())
 }
 
-/// The skill Twalk ships, run as Hermes runs it: the script signs and
-/// sends a request the route accepts. The proof that the document and the
-/// route agree, and the one test that would fail if either drifted.
+/// The skill Twalk ships, both ways in, run as Hermes runs them: the script
+/// signs and sends a request the route accepts, and so does the tool server
+/// an agent with no shell holds instead (#368). The proof that the document,
+/// the script, the tool and the route agree — and the one test that fails if
+/// any of the four drifts.
 #[tokio::test]
-async fn the_skills_script_makes_a_request_the_route_accepts() -> Result<()> {
+async fn the_skill_reaches_the_route_as_a_script_and_as_a_tool() -> Result<()> {
     ensure_stack().await?;
     let bus = bus().await?;
     let connection = unique("calendar");
@@ -997,6 +1001,135 @@ async fn the_skills_script_makes_a_request_the_route_accepts() -> Result<()> {
         "the short form the agent is meant to use is not in the document"
     );
     assert!(document.contains("X-Hermes-Signature-256") && document.contains("X-Hermes-Timestamp"));
+
+    // ---- and the same two reads through the tool, which is the way an agent
+    // holds them when it has no shell (#368). Grafted onto this test rather
+    // than given its own: a sixth Gateway on this host starves the fifth's
+    // bus read, and the script and the tool are the same wire by design — so
+    // one stack proving both is the honest shape as well as the cheap one.
+    let server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../skills/twalk-calendar/mcp_server.py")
+        .canonicalize()
+        .context("the skill's tool server exists")?;
+    let mut child = tokio::process::Command::new("python3")
+        .arg(&server)
+        .env("TWALK_GATEWAY_URL", &base)
+        .env("TWALK_ANSWER_SECRET", HERMES_ANSWER_SECRET)
+        .env("TWALK_CALENDAR_CONNECTION", &connection)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("the tool server started")?;
+    let mut stdin = child.stdin.take().expect("a pipe to write requests into");
+    let stdout = child.stdout.take().expect("a pipe to read answers from");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    // One request, one line back: MCP's stdio transport is newline-delimited
+    // JSON-RPC, which is the whole reason a server for it can be one file.
+    async fn ask(
+        stdin: &mut tokio::process::ChildStdin,
+        lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+        request: Value,
+    ) -> Result<Value> {
+        stdin.write_all(format!("{request}\n").as_bytes()).await?;
+        stdin.flush().await?;
+        let answered = lines
+            .next_line()
+            .await?
+            .context("the tool server answered a line")?;
+        Ok(serde_json::from_str(&answered)?)
+    }
+
+    // The handshake, then the listing: this is what a client does before it
+    // offers anything to a model, so a server that fails here offers nothing.
+    let hello = ask(&mut stdin, &mut lines, json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-03-26", "capabilities": {}},
+    }))
+    .await?;
+    assert_eq!(hello["result"]["protocolVersion"], "2025-03-26");
+    assert_eq!(hello["result"]["serverInfo"]["name"], "twalk-calendar");
+
+    let listed = ask(&mut stdin, &mut lines, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})).await?;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .context("a list of tools")?
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["freebusy", "event_facts"],
+        "the tool offers exactly the two governed reads, in the order the \
+         skill teaches them, and nothing else — no third function is the \
+         property this whole ticket exists for"
+    );
+
+    let answered = ask(&mut stdin, &mut lines, json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {
+            "name": "freebusy",
+            "arguments": {
+                "from": "2026-09-24T08:00:00Z",
+                "to": "2026-09-26T18:00:00Z",
+                "reference": "TWALK-REF:assistant:tool-run:1",
+            },
+        },
+    }))
+    .await?;
+    assert!(
+        answered["result"]["isError"].as_bool() != Some(true),
+        "the read came back as an error: {answered}"
+    );
+    let payload: Value =
+        serde_json::from_str(answered["result"]["content"][0]["text"].as_str().unwrap_or("{}"))?;
+    assert_eq!(
+        payload["busy"],
+        json!([{ "start": "2026-09-24T09:00:00Z", "end": "2026-09-24T10:30:00Z" }]),
+        "the tool's answer is the route's answer, unaltered"
+    );
+    assert!(
+        recorded_reads(&state_dir)?.iter().any(|read| {
+            read.3.as_deref() == Some("TWALK-REF:assistant:tool-run:1") && read.4 == "served"
+        }),
+        "a read made through the tool is in the owner's record, named by the \
+         message it was made for"
+    );
+
+    // A refusal reaches the model as a result it can act on, not as a
+    // protocol error that would tell it the tool is broken.
+    let refused = ask(&mut stdin, &mut lines, json!({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "freebusy", "arguments": {"from": "2026-09-24T08:00:00Z", "to": "2026-10-20T08:00:00Z"}},
+    }))
+    .await?;
+    assert_eq!(refused["result"]["isError"], json!(true));
+    let said = refused["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        said.contains("window_too_wide"),
+        "a refused read must name its code, or the agent cannot tell the \
+         owner what to fix: {said}"
+    );
+    assert!(
+        refused["error"].is_null(),
+        "a refused read must not arrive as a JSON-RPC error: {refused}"
+    );
+
+    // And a function this server does not have is refused by name rather than
+    // reached for: the allowlist is the tool's whole security argument.
+    let nothing = ask(&mut stdin, &mut lines, json!({
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {"name": "terminal", "arguments": {"command": "cat /etc/passwd"}},
+    }))
+    .await?;
+    assert_eq!(nothing["result"]["isError"], json!(true));
+
+    drop(stdin);
+    let _ = child.kill().await;
     collector.stop();
     gateway.stop().await;
     Ok(())
