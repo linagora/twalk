@@ -110,6 +110,10 @@ struct State {
     /// What happened, for the assertions: every token request's grant type,
     /// every refresh token presented.
     token_requests: Vec<String>,
+    /// Every path this fake was asked for, in order (#321): a test can
+    /// assert that a service the collector does not read was **never**
+    /// asked, which no log line proves.
+    paths: Vec<String>,
     refresh_tokens_presented: Vec<String>,
     counter: u64,
 }
@@ -465,6 +469,18 @@ impl FakeSso {
     }
 
     /// Every token request's grant type, in order.
+    /// The paths asked of this fake since it started, in order.
+    pub fn paths(&self) -> Vec<String> {
+        self.lock().paths.clone()
+    }
+
+    /// Whether any path of this service was asked for at all.
+    pub fn was_asked(&self, service: &str) -> bool {
+        self.paths()
+            .iter()
+            .any(|path| service_of(path) == Some(service))
+    }
+
     pub fn token_requests(&self) -> Vec<String> {
         self.lock().token_requests.clone()
     }
@@ -623,6 +639,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<Option<RawRequest>> {
 fn respond(request: &RawRequest, state: &Arc<Mutex<State>>) -> Option<Response> {
     let path = request.path.split('?').next().unwrap_or_default();
     let mut guard = state.lock().expect("the fake SSO is not poisoned");
+    guard.paths.push(path.to_owned());
     let response = if let Some(rest) = path.strip_prefix("/dav/calendars/") {
         dav(request, rest, &mut guard)?
     } else {
