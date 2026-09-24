@@ -3923,6 +3923,198 @@ paths:
                         enum:
                           [sign_in_not_configured, hermes_answers_not_configured]
 
+  /_twalk/hermes/event-facts:
+    get:
+      operationId: readHermesEventFacts
+      tags: [connections]
+      summary: Hermes asks what one of the owner's events carries, and is answered with facts.
+      description: |
+        The second governed pull (issue #355, child of #351), and the answer
+        to a question the owner asked: a persona that knows a meeting has a
+        video link can offer to join it, and one that knows there is an
+        agenda can offer to read it — without anybody's prose leaving this
+        machine.
+
+        **What it does not do.** It does not answer the DESCRIPTION, at any
+        setting of the calendar-location switch (#354) or any other. A
+        description is a free-text box written by whoever created the
+        meeting, which on an invitation is a third party who decided nothing
+        about this deployment (ADR 0012, ADR 0028); the collector does not
+        even read it, beyond its length. Nor does it answer an attachment's
+        name or contents. What comes back is a count, a length, and at most
+        one URL.
+
+        **The conference URL** is taken from a property whose *meaning* is
+        "this is the join link" — `CONFERENCE` (RFC 7986) or the
+        `X-GOOGLE-CONFERENCE` some exporters write — and only when it is an
+        `http(s)` one. It is deliberately **not** scraped out of the
+        description, which is where many calendars put it: pulling a URL out
+        of prose means deciding which of its URLs is the meeting, and an
+        intranet page, a document and a one-time token in a path are all
+        URLs too. A persona that learns "there is a description of 340
+        characters" and leaves the owner to open it is less useful and is
+        not wrong.
+
+        **Authentication, the connection, the relay and the record** are the
+        free/busy read's, exactly: the same secret, the same canonical line
+        with this path in it
+        (`GET\n/_twalk/hermes/event-facts\n<query as sent>\n<timestamp>`),
+        a calendar connection that is `connected`, a relay over internal
+        HTTP to the collector, and a row per read. Its journal is
+        `hermes_event_read` and its counter
+        `twalk_companion_gateway_hermes_event_reads_total{outcome}` — a
+        table and a series of their own, because "how often was my agenda
+        pulled" and "how often was an event asked about" are two questions
+        an owner asks separately. What the answer said is not kept, only
+        whether the event was held.
+
+        **`found: false`** is an answer, and a different one from "the
+        meeting carries nothing": it says this deployment holds no event
+        with that uid — never published it, or published it outside the
+        window the collector polls. A persona reads it as "I cannot tell",
+        not as "there is nothing".
+
+        How Hermes calls this is in `skills/twalk-calendar/SKILL.md`, beside
+        the free/busy call.
+      security:
+        - hermesSignature: []
+      parameters:
+        - name: connection
+          in: query
+          required: true
+          schema:
+            type: string
+          description: The calendar connection to read, as the registry names it.
+        - name: uid
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+          description: |
+            The event's iCalendar UID, as `calendar.event.created.v1` and
+            its siblings carried it. A persona has it from the event that
+            woke it; this route does not search by title or by time.
+        - name: X-Hermes-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: When the read was signed, RFC 3339; inside the signed line.
+        - name: X-Hermes-Delivery
+          in: header
+          required: false
+          schema:
+            type: string
+          description: One attempt's name, for the record; a retry keeps it.
+      responses:
+        "200":
+          description: What the event carries, and nothing it says.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HermesEventFacts"
+        "400":
+          description: |
+            - `invalid_request` — no `connection`.
+            - `invalid_uid` — `uid` is missing, empty, or longer than 512
+              characters.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [invalid_request, invalid_uid]
+        "401":
+          description: |
+            - `unsigned` — no `X-Hermes-Signature-256` or no
+              `X-Hermes-Timestamp`.
+            - `bad_signature` — the signature is not this Gateway's secret
+              over the canonical line, with the query string as sent.
+            - `stale_timestamp` — the timestamp is more than five minutes
+              from this clock, or is not an instant.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [unsigned, bad_signature, stale_timestamp]
+        "404":
+          description: |
+            `connection_unknown` — `connection` names no calendar connection
+            of this deployment. An event is read on a calendar connection
+            and on nothing else.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [connection_unknown]
+        "409":
+          description: |
+            `connection_not_connected` — the connection is not `connected`,
+            or no collector has reported it yet; `state` says which. The
+            same refusal an approval towards that connection gets.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - type: object
+                    required: [state]
+                    properties:
+                      error:
+                        enum: [connection_not_connected]
+                      state:
+                        type: string
+                        enum: [unknown, unreachable, reconnect_required, pending_operator]
+        "502":
+          description: |
+            - `collector_unreachable` — the collector did not answer, or
+              answered something that is not an answer about an event.
+            - `collector_refused` — the collector refused the read with a
+              code of its own; `detail` carries it.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum: [collector_unreachable, collector_refused]
+        "503":
+          description: |
+            - `sign_in_not_configured` — this deployment has no owner, so it
+              has no store either.
+            - `hermes_answers_not_configured` —
+              `GATEWAY_HERMES_ANSWER_SECRET` is unset: there is no seam to
+              Hermes, so nothing to verify a read with.
+            - `collector_not_configured` — `GATEWAY_COLLECTOR_URL` or
+              `GATEWAY_SERVICE_TOKEN` is unset: there is no collector to ask.
+            - `store_unavailable` — the connection's state could not be read.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Error"
+                  - properties:
+                      error:
+                        enum:
+                          [
+                            sign_in_not_configured,
+                            hermes_answers_not_configured,
+                            collector_not_configured,
+                            store_unavailable,
+                          ]
+
   /_twalk/hermes/freebusy:
     get:
       operationId: readHermesFreeBusy
@@ -4687,6 +4879,54 @@ components:
               description: |
                 Why this push was not a Twalk wake. Counted on `/metrics`
                 under the same word.
+    HermesEventFacts:
+      type: object
+      description: |
+        What one of the owner's events carries (issue #355): counts, a
+        length, and at most one URL. Never the description, never an
+        attachment's name — the collector does not read them.
+      required:
+        [connection, uid, found, conference, description_characters, attachments]
+      additionalProperties: false
+      properties:
+        connection:
+          type: string
+          description: The calendar connection the event was read on.
+        uid:
+          type: string
+          description: The event's iCalendar UID, as asked.
+        found:
+          type: boolean
+          description: |
+            Whether this deployment holds that event at all. `false` says
+            the collector never published it, or published it outside the
+            window it polls — **not** that the meeting carries nothing. The
+            other members are then their empty values, and a reader that
+            treats them as facts about a meeting is reading an absence as an
+            answer.
+        conference:
+          type: [string, "null"]
+          format: uri
+          description: |
+            The join link, when the event declares one in a property whose
+            meaning is that (`CONFERENCE`, RFC 7986, or
+            `X-GOOGLE-CONFERENCE`) and it is `http(s)`. `null` otherwise —
+            including when the link is only in the description, which this
+            deliberately does not read.
+        description_characters:
+          type: [integer, "null"]
+          minimum: 1
+          description: |
+            How long the DESCRIPTION is, in characters, or `null` when there
+            is none. The length and not the text: enough to say "there is an
+            agenda to read" and to tell it from a one-line note.
+        attachments:
+          type: integer
+          minimum: 0
+          description: |
+            How many attachments the event carries. Their names are not read
+            either: a file's name is a sentence somebody wrote.
+
     HermesFreeBusy:
       description: |
         The owner's busy intervals in the window asked for (ticket #281):

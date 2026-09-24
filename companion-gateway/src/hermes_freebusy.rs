@@ -71,6 +71,10 @@ use crate::store::Store;
 /// `/_twalk/` prefix.
 pub const FREEBUSY_PATH: &str = "/_twalk/hermes/freebusy";
 
+/// Where a persona asks what one event carries (#355), beside the read
+/// above and under the same reserved prefix.
+pub const EVENT_FACTS_PATH: &str = "/_twalk/hermes/event-facts";
+
 /// The header the request's timestamp travels in, RFC 3339; inside the
 /// signed line.
 pub const TIMESTAMP_HEADER: &str = "X-Hermes-Timestamp";
@@ -116,6 +120,9 @@ pub struct ReadRequest {
     pub timestamp: Option<String>,
     pub signature: Option<String>,
     pub delivery: Option<String>,
+    /// The event a read of #355's kind names. `None` on a free/busy read,
+    /// which asks about a window instead.
+    pub uid: Option<String>,
 }
 
 /// One busy interval, as the collector answers it and as Hermes reads it.
@@ -193,6 +200,8 @@ pub enum ReadRefusal {
     ConnectionUnknown(String),
     /// The window is not two instants in order.
     InvalidWindow(String),
+    /// `uid` is missing, empty, or longer than an iCalendar UID can be.
+    InvalidUid,
     /// Wider than [`MAX_WINDOW_SECONDS`].
     WindowTooWide,
     /// The connection is not `connected`, or no collector has spoken for it.
@@ -222,6 +231,7 @@ impl ReadRefusal {
             Self::NoConnection => "invalid_request",
             Self::ConnectionUnknown(_) => "connection_unknown",
             Self::InvalidWindow(_) => "invalid_window",
+            Self::InvalidUid => "invalid_uid",
             Self::WindowTooWide => "window_too_wide",
             Self::ConnectionNotConnected { .. } => "connection_not_connected",
             Self::StoreUnavailable(_) => "store_unavailable",
@@ -236,7 +246,10 @@ impl ReadRefusal {
                 503
             }
             Self::Unsigned | Self::BadSignature | Self::Stale { .. } => 401,
-            Self::NoConnection | Self::InvalidWindow(_) | Self::WindowTooWide => 400,
+            Self::NoConnection
+            | Self::InvalidWindow(_)
+            | Self::InvalidUid
+            | Self::WindowTooWide => 400,
             Self::ConnectionUnknown(_) => 404,
             Self::ConnectionNotConnected { .. } => 409,
             Self::CollectorUnreachable(_) | Self::CollectorRefused { .. } => 502,
@@ -279,6 +292,7 @@ impl ReadRefusal {
                  connection and on nothing else"
             ),
             Self::InvalidWindow(detail) => detail.clone(),
+            Self::InvalidUid => "uid is the event's iCalendar UID, between 1 and 512 characters, as `calendar.event.*` carried it".to_owned(),
             Self::WindowTooWide => format!(
                 "the window is wider than the {} days a free/busy read may ask for",
                 MAX_WINDOW_SECONDS / 86_400
@@ -330,6 +344,41 @@ pub struct HermesRead {
     pub outcome: String,
     /// How many intervals were answered; `None` on a refusal.
     pub intervals: Option<u64>,
+}
+
+/// What one event carries, as the collector answered (#355). Counts, a
+/// flag's worth of knowledge and at most one URL — never the description,
+/// never an attachment's name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventFacts {
+    /// Whether this collector holds that event at all. `false` is an
+    /// answer, and a different one from "the meeting carries nothing": a
+    /// persona learns the deployment has nothing about that uid.
+    pub found: bool,
+    pub conference: Option<String>,
+    pub description_characters: Option<u64>,
+    pub attachments: u64,
+}
+
+/// One read of what an event carries, as the journal keeps it (#355).
+///
+/// A sibling of [`HermesRead`] rather than a row in it: the two reads ask
+/// different questions — a window of the agenda, one event by its uid — and
+/// one table holding both would carry a discriminator and two half-empty
+/// groups of columns. What is kept is the same in spirit: who asked, for
+/// what, when, and how it went. Never what the answer said, beyond whether
+/// the event was held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermesEventRead {
+    pub connection: String,
+    /// The uid as asked, cut to [`RECORDED_MEMBER_LENGTH`].
+    pub uid: String,
+    pub requested_at: String,
+    pub delivery: Option<String>,
+    /// `served`, or the refusal's code.
+    pub outcome: String,
+    /// Whether the collector held the event; `None` on a refusal.
+    pub found: Option<bool>,
 }
 
 /// The I/O half: the secret, the store the connection's state and the
@@ -426,11 +475,18 @@ impl Reads {
         outcome
     }
 
-    async fn serve(&self, request: &ReadRequest) -> Result<Vec<Busy>, ReadRefusal> {
+    /// What both of Hermes's reads must carry before anything else is
+    /// looked at: a signature over **this read's own** canonical line, a
+    /// fresh timestamp, and the name of a connection. Answers that name.
+    ///
+    /// One function because a second copy of this is a second place for the
+    /// signature check to drift, and a signature check that is right in one
+    /// of two copies is worth nothing.
+    fn signed_for(&self, request: &ReadRequest, path: &str) -> Result<String, ReadRefusal> {
         let (Some(timestamp), Some(signature)) = (&request.timestamp, &request.signature) else {
             return Err(ReadRefusal::Unsigned);
         };
-        let line = canonical("GET", FREEBUSY_PATH, &request.query, timestamp);
+        let line = canonical("GET", path, &request.query, timestamp);
         if !signature_matches(&self.secret, Some(signature), line.as_bytes()) {
             return Err(ReadRefusal::BadSignature);
         }
@@ -444,7 +500,20 @@ impl Reads {
             .as_deref()
             .filter(|connection| !connection.is_empty())
             .ok_or(ReadRefusal::NoConnection)?;
-        let window = Window::parse(request.from.as_deref(), request.to.as_deref())?;
+        Ok(connection.to_owned())
+    }
+
+    /// The connection itself, judged **after** the read's own parameters
+    /// have been: it must be a calendar of this deployment, it must be
+    /// connected, and there must be a collector to relay to.
+    ///
+    /// The order is deliberate and is not free. A caller who asked for a
+    /// fortnight and a second is told their window is impossible whichever
+    /// connection they named; telling them instead that the connection is
+    /// unknown sends them to fix the wrong thing. The conformance suite
+    /// holds this order, which is how a refactor that quietly reversed it
+    /// was caught.
+    fn connection_ready(&self, connection: &str) -> Result<(String, String), ReadRefusal> {
         // A calendar connection of this deployment, and no other: an agenda
         // is what a calendar connection is, and a read on a mail or a
         // bridged connection would be a read of nothing — or, worse, of
@@ -479,14 +548,24 @@ impl Reads {
         let Some((collector_url, service_token)) = &self.collector else {
             return Err(ReadRefusal::CollectorNotConfigured);
         };
+        Ok((collector_url.clone(), service_token.clone()))
+    }
+
+    /// One relayed read of the collector's internal endpoint: the route,
+    /// the query it takes, and the answer as JSON. The status and the
+    /// collector's own error code come back as this module's refusals, so
+    /// a persona is never handed the collector's shape.
+    async fn relay(
+        &self,
+        collector_url: &str,
+        service_token: &str,
+        route: &str,
+        query: &[(&str, &str)],
+    ) -> Result<serde_json::Value, ReadRefusal> {
         let response = self
             .http
-            .get(format!("{}/freebusy", collector_url.trim_end_matches('/')))
-            .query(&[
-                ("connection", connection),
-                ("from", window.from.as_str()),
-                ("to", window.to.as_str()),
-            ])
+            .get(format!("{}/{route}", collector_url.trim_end_matches('/')))
+            .query(query)
             .bearer_auth(service_token)
             .send()
             .await
@@ -501,6 +580,111 @@ impl Reads {
                 code: body["error"].as_str().unwrap_or("unknown").to_owned(),
             });
         }
+        Ok(body)
+    }
+
+    /// What one of the owner's events carries (#355): relayed to the
+    /// collector, recorded, counted, and answered.
+    ///
+    /// The same governance as the free/busy read above, because it is the
+    /// same kind of pull — a persona reaching into the owner's own data
+    /// through a seam the owner can audit. What it may learn is narrower:
+    /// facts about an event, never its words.
+    pub async fn event_facts(&self, request: &ReadRequest) -> Result<EventFacts, ReadRefusal> {
+        let outcome = self.serve_event_facts(request).await;
+        self.metrics.record_hermes_event_read(match &outcome {
+            Ok(_) => "served",
+            Err(refusal) => refusal.code(),
+        });
+        let cut = |member: &Option<String>| {
+            member.as_deref().map(|value| {
+                value
+                    .chars()
+                    .take(RECORDED_MEMBER_LENGTH)
+                    .collect::<String>()
+            })
+        };
+        let record = HermesEventRead {
+            connection: cut(&request.connection).unwrap_or_default(),
+            uid: cut(&request.uid).unwrap_or_default(),
+            requested_at: crate::hermes_answer::rfc3339_seconds((self.now)()),
+            delivery: cut(&request.delivery),
+            outcome: match &outcome {
+                Ok(_) => "served".to_owned(),
+                Err(refusal) => refusal.code().to_owned(),
+            },
+            found: outcome.as_ref().ok().map(|facts| facts.found),
+        };
+        if let Err(error) = self.store.record_hermes_event_read(&record) {
+            // As the free/busy read's: said loudly, and the read still
+            // answered. A record that could not be written is an operator's
+            // problem to see, not a reason to tell Hermes nothing.
+            warn!(%error, "a read of an event's facts could not be recorded");
+        }
+        match &outcome {
+            Ok(facts) => info!(
+                connection = %record.connection,
+                uid = %record.uid,
+                delivery = record.delivery.as_deref(),
+                found = facts.found,
+                conference = facts.conference.is_some(),
+                attachments = facts.attachments,
+                "hermes read what one of the owner's events carries"
+            ),
+            Err(refusal) => warn!(
+                code = refusal.code(),
+                status = refusal.status(),
+                connection = %record.connection,
+                uid = %record.uid,
+                delivery = record.delivery.as_deref(),
+                detail = %refusal.message(),
+                "a read of an event's facts was refused"
+            ),
+        }
+        outcome
+    }
+
+    async fn serve_event_facts(&self, request: &ReadRequest) -> Result<EventFacts, ReadRefusal> {
+        let connection = self.signed_for(request, EVENT_FACTS_PATH)?;
+        let uid = request
+            .uid
+            .as_deref()
+            .map(str::trim)
+            .filter(|uid| !uid.is_empty() && uid.chars().count() <= 512)
+            .ok_or(ReadRefusal::InvalidUid)?;
+        let (collector_url, service_token) = self.connection_ready(&connection)?;
+        let body = self
+            .relay(
+                &collector_url,
+                &service_token,
+                "event-facts",
+                &[("connection", connection.as_str()), ("uid", uid)],
+            )
+            .await?;
+        serde_json::from_value(body.clone()).map_err(|error| {
+            ReadRefusal::CollectorUnreachable(format!(
+                "its answer carries no facts about the event: {error}"
+            ))
+        })
+    }
+
+    async fn serve(&self, request: &ReadRequest) -> Result<Vec<Busy>, ReadRefusal> {
+        let connection = self.signed_for(request, FREEBUSY_PATH)?;
+        let window = Window::parse(request.from.as_deref(), request.to.as_deref())?;
+        let (collector_url, service_token) = self.connection_ready(&connection)?;
+        let connection = connection.as_str();
+        let body = self
+            .relay(
+                &collector_url,
+                &service_token,
+                "freebusy",
+                &[
+                    ("connection", connection),
+                    ("from", window.from.as_str()),
+                    ("to", window.to.as_str()),
+                ],
+            )
+            .await?;
         serde_json::from_value(body["busy"].clone()).map_err(|error| {
             ReadRefusal::CollectorUnreachable(format!(
                 "its answer carries no busy intervals: {error}"

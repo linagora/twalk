@@ -629,6 +629,109 @@ pub(crate) fn parse_duration(value: &str) -> Result<ChronoDuration> {
     Ok(if negative { -total } else { total })
 }
 
+/// What an agent may learn **about** one event without being given its
+/// words (#355, #351).
+///
+/// The description is the field #351 refused to widen, and the reason does
+/// not go away: it is a free-text box written by whoever created the
+/// meeting, which on an invitation is a third party who decided nothing
+/// about this deployment. But the proposals the owner wants do not need the
+/// text. "This meeting has a video link, shall I join it?" needs to know
+/// there is one; "there is an agenda to read" needs to know there is one,
+/// not what it says.
+///
+/// So: counts, flags, and exactly one string — the conference URL, which is
+/// a URL and not somebody's prose.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Facts {
+    /// The join link, when the event says so in a property whose **meaning**
+    /// is "this is the join link": `CONFERENCE` (RFC 7986) or the
+    /// `X-GOOGLE-CONFERENCE` its exporters write.
+    ///
+    /// Deliberately **not** scraped out of the DESCRIPTION, which is where
+    /// many calendars put it. Pulling a URL out of prose means deciding
+    /// which of its URLs is the meeting — and an intranet link, a document,
+    /// a one-time token in a path are all URLs too. A persona that learns
+    /// "there is a description of 340 characters" and leaves the owner to
+    /// open it is less useful and is not wrong.
+    pub conference: Option<String>,
+    /// How long the DESCRIPTION is, in characters, or `None` when there is
+    /// none. The length and not the text: enough to say "there is an agenda
+    /// to read" and to tell it from a one-line note.
+    pub description_characters: Option<u64>,
+    /// How many ATTACH properties the event carries. Their names are not
+    /// read either: a file's name is a sentence somebody wrote.
+    pub attachments: u64,
+}
+
+/// Reads [`Facts`] from an iCalendar resource — the master VEVENT, as
+/// [`parse_vevent`] picks it.
+///
+/// This function is the only place in the collector that looks at a
+/// DESCRIPTION at all, and what it takes from it is its length. Everything
+/// it returns is a count, a flag, or a URL a property declared to be one.
+pub fn facts_of(ics: &str) -> Result<Facts> {
+    let lines = unfold(ics);
+    let mut inside = false;
+    let mut master: Vec<ContentLine> = Vec::new();
+    let mut current: Vec<ContentLine> = Vec::new();
+    for line in lines {
+        let Some(parsed) = ContentLine::parse(&line) else {
+            continue;
+        };
+        match (parsed.name.as_str(), parsed.value.as_str()) {
+            ("BEGIN", "VEVENT") => {
+                inside = true;
+                current = Vec::new();
+            }
+            ("END", "VEVENT") => {
+                inside = false;
+                // The master is the one without a RECURRENCE-ID, as
+                // `parse_vevent` decides it; the first VEVENT stands in
+                // when every one of them is an exception.
+                let is_master = !current.iter().any(|line| line.name == "RECURRENCE-ID");
+                if master.is_empty() || is_master {
+                    master = std::mem::take(&mut current);
+                }
+            }
+            _ if inside => current.push(parsed),
+            _ => {}
+        }
+    }
+    anyhow::ensure!(!master.is_empty(), "the resource holds no VEVENT");
+    let property = |name: &str| master.iter().find(|line| line.name == name);
+    let conference = property("CONFERENCE")
+        .or_else(|| property("X-GOOGLE-CONFERENCE"))
+        .map(|line| unescape_text(&line.value))
+        .map(|url| url.trim().to_owned())
+        .filter(|url| is_http_url(url));
+    let description_characters = property("DESCRIPTION")
+        .map(|line| unescape_text(&line.value))
+        .map(|text| text.trim().chars().count() as u64)
+        .filter(|count| *count > 0);
+    let attachments = master
+        .iter()
+        .filter(|line| line.name == "ATTACH")
+        .count()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    Ok(Facts {
+        conference,
+        description_characters,
+        attachments,
+    })
+}
+
+/// Whether a `CONFERENCE` value is a URL this collector will pass on. A
+/// property may hold `tel:` or anything else a client wrote; only `http`
+/// and `https` are handed to an agent, because those are the ones a
+/// proposal can act on and the ones a reader can judge.
+fn is_http_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !value.contains(char::is_whitespace)
+}
+
 /// Whether a published event may carry where the meeting is (#354): the
 /// owner's decision, as [`reduce`] is told it. A named pair rather than a
 /// `bool`, because `reduce(&event, owner, false, decide)` at a call site
@@ -1109,6 +1212,68 @@ END:VEVENT</cal:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:p
             reduced["participants_withheld"], 3,
             "two attendees and the organizer"
         );
+    }
+
+    #[test]
+    fn facts_say_what_an_event_carries_and_never_what_it_says() {
+        // #355: the fixture has a DESCRIPTION, an ATTACH and a LOCATION.
+        // What comes back is a length, a count, and no prose.
+        let facts = facts_of(WEEKLY).unwrap();
+        assert_eq!(
+            facts.description_characters,
+            Some("Pasted notes nobody decided to share".chars().count() as u64)
+        );
+        assert_eq!(facts.attachments, 1);
+        assert_eq!(facts.conference, None, "the fixture declares no join link");
+        let said = format!("{facts:?}");
+        assert!(!said.contains("Pasted notes"), "no prose: {said}");
+        assert!(!said.contains("secret.pdf"), "no attachment name: {said}");
+
+        // A join link is read from the property whose meaning is "this is
+        // the join link", and handed on as it stands.
+        let with_link = WEEKLY.replace(
+            "ATTACH:https://files.example/secret.pdf\r\n",
+            "CONFERENCE;VALUE=URI;FEATURE=VIDEO:https://meet.example/abc-def\r\n",
+        );
+        let facts = facts_of(&with_link).unwrap();
+        assert_eq!(
+            facts.conference.as_deref(),
+            Some("https://meet.example/abc-def")
+        );
+        assert_eq!(facts.attachments, 0);
+
+        // And never scraped out of the description, which is where many
+        // calendars put it: a URL in prose may be an intranet page, a
+        // document, or a token in a path, and choosing among them means
+        // reading the words this refuses to read.
+        let in_prose = WEEKLY.replace(
+            "DESCRIPTION:Pasted notes nobody decided to share",
+            "DESCRIPTION:Join at https://meet.example/xyz and read the plan",
+        );
+        let facts = facts_of(&in_prose).unwrap();
+        assert_eq!(facts.conference, None);
+        assert!(facts.description_characters.unwrap() > 0);
+
+        // A CONFERENCE that is not an http(s) URL is not passed on.
+        let telephone = WEEKLY.replace(
+            "ATTACH:https://files.example/secret.pdf\r\n",
+            "CONFERENCE;VALUE=URI:tel:+33-1-23-45-67-89\r\n",
+        );
+        assert_eq!(facts_of(&telephone).unwrap().conference, None);
+
+        // An event with neither says so with an absence, not a zero-length
+        // string: "there is no agenda" and "there is an empty one" are the
+        // same thing to a reader and should be the same answer.
+        let bare = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:bare\r\nSUMMARY:Bare\r\nDTSTART:20261005T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let facts = facts_of(bare).unwrap();
+        assert_eq!(facts.description_characters, None);
+        assert_eq!(facts.attachments, 0);
+        assert_eq!(facts.conference, None);
+
+        // Not a VEVENT at all is an error, not empty facts: "this resource
+        // holds nothing I can read" and "this meeting has nothing" are
+        // different answers.
+        assert!(facts_of("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n").is_err());
     }
 
     #[test]

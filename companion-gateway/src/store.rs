@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 13] = [
+pub const MIGRATIONS: [&str; 14] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -757,6 +757,34 @@ pub const MIGRATIONS: [&str; 13] = [
     BEGIN
         SELECT RAISE(ABORT, 'the calendar location decision journal is append-only');
     END;
+    "#,
+    // v14 — the second governed pull (#355): every read a persona made of
+    // what one of the owner's events carries, served or refused. `v11`'s
+    // reasoning, applied again: a pull that left no trace would be the one
+    // thing in this deployment the owner could not audit.
+    //
+    // A table of its own rather than a row in `hermes_read`, because the
+    // two reads ask different questions — a window of the agenda, one event
+    // by its uid — and one table holding both would need a discriminator
+    // and two half-empty groups of columns.
+    //
+    // What was learned is not kept, for the reason the free/busy read keeps
+    // no intervals: only `found`, which says whether this deployment held
+    // the event at all. The conference URL, the description's length and
+    // the attachment count are answers, and an audit log that stored them
+    // would be a copy of the thing the pull was governed for.
+    r#"
+    CREATE TABLE hermes_event_read (
+        sequence     INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection   TEXT NOT NULL,
+        uid          TEXT NOT NULL,
+        requested_at TEXT NOT NULL,
+        delivery     TEXT,
+        -- 'served', or the code the read was refused with.
+        outcome      TEXT NOT NULL,
+        found        INTEGER
+    );
+    CREATE INDEX hermes_event_read_connection ON hermes_event_read (connection, sequence);
     "#,
 ];
 
@@ -1720,6 +1748,30 @@ impl Store {
                 ],
             )
             .context("failed to record a free/busy read")?;
+        Ok(())
+    }
+
+    /// Appends one read of what an event carries (#355). A sibling of the
+    /// one above, on its own table for the reason v14 states.
+    pub fn record_hermes_event_read(
+        &self,
+        read: &crate::hermes_freebusy::HermesEventRead,
+    ) -> Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO hermes_event_read
+                 (connection, uid, requested_at, delivery, outcome, found)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    read.connection,
+                    read.uid,
+                    read.requested_at,
+                    read.delivery,
+                    read.outcome,
+                    read.found.map(i64::from),
+                ],
+            )
+            .context("failed to record a read of an event's facts")?;
         Ok(())
     }
 

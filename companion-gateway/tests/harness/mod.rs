@@ -1244,10 +1244,37 @@ pub fn freebusy_query(connection: &str, from: &str, to: &str) -> String {
 /// the skill's document rather than from the Gateway's code, so the test
 /// states the contract.
 pub fn freebusy_signature(query: &str, timestamp: &str) -> String {
+    hermes_read_signature("/_twalk/hermes/freebusy", query, timestamp)
+}
+
+/// The query of a read of what one event carries (#355), encoded as the
+/// skill encodes it — a uid is opaque and may hold anything.
+pub fn event_facts_query(connection: &str, uid: &str) -> String {
+    let encode = |value: &str| {
+        value
+            .replace('%', "%25")
+            .replace(':', "%3A")
+            .replace('+', "%2B")
+            .replace('&', "%26")
+            .replace('=', "%3D")
+            .replace('/', "%2F")
+    };
+    format!("connection={}&uid={}", encode(connection), encode(uid))
+}
+
+pub fn event_facts_signature(query: &str, timestamp: &str) -> String {
+    hermes_read_signature("/_twalk/hermes/event-facts", query, timestamp)
+}
+
+/// The signature of one of Hermes's reads. **The path is inside the signed
+/// line**, so a signature made for one read does not open the other — which
+/// is a property this helper's shape makes a test able to check rather than
+/// assume.
+pub fn hermes_read_signature(path: &str, query: &str, timestamp: &str) -> String {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(HERMES_ANSWER_SECRET.as_bytes())
         .expect("HMAC accepts a key of any length");
-    mac.update(format!("GET\n/_twalk/hermes/freebusy\n{query}\n{timestamp}").as_bytes());
+    mac.update(format!("GET\n{path}\n{query}\n{timestamp}").as_bytes());
     format!("sha256={:x}", mac.finalize().into_bytes())
 }
 

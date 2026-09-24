@@ -113,6 +113,50 @@ impl Calendars {
         Ok(crate::freebusy::merge_answers(answers, window))
     }
 
+    /// What one of the owner's events carries, without its words (#355):
+    /// the conference link when a property declares one, how long the
+    /// description is, how many attachments there are.
+    ///
+    /// The event is named by the `uid` a persona already has from
+    /// `calendar.event.*`, and found through the cursors this collector
+    /// wrote — so an event it never published is an event it will not
+    /// answer about, which is the same perimeter the published events had.
+    /// The resource is read again rather than remembered: the cursor keeps
+    /// the event **as published**, which is the reduced one, and a copy of
+    /// the description kept on disk to answer questions about it would be
+    /// the thing this whole ticket refuses.
+    pub async fn facts_about(
+        &self,
+        uid: &str,
+        owner_id: &str,
+        credential: &crate::side::Credential,
+    ) -> Result<Option<caldav::Facts>, SideError> {
+        for calendar in self.side.calendars(owner_id, credential).await? {
+            let cursor = match self.read_cursor(&calendar.id) {
+                Ok(cursor) => cursor,
+                Err(error) => {
+                    warn!(calendar = %calendar.id, error = %format!("{error:#}"), "a cursor could not be read while answering about an event");
+                    continue;
+                }
+            };
+            let Some(href) = cursor.known.iter().find_map(|(href, known)| {
+                (known.published.get("uid").and_then(Value::as_str) == Some(uid))
+                    .then(|| href.clone())
+            }) else {
+                continue;
+            };
+            let ics = self.side.resource(&href, credential).await?;
+            return match caldav::facts_of(&ics) {
+                Ok(facts) => Ok(Some(facts)),
+                Err(error) => {
+                    warn!(href = %href, error = %format!("{error:#}"), "the resource is not a VEVENT this collector reads; no facts answered");
+                    Ok(None)
+                }
+            };
+        }
+        Ok(None)
+    }
+
     /// The decision about a `mailto:` on the mail connection, or `Pending`
     /// — labelled by nothing, reduced by nothing — when there is none.
     fn decide(&self, identity: &str) -> Consent {
@@ -339,6 +383,31 @@ impl Side {
     /// `REPORT calendar-query` bounded by a time range answers in the same
     /// second on the same server — which is the difference between a
     /// history and what is happening around now.
+    /// One resource, as iCalendar text: a plain `GET` on the href the
+    /// listing gave (RFC 4791 — a calendar object resource is an ordinary
+    /// HTTP resource). Used to answer facts about one event (#355), where
+    /// a windowed `REPORT` would fetch a calendar to read one meeting.
+    pub async fn resource(
+        &self,
+        href: &str,
+        credential: &crate::side::Credential,
+    ) -> Result<String, SideError> {
+        // The href a listing returns is absolute on the service's own root,
+        // as sabre writes it (`/dav/calendars/<owner>/<calendar>/<uid>.ics`),
+        // so the base carries the scheme and host and the href the rest.
+        let url = format!("{}{href}", self.base);
+        let response = crate::side::send(self.http.get(&url), credential, "caldav").await?;
+        response
+            .text()
+            .await
+            .map_err(|error| SideError::Unreachable {
+                detail: format!(
+                    "caldav gave an unreadable resource: {}",
+                    crate::side::because(&error)
+                ),
+            })
+    }
+
     pub async fn listing(
         &self,
         collection: &str,

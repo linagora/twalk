@@ -84,6 +84,10 @@ pub struct Metrics {
     /// Free/busy reads Hermes made (ticket #281), by outcome: `served` or
     /// the refusal code. Every read, since the record is the point.
     hermes_reads: Mutex<BTreeMap<&'static str, u64>>,
+    /// Reads of what one event carries (#355), counted apart from the
+    /// free/busy series: two questions an owner asks separately, and one
+    /// series holding both would answer neither.
+    hermes_event_reads: Mutex<BTreeMap<&'static str, u64>>,
     /// Bridge transitions the outbox published, and how many are still
     /// waiting — the same pair as consent's, for the same question.
     bridge_status_published: Mutex<u64>,
@@ -205,6 +209,7 @@ impl Metrics {
             bridge_status_refusals: Mutex::new(BTreeMap::new()),
             hermes_answers: Mutex::new(BTreeMap::new()),
             hermes_reads: Mutex::new(BTreeMap::new()),
+            hermes_event_reads: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
             bridge_status_outbox_pending: Mutex::new(None),
             approvals_published: Mutex::new(0),
@@ -299,6 +304,15 @@ impl Metrics {
 
     /// Counts one free/busy read Hermes made (ticket #281): `served`, or
     /// the code it was refused with — the same word the record holds.
+    pub fn record_hermes_event_read(&self, outcome: &'static str) {
+        *self
+            .hermes_event_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
     pub fn record_hermes_read(&self, outcome: &'static str) {
         *self
             .hermes_reads
@@ -633,6 +647,18 @@ impl Metrics {
             {
                 out.push_str(&format!(
                     "twalk_companion_gateway_hermes_reads_total{{outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_hermes_event_reads_total Reads of what one of the owner's events carries — a conference link, a description's length, a count of attachments — by outcome: served, or the refusal code (#355). Never the description itself.\n");
+            out.push_str("# TYPE twalk_companion_gateway_hermes_event_reads_total counter\n");
+            for (outcome, count) in self
+                .hermes_event_reads
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_hermes_event_reads_total{{outcome=\"{outcome}\"}} {count}\n"
                 ));
             }
             out.push_str("# HELP twalk_companion_gateway_approval_refusals_total Approvals refused, by the code the caller was given.\n");

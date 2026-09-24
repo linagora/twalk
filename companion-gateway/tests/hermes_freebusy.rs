@@ -30,15 +30,17 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use harness::{
-    companion_build, ensure_stack, freebusy_query as query, freebusy_signature as signature,
-    gateway_env_with, gateway_state_dir, nats_url, poll_until, validate_against_contract, Bus,
-    GatewayProc, HERMES_ANSWER_SECRET, HERMES_DOMAIN, SERVICE_TOKEN,
+    companion_build, ensure_stack, event_facts_query, event_facts_signature,
+    freebusy_query as query, freebusy_signature as signature, gateway_env_with, gateway_state_dir,
+    nats_url, poll_until, validate_against_contract, Bus, GatewayProc, HERMES_ANSWER_SECRET,
+    HERMES_DOMAIN, SERVICE_TOKEN,
 };
 use serde_json::{json, Value};
 
 const STREAM: &str = "twalk";
 const CONNECTION_STATUS_SUBJECT: &str = "twalk.connection.status.changed.v1";
 const FREEBUSY_PATH: &str = "/_twalk/hermes/freebusy";
+const EVENT_FACTS_PATH: &str = "/_twalk/hermes/event-facts";
 
 fn unique(label: &str) -> String {
     format!(
@@ -282,6 +284,72 @@ fn recorded_reads(state_dir: &std::path::Path) -> Result<Vec<Recorded>> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// One read of what an event carries, signed over **its own** path.
+async fn signed_event_read(
+    base: &str,
+    connection: &str,
+    uid: &str,
+    delivery: Option<&str>,
+) -> Result<(u16, Value)> {
+    let query = event_facts_query(connection, uid);
+    let timestamp = in_seconds(0);
+    let mut request = reqwest::Client::new()
+        .get(format!("{base}{EVENT_FACTS_PATH}?{query}"))
+        .header("X-Hermes-Timestamp", &timestamp)
+        .header(
+            "X-Hermes-Signature-256",
+            event_facts_signature(&query, &timestamp),
+        );
+    if let Some(delivery) = delivery {
+        request = request.header("X-Hermes-Delivery", delivery);
+    }
+    let response = request.send().await?;
+    let status = response.status().as_u16();
+    let body = response.json().await.unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
+/// The `hermes_event_read` rows, newest first (#355). Its own table, so its
+/// own reader: the record is the acceptance criterion here too.
+fn recorded_event_reads(
+    state_dir: &std::path::Path,
+) -> Result<Vec<(String, String, Option<String>, String, Option<i64>)>> {
+    let connection = rusqlite::Connection::open_with_flags(
+        state_dir.join("consent.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT connection, uid, delivery, outcome, found
+         FROM hermes_event_read ORDER BY sequence DESC",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+async fn event_metric(base: &str, outcome: &str) -> Result<u64> {
+    let text = reqwest::get(format!("{base}/metrics"))
+        .await?
+        .text()
+        .await?;
+    let needle =
+        format!("twalk_companion_gateway_hermes_event_reads_total{{outcome=\"{outcome}\"}} ");
+    Ok(text
+        .lines()
+        .find_map(|line| line.strip_prefix(&needle))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0))
 }
 
 async fn metric(base: &str, outcome: &str) -> Result<u64> {
@@ -532,6 +600,216 @@ async fn a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_rec
     )
     .await?;
     assert_eq!(body["error"], "collector_unreachable");
+    gateway.stop().await;
+    Ok(())
+}
+
+/// #355: a persona asks what one event carries, and is answered with
+/// facts. The point of the test is as much what comes back as what does
+/// not: the stub collector is given a description's **length**, because
+/// the collector has no route that would give its text, and this asserts
+/// that nothing on the way adds one.
+#[tokio::test]
+async fn a_signed_read_says_what_an_event_carries_and_never_what_it_says() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let connection = unique("calendar");
+    let uid = "8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8";
+    let collector = StubCollector::answering(
+        200,
+        json!({
+            "connection": connection,
+            "uid": uid,
+            "found": true,
+            "conference": "https://meet.example/abc-def",
+            "description_characters": 340,
+            "attachments": 1,
+        }),
+    )
+    .await?;
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &calendar_status_event(&connection, "unknown", "connected"),
+    )
+    .await?;
+    let (gateway, base, state_dir) =
+        gateway("event-facts-served", &connection, Some(&collector.url())).await?;
+
+    let (status, body) = poll_until(
+        || async {
+            let answered = signed_event_read(&base, &connection, uid, Some("delivery-1"))
+                .await
+                .ok()?;
+            (answered.0 != 409).then_some(answered)
+        },
+        "the Gateway to have read the connection's state off the bus",
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["found"], json!(true));
+    assert_eq!(body["conference"], json!("https://meet.example/abc-def"));
+    assert_eq!(body["description_characters"], json!(340));
+    assert_eq!(body["attachments"], json!(1));
+    assert_eq!(body["uid"], json!(uid));
+
+    // What the Gateway relayed: the collector's own route, the uid as
+    // asked, and the service token as the bearer.
+    let relayed = collector
+        .requests()
+        .into_iter()
+        .find(|(line, _)| line.contains("/event-facts"))
+        .expect("the Gateway relayed the read to the collector");
+    assert!(relayed.0.contains(&format!("uid={uid}")), "{}", relayed.0);
+    assert!(
+        relayed.0.contains(&format!("connection={connection}")),
+        "{}",
+        relayed.0
+    );
+    assert_eq!(
+        relayed.1.as_deref(),
+        Some(&*format!("Bearer {SERVICE_TOKEN}"))
+    );
+
+    // The record: who asked, for which event, when, how it went — and
+    // **not** what the answer said, beyond whether the event was held. A
+    // journal that kept the conference URL would be a copy of the thing
+    // the pull was governed for.
+    let rows = recorded_event_reads(&state_dir)?;
+    let row = rows.first().expect("one read recorded");
+    assert_eq!(row.0, connection);
+    assert_eq!(row.1, uid);
+    assert_eq!(row.2.as_deref(), Some("delivery-1"));
+    assert_eq!(row.3, "served");
+    assert_eq!(row.4, Some(1), "found is kept, as a flag");
+    let stored = std::fs::read(state_dir.join("consent.sqlite3"))?;
+    let stored = String::from_utf8_lossy(&stored);
+    assert!(
+        !stored.contains("meet.example"),
+        "the conference URL is an answer, not a record"
+    );
+    assert!(event_metric(&base, "served").await? >= 1);
+
+    // An event this deployment does not hold is an answer of its own, and
+    // a persona must be able to tell it from "the meeting carries
+    // nothing".
+    collector.answer(
+        200,
+        json!({
+            "connection": connection,
+            "uid": "nothing-here",
+            "found": false,
+            "conference": Value::Null,
+            "description_characters": Value::Null,
+            "attachments": 0,
+        }),
+    );
+    let (status, body) = signed_event_read(&base, &connection, "nothing-here", None).await?;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["found"], json!(false));
+    assert_eq!(body["conference"], Value::Null);
+    // Found by its uid and not by being the newest row: a test that reads
+    // "the last line" asserts the order of everything that ran beside it.
+    let rows = recorded_event_reads(&state_dir)?;
+    let absent = rows
+        .iter()
+        .find(|row| row.1 == "nothing-here")
+        .expect("the read about an event this deployment does not hold is recorded");
+    assert_eq!(absent.4, Some(0), "not held is recorded as such");
+
+    // A collector that stops answering is a 502 and a recorded refusal,
+    // never a read that quietly says the event carries nothing.
+    collector.stop();
+    let (status, body) = signed_event_read(&base, &connection, uid, None).await?;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["error"], json!("collector_unreachable"));
+    let rows = recorded_event_reads(&state_dir)?;
+    let refused = rows
+        .iter()
+        .find(|row| row.1 == uid)
+        .expect("the refused read is recorded under the uid it asked about");
+    assert_eq!(refused.3, "collector_unreachable");
+    assert!(event_metric(&base, "collector_unreachable").await? >= 1);
+
+    gateway.stop().await;
+    Ok(())
+}
+
+/// The second script the skill ships (#355), against the real route: its
+/// encoding, its canonical line and its headers have to agree with the
+/// Gateway's byte for byte, and a script nobody runs is a script that
+/// agrees with nothing.
+#[tokio::test]
+async fn the_skills_event_script_makes_a_request_the_route_accepts() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let connection = unique("calendar");
+    // A uid with the characters that break an encoding that is not the
+    // route's: sabre writes these, and a `+` left bare reaches the Gateway
+    // as a space.
+    let uid = "8f3a+2b1c/4d5e:6f70";
+    let collector = StubCollector::answering(
+        200,
+        json!({
+            "connection": connection,
+            "uid": uid,
+            "found": true,
+            "conference": "https://meet.example/abc-def",
+            "description_characters": 12,
+            "attachments": 0,
+        }),
+    )
+    .await?;
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &calendar_status_event(&connection, "unknown", "connected"),
+    )
+    .await?;
+    let (gateway, base, state_dir) =
+        gateway("event-facts-skill", &connection, Some(&collector.url())).await?;
+    poll_until(
+        || async {
+            let (status, _) = signed_event_read(&base, &connection, uid, None)
+                .await
+                .ok()?;
+            (status == 200).then_some(())
+        },
+        "the connection's state to be read off the bus",
+    )
+    .await?;
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../skills/twalk-calendar/event-facts.sh")
+        .canonicalize()
+        .context("the skill's script exists")?;
+    let output = tokio::process::Command::new(&script)
+        .arg(&connection)
+        .arg(uid)
+        .env("TWALK_GATEWAY_URL", &base)
+        .env("TWALK_ANSWER_SECRET", HERMES_ANSWER_SECRET)
+        .env("TWALK_DELIVERY_ID", "event-skill-run-1")
+        .output()
+        .await
+        .context("the skill's script ran")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the script was refused:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let answer: Value = serde_json::from_str(stdout.trim())
+        .with_context(|| format!("the script printed the answer as JSON: {stdout}"))?;
+    assert_eq!(answer["found"], json!(true), "{answer}");
+    assert_eq!(answer["conference"], json!("https://meet.example/abc-def"));
+    // The uid survived the encoding on both sides: the row records what was
+    // asked, and what was asked is what the script sent.
+    let rows = recorded_event_reads(&state_dir)?;
+    let row = rows
+        .iter()
+        .find(|row| row.2.as_deref() == Some("event-skill-run-1"))
+        .expect("the script's own read is recorded");
+    assert_eq!(row.1, uid, "the uid survived the round trip");
+    assert_eq!(row.3, "served");
+
+    collector.stop();
     gateway.stop().await;
     Ok(())
 }

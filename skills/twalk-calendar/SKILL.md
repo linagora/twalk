@@ -1,18 +1,32 @@
 ---
 name: twalk-calendar
-description: Read the owner's free/busy through their Twalk deployment before proposing meeting times. Use when a contact asks when the owner is available, proposes a meeting, or asks to move one — never guess an agenda, and never answer with more than free or busy.
+description: Read the owner's free/busy through their Twalk deployment before proposing meeting times, and ask what one of their events carries — a join link, whether there is an agenda — without reading its words. Use when a contact asks when the owner is available, proposes a meeting, or asks to move one, and when a meeting the owner is about to attend may have a link or a document worth mentioning.
 ---
 
 # twalk-calendar
 
-Twalk lets you ask **one** thing about the owner's calendar: when they are busy, inside a window of at most fourteen days. Nothing else — not what they are doing, not with whom, not where. The answer is a list of busy intervals; every gap between them is free. This is the one governed pull of ADR 0032, and every read you make — served or refused — is recorded in the owner's deployment, for them to see, so read when a message needs it and not on every turn.
+Twalk lets you ask **two** things about the owner's calendar, and nothing else.
+
+**When they are busy**, inside a window of at most fourteen days. Not what they are doing, not with whom. The answer is a list of busy intervals; every gap between them is free.
+
+**What one event carries**, named by the uid the event that woke you carried: whether it has a join link and which, whether there is a description and how long, how many attachments. **Never the description's text** — it is a free-text box written by whoever created the meeting, which on an invitation is somebody who decided nothing about this deployment. No route answers it, and asking differently will not help.
+
+Both are governed pulls under ADR 0032, and every read you make — served or refused — is recorded in the owner's deployment for them to see. Read when a message needs it, not on every turn.
 
 ## When to use it
+
+**The free/busy read:**
 
 - A contact asks *"are you free Thursday?"*, *"when can we meet?"*, *"can we move it to next week?"*.
 - You are drafting a reply that proposes or confirms a time.
 
-Do not use it to summarise the owner's day, to find out what a meeting is about, or to check on somebody else: it cannot, and the refusal is recorded.
+**The event read:**
+
+- A meeting is about to start, or a message is about it, and a **join link** would help: *"your 14:00 has a video link, shall I send it?"*.
+- You want to tell the owner there is something to read before a meeting: *"there is an agenda on it"* — you can say that there is one and roughly how long, never what it says.
+- A contact asks where a meeting's document is: say there are attachments and how many, and let the owner open them.
+
+Do not use either to summarise the owner's day, to find out what a meeting is **about**, or to check on somebody else. The first cannot, the second will not, and the refusal is recorded.
 
 ## How to call it
 
@@ -43,6 +57,26 @@ $ skills/twalk-calendar/freebusy.sh calendar 2026-09-24T08:00:00Z 2026-09-26T18:
 
 The owner is busy Thursday 9:00–10:30 and Friday 14:00–15:00 (UTC); every other moment in the window is free. The intervals are in UTC and the end of each is exclusive.
 
+### Asking what an event carries
+
+```sh
+./event-facts.sh <connection> <uid>
+```
+
+- `connection` — as above.
+- `uid` — the event's iCalendar UID, exactly as `calendar.event.created.v1`, `…changed.v1` or `…removed.v1` carried it in `data.uid`. This route does not search by title or by time: if you do not have the uid, you cannot ask.
+
+```sh
+$ skills/twalk-calendar/event-facts.sh calendar 8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8
+{"connection":"calendar","uid":"8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8","found":true,"conference":"https://meet.example/abc-def","description_characters":340,"attachments":1}
+```
+
+That meeting has a join link you may offer, an agenda of about 340 characters you may **mention** but not read, and one attachment.
+
+`"found": false` means this deployment holds no event with that uid — it never published it, or it falls outside the window the collector polls. It does **not** mean the meeting carries nothing. Say you cannot tell; do not say there is no link.
+
+`"conference": null` means the event declares no join link in a property meant for one. Many calendars put the link in the description instead, and Twalk does not go looking for it there — choosing which URL in a text is "the meeting" means reading the text. If there is a description, say so and let the owner open it.
+
 ## What to do with the answer
 
 1. Convert to the owner's time zone before you speak (the operator told you which; if not, say the zone you are using).
@@ -55,6 +89,7 @@ The owner is busy Thursday 9:00–10:30 and Friday 14:00–15:00 (UTC); every ot
 The Gateway answers a JSON error with a code; the script prints it on stderr.
 
 - `window_too_wide` — narrow the window to fourteen days.
+- `invalid_uid` — the uid is missing, empty or over 512 characters; take it from the event's `data.uid`.
 - `invalid_window` — `from`/`to` are not RFC 3339 or not in order.
 - `connection_unknown` — the connection name is wrong; ask the operator.
 - `connection_not_connected` — the owner's calendar is not reachable right now (the answer says which state it is in). Say you cannot check the calendar at the moment; do not guess.
@@ -69,6 +104,8 @@ The Gateway answers a JSON error with a code; the script prints it on stderr.
 - `X-Hermes-Signature-256: sha256=<hex HMAC-SHA256>` over the line `GET`, newline, `/_twalk/hermes/freebusy`, newline, the query string exactly as sent, newline, the timestamp — keyed with `TWALK_ANSWER_SECRET`.
 
 An optional `X-Hermes-Delivery` names the attempt: every call is a line in the owner's record, and a retry that carries the same delivery is recorded as the same attempt tried again. The script takes it from `TWALK_DELIVERY_ID` and invents one per run otherwise.
+
+The event read is the same wire with its own path: `GET {TWALK_GATEWAY_URL}/_twalk/hermes/event-facts?connection=…&uid=…`, signed over `GET`, newline, `/_twalk/hermes/event-facts`, newline, the query as sent, newline, the timestamp. **The path is inside the signed line**, so a signature made for one read is refused on the other.
 
 The query string is signed **exactly as sent**, so encode it the way the script does: `:` as `%3A` and `+` as `%2B` in the instants (a `+` left bare reaches the Gateway as a space and the read is refused as `invalid_window`), and `%`, `&`, `=` likewise.
 
