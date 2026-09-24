@@ -7,6 +7,12 @@
 //! part, publishing that report with the headers the Sensor sets, and
 //! reads the line back as the owner.
 //!
+//! Three endings, not two (#311). A reply the sender gave up on is
+//! dead-lettered on `….persona.reply.approved.v1.dead` with the reason in
+//! a header, and the journal carries a line for it too — "never sent",
+//! with what stopped it. A channel that carried only the successes would
+//! be the silence #216 was written against, one surface further out.
+//!
 //! Two things the line must carry and one it must not. The network, the
 //! account the reply was posted as and the approval's id (its first twelve
 //! characters, enough to find it in `GET /api/approvals/{id}`) are what
@@ -42,13 +48,20 @@ const OWNER: &str = "@owner:test.twalk";
 
 /// Everything a journal line must and must not say about one report.
 fn assert_journal_line(line: &str, approval_event: &serde_json::Value) {
-    let id = approval_event["id"].as_str().unwrap();
-    let body = approval_event["data"]["final"]["body"].as_str().unwrap();
-    assert!(line.contains("WhatsApp"), "names the network: {line}");
+    assert_journal_line_names_no_text(line, approval_event);
     assert!(
         line.contains(OWNER),
         "names the account it was posted as: {line}"
     );
+}
+
+/// What every journal line says, whichever way the reply ended: which
+/// network, which approval — and never the reply's own words. A line about
+/// a reply that never left names no account, because none posted it.
+fn assert_journal_line_names_no_text(line: &str, approval_event: &serde_json::Value) {
+    let id = approval_event["id"].as_str().unwrap();
+    let body = approval_event["data"]["final"]["body"].as_str().unwrap();
+    assert!(line.contains("WhatsApp"), "names the network: {line}");
     assert!(
         line.contains(&id[..12]),
         "names the approval by its first twelve characters: {line}"
@@ -62,7 +75,12 @@ fn assert_journal_line(line: &str, approval_event: &serde_json::Value) {
 /// The journey in one language: a reply that reached the contact, then
 /// one nobody received. `reached_words` and `nobody_words` are the
 /// fragments of that language's two sentences.
-async fn journal_in(language: &str, reached_words: &str, nobody_words: &str) -> Result<()> {
+async fn journal_in(
+    language: &str,
+    reached_words: &str,
+    nobody_words: &str,
+    never_sent_words: &str,
+) -> Result<()> {
     let run = Run::start_in(&format!("journal-{language}"), language).await?;
 
     let reached = approval(&run.id, 1)?;
@@ -105,17 +123,35 @@ async fn journal_in(language: &str, reached_words: &str, nobody_words: &str) -> 
         line.content
     );
 
+    // And a reply that never left at all (#311): the sender gave up, said
+    // why in a header, and the journal says so rather than staying silent
+    // — the silence that let an approval read as sent for ever.
+    let never = approval(&run.id, 3)?;
+    run.publish_dead_report(&never, Some("the JMAP server answered unknownMethod"))
+        .await?;
+    let line = run
+        .wait_for_line(&run.channels.journal, &never["id"].as_str().unwrap()[..12])
+        .await?;
+    assert_journal_line_names_no_text(&line.content, &never);
+    assert!(
+        line.content.contains(never_sent_words)
+            && line.content.contains("unknownMethod")
+            && !line.content.contains(reached_words),
+        "a reply that never left says so and says what stopped it, in {language}: {}",
+        line.content
+    );
+
     run.shutdown().await
 }
 
 #[tokio::test]
 async fn a_posted_reply_is_journalled_without_its_text() -> Result<()> {
-    journal_in("fr", "a atteint le contact", "Personne").await
+    journal_in("fr", "a atteint le contact", "Personne", "Non partie").await
 }
 
 #[tokio::test]
 async fn the_journal_is_written_in_english_when_asked() -> Result<()> {
-    journal_in("en", "reached the contact", "Nobody").await
+    journal_in("en", "reached the contact", "Nobody", "Never sent").await
 }
 
 #[tokio::test]

@@ -716,6 +716,8 @@
 	"approvals.posted.contact": "Entregada: tu Sensor la publicó como {postedAs} en la conversación, y la red la transmitió al contacto.",
 	"approvals.posted.nobody": "Nadie la recibió: tu Sensor la publicó como {postedAs}, una cuenta que el bridge de la conversación ignora porque no es la tuya (#123). Existe en una sala que el contacto no puede ver.",
 	"approvals.posted.pending": "Tu Sensor aún no la ha publicado — o lo hizo más allá del tramo del flujo que lee tu servidor.",
+	"approvals.posted.undelivered": "El servicio que debía enviarla se dio por vencido: {reason}",
+	"approvals.posted.undelivered.unexplained": "El servicio que debía enviarla se dio por vencido, sin decir por qué.",
 	"approvals.lost.title": "Esta respuesta no salió",
 	"approvals.lost.body": "Tu servidor registró tu aprobación y el flujo de eventos nunca confirmó la respuesta, así que nunca se publicó. Aprobar de nuevo vuelve a publicar exactamente la misma respuesta — no puede enviarse dos veces, pase lo que pase.",
 	"approvals.lost.retry": "Enviarla de nuevo",

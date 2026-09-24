@@ -295,6 +295,12 @@ impl Run {
         format!("{}.posted", self.subject("persona.reply.approved"))
     }
 
+    /// The subject a sender dead-letters an approved reply on (#311):
+    /// `<id>.persona.reply.approved.v1.dead`.
+    pub fn dead_subject(&self) -> String {
+        format!("{}.dead", self.subject("persona.reply.approved"))
+    }
+
     /// Validates `event` against the contract's schema for `type_name` and
     /// publishes it on that type's subject, `Nats-Msg-Id` its own id — the
     /// way a producer does. An event that fails the contract is a test
@@ -334,6 +340,21 @@ impl Run {
         posted_as: &str,
     ) -> Result<()> {
         self.publish_posted_report_as(approval, reach, posted_as, "posted")
+            .await
+    }
+
+    /// A sender giving up on an approved reply (#311): the same event
+    /// republished unchanged on the `.dead` subject with the reason in a
+    /// header, under `Nats-Msg-Id` `<id>:dead` as both senders set it.
+    /// `reason` is `None` for a Sensor older than #311, which set none.
+    pub async fn publish_dead_report(&self, approval: &Value, reason: Option<&str>) -> Result<()> {
+        validate_against_contract(approval, "persona.reply.approved")?;
+        let mut headers = async_nats::HeaderMap::new();
+        if let Some(reason) = reason {
+            headers.insert("reason", reason);
+        }
+        self.bus
+            .publish_event_with_headers(&self.dead_subject(), "dead", headers, approval)
             .await
     }
 

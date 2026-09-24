@@ -288,6 +288,10 @@ fn suggestion_json(listed: &Listed) -> Value {
             "detail": listed.delivery.detail(),
         },
         "posted": listed.posted.as_ref().map(posted_json),
+        // And what was given up on (#311): the third fact, never folded
+        // into the other two. A reply that could not be sent showed as
+        // `published` for ever until this member existed.
+        "undelivered": listed.undelivered.as_ref().map(undelivered_json),
     })
 }
 
@@ -298,6 +302,15 @@ pub fn posted_json(posted: &crate::approval::Posted) -> Value {
         "reach": posted.reach,
         "posted_as": posted.posted_as,
         "stream_sequence": posted.stream_sequence,
+    })
+}
+
+/// A dead letter, as both the listing and `GET /api/approvals/{id}` render
+/// it (#311).
+pub fn undelivered_json(undelivered: &crate::approval::Undelivered) -> Value {
+    json!({
+        "reason": undelivered.reason,
+        "stream_sequence": undelivered.stream_sequence,
     })
 }
 
@@ -332,6 +345,23 @@ mod tests {
     use crate::portals::Delivery;
     use crate::suggestions::{Standing, Window};
 
+    /// One approval as the store holds it, published on the bus.
+    fn recorded() -> RecordedApproval {
+        RecordedApproval {
+            event_id: "c".repeat(64),
+            suggestion_event_id: "a".repeat(64),
+            approved_by: "@michel:example.com".to_owned(),
+            persona_id: "assistant".to_owned(),
+            network: Network::Whatsapp,
+            contact: "@whatsapp_336:example.com".to_owned(),
+            edited: true,
+            written_by: "persona".to_owned(),
+            approved_at: "2026-09-17T10:04:37.000Z".to_owned(),
+            published_at: Some("2026-09-17T10:04:37.100Z".to_owned()),
+            stream_sequence: Some(4242),
+        }
+    }
+
     fn listed(standing: Standing, approval: Option<RecordedApproval>) -> Listed {
         Listed {
             event_id: "a".repeat(64),
@@ -360,6 +390,7 @@ mod tests {
                 why: "trigger_out_of_reach",
             },
             posted: None,
+            undelivered: None,
         }
     }
 
@@ -389,7 +420,47 @@ mod tests {
         }
     }
 
+    /// #311: a reply that was given up on says so, as its own member,
+    /// beside the other two — and a suggestion nothing was given up on
+    /// renders `null` rather than leaving the member out, since a client
+    /// that has to ask whether a key exists reads the absence as "fine".
     #[test]
+    fn a_reply_that_was_given_up_on_is_a_member_of_its_own() {
+        let quiet = suggestion_json(&listed(Standing::Approvable, None));
+        assert_eq!(quiet["undelivered"], Value::Null);
+
+        let mut given_up = listed(Standing::Approved, Some(recorded()));
+        given_up.undelivered = Some(crate::approval::Undelivered {
+            reason: Some("the JMAP server answered unknownMethod".to_owned()),
+            stream_sequence: 91,
+        });
+        let rendered = suggestion_json(&given_up);
+        assert_eq!(
+            rendered["undelivered"],
+            json!({
+                "reason": "the JMAP server answered unknownMethod",
+                "stream_sequence": 91,
+            })
+        );
+        // The publication still says what it said: the Gateway does not
+        // rewrite one fact because another arrived. Three facts, three
+        // members — the screen decides what to show (#311).
+        assert_eq!(rendered["approval"]["publication"], json!("published"));
+
+        // A sender that said nothing — a Sensor older than #311 — is a
+        // dead letter all the same, and the Gateway renders the absence
+        // rather than an English sentence the screen would have to show
+        // inside a French one.
+        given_up.undelivered = Some(crate::approval::Undelivered {
+            reason: None,
+            stream_sequence: 92,
+        });
+        assert_eq!(
+            suggestion_json(&given_up)["undelivered"],
+            json!({ "reason": Value::Null, "stream_sequence": 92 })
+        );
+    }
+
     /// #334: the screen may say who is answered and what they asked, in
     /// the persona's words, and a suggestion that carries none renders
     /// the member as `null` rather than inventing one.
@@ -450,20 +521,7 @@ mod tests {
 
     #[test]
     fn an_approved_suggestion_carries_the_record_that_says_where_the_reply_went() {
-        let recorded = RecordedApproval {
-            event_id: "c".repeat(64),
-            suggestion_event_id: "a".repeat(64),
-            approved_by: "@michel:example.com".to_owned(),
-            persona_id: "assistant".to_owned(),
-            network: Network::Whatsapp,
-            contact: "@whatsapp_336:example.com".to_owned(),
-            edited: true,
-            written_by: "persona".to_owned(),
-            approved_at: "2026-09-17T10:04:37.000Z".to_owned(),
-            published_at: Some("2026-09-17T10:04:37.100Z".to_owned()),
-            stream_sequence: Some(4242),
-        };
-        let rendered = suggestion_json(&listed(Standing::Approved, Some(recorded)));
+        let rendered = suggestion_json(&listed(Standing::Approved, Some(recorded())));
         assert_eq!(rendered["standing"], json!("approved"));
         assert_eq!(rendered["approval"]["publication"], json!("published"));
         assert_eq!(rendered["approval"]["stream_sequence"], json!(4242));

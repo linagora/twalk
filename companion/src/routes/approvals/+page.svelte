@@ -605,14 +605,19 @@
 				<!-- Published is not delivered (#216): a second sentence, from the
 				     Sensor's own report when there is one, and never from the
 				     approval's `publication`. -->
+				{@const givenUp = row.undelivered !== null && row.undelivered !== undefined}
 				<p
-					class="small {row.posted?.reach === 'nobody' ? 'card card--warning' : ''}"
+					class="small {givenUp || row.posted?.reach === 'nobody' ? 'card card--warning' : ''}"
 					data-testid="delivered"
-					data-reach={row.posted?.reach ?? 'pending'}
+					data-reach={givenUp ? 'undelivered' : (row.posted?.reach ?? 'pending')}
 				>
-					<Icon name={row.posted?.reach === 'nobody' ? 'warning' : 'ok'} size="dense" />
+					<Icon
+						name={givenUp || row.posted?.reach === 'nobody' ? 'warning' : 'ok'}
+						size="dense"
+					/>
 					{$t(postedCopy(row), {
 						postedAs: row.posted?.posted_as ?? '',
+						reason: row.undelivered?.reason ?? '',
 						detail: $t(deliveryDetailKey(row.delivery))
 					})}
 				</p>
@@ -681,6 +686,7 @@
 					<p class="small muted" data-testid="delivered" data-reach="pending">
 						{$t(postedCopy(row), {
 							postedAs: '',
+							reason: row.undelivered?.reason ?? '',
 							detail: $t(deliveryDetailKey(row.delivery))
 						})}
 					</p>

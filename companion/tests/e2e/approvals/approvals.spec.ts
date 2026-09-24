@@ -11,7 +11,7 @@
 
 import { expect, test, type Page } from '@playwright/test';
 
-import { watchBus, type BusWatch } from '../dashboard/bus';
+import { publish, watchBus, type BusWatch } from '../dashboard/bus';
 import {
 	bridgeStack,
 	decideAbout,
@@ -25,6 +25,8 @@ import {
 } from './harness';
 
 const REPLY_APPROVED_SUBJECT = 'twalk.persona.reply.approved.v1';
+/** Where a sender that gave up republishes the approval (#311). */
+const REPLY_DEAD_SUBJECT = `${REPLY_APPROVED_SUBJECT}.dead`;
 
 const stack = bridgeStack();
 
@@ -60,6 +62,8 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 	await waitForSuggestion(request, token, published.suggestionId);
 
 	const bus = await watchBus(it.natsPort, REPLY_APPROVED_SUBJECT);
+	/** The approved reply as it left, for the dead-letter half of this journey. */
+	let approvedReply: unknown;
 	try {
 		await page.goto('/approvals');
 		const row = page.getByTestId(`suggestion-${published.suggestionId}`);
@@ -159,6 +163,10 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 		// showed it, and carried as a member of its own besides.
 		expect(envelope.data.final.body).toBe(`${published.body}\n${FRENCH_DISCLOSURE}`);
 		expect(envelope.data.disclosure).toBe(FRENCH_DISCLOSURE);
+		// Kept for the dead-letter half below: a `.dead` report is the
+		// approval event **unchanged**, so the one the bus carried is the
+		// one a sender would republish.
+		approvedReply = event.event;
 	} finally {
 		bus.close();
 	}
@@ -182,6 +190,29 @@ test('a suggestion appears, is approved, and the screen says what happened', asy
 	await expect(
 		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('approve')
 	).toHaveCount(0);
+
+	// And when the component that had to send it gives up (#311), the second
+	// sentence becomes the third state rather than staying "not yet" for ever
+	// — the silence that told an owner "sent" for a message that never left.
+	// Played by the test, as the Sensor and the collector do it: the approval
+	// republished unchanged on the `.dead` sibling subject. This publisher
+	// declares no headers, so the dead letter carries no reason — which is
+	// exactly what a Sensor older than #311 published, and the screen has to
+	// say something all the same.
+	await publish(it.natsPort, REPLY_DEAD_SUBJECT, approvedReply);
+	await page.reload();
+	const givenUp = page
+		.getByTestId(`suggestion-${published.suggestionId}`)
+		.getByTestId('delivered');
+	await expect(givenUp).toHaveAttribute('data-reach', 'undelivered');
+	// Either catalogue: this journey runs in whichever language the browser
+	// asks for, and the sentence is the deployment's, not the test's.
+	await expect(givenUp).toContainText(/gave up|abandonné/);
+	// The approval record still says what it said: the screen shows the
+	// failure, and never rewrites the publication it recorded.
+	await expect(
+		page.getByTestId(`suggestion-${published.suggestionId}`).getByTestId('already-sent')
+	).toBeVisible();
 });
 
 test('nothing is approved by a keystroke, and nothing approves a list', async ({

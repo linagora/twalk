@@ -636,6 +636,44 @@ pub struct Posted {
 pub const POSTED_REACH_HEADER: &str = "reach";
 pub const POSTED_AS_HEADER: &str = "posted-as";
 
+/// A reply the component that had to send it gave up on (#311): the
+/// approval republished unchanged on `twalk.persona.reply.approved.v1.dead`
+/// by the Sensor or the collector, once a post can never succeed or has
+/// burned its attempts.
+///
+/// A third thing beside `publication` and [`Posted`], not a variant of
+/// either: recorded on the bus, delivered to the contact, and given up on
+/// are three states, and folding the third into the first is what made an
+/// undeliverable reply read as `published` for ever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undelivered {
+    /// Why, in the sender's own words — the [`REASON_HEADER`] of the dead
+    /// letter, capped by the sender. Neither sender quotes the reply's body
+    /// in it.
+    ///
+    /// `None` when the sender set none: a Sensor older than #311 published
+    /// dead letters without the header. The Gateway answers the absence
+    /// rather than a sentence of its own, because the screen that renders
+    /// it speaks five languages and the one thing the Gateway must not do
+    /// is put English prose where a translation belongs.
+    pub reason: Option<String>,
+    pub stream_sequence: u64,
+}
+
+/// The header both senders put the reason in (`sensor/src/outbound.rs`,
+/// `collector/src/outbound.rs`).
+pub const REASON_HEADER: &str = "reason";
+
+/// The reason a dead letter carries, if it carries one. An empty header is
+/// no reason. One function, because the listing and the single record must
+/// not answer two different things about the same dead letter.
+pub fn reason_of(headers: Option<&async_nats::HeaderMap>) -> Option<String> {
+    headers
+        .and_then(|headers| headers.get(REASON_HEADER))
+        .map(|reason| reason.as_str().trim().to_owned())
+        .filter(|reason| !reason.is_empty())
+}
+
 /// The report's envelope: the approval's own id, and nothing else read.
 #[derive(Debug, Deserialize)]
 struct PostedEnvelope {
@@ -1403,6 +1441,51 @@ impl Approvals {
             Ok(posted) => posted,
             Err(error) => {
                 warn!(%error, "the Sensor's posted reports could not be read");
+                None
+            }
+        }
+    }
+
+    /// Whether the component that had to send this reply gave up on it
+    /// (#311), read from the publication's position forward on the `.dead`
+    /// sibling subject — exactly as [`Self::posted`] reads the `.posted`
+    /// one, and for the same reason: the dead letter follows the reply.
+    ///
+    /// Both are read on every request, because they are not opposites. A
+    /// bus that cannot be reached is `None` and logged, since this is a
+    /// fact *about* a record already read.
+    pub async fn undelivered(&self, recorded: &RecordedApproval) -> Option<Undelivered> {
+        let sequence = recorded.stream_sequence?;
+        let jetstream = match self.jetstream().await {
+            Ok(jetstream) => jetstream,
+            Err(error) => {
+                warn!(%error, "the bus did not answer a read of the dead letters");
+                return None;
+            }
+        };
+        let wanted = recorded.event_id.clone();
+        let found = self
+            .scan_forward(
+                jetstream,
+                &format!("{}.dead", bus_subject(REPLY_APPROVED_TYPE)),
+                sequence,
+                |message| {
+                    let envelope: PostedEnvelope = serde_json::from_slice(&message.payload).ok()?;
+                    if envelope.id != wanted {
+                        return None;
+                    }
+                    let stream_sequence = message.info().map(|info| info.stream_sequence).ok()?;
+                    Some(Undelivered {
+                        reason: reason_of(message.headers.as_ref()),
+                        stream_sequence,
+                    })
+                },
+            )
+            .await;
+        match found {
+            Ok(undelivered) => undelivered,
+            Err(error) => {
+                warn!(%error, "the dead letters of approved replies could not be read");
                 None
             }
         }

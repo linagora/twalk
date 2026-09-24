@@ -330,7 +330,9 @@ async fn open_all(
 pub enum Which {
     /// `persona.suggest.produced` → one forum post in `approbations`.
     Suggestions,
-    /// `persona.reply.approved.posted` → one line in `journal`.
+    /// `persona.reply.approved.posted` **and** `.dead` → one line in
+    /// `journal` either way, because a reply that never left is as much a
+    /// fact about an approval as one that went out (#311).
     Journal,
     /// `bridge.status.changed` and `consent.state.changed` → `activite`.
     Activity,
@@ -354,8 +356,16 @@ impl Which {
     }
 
     /// The durable pull consumer's configuration. `filter_subjects` for the
-    /// activity consumer, which reads two subjects, and `filter_subject`
-    /// for the other two; the bus refuses both on one consumer.
+    /// journal and activity consumers, which read two subjects each, and
+    /// `filter_subject` for the suggestions one; the bus refuses both on one
+    /// consumer.
+    ///
+    /// The journal consumer's second subject arrived with #311, and a
+    /// durable keeps the configuration it was created with (see [`open`]):
+    /// on a deployment that already ran the clerk, `nats consumer rm twalk
+    /// clerk-journal` before the restart is what makes it read `.dead` at
+    /// all. The clerk's README says so under "Three decisions worth
+    /// arguing with".
     fn config(self, config: &Config) -> pull::Config {
         let (filter_subject, filter_subjects, deliver_policy) = match self {
             Self::Suggestions => (
@@ -363,7 +373,11 @@ impl Which {
                 Vec::new(),
                 DeliverPolicy::All,
             ),
-            Self::Journal => (posted_subject(config), Vec::new(), DeliverPolicy::New),
+            Self::Journal => (
+                String::new(),
+                vec![posted_subject(config), dead_subject(config)],
+                DeliverPolicy::New,
+            ),
             Self::Activity => (
                 String::new(),
                 vec![
@@ -390,6 +404,13 @@ impl Which {
 /// posted it, with the `reach` and `posted-as` headers (#216).
 fn posted_subject(config: &Config) -> String {
     format!("{}.posted", config.bus_subject(REPLY_APPROVED))
+}
+
+/// The subject a sender that gave up republishes an approved reply on, the
+/// reason in a header (#311): the Sensor when a post can never succeed or
+/// has burned its attempts, the collector likewise for a mail submission.
+fn dead_subject(config: &Config) -> String {
+    format!("{}.dead", config.bus_subject(REPLY_APPROVED))
 }
 
 /// One durable consumer, created or found. Found means **returned as it
@@ -475,6 +496,9 @@ async fn drain(clerk: &Clerk, which: Which, consumer: PullConsumer) -> Result<()
         };
         let result = match which {
             Which::Suggestions => handle_suggestion(clerk, &message).await,
+            Which::Journal if message.subject.as_str().ends_with(".dead") => {
+                handle_dead_report(clerk, &message).await
+            }
             Which::Journal => handle_posted_report(clerk, &message).await,
             Which::Activity => handle_activity(clerk, &message).await,
         };
@@ -783,16 +807,6 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
         );
         return Ok(());
     };
-    let journal = clerk.config.channel_journal.as_str();
-    if already_lined(clerk, journal, &report.approval_id).await? {
-        skip(
-            clerk,
-            Skipped::Duplicate,
-            "posted report",
-            &format!("approval_id={}", report.approval_id),
-        );
-        return Ok(());
-    }
     let line = text::journal_line(
         clerk.lang,
         &report.network,
@@ -802,21 +816,100 @@ async fn handle_posted_report(clerk: &Clerk, message: &Message) -> Result<(), Re
         &report.time,
         report.edited,
     );
-    let published = clerk
-        .relay
-        .stream_message(journal, &line, &report.approval_id)
-        .await?;
-    let total = clerk.metrics.record_post(Channel::Journal);
+    let Some(published) = journal_line(clerk, "posted report", &report.approval_id, &line).await?
+    else {
+        return Ok(());
+    };
     info!(
         approval_id = %report.approval_id,
         network = %report.network,
         reach = %report.reach,
         edited = report.edited,
         event_id = %published.event_id,
-        total,
+        total = published.total,
         "journalled a posted reply"
     );
     Ok(())
+}
+
+/// One `.dead` report (#311): a line in `journal` saying the reply did not
+/// leave and what stopped it. Deduplicated by the `r` tag exactly as a
+/// `.posted` line is — and against the same tag, the approval's id, so a
+/// deployment whose reply was posted *and* later dead-lettered (which the
+/// senders do not do) would keep the first line rather than contradict it
+/// in two.
+async fn handle_dead_report(clerk: &Clerk, message: &Message) -> Result<(), RelayError> {
+    let Some(report) = events::dead_report(&message.payload, message.headers.as_ref()) else {
+        skip(
+            clerk,
+            Skipped::Unreadable,
+            "dead-letter report",
+            "the payload is not an approved reply",
+        );
+        return Ok(());
+    };
+    let line = text::journal_undelivered_line(
+        clerk.lang,
+        &report.network,
+        report.reason.as_deref(),
+        &report.approval_id,
+        &report.time,
+    );
+    let Some(published) =
+        journal_line(clerk, "dead-letter report", &report.approval_id, &line).await?
+    else {
+        return Ok(());
+    };
+    warn!(
+        approval_id = %report.approval_id,
+        network = %report.network,
+        reason = report.reason.as_deref(),
+        event_id = %published.event_id,
+        total = published.total,
+        "journalled a reply that did not leave"
+    );
+    Ok(())
+}
+
+/// One line in `journal`, whichever report asked for it: the relay queried
+/// for a line already tagged with this approval, the line written when
+/// there is none, and the post counted. `None` when the relay already held
+/// one — `skipped{duplicate}`, named by `what`.
+///
+/// One function for both reports because both are the same fact about the
+/// same approval, deduplicated against the same tag: a reply that was
+/// posted and later dead-lettered — which neither sender does — would keep
+/// its first line rather than contradict itself in two.
+async fn journal_line(
+    clerk: &Clerk,
+    what: &str,
+    approval_id: &str,
+    line: &str,
+) -> Result<Option<JournalledLine>, RelayError> {
+    let journal = clerk.config.channel_journal.as_str();
+    if already_lined(clerk, journal, approval_id).await? {
+        skip(
+            clerk,
+            Skipped::Duplicate,
+            what,
+            &format!("approval_id={approval_id}"),
+        );
+        return Ok(None);
+    }
+    let published = clerk
+        .relay
+        .stream_message(journal, line, approval_id)
+        .await?;
+    Ok(Some(JournalledLine {
+        event_id: published.event_id,
+        total: clerk.metrics.record_post(Channel::Journal),
+    }))
+}
+
+/// What a journal line that went up is worth saying about it.
+struct JournalledLine {
+    event_id: String,
+    total: u64,
 }
 
 /// One bridge transition or consent decision: a line in `activite`, by

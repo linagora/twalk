@@ -118,6 +118,14 @@ export interface Row {
 	 * contact are two sentences on this screen, by construction.
 	 */
 	posted: Posted | null;
+	/**
+	 * What the component that had to send it said when it gave up (#311),
+	 * or `null` while nothing has been given up on. A third state, not the
+	 * absence of the second: until this existed, a reply that could never
+	 * be sent read as "published" for ever, and an owner was told "sent"
+	 * for a message that never left.
+	 */
+	undelivered: Suggestion['undelivered'];
 	actions: Action[];
 }
 
@@ -163,6 +171,7 @@ export function toRow(suggestion: Suggestion): Row {
 			suggestion.standing === 'approved' && suggestion.approval?.publication === 'unpublished',
 		delivery: suggestion.delivery,
 		posted: suggestion.posted,
+		undelivered: suggestion.undelivered,
 		actions: actionsFor(suggestion)
 	};
 }
@@ -201,7 +210,19 @@ export function deliveryDetailKey(delivery: Delivery): MessageKey {
  * either the certainty the screen already had (`cannot_reach`) or the honest
  * "not yet". It is never derived from `approval.publication`.
  */
-export function postedCopy(row: Pick<Row, 'delivery' | 'posted'>): MessageKey {
+export function postedCopy(row: Pick<Row, 'delivery' | 'posted' | 'undelivered'>): MessageKey {
+	// What was given up on is read first (#311). A dead-lettered reply may
+	// also carry a `posted` report — the Sensor reports what it reached
+	// before the collector gives up on its own half, and "it went nowhere"
+	// is the fact that matters to someone deciding whether to send again.
+	if (row.undelivered !== null && row.undelivered !== undefined) {
+		// A sender older than #311 set no reason, and the Gateway says so
+		// with a null rather than inventing English prose for a screen that
+		// speaks five languages. The sentence is this catalogue's to write.
+		return row.undelivered.reason
+			? 'approvals.posted.undelivered'
+			: 'approvals.posted.undelivered.unexplained';
+	}
 	if (row.posted !== null) {
 		return row.posted.reach === 'contact'
 			? 'approvals.posted.contact'

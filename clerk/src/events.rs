@@ -143,6 +143,47 @@ pub fn posted_report(
     })
 }
 
+/// What `journal` needs about one reply that never left (#311): which
+/// network it was meant for, why the sender gave up, and which approval —
+/// never the reply's own words, for the reason [`PostedReport`] does not
+/// carry them either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadReport {
+    pub approval_id: String,
+    pub network: String,
+    /// The `reason` header. `None` when the sender set none: the Sensor did
+    /// not until #311, and a dead letter published by an older binary is
+    /// still a dead letter — a line that says the reply did not leave is
+    /// worth more than no line, so the reason is optional and the sentence
+    /// says when it is missing.
+    pub reason: Option<String>,
+    pub time: String,
+}
+
+/// Reads a `.dead` report: the `persona.reply.approved` event republished
+/// unchanged on `<subject>.dead` by whichever component had to send it,
+/// with the reason in a header.
+///
+/// Returns `None` only when the payload is not the approval shape — this
+/// event's own `type`, plus `id`, `time` and `network`. Unlike
+/// [`posted_report`], no header is required: the fact worth saying is that
+/// the reply did not leave, and that is the subject, not a header.
+pub fn dead_report(payload: &[u8], headers: Option<&async_nats::HeaderMap>) -> Option<DeadReport> {
+    let value: serde_json::Value = serde_json::from_slice(payload).ok()?;
+    if value.get("type").and_then(|v| v.as_str()) != Some(REPLY_APPROVED) {
+        return None;
+    }
+    Some(DeadReport {
+        approval_id: value.get("id")?.as_str()?.to_owned(),
+        network: value.get("network")?.as_str()?.to_owned(),
+        reason: headers
+            .and_then(|headers| headers.get("reason"))
+            .map(|reason| reason.as_str().trim().to_owned())
+            .filter(|reason| !reason.is_empty()),
+        time: value.get("time")?.as_str()?.to_owned(),
+    })
+}
+
 /// A `bridge.status.changed` event, as much of it as `activite` needs: which
 /// bridge and its new state, and the event's own `id`, which the line it
 /// becomes is tagged with so a redelivery finds it (`relay::stream_message`).
@@ -319,6 +360,43 @@ mod tests {
             change.data.scope.unwrap().networks,
             vec!["whatsapp".to_string()]
         );
+    }
+
+    #[test]
+    fn a_dead_report_is_read_with_or_without_a_reason() {
+        // #311: the dead letter of the contract's own approval fixture.
+        let bytes = fixture("persona.reply.approved.json");
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("reason", "  the JMAP server answered unknownMethod  ");
+
+        let report = dead_report(&bytes, Some(&headers)).expect("a readable report");
+        assert_eq!(
+            report.approval_id,
+            "57f0e4d352d1ba5e6bf0e92223634253cd852e3d7d018ea91025dc098c1a564a"
+        );
+        assert_eq!(report.network, "whatsapp");
+        assert_eq!(report.time, "2026-09-17T10:04:37Z");
+        assert_eq!(
+            report.reason.as_deref(),
+            Some("the JMAP server answered unknownMethod")
+        );
+
+        // A Sensor older than #311 set no reason header, and an empty one is
+        // no reason either: still a report, because the subject is what says
+        // the reply did not leave.
+        assert_eq!(dead_report(&bytes, None).expect("a report").reason, None);
+        let mut blank = async_nats::HeaderMap::new();
+        blank.insert("reason", "   ");
+        assert_eq!(
+            dead_report(&bytes, Some(&blank)).expect("a report").reason,
+            None
+        );
+
+        // But not the approval shape is not a report at all.
+        assert!(dead_report(b"{", Some(&headers)).is_none());
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["type"] = serde_json::Value::String("something.else".to_owned());
+        assert!(dead_report(&serde_json::to_vec(&value).unwrap(), Some(&headers)).is_none());
     }
 
     #[test]

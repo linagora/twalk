@@ -1151,3 +1151,112 @@ async fn a_reply_says_before_the_approval_whether_it_can_reach_the_contact() -> 
     assert_eq!(listed["posted"], posted);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// 10. Given up on is a third answer, and never "published" (#311)
+// ---------------------------------------------------------------------------
+
+/// A reply the component that had to send it could not send — the Sensor's
+/// post refused for good, the collector's mail submission out of retries —
+/// is dead-lettered on `twalk.persona.reply.approved.v1.dead` with the
+/// reason in a header. Nothing read that subject: the approval kept saying
+/// `publication: published`, which is true and is not the question the
+/// owner is asking, and the screen showed a reply that never left as sent.
+///
+/// So the listing and the record both carry `undelivered`, read from the
+/// publication's own position forward the way `posted` is. Asserted on both
+/// documents, because a screen that reads one and a script that reads the
+/// other must not learn two different things about the same reply.
+#[tokio::test]
+async fn a_reply_that_was_given_up_on_says_so_rather_than_staying_published() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("suggestions-undelivered").await?;
+    let talk = conversation(
+        &running,
+        &bus,
+        "givenup",
+        "granted",
+        Some(&in_seconds(3600)),
+    )
+    .await?;
+    running.listed(&talk.suggestion_id).await?;
+
+    let (status, approved) = running
+        .post(
+            "/api/approvals",
+            &json!({ "suggestion_event_id": talk.suggestion_id }),
+        )
+        .await?;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{approved}");
+    let (_text, before, _) = running.listed(&talk.suggestion_id).await?;
+    assert_eq!(
+        before["undelivered"],
+        Value::Null,
+        "nothing has been given up on yet, and the member says so with a null rather than \
+         being absent: {before}"
+    );
+
+    // The sender gives up, as `sensor/src/main.rs` and
+    // `collector/src/replies.rs` do: the approval republished unchanged on
+    // the `.dead` sibling subject, the reason in a header. Played by the
+    // test, since this suite runs neither sender.
+    let reply: Value = bus
+        .fetch_all(STREAM, "twalk.persona.reply.approved.v1")
+        .await?
+        .into_iter()
+        .find(|event| event["id"] == approved["event_id"])
+        .context("the approved reply is on the bus")?;
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("event-id", reply["id"].as_str().unwrap_or_default());
+    headers.insert("reason", "the JMAP server answered unknownMethod");
+    bus.publish_event_with_headers(
+        "twalk.persona.reply.approved.v1.dead",
+        "dead",
+        headers,
+        &reply,
+    )
+    .await?;
+
+    let undelivered = poll_until(
+        || async {
+            let (status, record) = running
+                .get(&format!("/api/approvals/{}", talk.suggestion_id))
+                .await
+                .ok()?;
+            (status == reqwest::StatusCode::OK && !record["undelivered"].is_null())
+                .then_some(record.clone())
+        },
+        "the dead letter on the approval record",
+    )
+    .await?;
+    assert_eq!(
+        undelivered["undelivered"]["reason"],
+        json!("the JMAP server answered unknownMethod"),
+        "the sender's own words, so the owner learns what stopped it rather than only that \
+         something did: {undelivered}"
+    );
+    assert!(
+        undelivered["undelivered"]["stream_sequence"]
+            .as_u64()
+            .unwrap_or_default()
+            > approved["stream_sequence"].as_u64().unwrap_or_default(),
+        "the dead letter follows the reply on the bus: {undelivered}"
+    );
+    // The publication still says what it said. Three facts, three members:
+    // the Gateway does not rewrite one because another arrived, and the
+    // screen is the one that decides which sentence wins.
+    assert_eq!(undelivered["publication"], json!("published"));
+    assert_eq!(
+        undelivered["posted"],
+        Value::Null,
+        "a reply given up on was never posted: {undelivered}"
+    );
+
+    // And the listing says the same thing about the same suggestion.
+    let (_text, listed, _) = running.listed(&talk.suggestion_id).await?;
+    assert_eq!(listed["standing"], json!("approved"));
+    assert_eq!(listed["undelivered"], undelivered["undelivered"]);
+    assert_eq!(listed["approval"]["publication"], json!("published"));
+    Ok(())
+}

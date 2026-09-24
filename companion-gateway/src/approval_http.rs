@@ -128,7 +128,9 @@ async fn approve(
 /// never approved. The record carries `posted` as well: the Sensor's report
 /// of what the reply reached once posted (`contact` or `nobody`, and by which
 /// account), or `null` while there is none — published on the bus and
-/// delivered to the contact are two facts (#216). The record's
+/// delivered to the contact are two facts (#216). And `undelivered`, the
+/// third: the sender gave up, with its reason (#311). A client that reads
+/// `publication` alone is reading the first of three. The record's
 /// `publication` is `published` or
 /// `unpublished`, and never anything a screen should render as a spinner:
 /// an approval is published inside its own request or it is refused, so
@@ -157,10 +159,19 @@ async fn approval_of_suggestion(
             // which the record says, and delivered to the contact, which
             // only the Sensor's own report can say (#216).
             let posted = approvals.posted(&recorded).await;
+            // And whether it was given up on (#311), which is neither of the
+            // other two answers: a reply the Sensor or the collector could
+            // not send is not waiting to be posted, and a record that said
+            // only `published` let an owner believe it went out.
+            let undelivered = approvals.undelivered(&recorded).await;
             let mut rendered = recorded_json(&recorded);
             rendered["posted"] = posted
                 .as_ref()
                 .map(crate::suggestions_http::posted_json)
+                .unwrap_or(Value::Null);
+            rendered["undelivered"] = undelivered
+                .as_ref()
+                .map(crate::suggestions_http::undelivered_json)
                 .unwrap_or(Value::Null);
             Json(rendered).into_response()
         }
