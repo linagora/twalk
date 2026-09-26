@@ -1,23 +1,63 @@
 #!/usr/bin/env sh
 # Read the owner's free/busy through their Twalk deployment (skills/twalk-calendar).
 #
-#   freebusy.sh <connection> <from> <to>
+#   freebusy.sh <from> <to>                 # the deployment's own calendar
+#   freebusy.sh <connection> <from> <to>    # naming it, when there are two
 #
 # Signs `GET /_twalk/hermes/freebusy` with TWALK_ANSWER_SECRET — the secret
 # the outbound hook signs answers with — over the request line, and prints
 # the Gateway's JSON answer. Needs curl and openssl.
+#
+# The connection may be left out because an agent drafting a reply has no way
+# to know one: the message it was woken for carries the *kind* of connection
+# it arrived on and never an id (ADR 0033), and the calendar's is a different
+# connection anyway. So the deployment names it once, beside the two values
+# this script already needs, and the agent asks the question rather than
+# guessing an answer the Gateway would refuse (#363).
 set -eu
 
-if [ "$#" -ne 3 ]; then
-  echo "usage: $0 <connection> <from> <to>   (from/to: RFC 3339, at most 14 days apart)" >&2
+# Two ways to fail, and two codes, because a caller who cannot tell them
+# apart cannot act on either: 64 means this call was wrong, 78 means this
+# deployment never finished installing the skill. Written out rather than
+# `${VAR:?...}` because that form carries its message inside `${...}`, where
+# an apostrophe makes the whole file unparseable to bash — and `#!/usr/bin/env
+# sh` is bash on any host whose /bin/sh is one.
+missing() {
+  echo "$0: $1 is unset — $2. This deployment has not finished installing twalk-calendar; nothing was read and nothing reached the Gateway, so this message is the only trace." >&2
+  exit 78
+}
+misused() {
+  echo "$0: $1" >&2
+  echo "usage: $0 [<connection>] $2" >&2
   exit 64
-fi
-: "${TWALK_GATEWAY_URL:?TWALK_GATEWAY_URL is the owner's Companion Gateway origin}"
-: "${TWALK_ANSWER_SECRET:?TWALK_ANSWER_SECRET is the secret the outbound hook signs with}"
+}
 
-connection=$1
-from=$2
-to=$3
+[ -n "${TWALK_GATEWAY_URL:-}" ] || missing TWALK_GATEWAY_URL "the owner's Companion Gateway origin"
+[ -n "${TWALK_ANSWER_SECRET:-}" ] || missing TWALK_ANSWER_SECRET "the secret the outbound hook signs answers with"
+
+if [ "$#" -eq 2 ]; then
+  [ -n "${TWALK_CALENDAR_CONNECTION:-}" ] \
+    || missing TWALK_CALENDAR_CONNECTION "the calendar connection this deployment reads"
+  connection=$TWALK_CALENDAR_CONNECTION
+  from=$1
+  to=$2
+elif [ "$#" -eq 3 ]; then
+  connection=$1
+  from=$2
+  to=$3
+else
+  misused "$# arguments" "<from> <to>   (RFC 3339, at most 14 days apart; the connection defaults to TWALK_CALENDAR_CONNECTION)"
+fi
+
+# A three-argument call with its connection dropped is a two-argument call
+# with a connection name where an instant should be. Caught here: the Gateway
+# would refuse it as `invalid_window`, which sends the reader to look at
+# their clock instead of at their command line.
+case $from in
+  [0-9][0-9][0-9][0-9]-*) ;;
+  *) misused "\"$from\" is not an RFC 3339 instant (did you mean it as the connection, with the two dates after it?)" \
+       "<from> <to>   (RFC 3339, at most 14 days apart)" ;;
+esac
 path=/_twalk/hermes/freebusy
 # The query string is signed exactly as sent, so it is built once and used
 # twice: RFC 3339 instants carry ':' and '+', which are percent-encoded here
