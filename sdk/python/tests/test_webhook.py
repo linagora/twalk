@@ -31,7 +31,7 @@ import hmac
 import json
 import unittest
 
-from fixtures import fixture
+from fixtures import fixture, variant_fixture
 
 from twalk_sdk.config import Config, ConfigError
 from twalk_sdk.envelope import suggest_id
@@ -111,6 +111,65 @@ class TheTemplate(unittest.TestCase):
                 "user_language": "fr",
             },
         )
+
+    def mail(self) -> dict:
+        return self.body(trigger=InboundMessage(variant_fixture(
+            "inbound.message.received", "email"
+        )))
+
+    def test_a_mails_body_is_exactly_these_named_fields(self) -> None:
+        """The closed list again, for the shape that has eleven members.
+
+        Pinned with ``==`` like the bridged one and for the same reason: the
+        mail path is the one that grew a member (#362), so it is the path
+        where a twelfth could be added without anybody noticing."""
+        self.assertEqual(
+            self.mail(),
+            {
+                "event_type": MESSAGE_RECEIVED_EVENT,
+                "template_version": TEMPLATE_VERSION,
+                "reference": (
+                    "TWALK-REF:assistant:"
+                    "8d5959c3b0bcd54ea70f7d744f0264d84eccfb2054a08102c0ff19f5705f3d3d:1"
+                ),
+                "network": "email",
+                "received_at": "2026-09-21T08:15:03Z",
+                "message": (
+                    "Bonjour Michel,\n\nOn se voit toujours lundi pour le "
+                    "point hebdo ?\n\nAlice"
+                ),
+                "format": "text/plain",
+                "quotes_an_earlier_message": True,
+                "has_attachments": True,
+                "user_language": "fr",
+                "title": "Re: Point hebdo",
+            },
+        )
+
+    def test_nothing_identifying_anybody_crosses_beside_a_subject(self) -> None:
+        """A subject line crossing is not a door held open for the name
+        attached to it, nor for the addresses and message ids a mail carries
+        that a bridged message does not."""
+        sent = encode_body(self.mail()).decode("utf-8")
+        for marker, what in (
+            ("Alice Martin", "the contact's display name"),
+            ("alice@example.org", "the sender's address"),
+            ("9b8c7d6e-1", "the mail's own message id"),
+            ("c9d8e7f6-5a4b", "the thread the mail belongs to"),
+            ("direct", "who else was on the mail, which is the deployment's business"),
+        ):
+            self.assertNotIn(
+                marker,
+                sent,
+                f"{what} reached Hermes; its memory never expires what it is shown",
+            )
+
+    def test_a_message_with_no_subject_carries_no_member_at_all(self) -> None:
+        """A bridged message has no subject, and a revoked sender's mail
+        carries none either. An absent member says that; an empty string
+        says there was a subject and it was blank, which is a different
+        message and a lie about this one (#359's rule, other door)."""
+        self.assertNotIn("title", self.body())
 
     def test_nothing_identifying_anybody_crosses_the_seam(self) -> None:
         sent = encode_body(self.body()).decode("utf-8")
