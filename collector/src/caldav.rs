@@ -322,13 +322,23 @@ pub fn parse_vevent(ics: &str) -> Result<Vevent> {
         .filter(|location| !location.is_empty());
     let dtstart = property("DTSTART").context("the VEVENT has no DTSTART")?;
     let all_day = dtstart.is_date();
-    let timezone = dtstart.param("TZID").filter(|_| !all_day);
-    let start = Moment::parse(&dtstart.value, timezone.as_deref(), all_day)
+    let tzid = dtstart.param("TZID").filter(|_| !all_day);
+    let start = Moment::parse(&dtstart.value, tzid.as_deref(), all_day)
         .with_context(|| format!("DTSTART {:?} cannot be read", dtstart.value))?;
+    // The **IANA** name, which is what the contract's `timezone` is defined as
+    // — and after #350 the TZID is not always one: an Outlook event says
+    // `Romance Standard Time`, and publishing that word would put a label of
+    // Microsoft's table where every consumer reads a zone. Taken from the
+    // moment that was actually parsed rather than from the parameter, so the
+    // two can never disagree.
+    let timezone = match &start {
+        Moment::Zoned(_, zone) => Some(zone.name().to_owned()),
+        Moment::Date(_) | Moment::Utc(_) => None,
+    };
     let end = match (property("DTEND"), property("DURATION")) {
         (Some(dtend), _) => Moment::parse(
             &dtend.value,
-            dtend.param("TZID").or_else(|| timezone.clone()).as_deref(),
+            dtend.param("TZID").or_else(|| tzid.clone()).as_deref(),
             dtend.is_date(),
         )
         .with_context(|| format!("DTEND {:?} cannot be read", dtend.value))?,
@@ -564,9 +574,25 @@ impl Moment {
             NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").context("not a DATE-TIME")?;
         match tzid {
             Some(tzid) => {
-                let zone: chrono_tz::Tz = tzid
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("TZID {tzid:?} is not an IANA zone"))?;
+                // Both families a calendar writes, and nothing else (#350):
+                // IANA, and the Windows names Outlook writes, through CLDR's
+                // own table. A name in neither is still refused — an instant
+                // this collector cannot place is one it must not guess at —
+                // and the refusal says which family it fell outside of, so an
+                // operator can tell "that is not a zone" from "your calendar
+                // speaks Windows and this build's table is too old".
+                let zone = crate::zones::read(tzid).ok_or_else(|| {
+                    if crate::zones::is_windows_name(tzid) {
+                        anyhow::anyhow!(
+                            "TZID {tzid:?} is a Windows zone name this build's CLDR table maps to \
+                             a zone its own database does not have"
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "TZID {tzid:?} is neither an IANA zone nor a Windows zone name"
+                        )
+                    }
+                })?;
                 Ok(Self::Zoned(local, zone))
             }
             None => Ok(Self::Utc(local)),
@@ -1025,6 +1051,42 @@ mod tests {
     use super::*;
 
     const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:8f3a2b1c-4d5e-6f70-8192-a3b4c5d6e7f8\r\nSUMMARY:Weekly sync\\, with commas\\; and more\r\nDESCRIPTION:Pasted notes nobody decided to share\r\nLOCATION:Salle B\\, 4e étage\r\nDTSTART;TZID=Europe/Paris:20261005T090000\r\nDTEND;TZID=Europe/Paris:20261005T093000\r\nRRULE:FREQ=WEEKLY;BYDAY=MO\r\nORGANIZER;CN=Michel Maudet:mailto:Michel@Example.com\r\nATTENDEE;CN=Michel Maudet;ROLE=CHAIR;PARTSTAT=ACCEPTED:mailto:michel@example.com\r\nATTENDEE;CN=\"Martin, Alice\";ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:bob@example.org\r\nATTENDEE;CUTYPE=ROOM;CN=Salle B:urn:uuid:room-b\r\nATTACH:https://files.example/secret.pdf\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    /// One event as Outlook publishes it: a Windows zone name in the TZID,
+    /// and a `VTIMEZONE` that names the same thing. Copied in shape from the
+    /// sixty the reference deployment refused on 2026-09-24 (#350).
+    const OUTLOOK: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Romance Standard Time\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:040000008200E00074C5B7101A82E008\r\nSUMMARY:Point hebdo\r\nDTSTART;TZID=Romance Standard Time:20260921T140000\r\nDTEND;TZID=Romance Standard Time:20260921T150000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+    #[test]
+    fn an_event_written_by_outlook_is_read_and_published_in_iana_terms() {
+        // #350: sixty of the owner's real meetings were refused for saying
+        // `Romance Standard Time`, which is what every Outlook writes, and a
+        // free/busy built without them describes a calendar nobody has.
+        let event = parse_vevent(OUTLOOK).unwrap();
+        // The instants a calendar client shows for that event: 14:00 Paris in
+        // September is UTC+2.
+        assert_eq!(event.start, "2026-09-21T14:00:00+02:00");
+        assert_eq!(event.end, "2026-09-21T15:00:00+02:00");
+        // And the zone it is published with is the **IANA** one, which is what
+        // the contract defines `timezone` as. Publishing the Windows label
+        // would put a word out of Microsoft's table where every consumer of
+        // this event reads a zone — and #369 stores it, #379 spells local
+        // hours with it and #381 clips a working day by it.
+        assert_eq!(event.timezone.as_deref(), Some("Europe/Paris"));
+    }
+
+    #[test]
+    fn a_tzid_in_neither_family_is_still_refused_and_says_so() {
+        // The rule that made #350 visible instead of silent, and it stays: an
+        // instant this collector cannot place is not published an hour wrong.
+        let ics = OUTLOOK.replace("Romance Standard Time", "Middle-earth Standard Time");
+        let refusal = format!("{:#}", parse_vevent(&ics).unwrap_err());
+        assert!(
+            refusal.contains("Middle-earth Standard Time")
+                && refusal.contains("neither an IANA zone nor a Windows zone name"),
+            "the refusal names the zone and both families it fell outside of: {refusal}"
+        );
+    }
 
     #[test]
     fn a_vevent_is_read_as_the_contract_publishes_it_and_nothing_else() {

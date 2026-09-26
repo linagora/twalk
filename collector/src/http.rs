@@ -198,9 +198,9 @@ async fn free_busy(
             // name is worth saying out loud and worth nothing to a reader, so
             // it is dropped rather than passed on: a model handed "Romance
             // Standard Time" will use it in a sentence.
-            let local = zone.as_ref().and_then(|zone| match zone.name.parse::<chrono_tz::Tz>() {
-                Ok(tz) => Some((zone, chrono::Utc::now().with_timezone(&tz))),
-                Err(_) => {
+            let local = zone.as_ref().and_then(|zone| match crate::zones::read(&zone.name) {
+                Some(tz) => Some((zone, chrono::Utc::now().with_timezone(&tz))),
+                None => {
                     warn!(
                         connection,
                         timezone = zone.name,

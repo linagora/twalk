@@ -275,6 +275,7 @@ async fn run(config: Config) -> Result<()> {
         .map(|held| {
             Ok::<_, anyhow::Error>(twalk_collector::calendars::Calendars {
                 connection: held.id.clone(),
+                refused: std::sync::Arc::default(),
                 owner_email: config.owner_email.clone(),
                 mail_connection: config
                     .connections
@@ -724,6 +725,7 @@ async fn run(config: Config) -> Result<()> {
                     debug!(
                         envelopes = found.envelopes.len(),
                         cursors = found.cursors.len(),
+                        refused = found.refused,
                         "calendars polled"
                     );
                     for envelope in &found.envelopes {

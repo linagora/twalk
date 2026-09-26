@@ -288,7 +288,10 @@ pub fn free_between(
     zone: Option<&str>,
     working_day: Option<&WorkingDay>,
 ) -> Vec<Free> {
-    let zone = zone.and_then(|name| name.parse::<chrono_tz::Tz>().ok());
+    // The same door as everywhere else (#350): a stored name is an IANA one
+    // today, and reading it through the table means a name written by an older
+    // build or by hand cannot half-work.
+    let zone = zone.and_then(crate::zones::read);
     let local = |at: &DateTime<Utc>| {
         zone.map(|zone| {
             at.with_timezone(&zone)

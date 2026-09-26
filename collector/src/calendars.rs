@@ -50,6 +50,11 @@ pub struct Calendars {
     /// Named for the decision and not for the field: `self.location` would
     /// read as a meeting's own place.
     pub locations_may_travel: SharedSwitch,
+    /// Resources read and not published, ever, by this process (#350). Read as
+    /// a delta around each calendar, which is why it is a counter and not a
+    /// field the poll owns: `publishable` is called from the pure step, and
+    /// threading a tally through it would make every caller carry one.
+    pub refused: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The owner's working day, as the Companion Gateway answers it (#381),
     /// refreshed by the run loop beside the switch above and read when a
     /// free/busy read is answered. `None` while they have said nothing, which
@@ -74,6 +79,15 @@ pub type SharedWorkingDay = Arc<std::sync::Mutex<Option<crate::freebusy::Working
 pub struct Poll {
     pub envelopes: Vec<Value>,
     pub cursors: Vec<(String, Cursor)>,
+    /// How many resources of this poll were read and **not published**, over
+    /// every calendar (#350).
+    ///
+    /// Counted because the sixty events the reference deployment refused on
+    /// 2026-09-24 were sixty log lines and no number: a calendar can stop being
+    /// published almost entirely without anything saying so in one place. The
+    /// reasons stay on the per-resource lines — this is the figure that sends
+    /// somebody to read them.
+    pub refused: usize,
 }
 
 /// The zone the owner's agenda is written in, and where that was read.
@@ -319,6 +333,7 @@ impl Calendars {
                 .read(&collection, &changes.to_read(), credential)
                 .await?;
             let first_poll = cursor.ctag.is_none() && cursor.known.is_empty();
+            let refused_before = self.refused.load(Ordering::Relaxed);
             let (envelopes, next) = self.reconcile(
                 &calendar,
                 &collection,
@@ -328,6 +343,24 @@ impl Calendars {
                 &resources,
                 now,
             );
+            // What this calendar refused, as one number rather than as a run
+            // of lines (#350). Said at WARN because a calendar that is read and
+            // not published is not a detail: it is an agenda the owner has and
+            // their assistant does not, and the free/busy built from it will
+             // describe a week they are not living.
+            let refused = self
+                .refused
+                .load(Ordering::Relaxed)
+                .saturating_sub(refused_before);
+            if refused > 0 {
+                warn!(
+                    calendar = %calendar.id,
+                    refused,
+                    read = resources.len(),
+                    "resources of this calendar were read and not published; the lines above say \
+                     why, one per resource"
+                );
+            }
             if first_poll {
                 // No backfill: what the calendar already holds is taken as
                 // the state, published as nothing.
@@ -335,6 +368,7 @@ impl Calendars {
             } else {
                 poll.envelopes.extend(envelopes);
             }
+            poll.refused += refused;
             poll.cursors.push((calendar.id.clone(), next));
         }
         Ok(poll)
@@ -440,6 +474,7 @@ impl Calendars {
                 |identity| self.decide(identity),
             )),
             Err(error) => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
                 warn!(href = %resource.href, error = %format!("{error:#}"), "the resource is not a VEVENT this collector reads; nothing published");
                 None
             }
@@ -686,10 +721,17 @@ fn tzid_in(body: &str) -> Option<String> {
         .find(|c: char| c == '\r' || c == '\n' || c == '<' || c == '&')
         .unwrap_or(rest.len());
     let name = rest[..end].trim();
-    // A zone is an IANA name, and this is the whole check: anything with a
-    // space or a slash-less shape is something else that happened to follow
-    // the letters TZID — say nothing rather than hand a model a word.
-    (!name.is_empty() && !name.contains(' ') && name.len() < 64).then(|| name.to_owned())
+    // A zone this collector can read, and its **IANA** name — not the word the
+    // collection wrote (#350). The shape check this replaces refused anything
+    // with a space, which refused every Outlook-shaped calendar: those declare
+    // `TZID:Romance Standard Time`, and a deployment whose collection says so
+    // was read as declaring nothing at all. It also let `Europe/Pariss`
+    // through, to fail two modules later.
+    //
+    // Reading it through the table is both halves at once: a name in neither
+    // family is still nothing, and a name in either is stored as the zone it
+    // means, so the owner's zone is an IANA name wherever it came from (#369).
+    crate::zones::read(name).map(|zone| zone.name().to_owned())
 }
 
 #[cfg(test)]
@@ -748,10 +790,20 @@ mod tests {
         // the `207`, and there is no TZID anywhere in it.
         assert_eq!(tzid_in("<d:prop><cal:calendar-timezone/></d:prop>"), None);
 
-        // And a word that follows the letters TZID without being a zone is
-        // not handed to a model to put in a sentence: Windows spells its
-        // zones with spaces, and no converter this side knows them.
-        assert_eq!(tzid_in("TZID: Romance Standard Time\r\n"), None);
+        // A Windows name is a zone this collector reads, and it is stored as
+        // the zone it means rather than as the word Outlook wrote (#350).
+        // Before that, a collection declaring one was read as declaring
+        // nothing, because the check refused any name with a space in it.
+        assert_eq!(
+            tzid_in("TZID: Romance Standard Time\r\n").as_deref(),
+            Some("Europe/Paris")
+        );
+
+        // And a word that follows the letters TZID without being a zone in
+        // either family is still nothing: it is not handed to a model to put
+        // in a sentence, and it is not guessed at.
+        assert_eq!(tzid_in("TZID:Not A Zone At All\r\n"), None);
+        assert_eq!(tzid_in("TZID:Europe/Pariss\r\n"), None);
         assert_eq!(tzid_in("TZID:\r\n"), None);
     }
 }
