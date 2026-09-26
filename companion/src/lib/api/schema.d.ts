@@ -4241,6 +4241,71 @@ export interface components {
             given_up: null | components["schemas"]["GivenUpReport"];
             /** @description The network the message it answers arrived on. */
             network: components["schemas"]["Network"];
+            /**
+             * @description What the draft did before it was written (#367), oldest first:
+             *     the governed reads it made and the questions it put to the owner.
+             *
+             *     The reason this member exists is the reason the autonomy is safe
+             *     to want. A draft that read a calendar, asked a question and then
+             *     wrote is more useful than one that guessed, and less transparent
+             *     — the owner approves an outcome whose path they did not see.
+             *     Every step of it is already journalled, so the screen shows it,
+             *     and the approval then covers the path as well as the text.
+             *
+             *     Always an array. Empty for a draft that looked nothing up, which
+             *     is every suggestion made before #363 and every message that
+             *     needed nothing: empty is a fact, not a gap.
+             *
+             *     What is never here is what a step *learned*. A read's intervals
+             *     are counted, never kept; a question's answer lives in the
+             *     owner's own channel. This is the path, not a transcript.
+             */
+            path: ({
+                /** Format: date-time */
+                at: string;
+                /**
+                 * Format: date-time
+                 * @description The window the read asked for.
+                 */
+                from: string;
+                /**
+                 * @description How many busy intervals came back, or `null` on a
+                 *     refusal — which a screen must not render as `0`, since
+                 *     that reads as an empty agenda.
+                 */
+                intervals?: null | number;
+                /** @enum {string} */
+                kind: "freebusy";
+                /** @description `served`, or the code the read was refused with. */
+                outcome: string;
+                /** Format: date-time */
+                to: string;
+            } | {
+                /** Format: date-time */
+                at: string;
+                /**
+                 * @description Whether this deployment held the event at all; `null`
+                 *     on a refusal.
+                 */
+                found?: null | boolean;
+                /** @enum {string} */
+                kind: "event_facts";
+                outcome: string;
+                /** @description The event asked about, by its iCalendar UID. */
+                uid: string;
+            } | {
+                /**
+                 * @description The question the agent put to the owner, in its own
+                 *     words — never a quotation of the contact (#360's rule,
+                 *     ADR 0012's line). The owner's answer is not here: it
+                 *     lives in the channel where they wrote it.
+                 */
+                asked: string;
+                /** Format: date-time */
+                at: string;
+                /** @enum {string} */
+                kind: "asked";
+            })[];
             /** @description The persona that proposed it. */
             persona_id: string;
             /**

@@ -47,6 +47,7 @@ function suggestion(over: Partial<Suggestion> = {}): Suggestion {
 		delivery: { reach: 'unknown', detail: 'not_a_known_portal' },
 		posted: null,
 		given_up: null,
+		path: [],
 		...over
 	} as Suggestion;
 }
@@ -402,5 +403,49 @@ describe('the disclosure (#121)', () => {
 		const row = toRow(suggestion({ disclosure: null }));
 		expect(row.disclosure).toBeNull();
 		expect(row.body).toBe('Pas de problème, à 20h !');
+	});
+});
+
+describe('what the draft did before it wrote (#367)', () => {
+	it('carries the path onto the row, in the order the screen draws it', () => {
+		const row = toRow(
+			suggestion({
+				path: [
+					{
+						kind: 'freebusy',
+						at: '2026-09-26T09:00:00Z',
+						from: '2026-09-28T06:00:00Z',
+						to: '2026-10-02T18:00:00Z',
+						outcome: 'served',
+						intervals: 4
+					},
+					{ kind: 'asked', at: '2026-09-26T09:01:00Z', asked: 'de quel projet il parle' }
+				]
+			} as Partial<Suggestion>)
+		);
+		expect(row.path.map((step) => step.kind)).toEqual(['freebusy', 'asked']);
+	});
+
+	it('is an empty list, never undefined, for a Gateway that answers none', () => {
+		// A suggestion from before #367, or a Gateway not yet updated: the
+		// screen must render nothing rather than branch on a missing member.
+		const older = suggestion();
+		delete (older as Record<string, unknown>).path;
+		expect(toRow(older).path).toEqual([]);
+	});
+
+	it('carries nothing a step learned, and nothing about the contact', () => {
+		// The property, asserted on the value: a path is what happened, not a
+		// transcript. A read's intervals are a count; a question is the
+		// assistant's own words.
+		const row = toRow(
+			suggestion({
+				path: [{ kind: 'asked', at: '2026-09-26T09:01:00Z', asked: 'de quel projet il parle' }]
+			} as Partial<Suggestion>)
+		);
+		const rendered = JSON.stringify(row.path);
+		for (const marker of ['@whatsapp_33612345678', 'Aïcha', '+33612345678']) {
+			expect(rendered).not.toContain(marker);
+		}
 	});
 });

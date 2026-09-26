@@ -582,6 +582,85 @@ async fn a_wake_that_asks_the_owner_is_recorded_and_is_not_a_refusal() -> Result
     Ok(())
 }
 
+/// #367's second half: the approval screen shows what the draft **did**.
+///
+/// A draft that read a calendar, asked a question and then wrote is more
+/// useful than one that guessed, and less transparent — the owner approves an
+/// outcome whose path they did not see. Every step of it is journalled, so
+/// this proves the screen can show it: one wake defers with a question, the
+/// next drafts, and the suggestion the owner reads carries both facts.
+#[tokio::test]
+async fn a_suggestion_carries_what_the_draft_did_before_it_wrote() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-path").await?;
+    let (contact, room) = conversation("path");
+
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    // First wake: it needs something only the owner can say, and asks.
+    let asked = "Je lui demande de quel projet il parle avant de proposer une date.";
+    let push = hermes_push(&harness::hermes_deferral(
+        &hermes_reference("assistant", &trigger_id, 1),
+        asked,
+    ));
+    let deferred = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    assert_eq!(deferred.status().as_u16(), 200);
+
+    // Second wake, the owner having answered in their channel: the draft.
+    let reference = hermes_reference("assistant", &trigger_id, 2);
+    let (status, body) = running.answer(&reference, Some("fr")).await?;
+    assert_eq!(status, 200, "{body}");
+    let suggestion_id = body["suggestion_event_id"].as_str().unwrap().to_owned();
+
+    let (status, listing) = running
+        .get(&format!("/api/suggestions/{suggestion_id}"))
+        .await?;
+    assert_eq!(status, 200, "{listing}");
+    let path = listing["path"].as_array().expect("an array");
+    assert_eq!(
+        path.len(),
+        1,
+        "the question the draft asked is the path the owner reads: {listing}"
+    );
+    assert_eq!(path[0]["kind"], "asked");
+    assert_eq!(path[0]["asked"], asked);
+    assert!(
+        path[0]["at"].as_str().is_some_and(|at| at.len() >= 20),
+        "each step says when it happened: {listing}"
+    );
+
+    // The join is the reference, and the reference names *this* message: a
+    // question asked about another message must not appear on this one.
+    let (other_contact, other_room) = conversation("pathelsewhere");
+    running.decide(&other_contact, "granted").await?;
+    let other = inbound_event(&other_contact, &other_room, "granted");
+    let other_id = other["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &other).await?;
+    let elsewhere = hermes_push(&harness::hermes_deferral(
+        &hermes_reference("assistant", &other_id, 1),
+        "Une question sur un tout autre message",
+    ));
+    post_hermes_answer(
+        &running.base,
+        Some(&hermes_signature(&elsewhere)),
+        &elsewhere,
+    )
+    .await?;
+    let (_, listing) = running
+        .get(&format!("/api/suggestions/{suggestion_id}"))
+        .await?;
+    assert_eq!(
+        listing["path"].as_array().map(Vec::len),
+        Some(1),
+        "a question about another message reached this one's path: {listing}"
+    );
+    Ok(())
+}
+
 /// #360: what a suggestion answers, on the path this deployment runs.
 ///
 /// #334 gave `persona.suggest.produced.v1` a `context` and built everything

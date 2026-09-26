@@ -822,6 +822,51 @@ pub const MIGRATIONS: [&str; 15] = [
     "#,
 ];
 
+/// One thing a draft did before it was written (#367).
+///
+/// Three kinds because they are three different sentences on the approval
+/// screen — *it read your calendar*, *it asked what that meeting carries*,
+/// *it asked you something* — and folding them into one shape with optional
+/// members is how a screen acquires a branch per member.
+///
+/// What is **not** here is what any of them learned. A read's intervals are
+/// counted, never kept (that is `hermes_read`'s own decision, v11), and a
+/// question's answer lives in the owner's channel where they can read it.
+/// This is the path, not a transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// A free/busy read: the window asked for, and how it went.
+    FreeBusy {
+        from: String,
+        to: String,
+        /// `served`, or the code it was refused with.
+        outcome: String,
+        /// How many busy intervals came back; `None` on a refusal.
+        intervals: Option<u64>,
+        at: String,
+    },
+    /// A read of what one of the owner's events carries.
+    EventFacts {
+        uid: String,
+        outcome: String,
+        /// Whether this deployment held the event at all; `None` on a
+        /// refusal.
+        found: Option<bool>,
+        at: String,
+    },
+    /// A question put to the owner, in the agent's own words.
+    Asked { asked: String, at: String },
+}
+
+impl Step {
+    /// When it happened, for the one ordering that matters.
+    pub fn at(&self) -> &str {
+        match self {
+            Step::FreeBusy { at, .. } | Step::EventFacts { at, .. } | Step::Asked { at, .. } => at,
+        }
+    }
+}
+
 /// One switch's journal: the table its rows live in, the noun a failure
 /// names it by, and what it ships as. Not a string a caller passes — the
 /// two constants below are every value this type takes, which is what lets
@@ -1834,19 +1879,74 @@ impl Store {
         Ok(())
     }
 
-    /// What was asked about one trigger, oldest first: the path a draft took
-    /// before it was written, for the approval screen that has to show it.
-    pub fn hermes_deferrals(&self, trigger_event_id: &str) -> Result<Vec<(String, String)>> {
+    /// What a draft did before it was written, oldest first (#367): the
+    /// governed reads it made and the questions it put to the owner.
+    ///
+    /// The three journals are joined on the message, and this is the moment
+    /// a decision taken for another reason pays off. A read records the
+    /// `delivery` its caller named it by, and since #363 the skill tells the
+    /// agent to put **the reference it was given** there — so a read made
+    /// for this message carries this message's id inside that column, and a
+    /// read made for another does not. Deferrals name the trigger outright.
+    ///
+    /// Without that, a read could not be attributed to a message at all and
+    /// this screen could only ever have said "some reads happened today".
+    ///
+    /// Ordered by the instant each was recorded, across all three: what the
+    /// owner needs is the sequence of what their assistant did, not three
+    /// lists to interleave by eye. The instants are the same format
+    /// throughout, so the comparison is the string's.
+    pub fn hermes_path(&self, trigger_event_id: &str) -> Result<Vec<Step>> {
         let connection = self.connection();
-        let mut statement = connection.prepare(
-            "SELECT asked, deferred_at FROM hermes_deferral
-             WHERE trigger_event_id = ? ORDER BY sequence",
+        let named = format!("%{trigger_event_id}%");
+        let mut steps = Vec::new();
+
+        let mut reads = connection.prepare(
+            "SELECT window_from, window_to, outcome, intervals, requested_at
+             FROM hermes_read WHERE delivery LIKE ?1 ORDER BY sequence",
         )?;
-        let rows = statement
-            .query_map([trigger_event_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to read the deferrals of a trigger")?;
-        Ok(rows)
+        for step in reads.query_map([&named], |row| {
+            Ok(Step::FreeBusy {
+                from: row.get(0)?,
+                to: row.get(1)?,
+                outcome: row.get(2)?,
+                intervals: row.get::<_, Option<i64>>(3)?.map(|count| count as u64),
+                at: row.get(4)?,
+            })
+        })? {
+            steps.push(step.context("failed to read a free/busy step")?);
+        }
+
+        let mut events = connection.prepare(
+            "SELECT uid, outcome, found, requested_at
+             FROM hermes_event_read WHERE delivery LIKE ?1 ORDER BY sequence",
+        )?;
+        for step in events.query_map([&named], |row| {
+            Ok(Step::EventFacts {
+                uid: row.get(0)?,
+                outcome: row.get(1)?,
+                found: row.get::<_, Option<i64>>(2)?.map(|found| found != 0),
+                at: row.get(3)?,
+            })
+        })? {
+            steps.push(step.context("failed to read an event-facts step")?);
+        }
+
+        let mut asked = connection.prepare(
+            "SELECT asked, deferred_at FROM hermes_deferral
+             WHERE trigger_event_id = ?1 ORDER BY sequence",
+        )?;
+        for step in asked.query_map([trigger_event_id], |row| {
+            Ok(Step::Asked {
+                asked: row.get(0)?,
+                at: row.get(1)?,
+            })
+        })? {
+            steps.push(step.context("failed to read a question step")?);
+        }
+
+        steps.sort_by(|left, right| left.at().cmp(right.at()));
+        Ok(steps)
     }
 
     /// The most recent transitions, newest first, for the dashboard's feed.
