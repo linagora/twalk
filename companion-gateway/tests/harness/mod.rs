@@ -1334,6 +1334,12 @@ pub fn hermes_answer_saying(
     answer.to_string()
 }
 
+/// A wake that ends in a question to the owner instead of a draft (#367):
+/// the reference, and what the agent says it needs, and no reply at all.
+pub fn hermes_deferral(reference: &str, asked: &str) -> String {
+    serde_json::json!({ "reference": reference, "deferred": asked }).to_string()
+}
+
 /// The `TWALK-REF:` token a persona puts in a wake and Hermes copies back.
 pub fn hermes_reference(persona_id: &str, trigger_event_id: &str, attempt: u64) -> String {
     format!("TWALK-REF:{persona_id}:{trigger_event_id}:{attempt}")

@@ -137,12 +137,19 @@ struct Running {
     base: String,
     device: String,
     http: reqwest::Client,
+    /// Where the store is, for the one test that reads a journal rather than
+    /// the bus: a deferral publishes nothing, so the record is the only
+    /// place it exists (#367).
+    state_dir: std::path::PathBuf,
 }
 
 impl Running {
     async fn start(test_name: &str) -> Result<Self> {
         let static_dir = companion_build(test_name)?;
-        Self::start_with(gateway_env_with_hermes(&static_dir, &nats_url())).await
+        let state_dir = harness::gateway_state_dir(&static_dir);
+        let mut running = Self::start_with(gateway_env_with_hermes(&static_dir, &nats_url())).await?;
+        running.state_dir = state_dir;
+        Ok(running)
     }
 
     async fn start_with(env: Vec<(String, String)>) -> Result<Self> {
@@ -165,6 +172,7 @@ impl Running {
             base,
             device,
             http: reqwest::Client::new(),
+            state_dir: std::path::PathBuf::new(),
         })
     }
 
@@ -480,6 +488,97 @@ async fn a_language_the_contract_has_no_sentence_for_is_refused_counted_and_neve
         Some(1),
         "the refusal is counted under its own code: {metrics}"
     );
+    Ok(())
+}
+
+/// #367: a wake may end in a question to the owner instead of a draft.
+///
+/// The owner asked for this in their own words — Hermes must be able to take
+/// initiative across turns, and when it needs them, to ask in the channel
+/// where the two of them talk. The Gateway's part is to have a word for it:
+/// before this, an answer with no reply was read as unreadable and counted as
+/// a refusal, which is a statement that something went wrong when nothing had.
+#[tokio::test]
+async fn a_wake_that_asks_the_owner_is_recorded_and_is_not_a_refusal() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-deferred").await?;
+    let (contact, room) = conversation("deferred");
+
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let reference = hermes_reference("assistant", &trigger_id, 1);
+    let push = hermes_push(&harness::hermes_deferral(
+        &reference,
+        "Je lui demande de quel projet il parle avant de proposer une date.",
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_str(&response.text().await?)?;
+
+    // A `200`, because the agent did the right thing.
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "deferred");
+    assert_eq!(body["trigger_event_id"], trigger_id);
+
+    // And no suggestion: there is nothing to approve yet, which is the whole
+    // point of saying so rather than drafting blind.
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a wake that deferred published a suggestion anyway"
+    );
+
+    // The journal is where a deferral exists at all, since nothing is
+    // published: the owner's record says what their draft was waiting for.
+    let asked = rusqlite::Connection::open_with_flags(
+        running.state_dir.join("consent.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?
+    .prepare("SELECT trigger_event_id, persona_id, attempt, asked FROM hermes_deferral")?
+    .query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?
+    .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(asked.len(), 1, "the deferral is one row: {asked:?}");
+    assert_eq!(asked[0].0, trigger_id);
+    assert_eq!(asked[0].1, "assistant");
+    assert_eq!(asked[0].2, 1);
+    assert!(
+        asked[0].3.starts_with("Je lui demande de quel projet"),
+        "the record keeps what the agent asked, in its own words: {:?}",
+        asked[0].3
+    );
+
+    // Counted apart from every refusal, so that "how often does my assistant
+    // need me" is a question an operator can answer.
+    let metrics = reqwest::get(format!("{}/metrics", running.base))
+        .await?
+        .text()
+        .await?;
+    let counted = harness::parse_exposition(&metrics)
+        .into_iter()
+        .find(|(name, _)| {
+            name == "twalk_companion_gateway_hermes_answers_total{outcome=\"deferred\"}"
+        })
+        .map(|(_, count)| count);
+    assert_eq!(counted, Some(1), "a deferral is its own outcome: {metrics}");
+    for refused in ["hermes_answer_is_empty", "hermes_answer_unreadable"] {
+        assert!(
+            !metrics.contains(&format!(
+                "twalk_companion_gateway_hermes_answers_total{{outcome=\"{refused}\"}} 1"
+            )),
+            "a question to the owner was counted as {refused}: {metrics}"
+        );
+    }
     Ok(())
 }
 

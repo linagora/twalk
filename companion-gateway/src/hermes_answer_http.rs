@@ -81,6 +81,16 @@ async fn receive_answer(
             })),
         )
             .into_response(),
+        // Also a `200`, and for a stronger reason: the agent did the right
+        // thing (#367). It needed something only the owner can say, asked
+        // them in their own channel, and told this Gateway so — which is a
+        // line in the owner's journal, not a failure. The `4xx` this used to
+        // be was the route reading a question as an unreadable answer.
+        Ok(Received::Deferred { trigger_event_id }) => (
+            StatusCode::OK,
+            Json(json!({ "status": "deferred", "trigger_event_id": trigger_event_id })),
+        )
+            .into_response(),
         // A `200` on purpose: a turn that was never a Twalk wake is not a
         // failure, and a `4xx` would teach an operator to ignore this endpoint's
         // errors. The reason is in the answer and in `/metrics`.

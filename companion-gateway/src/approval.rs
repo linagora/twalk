@@ -1277,6 +1277,14 @@ impl Approvals {
         self.lookup_window
     }
 
+    /// The store these approvals write to, for the one caller that needs to
+    /// write beside them rather than through them: the answers' deferral
+    /// journal (#367). Narrow on purpose — a second component holding the
+    /// store is how two components acquire two opinions about it.
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
     /// Finds one inbound message on the bus by its CloudEvents id, and reads
     /// the attributes a `persona.*` envelope copies from it.
     ///

@@ -213,6 +213,41 @@ pub struct Answer {
     pub summary: Option<String>,
 }
 
+/// A wake that ended in a question to the owner instead of a draft (#367).
+///
+/// The owner asked for this in their own words: Hermes must be able to take
+/// initiative across turns, and when it needs them, to post in the channel
+/// where the two of them talk, so that they can answer and it can then write
+/// the best reply to approve. The Gateway's part is to have a **word** for
+/// that, because until it did, an agent that stopped to ask produced an
+/// answer with no reply — which this route read as unreadable and counted as
+/// a refusal. A refusal is a statement that something went wrong, and
+/// nothing had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deferral {
+    pub reference: Reference,
+    /// What the agent says it needs, in its own words — for the owner's
+    /// record, never a quotation of the contact (#360's rule, ADR 0012's
+    /// line). It is not sent anywhere: the question itself reaches the owner
+    /// through their own channel, which is Hermes's side of the seam.
+    pub asked: String,
+}
+
+/// What an answer turns out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// A draft, which becomes a suggestion.
+    Drafted(Answer),
+    /// A question put to the owner, which becomes a line in their journal
+    /// and no suggestion.
+    Deferred(Deferral),
+}
+
+/// The most a deferral's question may carry in the record. The same cap as a
+/// summary's, for the same reason: it is a sentence a human reads on a
+/// screen, not a document.
+pub const MAX_ASKED: usize = MAX_SUMMARY;
+
 /// The most a summary may carry, as `persona.suggest.produced.v1`'s
 /// `data.context.summary` allows. Two sentences, which is what the member
 /// was specified as and what an approval surface can show above a draft.
@@ -289,6 +324,65 @@ impl Reference {
 /// A fenced code block is unwrapped first, because a model asked for JSON
 /// writes ```` ```json ```` in front of it often enough that refusing one
 /// would make this seam look broken when it is working.
+/// Which of the two an answer is, and then the rules for that one (#367).
+///
+/// The deferral is looked for **first** and on one member only, because the
+/// two shapes are told apart by intent rather than by what is missing: an
+/// answer that says `deferred` is one whose agent decided not to draft yet,
+/// and an answer without a reply that says nothing about why is still the
+/// unreadable answer it always was. A model that sends both is drafting —
+/// the draft is the thing a human can act on, so it wins, and the question
+/// it also asked is not lost because the reply is what the owner reads.
+pub fn parse_outcome(written: &str) -> Result<Outcome, AnswerRefusal> {
+    let text = unfence(written.trim());
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        // Not JSON at all: the draft path owns that refusal and its message.
+        return parse_answer(written).map(Outcome::Drafted);
+    };
+    let Some(object) = value.as_object() else {
+        return parse_answer(written).map(Outcome::Drafted);
+    };
+    let drafted = object
+        .get("reply")
+        .and_then(Value::as_str)
+        .is_some_and(|reply| !reply.trim().is_empty());
+    let asked = match object.get("deferred") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(asked)) => Some(asked.trim().to_owned()),
+        Some(_) => {
+            return Err(AnswerRefusal::Unreadable(
+                "the answer's deferred is a string when it is there: what you need from the \
+                 user, in your own words"
+                    .to_owned(),
+            ))
+        }
+    };
+    match asked {
+        Some(asked) if !drafted => {
+            if asked.is_empty() {
+                return Err(AnswerRefusal::EmptyDeferral);
+            }
+            let asked = if asked.chars().count() > MAX_ASKED {
+                // Trimmed, not refused, and this is the one member where that
+                // is right: the question has already reached the owner in
+                // their channel, so refusing the record would lose the trace
+                // of something that happened rather than prevent it.
+                asked.chars().take(MAX_ASKED).collect()
+            } else {
+                asked
+            };
+            let reference = object
+                .get("reference")
+                .and_then(Value::as_str)
+                .and_then(Reference::find)
+                .or_else(|| Reference::find(text))
+                .ok_or(AnswerRefusal::NoReference)?;
+            Ok(Outcome::Deferred(Deferral { reference, asked }))
+        }
+        _ => parse_answer(written).map(Outcome::Drafted),
+    }
+}
+
 pub fn parse_answer(written: &str) -> Result<Answer, AnswerRefusal> {
     let text = unfence(written.trim());
     let value: Value = serde_json::from_str(text).map_err(|error| {
@@ -448,6 +542,9 @@ pub enum AnswerRefusal {
     EmptySummary,
     /// A `summary` longer than the contract's member allows.
     SummaryTooLong(usize),
+    /// A `deferred` that is there and says nothing (#367): an agent that
+    /// stopped to ask the owner something, without saying what.
+    EmptyDeferral,
     /// A fact the approval path establishes the same way.
     Shared(Refusal),
 }
@@ -473,6 +570,7 @@ impl AnswerRefusal {
             AnswerRefusal::ReplyTooLong(_) => "hermes_answer_too_long",
             AnswerRefusal::EmptySummary => "hermes_answer_summary_is_empty",
             AnswerRefusal::SummaryTooLong(_) => "hermes_answer_summary_too_long",
+            AnswerRefusal::EmptyDeferral => "hermes_answer_deferral_is_empty",
             AnswerRefusal::Shared(refusal) => refusal.code(),
         }
     }
@@ -495,7 +593,8 @@ impl AnswerRefusal {
             | AnswerRefusal::EmptyReply
             | AnswerRefusal::ReplyTooLong(_)
             | AnswerRefusal::EmptySummary
-            | AnswerRefusal::SummaryTooLong(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | AnswerRefusal::SummaryTooLong(_)
+            | AnswerRefusal::EmptyDeferral => StatusCode::UNPROCESSABLE_ENTITY,
             AnswerRefusal::Shared(refusal) => refusal.status(),
         }
     }
@@ -554,6 +653,11 @@ impl AnswerRefusal {
                  the silence this member exists to end."
                     .to_owned()
             }
+            AnswerRefusal::EmptyDeferral => "the answer defers and says nothing about what it \
+                 needs. `deferred` is the question you put to the user, in your own words, so \
+                 that their own record says what the draft was waiting for. Leave the member \
+                 out to draft normally."
+                .to_owned(),
             AnswerRefusal::SummaryTooLong(length) => format!(
                 "the answer's summary is {length} characters and the limit is {MAX_SUMMARY}: it \
                  is two sentences about what the message asks, read above a draft, and not a \
@@ -583,6 +687,10 @@ pub enum Received {
         language: String,
         stream_sequence: u64,
     },
+    /// The wake ended in a question to the owner (#367): recorded in their
+    /// journal, counted apart from refusals, and no suggestion. Answered
+    /// `200`, because nothing went wrong.
+    Deferred { trigger_event_id: String },
     /// Not a Twalk wake. Counted and answered `200`: see the module docstring.
     Ignored { reason: &'static str },
 }
@@ -668,7 +776,10 @@ impl Answers {
         }
         self.fresh(&push.timestamp)?;
 
-        let answer = parse_answer(&push.extra.response_text)?;
+        let answer = match parse_outcome(&push.extra.response_text)? {
+            Outcome::Drafted(answer) => answer,
+            Outcome::Deferred(deferral) => return self.defer(deferral).await,
+        };
         let trigger = self
             .approvals
             .trigger_envelope(&answer.reference.trigger_event_id)
@@ -718,6 +829,44 @@ impl Answers {
             suggestion_event_id,
             language: answer.language,
             stream_sequence,
+        })
+    }
+
+    /// A wake that ended in a question to the owner instead of a draft
+    /// (#367): the trigger is still checked, the consent is still checked,
+    /// and then the question is written into the owner's journal and nothing
+    /// is published.
+    ///
+    /// The two checks are not skipped, although no suggestion comes of it.
+    /// A deferral names a trigger, and a reference naming a message this
+    /// deployment never received, or a contact whose consent was revoked
+    /// since, is the same refusal here as on the drafting path — otherwise
+    /// `deferred` would be a way to write a line about somebody into the
+    /// owner's journal without passing the gate the draft passes.
+    async fn defer(&self, deferral: Deferral) -> Result<Received, AnswerRefusal> {
+        let trigger = self
+            .approvals
+            .trigger_envelope(&deferral.reference.trigger_event_id)
+            .await?;
+        self.approvals
+            .consent_now(&trigger.contact, &trigger.connection, trigger.network)?;
+        let deferred_at = rfc3339_seconds((self.now)());
+        self.approvals
+            .store()
+            .record_hermes_deferral(&deferral, &deferred_at)
+            .map_err(|error| {
+                warn!(%error, "a deferral could not be recorded");
+                AnswerRefusal::Shared(Refusal::StoreUnavailable(format!("{error:#}")))
+            })?;
+        self.metrics.record_hermes_answer("deferred");
+        info!(
+            trigger = %deferral.reference.trigger_event_id,
+            persona = %deferral.reference.persona_id,
+            attempt = deferral.reference.attempt,
+            "hermes asked the owner something instead of drafting"
+        );
+        Ok(Received::Deferred {
+            trigger_event_id: deferral.reference.trigger_event_id,
         })
     }
 
@@ -961,6 +1110,86 @@ mod tests {
     use super::*;
 
     const TRIGGER: &str = "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0";
+
+    #[test]
+    fn a_wake_may_end_in_a_question_to_the_owner_instead_of_a_draft() {
+        // #367: the agent needed something only the owner can say, asked
+        // them in their channel, and says so here. Not a refusal — nothing
+        // went wrong — and not a suggestion either.
+        let outcome = parse_outcome(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1",
+                 "deferred": "Je lui demande de quel projet il parle avant de proposer une date."}}"#
+        ))
+        .expect("a deferral");
+        let Outcome::Deferred(deferral) = outcome else {
+            panic!("a deferral was read as a draft: {outcome:?}");
+        };
+        assert_eq!(deferral.reference.trigger_event_id, TRIGGER);
+        assert!(deferral.asked.starts_with("Je lui demande"));
+    }
+
+    #[test]
+    fn an_answer_that_both_drafts_and_asks_is_a_draft() {
+        // The draft is the thing a human can act on, so it wins. An agent
+        // that wrote a reply *and* a question has given the owner something
+        // to approve, and holding that back over the question would be
+        // refusing the useful half.
+        let outcome = parse_outcome(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "reply": "Jeudi me va",
+                 "language": "fr", "deferred": "je me demande si"}}"#
+        ))
+        .expect("a draft");
+        assert!(
+            matches!(outcome, Outcome::Drafted(_)),
+            "the draft was held back for the question beside it: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_reply_and_no_reason_is_the_refusal_it_always_was() {
+        // The two shapes are told apart by intent, not by what is missing:
+        // `deferred` is a decision, and an answer without a reply that says
+        // nothing about why is still unreadable. Otherwise every empty
+        // answer would quietly become a deferral and the owner's journal
+        // would fill with questions nobody asked.
+        let refusal = parse_outcome(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "reply": "", "language": "fr"}}"#
+        ))
+        .expect_err("a refusal");
+        assert_eq!(refusal.code(), "hermes_answer_is_empty");
+    }
+
+    #[test]
+    fn a_deferral_that_says_nothing_is_refused_and_one_too_long_is_kept() {
+        let refusal = parse_outcome(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "deferred": "   "}}"#
+        ))
+        .expect_err("a refusal");
+        assert_eq!(refusal.code(), "hermes_answer_deferral_is_empty");
+        assert_eq!(refusal.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Trimmed rather than refused, and this is the one member where that
+        // is right: the question has already reached the owner, so refusing
+        // the record would lose the trace of something that happened.
+        let long = "x".repeat(MAX_ASKED + 40);
+        let outcome = parse_outcome(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "deferred": "{long}"}}"#
+        ))
+        .expect("a deferral");
+        let Outcome::Deferred(deferral) = outcome else {
+            panic!("not a deferral");
+        };
+        assert_eq!(deferral.asked.chars().count(), MAX_ASKED);
+    }
+
+    #[test]
+    fn a_deferral_that_is_not_a_string_is_unreadable() {
+        let refusal = parse_outcome(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "deferred": true}}"#
+        ))
+        .expect_err("a refusal");
+        assert_eq!(refusal.code(), "hermes_answer_unreadable");
+    }
 
     #[test]
     fn a_reference_is_found_wherever_a_model_put_it() {

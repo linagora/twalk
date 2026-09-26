@@ -3131,9 +3131,9 @@ export interface components {
             version: string;
         };
         /**
-         * @description What became of one push: a suggestion, or an ignored run. Two shapes
-         *     rather than one with optional members, because "published" and
-         *     "ignored" are different facts and a client should not have to
+         * @description What became of one push: a suggestion, a question put to the owner, or
+         *     an ignored run. Separate shapes rather than one with optional members,
+         *     because these are different facts and a client should not have to
          *     discover which by looking for a null.
          */
         HermesAnswerAccepted: {
@@ -3154,6 +3154,19 @@ export interface components {
              *     the idempotency key the persona gave Hermes for the wake.
              */
             suggestion_event_id: string;
+        } | {
+            /**
+             * @description The wake ended in a question to the owner instead of a draft
+             *     (#367): the agent needed something only they can say and
+             *     asked them in their own channel. Recorded in the owner's
+             *     journal, counted on `/metrics` under `deferred`, and no
+             *     suggestion — there is nothing to approve yet, which is the
+             *     point of saying so rather than drafting blind.
+             * @enum {string}
+             */
+            status: "deferred";
+            /** @description The message the question is about. */
+            trigger_event_id: string;
         } | {
             /**
              * @description Why this push was not a Twalk wake. Counted on `/metrics`
@@ -3187,8 +3200,18 @@ export interface components {
                 /**
                  * @description What the model wrote: a JSON object with `reference`, `reply`
                  *     and `language` — a BCP 47 tag whose primary subtag must be one
-                 *     the contract holds a disclosure sentence for. A fenced code
-                 *     block around it is unwrapped.
+                 *     the contract holds a disclosure sentence for — and optionally
+                 *     `summary`, what the message asks in the agent's own words
+                 *     (#360). A fenced code block around it is unwrapped.
+                 *
+                 *     **Or a deferral** (#367): `reference` and `deferred`, the
+                 *     question the agent put to the owner in their own channel, and
+                 *     no reply. That is not a refusal and produces no suggestion —
+                 *     the agent decided it needed something only the owner can say.
+                 *     An answer with no reply and no `deferred` is still the
+                 *     unreadable answer it always was: the two shapes are told apart
+                 *     by intent, not by what is missing. One carrying both is read
+                 *     as a draft, because the draft is the thing a human can act on.
                  */
                 response_text: string;
                 /** @description Hermes's own session key. Logged, never the correlation. */
@@ -4864,11 +4887,14 @@ export interface operations {
         };
         responses: {
             /**
-             * @description Either the answer became a suggestion (`status: "published"`, with
-             *     the suggestion's CloudEvents id, the language its disclosure was
-             *     selected by and the stream position it landed at) or the push was
-             *     not a Twalk wake and was ignored (`status: "ignored"`, with the
-             *     reason, also counted on `/metrics`).
+             * @description One of three. The answer became a suggestion (`status:
+             *     "published"`, with the suggestion's CloudEvents id, the language
+             *     its disclosure was selected by and the stream position it landed
+             *     at); the wake ended in a question to the owner instead of a draft
+             *     (`status: "deferred"`, with the message it is about — #367); or
+             *     the push was not a Twalk wake and was ignored (`status:
+             *     "ignored"`, with the reason). All three are counted on
+             *     `/metrics`.
              */
             200: {
                 headers: {
