@@ -309,13 +309,25 @@ export function calendarLocationRecord(
 /** The owner's working day as the Gateway answers it (#381). */
 export type WorkingDayState = components['schemas']['WorkingDayState'];
 
+/** One day's own hours, while the user edits them (#386). */
+export interface DayHours {
+	startsAt: string;
+	endsAt: string;
+}
+
 /** What the working-day form holds while the user edits it. */
 export interface WorkingDayForm {
 	/** The ISO weekdays ticked, 1 for Monday. */
 	days: number[];
-	/** `HH:MM`, as a time input gives them. */
+	/** `HH:MM`, as a time input gives them — the **default** amplitude. */
 	startsAt: string;
 	endsAt: string;
+	/**
+	 * The days that run other hours (#386), by ISO weekday. A day that is not
+	 * here runs the default: absence means *as usual*, never *no meetings*,
+	 * which is what the ticked days above are for.
+	 */
+	exceptions: Record<number, DayHours>;
 }
 
 /** The form a state reads back into, or the shape a first visit starts from. */
@@ -326,9 +338,67 @@ export function workingDayForm(state: WorkingDayState | null): WorkingDayForm {
 		// because a form nobody can submit teaches nothing — but the *state*
 		// stays unset until they press the button, so no default is recorded
 		// on their behalf.
-		return { days: [1, 2, 3, 4, 5], startsAt: '09:00', endsAt: '18:00' };
+		return { days: [1, 2, 3, 4, 5], startsAt: '09:00', endsAt: '18:00', exceptions: {} };
 	}
-	return { days: [...day.days], startsAt: day.starts_at, endsAt: day.ends_at };
+	const exceptions: Record<number, DayHours> = {};
+	for (const [weekday, hours] of Object.entries(day.exceptions ?? {})) {
+		const numbered = Number(weekday);
+		if (Number.isInteger(numbered) && hours !== undefined) {
+			exceptions[numbered] = { startsAt: hours.starts_at, endsAt: hours.ends_at };
+		}
+	}
+	return {
+		days: [...day.days],
+		startsAt: day.starts_at,
+		endsAt: day.ends_at,
+		exceptions
+	};
+}
+
+/** The exceptions a form holds, by weekday, in the order a week runs. */
+export function exceptionDays(form: WorkingDayForm): number[] {
+	return Object.keys(form.exceptions)
+		.map(Number)
+		.filter((day) => form.days.includes(day))
+		.sort((left, right) => left - right);
+}
+
+/**
+ * The ticked days that have no hours of their own, in week order — what the
+ * "give a day its own hours" control offers.
+ */
+export function daysOnTheDefault(form: WorkingDayForm): number[] {
+	return [...form.days]
+		.filter((day) => form.exceptions[day] === undefined)
+		.sort((left, right) => left - right);
+}
+
+/** The body of a decision, from the form: `exceptions` only when there are any. */
+export function workingDayBody(form: WorkingDayForm): {
+	days: number[];
+	starts_at: string;
+	ends_at: string;
+	exceptions?: Record<string, { starts_at: string; ends_at: string }>;
+} {
+	const body = {
+		days: [...form.days].sort((left, right) => left - right),
+		starts_at: form.startsAt,
+		ends_at: form.endsAt
+	};
+	const days = exceptionDays(form);
+	if (days.length === 0) {
+		return body;
+	}
+	// Keyed by the weekday as a string, which is what a JSON object can be
+	// keyed by — and only for days that are still ticked, so unticking a day
+	// takes its exception with it rather than sending a contradiction the
+	// Gateway would refuse.
+	const exceptions: Record<string, { starts_at: string; ends_at: string }> = {};
+	for (const day of days) {
+		const hours = form.exceptions[day];
+		exceptions[String(day)] = { starts_at: hours.startsAt, ends_at: hours.endsAt };
+	}
+	return { ...body, exceptions };
 }
 
 /**
@@ -350,7 +420,22 @@ export function workingDayTrouble(
 	// Lexicographic on `HH:MM` is chronological, which is what the format is
 	// for. An amplitude that ends before it begins is a night, and a working
 	// day that wraps midnight is a different thing this form does not hold.
-	return form.endsAt <= form.startsAt ? 'order' : null;
+	if (form.endsAt <= form.startsAt) {
+		return 'order';
+	}
+	// And every day that runs other hours is held to the same two rules
+	// (#386), so the button says why rather than the Gateway saying it in a
+	// 422 about a day the user has to find again.
+	for (const day of exceptionDays(form)) {
+		const hours = form.exceptions[day];
+		if (!isWallClock(hours.startsAt) || !isWallClock(hours.endsAt)) {
+			return 'time';
+		}
+		if (hours.endsAt <= hours.startsAt) {
+			return 'order';
+		}
+	}
+	return null;
 }
 
 /** `HH:MM` on a 24-hour clock, the only spelling the Gateway accepts. */

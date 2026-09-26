@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 16] = [
+pub const MIGRATIONS: [&str; 17] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -864,7 +864,58 @@ pub const MIGRATIONS: [&str; 16] = [
         SELECT RAISE(ABORT, 'the working day journal is append-only');
     END;
     "#,
+    // v17 (#386): the days that run something other than the default
+    // amplitude. `3=09:00-12:30,5=09:00-16:00`, keyed by ISO weekday — the
+    // same reasoning as `days` above, that a set this small is honest as a
+    // string and a table would be ceremony, and the same shape so the two
+    // columns of one decision read alike.
+    //
+    // A column added rather than a table replaced: every row already written
+    // is a decision the owner took, and it means what it meant — no exception,
+    // which is `NULL` here and every day on the default.
+    //
+    // `ALTER TABLE ... ADD COLUMN` is DDL and not an `UPDATE`, so the
+    // append-only triggers above neither fire nor need lifting.
+    r#"
+    ALTER TABLE working_day_decision ADD COLUMN exceptions TEXT;
+    "#,
 ];
+
+/// `3=09:00-12:30,5=09:00-16:00` as the working day's exceptions (#386).
+///
+/// An entry this cannot read is **dropped**, and the day it named then runs the
+/// default. That is the least-wrong of three answers and it is worth saying
+/// why: refusing the whole row would answer "no working day at all", which
+/// offers the owner's nights; keeping the row and inventing hours for the day
+/// is not available; so the day falls back to the amplitude the owner did set,
+/// which is the narrowest honest reading of a state this build wrote and can no
+/// longer parse. It cannot happen without a defect on the writing side, which is
+/// why it is a `filter_map` and not a refusal — and why the unit test asserts
+/// what it does rather than leaving it to be discovered.
+fn read_exceptions(column: Option<&str>) -> std::collections::BTreeMap<u8, crate::working_day::Span> {
+    let Some(column) = column else {
+        return Default::default();
+    };
+    column
+        .split(',')
+        .filter_map(|entry| {
+            let (weekday, hours) = entry.trim().split_once('=')?;
+            let weekday: u8 = weekday.trim().parse().ok()?;
+            let (starts_at, ends_at) = hours.trim().split_once('-')?;
+            (crate::working_day::is_wall_clock(starts_at)
+                && crate::working_day::is_wall_clock(ends_at))
+            .then(|| {
+                (
+                    weekday,
+                    crate::working_day::Span {
+                        starts_at: starts_at.to_owned(),
+                        ends_at: ends_at.to_owned(),
+                    },
+                )
+            })
+        })
+        .collect()
+}
 
 /// One thing a draft did before it was written (#367).
 ///
@@ -2470,7 +2521,7 @@ impl Store {
         actor: &str,
     ) -> Result<crate::working_day::State> {
         use crate::working_day::Update;
-        let (state, days, starts_at, ends_at, reason) = match update {
+        let (state, days, starts_at, ends_at, exceptions, reason) = match update {
             Update::Set { day, reason } => (
                 "set",
                 Some(
@@ -2482,16 +2533,38 @@ impl Store {
                 ),
                 Some(day.starts_at.clone()),
                 Some(day.ends_at.clone()),
+                // `NULL` and not an empty string when there is none: a
+                // deployment with one amplitude writes the row it wrote before
+                // #386, and a reader cannot tell the two apart because there is
+                // nothing to tell apart.
+                (!day.exceptions.is_empty()).then(|| {
+                    day.exceptions
+                        .iter()
+                        .map(|(weekday, span)| {
+                            format!("{weekday}={}-{}", span.starts_at, span.ends_at)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }),
                 reason.clone(),
             ),
-            Update::Clear { reason } => ("cleared", None, None, None, reason.clone()),
+            Update::Clear { reason } => ("cleared", None, None, None, None, reason.clone()),
         };
         self.connection()
             .execute(
                 "INSERT INTO working_day_decision
-                 (new_state, days, starts_at, ends_at, occurred_at, actor, reason)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                rusqlite::params![state, days, starts_at, ends_at, occurred_at, actor, reason],
+                 (new_state, days, starts_at, ends_at, exceptions, occurred_at, actor, reason)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    state,
+                    days,
+                    starts_at,
+                    ends_at,
+                    exceptions,
+                    occurred_at,
+                    actor,
+                    reason
+                ],
             )
             .context("failed to record a working day decision")?;
         self.working_day_state()
@@ -2500,11 +2573,15 @@ impl Store {
     /// The working day as it stands: the journal's last row, or nothing —
     /// a deployment where nobody said has no opinion, and every free gap is
     /// answered exactly as it was before this existed (#381).
+    ///
+    /// Its `exceptions` are the days that run other hours (#386), read from the
+    /// column this build writes: see [`read_exceptions`] for what an entry it
+    /// cannot read does.
     pub fn working_day_state(&self) -> Result<crate::working_day::State> {
         use crate::working_day::{State, WorkingDay};
         let connection = self.connection();
         let mut statement = connection.prepare(
-            "SELECT new_state, days, starts_at, ends_at, occurred_at, actor, reason
+            "SELECT new_state, days, starts_at, ends_at, occurred_at, actor, reason, exceptions
              FROM working_day_decision ORDER BY sequence DESC LIMIT 1",
         )?;
         let row = statement
@@ -2517,11 +2594,13 @@ impl Store {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .optional()
             .context("failed to read the working day")?;
-        let Some((state, days, starts_at, ends_at, occurred_at, actor, reason)) = row else {
+        let Some((state, days, starts_at, ends_at, occurred_at, actor, reason, exceptions)) = row
+        else {
             return Ok(State::default());
         };
         // A row whose three members are not all there is a row this build
@@ -2537,6 +2616,7 @@ impl Store {
                     days,
                     starts_at,
                     ends_at,
+                    exceptions: read_exceptions(exceptions.as_deref()),
                 })
             }
             _ => None,
@@ -4473,6 +4553,112 @@ mod bridge_status_tests {
             .record_connections(&test_support::implicit_registry())
             .expect("the registry records");
         store
+    }
+
+    #[test]
+    fn a_working_day_records_the_days_that_differ_and_reads_them_back() {
+        use crate::working_day::{Span, Update, WorkingDay};
+        let store = store("working-day-exceptions");
+
+        // One amplitude: the row this Gateway wrote before #386, and the
+        // column is null rather than an empty list — there is nothing to tell
+        // apart, so nothing is written to tell it apart with.
+        let plain = Update::Set {
+            day: WorkingDay {
+                days: vec![1, 2, 3, 4, 5],
+                starts_at: "09:00".to_owned(),
+                ends_at: "18:30".to_owned(),
+                exceptions: Default::default(),
+            },
+            reason: None,
+        };
+        let state = store
+            .record_working_day_decision(&plain, "2026-09-26T20:00:00.000Z", "@owner:example.com")
+            .expect("the decision records");
+        assert!(state.day.expect("a day").exceptions.is_empty());
+
+        // And with a short Wednesday and a shorter Friday.
+        let with_exceptions = Update::Set {
+            day: WorkingDay {
+                days: vec![1, 2, 3, 4, 5],
+                starts_at: "09:00".to_owned(),
+                ends_at: "18:30".to_owned(),
+                exceptions: [
+                    (
+                        3,
+                        Span {
+                            starts_at: "09:00".to_owned(),
+                            ends_at: "12:30".to_owned(),
+                        },
+                    ),
+                    (
+                        5,
+                        Span {
+                            starts_at: "09:00".to_owned(),
+                            ends_at: "16:00".to_owned(),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            reason: Some("mercredi court".to_owned()),
+        };
+        let state = store
+            .record_working_day_decision(
+                &with_exceptions,
+                "2026-09-26T20:05:00.000Z",
+                "@owner:example.com",
+            )
+            .expect("the decision records");
+        let day = state.day.expect("a day");
+        assert_eq!(day.span(3), ("09:00", "12:30"));
+        assert_eq!(day.span(5), ("09:00", "16:00"));
+        assert_eq!(day.span(1), ("09:00", "18:30"), "the days that did not");
+        assert_eq!(state.reason.as_deref(), Some("mercredi court"));
+
+        // The journal is a journal: the first decision is still there, with
+        // its own (absent) exceptions, and the read answers the last.
+        let connection = store.connection();
+        let mut statement = connection
+            .prepare("SELECT exceptions FROM working_day_decision ORDER BY sequence")
+            .expect("the journal is readable");
+        let rows: Vec<Option<String>> = statement
+            .query_map([], |row| row.get::<_, Option<String>>(0))
+            .expect("the rows read")
+            .map(|row| row.expect("a row"))
+            .collect();
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0], None, "the first decision named no exception");
+        assert_eq!(rows[1].as_deref(), Some("3=09:00-12:30,5=09:00-16:00"));
+        drop(statement);
+        drop(connection);
+
+        // Cleared: back to no opinion, exceptions and all, because they were
+        // one decision.
+        let state = store
+            .record_working_day_decision(
+                &Update::Clear { reason: None },
+                "2026-09-26T20:10:00.000Z",
+                "@owner:example.com",
+            )
+            .expect("the decision records");
+        assert!(state.day.is_none());
+        assert_eq!(state.since.as_deref(), Some("2026-09-26T20:10:00.000Z"));
+    }
+
+    #[test]
+    fn an_exception_this_build_cannot_read_leaves_its_day_on_the_default() {
+        // It takes a defect on the writing side to get here, which is why it
+        // is asserted rather than left to be met: the day falls back to the
+        // amplitude the owner *did* set — narrower than answering "no working
+        // day", which would offer their nights, and honest in a way inventing
+        // hours for that day would not be.
+        let read = read_exceptions(Some("3=09:00-12:30,5=bananas,x=09:00-10:00,7=09:00"));
+        assert_eq!(read.len(), 1, "{read:?}");
+        assert_eq!(read[&3].ends_at, "12:30");
+        assert!(read_exceptions(None).is_empty());
+        assert!(read_exceptions(Some("")).is_empty());
     }
 
     fn transition(from: ContractState, to: ContractState, occurred_at: &str) -> Transition {

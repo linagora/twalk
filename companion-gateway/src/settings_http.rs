@@ -642,13 +642,38 @@ async fn write_working_day(
 }
 
 /// The working day as both of its routes answer it.
+/// The working day as both routes answer it: the three members #381 defined and,
+/// when there are any, the days that run other hours (#386).
+///
+/// `exceptions` is **absent** and not an empty object on a deployment with one
+/// amplitude: the document is then byte for byte the one this Gateway answered
+/// before #386, which is what lets an older collector and an older screen keep
+/// reading it without learning anything.
+fn day_json(day: &crate::working_day::WorkingDay) -> Value {
+    let mut rendered = json!({
+        "days": day.days,
+        "starts_at": day.starts_at,
+        "ends_at": day.ends_at,
+    });
+    if !day.exceptions.is_empty() {
+        rendered["exceptions"] = Value::Object(
+            day.exceptions
+                .iter()
+                .map(|(weekday, span)| {
+                    (
+                        weekday.to_string(),
+                        json!({ "starts_at": span.starts_at, "ends_at": span.ends_at }),
+                    )
+                })
+                .collect(),
+        );
+    }
+    rendered
+}
+
 fn working_day_json(state: &crate::working_day::State) -> Value {
     json!({
-        "day": state.day.as_ref().map(|day| json!({
-            "days": day.days,
-            "starts_at": day.starts_at,
-            "ends_at": day.ends_at,
-        })),
+        "day": state.day.as_ref().map(day_json),
         "since": state.since,
         "actor": state.actor,
         "reason": state.reason,
@@ -667,7 +692,10 @@ fn working_day_json(state: &crate::working_day::State) -> Value {
 /// ```json
 /// {
 ///   "calendar_location": { "enabled": false },
-///   "working_day": { "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:00" }
+///   "working_day": {
+///     "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:00",
+///     "exceptions": { "3": { "starts_at": "09:00", "ends_at": "12:30" } }
+///   }
 /// }
 /// ```
 ///
@@ -724,11 +752,7 @@ async fn collection_settings(State(gateway): State<Gateway>, headers: HeaderMap)
     };
     Json(json!({
         "calendar_location": { "enabled": location },
-        "working_day": working_day.map(|day| json!({
-            "days": day.days,
-            "starts_at": day.starts_at,
-            "ends_at": day.ends_at,
-        })),
+        "working_day": working_day.as_ref().map(day_json),
     }))
     .into_response()
 }
@@ -1082,6 +1106,53 @@ fn api_error(status: StatusCode, code: &str, detail: &str) -> Response {
 mod tests {
     use super::*;
     use crate::settings::{parse_model_update, CredentialSource};
+
+    #[test]
+    fn a_working_day_answers_its_exceptions_and_says_nothing_when_there_are_none() {
+        use crate::working_day::{Span, State, WorkingDay};
+        let state = |exceptions: std::collections::BTreeMap<u8, Span>| State {
+            day: Some(WorkingDay {
+                days: vec![1, 2, 3, 4, 5],
+                starts_at: "09:00".to_owned(),
+                ends_at: "18:30".to_owned(),
+                exceptions,
+            }),
+            since: Some("2026-09-26T20:00:00.000Z".to_owned()),
+            actor: Some("@owner:example.com".to_owned()),
+            reason: None,
+        };
+
+        // A week with one amplitude answers the document this Gateway answered
+        // before #386 — no member where there was none, which is what lets an
+        // older collector and an older screen keep reading it.
+        let plain = working_day_json(&state(Default::default()));
+        assert_eq!(
+            plain["day"],
+            json!({ "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:30" })
+        );
+
+        // And a short Wednesday is one more member, keyed by the weekday as a
+        // string because that is what a JSON object is keyed by.
+        let with_one = working_day_json(&state(
+            [(
+                3,
+                Span {
+                    starts_at: "09:00".to_owned(),
+                    ends_at: "12:30".to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        ));
+        assert_eq!(
+            with_one["day"]["exceptions"],
+            json!({ "3": { "starts_at": "09:00", "ends_at": "12:30" } })
+        );
+        assert_eq!(
+            with_one["day"]["ends_at"], "18:30",
+            "the default is still the default: {with_one}"
+        );
+    }
 
     fn settings(name: &str, credential_file: Option<&std::path::Path>) -> Settings {
         let directory = std::env::temp_dir().join(format!(
