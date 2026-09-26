@@ -252,6 +252,29 @@ async fn free_busy(
                     "starts_at": day.starts_at,
                     "ends_at": day.ends_at,
                 });
+                // And the days that run other hours (#386), when there are
+                // any: the gaps of a short Wednesday were clipped by 12:30,
+                // and an agent that was told the default alone would read
+                // *"taken from 12:30 to 18:00"* out of a week the owner does
+                // not work. Absent when every day runs the default, so a
+                // deployment with one amplitude answers what it answered
+                // before — the same rule as the zone members below.
+                if !day.exceptions.is_empty() {
+                    answer["working_day"]["exceptions"] = serde_json::Value::Object(
+                        day.exceptions
+                            .iter()
+                            .map(|(weekday, span)| {
+                                (
+                                    weekday.to_string(),
+                                    json!({
+                                        "starts_at": span.starts_at,
+                                        "ends_at": span.ends_at,
+                                    }),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
             }
             // Absent, not null, when there is no zone to name: a member that
             // is there and empty says "I looked and the answer is nothing",

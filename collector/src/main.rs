@@ -1032,6 +1032,30 @@ async fn collection_settings(
                 .collect(),
             starts_at: day.get("starts_at")?.as_str()?.to_owned(),
             ends_at: day.get("ends_at")?.as_str()?.to_owned(),
+            // The days that run other hours (#386), when the Gateway names
+            // any. Absent from a Gateway older than the decision, and from a
+            // deployment whose week is one amplitude; an entry missing half of
+            // itself is dropped, and that day then runs the default — the
+            // narrowest honest reading, since the alternative is to clip by a
+            // value only half of which arrived.
+            exceptions: day
+                .get("exceptions")
+                .and_then(serde_json::Value::as_object)
+                .map(|given| {
+                    given
+                        .iter()
+                        .filter_map(|(weekday, hours)| {
+                            Some((
+                                weekday.parse::<u8>().ok()?,
+                                twalk_collector::freebusy::Span {
+                                    starts_at: hours.get("starts_at")?.as_str()?.to_owned(),
+                                    ends_at: hours.get("ends_at")?.as_str()?.to_owned(),
+                                },
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
         .filter(|day| !day.days.is_empty())
     });

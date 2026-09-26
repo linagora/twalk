@@ -3488,6 +3488,7 @@ export interface components {
                 days: number[];
                 /** @example 18:00 */
                 ends_at: string;
+                exceptions?: components["schemas"]["WorkingDayExceptions"];
                 /**
                  * @description `HH:MM`, a wall clock in the owner's own zone: `09:00` is nine
                  *     in the morning where they are, in summer and in winter both.
@@ -4653,7 +4654,8 @@ export interface components {
         };
         /**
          * @description The days the owner accepts meetings on and the amplitude of those
-         *     days (#381), in their own zone.
+         *     days (#381), in their own zone — and the days that run other hours
+         *     (#386).
          */
         WorkingDay: {
             /**
@@ -4669,11 +4671,50 @@ export interface components {
             days: number[];
             /** @example 18:00 */
             ends_at: string;
+            exceptions?: components["schemas"]["WorkingDayExceptions"];
             /**
-             * @description `HH:MM`, a wall clock in the owner's own zone.
+             * @description `HH:MM`, a wall clock in the owner's own zone. The **default**:
+             *     the hours a day runs unless `exceptions` gives it others.
              * @example 09:00
              */
             starts_at: string;
+        };
+        /**
+         * @description The weekdays that run something other than the default amplitude
+         *     (#386), keyed by ISO weekday as a string — `"3"` for Wednesday.
+         *
+         *     One amplitude for a whole week is often false: a short Wednesday, a
+         *     Friday that ends at 16:00, a Monday that starts late. Before this the
+         *     owner's only way to say so was to make the whole week as narrow as its
+         *     narrowest day, which hides real availability from every draft.
+         *
+         *     **Absent when every day runs the default**, which is most deployments —
+         *     and then this document is byte for byte the one this Gateway answered
+         *     before #386, which is what lets an older reader keep reading it.
+         *
+         *     A day in `days` with no entry here runs the default. Absence means *as
+         *     usual*, never *no meetings*: `days` is already where a day is refused,
+         *     and one member saying two things is how a screen starts lying. Every
+         *     key must be one of `days` — an exception for a day the owner does not
+         *     accept meetings on is two statements that contradict each other, and it
+         *     is refused rather than resolved.
+         * @example {
+         *       "3": {
+         *         "starts_at": "09:00",
+         *         "ends_at": "12:30"
+         *       }
+         *     }
+         */
+        WorkingDayExceptions: {
+            [key: string]: {
+                /** @example 12:30 */
+                ends_at: string;
+                /**
+                 * @description `HH:MM`, a wall clock in the owner's own zone.
+                 * @example 09:00
+                 */
+                starts_at: string;
+            };
         };
         WorkingDayState: {
             /** @description Who decided: this deployment's owner, from configuration. */
@@ -4694,11 +4735,18 @@ export interface components {
         /**
          * @description `{"days": [1,2,3,4,5], "starts_at": "09:00", "ends_at": "18:00"}`, or
          *     `{"days": null}` to say nothing again.
+         *
+         *     With a day that runs other hours (#386):
+         *     `{"days": [1,2,3,4,5], "starts_at": "09:00", "ends_at": "18:30",
+         *     "exceptions": {"3": {"starts_at": "09:00", "ends_at": "12:30"}}}`.
+         *     Clearing clears the exceptions with the day — they are one decision,
+         *     and the journal holds it whole.
          */
         WorkingDayUpdate: {
             days: null | number[];
             /** @example 18:00 */
             ends_at?: string;
+            exceptions?: null | components["schemas"]["WorkingDayExceptions"];
             /** @description The owner's own note, optional. */
             reason?: null | string;
             /** @example 09:00 */
@@ -8125,7 +8173,12 @@ export interface operations {
              *       that is not an ISO weekday.
              *     - `working_day_time_invalid` — a time that is not `HH:MM` on a
              *       24-hour clock.
-             *     - `working_day_order_invalid` — the end is not after the start.
+             *     - `working_day_order_invalid` — the end is not after the start,
+             *       of the day or of one of its exceptions.
+             *     - `working_day_exception_invalid` — `exceptions` is not a map of
+             *       ISO weekday to hours, or it names a day that is not among
+             *       `days`: two statements that contradict each other, and which
+             *       one was meant is not this route's to decide (#386).
              *     - `working_day_reason_too_long` — over 1 024 characters.
              *     - `invalid_request` — not the JSON object this route asks for.
              */

@@ -65,6 +65,9 @@
 	} from '$lib/settings/api';
 	import {
 		calendarLocationRecord,
+		daysOnTheDefault,
+		exceptionDays,
+		workingDayBody,
 		workingDayForm,
 		workingDayRecord,
 		workingDayTrouble,
@@ -149,6 +152,8 @@
 	let workingDayReason = $state('');
 	let workingDayOutcome = $state<'saved' | 'cleared' | { refused: Refused } | null>(null);
 	let workingDayDraft = $state(workingDayForm(null));
+	/** The day the "hours of its own" control is about to add, or `null`. */
+	let dayToAdd = $state<number | null>(null);
 
 	const credential = $derived<CredentialState | null>(
 		configuration === null ? null : credentialState(configuration)
@@ -160,6 +165,14 @@
 	const dayRecord = $derived(workingDay === null ? null : workingDayRecord(workingDay, $locale));
 	/** Why the button is disabled, said rather than left to a `422` (#381). */
 	const dayTrouble = $derived(workingDayTrouble(workingDayDraft));
+	/** The days that run other hours, and the ticked days that do not (#386). */
+	const ownHours = $derived(exceptionDays(workingDayDraft));
+	const onTheDefault = $derived(daysOnTheDefault(workingDayDraft));
+	/** One weekday's name, through the same typed keys the tick boxes use. */
+	const dayName = $derived((day: number) => {
+		const named = WEEK.find(([weekday]) => weekday === day);
+		return named === undefined ? '' : $t(named[1]);
+	});
 	const problemOf = $derived(
 		(field: FormProblem['field']) => formProblems.find((problem) => problem.field === field) ?? null
 	);
@@ -225,14 +238,7 @@
 		}
 		workingDayOutcome = null;
 		busy = 'working-day';
-		const answer = await saveWorkingDay(
-			{
-				days: [...workingDayDraft.days].sort((left, right) => left - right),
-				starts_at: workingDayDraft.startsAt,
-				ends_at: workingDayDraft.endsAt
-			},
-			workingDayReason
-		);
+		const answer = await saveWorkingDay(workingDayBody(workingDayDraft), workingDayReason);
 		if (answer.ok) {
 			workingDay = answer.state;
 			workingDayDraft = workingDayForm(answer.state);
@@ -261,11 +267,58 @@
 
 	/** Tick or untick one day of the week. */
 	function toggleDay(day: number) {
+		const ticked = workingDayDraft.days.includes(day);
+		const exceptions = { ...workingDayDraft.exceptions };
+		if (ticked) {
+			// Its own hours go with it. An exception for a day the user does not
+			// accept meetings on is two statements that contradict each other,
+			// and the Gateway refuses it by name (#386) — so the form does not
+			// hold one either.
+			delete exceptions[day];
+		}
 		workingDayDraft = {
 			...workingDayDraft,
-			days: workingDayDraft.days.includes(day)
-				? workingDayDraft.days.filter((ticked) => ticked !== day)
-				: [...workingDayDraft.days, day]
+			days: ticked
+				? workingDayDraft.days.filter((other) => other !== day)
+				: [...workingDayDraft.days, day],
+			exceptions
+		};
+	}
+
+	/** Give one day hours of its own, starting from the default (#386). */
+	function giveOwnHours(day: number | null) {
+		if (day === null || workingDayDraft.exceptions[day] !== undefined) {
+			return;
+		}
+		workingDayDraft = {
+			...workingDayDraft,
+			exceptions: {
+				...workingDayDraft.exceptions,
+				// From the default rather than from nothing: the user narrows a
+				// day they can already see, and an empty pair of time inputs
+				// would be a form that cannot be submitted until both are typed.
+				[day]: { startsAt: workingDayDraft.startsAt, endsAt: workingDayDraft.endsAt }
+			}
+		};
+		dayToAdd = null;
+	}
+
+	/** And back to the default: "as usual again", not a day removed. */
+	function backToDefault(day: number) {
+		const exceptions = { ...workingDayDraft.exceptions };
+		delete exceptions[day];
+		workingDayDraft = { ...workingDayDraft, exceptions };
+	}
+
+	/** One exception's own hours, as its two time inputs give them. */
+	function setOwnHours(day: number, part: 'startsAt' | 'endsAt', value: string) {
+		const hours = workingDayDraft.exceptions[day];
+		if (hours === undefined) {
+			return;
+		}
+		workingDayDraft = {
+			...workingDayDraft,
+			exceptions: { ...workingDayDraft.exceptions, [day]: { ...hours, [part]: value } }
 		};
 	}
 
@@ -896,6 +949,90 @@
 				</label>
 			</div>
 
+			<!-- The days that run other hours (#386). Only those are listed: a
+			     row per ticked day would be five rows to say one thing, and the
+			     line under them says what the rest follow. A day is added by
+			     naming it, and "as usual again" is a decision rather than a row
+			     deleted — the same reading `days` has, where absence means the
+			     default and never "no meetings". -->
+			<div class="own-hours" data-testid="working-day-exceptions">
+				{#each ownHours as day (day)}
+					<div class="own-day" data-testid="working-day-exception-{day}">
+						<span class="small day-name">{dayName(day)}</span>
+						<label class="field">
+							<span class="small">{$t('settings.workingDay.startsAt')}</span>
+							<input
+								class="input"
+								type="time"
+								value={workingDayDraft.exceptions[day].startsAt}
+								disabled={busy !== null}
+								oninput={(event) =>
+									setOwnHours(day, 'startsAt', (event.currentTarget as HTMLInputElement).value)}
+								data-testid="working-day-exception-{day}-starts-at"
+							/>
+						</label>
+						<label class="field">
+							<span class="small">{$t('settings.workingDay.endsAt')}</span>
+							<input
+								class="input"
+								type="time"
+								value={workingDayDraft.exceptions[day].endsAt}
+								disabled={busy !== null}
+								oninput={(event) =>
+									setOwnHours(day, 'endsAt', (event.currentTarget as HTMLInputElement).value)}
+								data-testid="working-day-exception-{day}-ends-at"
+							/>
+						</label>
+						<button
+							class="button button--quiet small"
+							type="button"
+							disabled={busy !== null}
+							onclick={() => backToDefault(day)}
+							data-testid="working-day-exception-{day}-clear"
+						>
+							{$t('settings.workingDay.exceptions.asUsual')}
+						</button>
+					</div>
+				{/each}
+
+				{#if ownHours.length > 0}
+					<p class="small muted" data-testid="working-day-exceptions-rest">
+						{$t('settings.workingDay.exceptions.theRest', {
+							startsAt: workingDayDraft.startsAt,
+							endsAt: workingDayDraft.endsAt
+						})}
+					</p>
+				{/if}
+
+				{#if onTheDefault.length > 0}
+					<div class="own-add">
+						<label class="field">
+							<span class="small">{$t('settings.workingDay.exceptions.add')}</span>
+							<select
+								class="input"
+								bind:value={dayToAdd}
+								disabled={busy !== null}
+								data-testid="working-day-exception-add"
+							>
+								<option value={null}>{$t('settings.workingDay.exceptions.choose')}</option>
+								{#each onTheDefault as day (day)}
+									<option value={day}>{dayName(day)}</option>
+								{/each}
+							</select>
+						</label>
+						<button
+							class="button button--quiet small"
+							type="button"
+							disabled={busy !== null || dayToAdd === null}
+							onclick={() => giveOwnHours(dayToAdd)}
+							data-testid="working-day-exception-add-confirm"
+						>
+							{$t('settings.workingDay.exceptions.give')}
+						</button>
+					</div>
+				{/if}
+			</div>
+
 			<!-- Said, rather than left to the Gateway's 422: a button that is
 			     disabled without saying why teaches nothing. -->
 			{#if dayTrouble !== null}
@@ -1008,6 +1145,27 @@
 		display: flex;
 		align-items: center;
 		gap: var(--space-1);
+	}
+
+	/* The days that run other hours (#386): rows under the amplitude, each one
+	   a day, its two times and the way back to the default. Quiet, because they
+	   are exceptions to the sentence above them and not a second form. */
+	.own-hours {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2);
+	}
+
+	.own-day,
+	.own-add {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-end;
+		gap: var(--space-3);
+	}
+
+	.own-day .day-name {
+		min-width: 6rem;
 	}
 
 	/* Two times side by side, because they are one amplitude, and stacked

@@ -169,7 +169,13 @@ export async function loadWorkingDay(): Promise<WorkingDayAnswer> {
  * not be asked is a preference.
  */
 export async function saveWorkingDay(
-	day: { days: number[]; starts_at: string; ends_at: string } | null,
+	day: {
+		days: number[];
+		starts_at: string;
+		ends_at: string;
+		/** The days that run other hours (#386), keyed by ISO weekday. */
+		exceptions?: Record<string, { starts_at: string; ends_at: string }>;
+	} | null,
 	reason?: string
 ): Promise<WorkingDayAnswer> {
 	const note = reason?.trim() ?? '';

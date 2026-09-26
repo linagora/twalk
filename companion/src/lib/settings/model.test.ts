@@ -18,6 +18,9 @@ import {
 	formOf,
 	isWallClock,
 	requestOf,
+	daysOnTheDefault,
+	exceptionDays,
+	workingDayBody,
 	workingDayForm,
 	workingDayRecord,
 	workingDayTrouble
@@ -326,13 +329,23 @@ describe("the owner's working day (#381)", () => {
 		// A form nobody can submit teaches nothing, so it opens filled — but
 		// the *state* stays unset until the user presses the button, which is
 		// what the record line says.
-		expect(workingDayForm(null)).toEqual({ days: [1, 2, 3, 4, 5], startsAt: '09:00', endsAt: '18:00' });
+		expect(workingDayForm(null)).toEqual({
+			days: [1, 2, 3, 4, 5],
+			startsAt: '09:00',
+			endsAt: '18:00',
+			exceptions: {}
+		});
 		expect(workingDayRecord(state(null), 'fr').key).toBe('settings.workingDay.record.unset');
 	});
 
 	it('reads a state back into the form, and says who set it', () => {
 		const set = state({ days: [2, 4], starts_at: '10:00', ends_at: '16:30' }, '2026-09-26T15:12:04.000Z', '@michel:twalk.localhost');
-		expect(workingDayForm(set)).toEqual({ days: [2, 4], startsAt: '10:00', endsAt: '16:30' });
+		expect(workingDayForm(set)).toEqual({
+			days: [2, 4],
+			startsAt: '10:00',
+			endsAt: '16:30',
+			exceptions: {}
+		});
 		const record = workingDayRecord(set, 'fr');
 		expect(record.kind).toBe('set');
 		expect(record.key).toBe('settings.workingDay.record.set');
@@ -348,7 +361,7 @@ describe("the owner's working day (#381)", () => {
 	});
 
 	it('says why a form cannot be sent, rather than leaving it to a 422', () => {
-		const form = { days: [1], startsAt: '09:00', endsAt: '18:00' };
+		const form = { days: [1], startsAt: '09:00', endsAt: '18:00', exceptions: {} };
 		expect(workingDayTrouble(form)).toBeNull();
 		expect(workingDayTrouble({ ...form, days: [] })).toBe('days');
 		expect(workingDayTrouble({ ...form, startsAt: '9:00' })).toBe('time');
@@ -356,6 +369,70 @@ describe("the owner's working day (#381)", () => {
 		// day that wraps midnight is a different thing.
 		expect(workingDayTrouble({ ...form, startsAt: '18:00', endsAt: '09:00' })).toBe('order');
 		expect(workingDayTrouble({ ...form, startsAt: '09:00', endsAt: '09:00' })).toBe('order');
+	});
+
+	it('carries the days that run other hours, and only for days still ticked', () => {
+		// #386: a short Wednesday, said without making the whole week as narrow
+		// as it.
+		const form = workingDayForm({
+			day: {
+				days: [1, 2, 3, 4, 5],
+				starts_at: '09:00',
+				ends_at: '18:30',
+				exceptions: { '3': { starts_at: '09:00', ends_at: '12:30' } }
+			},
+			since: '2026-09-26T20:00:00.000Z',
+			actor: '@owner:example.com',
+			reason: null
+		});
+		expect(exceptionDays(form)).toEqual([3]);
+		expect(daysOnTheDefault(form)).toEqual([1, 2, 4, 5]);
+		expect(workingDayBody(form)).toEqual({
+			days: [1, 2, 3, 4, 5],
+			starts_at: '09:00',
+			ends_at: '18:30',
+			exceptions: { '3': { starts_at: '09:00', ends_at: '12:30' } }
+		});
+
+		// A day no longer ticked takes its hours with it: the Gateway refuses an
+		// exception for a day the user does not accept, and the form must not
+		// send a contradiction it can see.
+		const untickedWednesday = { ...form, days: [1, 2, 4, 5] };
+		expect(exceptionDays(untickedWednesday)).toEqual([]);
+		expect(workingDayBody(untickedWednesday)).toEqual({
+			days: [1, 2, 4, 5],
+			starts_at: '09:00',
+			ends_at: '18:30'
+		});
+
+		// And a week with one amplitude sends the body it sent before #386 —
+		// no member where there was none.
+		expect(workingDayBody({ ...form, exceptions: {} })).toEqual({
+			days: [1, 2, 3, 4, 5],
+			starts_at: '09:00',
+			ends_at: '18:30'
+		});
+	});
+
+	it('says why an exception cannot be sent, as it does for the day itself', () => {
+		const form = {
+			days: [1, 3],
+			startsAt: '09:00',
+			endsAt: '18:00',
+			exceptions: { 3: { startsAt: '09:00', endsAt: '12:30' } }
+		};
+		expect(workingDayTrouble(form)).toBeNull();
+		expect(
+			workingDayTrouble({ ...form, exceptions: { 3: { startsAt: '9:00', endsAt: '12:30' } } })
+		).toBe('time');
+		expect(
+			workingDayTrouble({ ...form, exceptions: { 3: { startsAt: '12:30', endsAt: '09:00' } } })
+		).toBe('order');
+		// An exception for a day that is not ticked is not the form's to
+		// report: it is dropped before it is sent, so there is nothing to say.
+		expect(
+			workingDayTrouble({ ...form, days: [1], exceptions: { 3: { startsAt: '25:00', endsAt: '26:00' } } })
+		).toBeNull();
 	});
 
 	it('accepts only HH:MM on a 24-hour clock, the spelling the Gateway takes', () => {
