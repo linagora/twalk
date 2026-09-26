@@ -223,13 +223,13 @@ async fn main() -> Result<()> {
                 lookup_window = config.approval_lookup_window,
                 "suggestion reads are on: GET /api/suggestions projects the bus — nothing is                  stored, and the answer says how far back it looked"
             );
-            // Hermes's answers (ticket #206, ADR 0032). Built on the
-            // approval half rather than beside it: the trigger lookup, the
-            // consent read at that moment, the refusal vocabulary and the
-            // in-request publish are the same, and two implementations of
             // Hermes's free/busy reads (ticket #281): the one governed pull,
             // on the same secret, relayed to the collector when one is
             // named, recorded in the store whatever the outcome.
+            //
+            // Built before the answers because the answers now hold it: the
+            // Gateway checks the times a draft offers with the same read that
+            // served the draft (#383).
             let reads = config.hermes_answers.as_ref().map(|seam| {
                 match &seam.collector_url {
                     Some(url) => info!(
@@ -259,6 +259,10 @@ async fn main() -> Result<()> {
                     std::time::SystemTime::now,
                 ))
             });
+            // Hermes's answers (ticket #206, ADR 0032). Built on the
+            // approval half rather than beside it: the trigger lookup, the
+            // consent read at that moment, the refusal vocabulary and the
+            // in-request publish are the same, and two implementations of
             // any of them would be two vocabularies for one fact.
             let answers = match &config.hermes_answers {
                 Some(seam) => {

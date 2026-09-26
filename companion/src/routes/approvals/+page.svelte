@@ -553,6 +553,37 @@
 				</details>
 			{/if}
 
+			{#if row.times !== null && row.times !== undefined}
+				<!-- Whether the hours this reply names were checked (#383).
+				     After the path and before the text, for the reason the path
+				     is there: the user decides what, having read how.
+
+				     Two states and no third. `checked` means every instant the
+				     draft offered was inside a window it had read and inside a
+				     free gap of the calendar, asked again at the moment of
+				     publication — a draft that failed was never published at
+				     all, so this is never a warning about a time that is wrong.
+				     `unverified` is the case the ticket exists to close: a reply
+				     that names an hour and offered no instants is published,
+				     because refusing on a text pattern would refuse "je te
+				     réponds sous 24h", and the user is told rather than
+				     protected. -->
+				<p
+					class="small {row.times.state === 'unverified' ? 'card card--warning' : 'muted'}"
+					data-testid="times"
+				>
+					{#if row.times.state === 'unverified'}
+						{$t('approvals.times.unverified')}
+					{:else if row.times.count === 1}
+						{$t('approvals.times.checkedOne')}
+					{:else if row.times.count !== null && row.times.count !== undefined}
+						{$t('approvals.times.checked', { count: row.times.count })}
+					{:else}
+						{$t('approvals.times.checkedPlain')}
+					{/if}
+				</p>
+			{/if}
+
 			{#if outcome !== undefined && outcome.kind === 'sent' && outcome.edited}
 				<!-- Once an edited reply has gone out, what matters is what went
 				     out, and that is the user's text — which this screen has in

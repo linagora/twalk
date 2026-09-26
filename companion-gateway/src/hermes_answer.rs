@@ -75,6 +75,7 @@
 //! the contract had nowhere to put it; that header is gone, because the
 //! member it stood in for exists.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -261,9 +262,88 @@ pub enum Outcome {
 /// screen, not a document.
 pub const MAX_ASKED: usize = MAX_SUMMARY;
 
-/// The most instants one reply may offer. Three is what the skill asks for,
-/// and a reply naming ten times is not an offer but a timetable — the cap is
-/// there so a malformed answer cannot make the Gateway do ten governed reads.
+/// Whether a reply's text names something time-like: a digit against an hour
+/// mark (`14h`, `14 h 30`, `14:00`), a digit against a meridiem (`2pm`), or
+/// one of the few hours that have names (`midi`, `noon`).
+///
+/// **Generous on purpose, and it may not be otherwise.** What it decides is a
+/// *label* on an approval screen — "nothing here was verified" — and never a
+/// refusal, so a false positive costs the owner one true sentence about a
+/// draft that named no time, and a false negative costs them the one warning
+/// this exists to give. #383 is explicit about why the refusal is not
+/// available here: refusing on a text pattern would refuse *"je te réponds
+/// sous 24h"*, which is not a proposal. This function will call that reply
+/// time-like, and that is the intended answer.
+///
+/// It reads the text the agent wrote and nothing else. No parsing of *which*
+/// time is meant: "lundi vers 14h" is a time-like reply whatever Monday it
+/// meant, and guessing which would be the prose-parsing that `proposed`
+/// exists to make unnecessary.
+fn names_a_time(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if !byte.is_ascii_digit() {
+            continue;
+        }
+        // The start of a run of digits, so `2026-10-12T12:00:00Z` is examined
+        // once from its year and not four times from its middle.
+        if index > 0 && bytes[index - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut after = index;
+        while after < bytes.len() && bytes[after].is_ascii_digit() {
+            after += 1;
+        }
+        if after - index > 2 {
+            continue;
+        }
+        let rest = &bytes[after..];
+        // `14h`, `14 h 30`: an hour mark, with or without the space a French
+        // typographer puts before it.
+        let marked = |rest: &[u8]| matches!(rest.first(), Some(b'h' | b'H'));
+        if marked(rest) || (rest.first() == Some(&b' ') && marked(&rest[1..])) {
+            return true;
+        }
+        // `14:00`: two digits after the colon, so a ratio or a score is not
+        // an hour.
+        if rest.first() == Some(&b':')
+            && rest.len() >= 3
+            && rest[1].is_ascii_digit()
+            && rest[2].is_ascii_digit()
+        {
+            return true;
+        }
+        // `2pm`, `10 am`.
+        let meridiem = |rest: &[u8]| {
+            matches!(rest.first(), Some(b'a' | b'A' | b'p' | b'P'))
+                && matches!(rest.get(1), Some(b'm' | b'M'))
+        };
+        if meridiem(rest) || (rest.first() == Some(&b' ') && meridiem(&rest[1..])) {
+            return true;
+        }
+    }
+    // The hours that are words, as whole words: the hyphen counts as part of
+    // one, so `Midi-Pyrénées` is a region and `à midi` is an hour.
+    text.to_lowercase()
+        .split(|character: char| !character.is_alphanumeric() && character != '-')
+        .any(|word| matches!(word, "midi" | "minuit" | "noon" | "midnight"))
+}
+
+/// Whether an instant falls inside a half-open range of instants, both as
+/// seconds since the epoch: `start <= at < end`.
+///
+/// One function because the rule is used twice — once against the windows the
+/// agent read, once against the gaps the calendar answers — and a half-open
+/// range written twice is a half-open range written two ways eventually.
+fn covers(range: (i64, i64), at: i64) -> bool {
+    range.0 <= at && at < range.1
+}
+
+/// The most instants one reply may offer. Eight is a fortnight's worth of one
+/// offer a weekday, which is more than any reply this project has drafted and
+/// less than a timetable; the cap is there because every distinct window in
+/// the list costs one governed read of the owner's calendar, and a malformed
+/// answer must not be able to ask for an unbounded number of them.
 pub const MAX_PROPOSED: usize = 8;
 
 /// The most a summary may carry, as `persona.suggest.produced.v1`'s
@@ -490,19 +570,20 @@ pub fn parse_answer(written: &str) -> Result<Answer, AnswerRefusal> {
             }
             let mut parsed = Vec::new();
             for instant in instants {
-                let instant = instant.as_str().map(str::trim).unwrap_or_default();
-                if parse_rfc3339_seconds(instant).is_none() {
-                    return Err(AnswerRefusal::ProposedUnreadable(instant.to_owned()));
+                // What was *said*, whatever it was: a refusal that quotes
+                // `""` back at an agent that sent `1` tells it nothing, and
+                // this message is the only thing it gets to act on.
+                let Some(said) = instant.as_str().map(str::trim) else {
+                    return Err(AnswerRefusal::ProposedUnreadable(instant.to_string()));
+                };
+                if parse_rfc3339_seconds(said).is_none() {
+                    return Err(AnswerRefusal::ProposedUnreadable(said.to_owned()));
                 }
-                parsed.push(instant.to_owned());
+                parsed.push(said.to_owned());
             }
             parsed
         }
-        Some(_) => {
-            return Err(AnswerRefusal::ProposedUnreadable(
-                "it is a list of instants when it is there".to_owned(),
-            ))
-        }
+        Some(said) => return Err(AnswerRefusal::ProposedUnreadable(said.to_string())),
     };
     Ok(Answer {
         reference,
@@ -978,18 +1059,23 @@ impl Answers {
                 warn!(%error, "the windows read for a trigger could not be read");
                 AnswerRefusal::ProposedUncheckable(format!("{error:#}"))
             })?;
+        // Which window each offered time falls in, before any of them is
+        // checked. Grouped by window, so a reply offering three times in one
+        // week costs the owner's calendar one read and not three — and two
+        // offers of the same instant cost nothing twice.
+        let mut by_window: BTreeMap<usize, Vec<(&str, i64)>> = BTreeMap::new();
         for instant in &answer.proposed {
             let at = parse_rfc3339_seconds(instant)
                 .ok_or_else(|| AnswerRefusal::ProposedUnreadable(instant.clone()))?;
-            // The window that covers it, among those actually served. A read
-            // that was refused covered nothing, and is not in this list.
-            let covering = windows.iter().find(|(_, from, to)| {
+            // Among the windows actually served: a read that was refused
+            // covered nothing, and is not in this list.
+            let covering = windows.iter().position(|(_, from, to)| {
                 matches!(
                     (parse_rfc3339_seconds(from), parse_rfc3339_seconds(to)),
-                    (Some(from), Some(to)) if from <= at && at < to
+                    (Some(from), Some(to)) if covers((from, to), at)
                 )
             });
-            let Some((connection, from, to)) = covering else {
+            let Some(index) = covering else {
                 warn!(
                     %instant,
                     trigger = %answer.reference.trigger_event_id,
@@ -1000,32 +1086,48 @@ impl Answers {
                     instant: instant.clone(),
                 });
             };
-            let free = reads
-                // Journalled under the reference, like the agent's own reads:
-                // the owner's record then shows the check beside what it
-                // checked (#367's path reads the same column).
-                .is_free(
-                    connection,
-                    (from, to),
-                    instant,
-                    &format!(
-                        "{REFERENCE_PREFIX}{}:{}:{}",
-                        answer.reference.persona_id,
-                        answer.reference.trigger_event_id,
-                        answer.reference.attempt
-                    ),
-                )
+            by_window
+                .entry(index)
+                .or_default()
+                .push((instant.as_str(), at));
+        }
+        // Journalled under the reference, like the agent's own reads: the
+        // owner's record then shows the check beside what it checked (#367's
+        // path reads the same column).
+        let delivery = format!(
+            "{REFERENCE_PREFIX}{}:{}:{}",
+            answer.reference.persona_id,
+            answer.reference.trigger_event_id,
+            answer.reference.attempt
+        );
+        for (index, offered) in by_window {
+            let (connection, from, to) = &windows[index];
+            let gaps = reads
+                .free_gaps(connection, (from, to), &delivery)
                 .await
                 .map_err(|refusal| AnswerRefusal::ProposedUncheckable(refusal.message()))?;
-            if !free {
-                warn!(
-                    %instant,
-                    trigger = %answer.reference.trigger_event_id,
-                    "a draft offered a time the owner is busy in; nothing published"
-                );
-                return Err(AnswerRefusal::ProposedNotFree {
-                    instant: instant.clone(),
-                });
+            // No `free` member at all is a collector that predates #379, and
+            // it is *not* an empty week: concluding "the owner is busy" from
+            // it would refuse every draft of that deployment with a sentence
+            // about the owner's calendar instead of about the deployment.
+            let Some(gaps) = gaps else {
+                return Err(AnswerRefusal::ProposedUncheckable(format!(
+                    "the calendar read of {from}–{to} answered no free gaps at all, so this \
+                     deployment cannot tell a free moment from a busy one"
+                )));
+            };
+            for (instant, at) in offered {
+                if !gaps.iter().any(|gap| covers(*gap, at)) {
+                    warn!(
+                        %instant,
+                        trigger = %answer.reference.trigger_event_id,
+                        gaps = gaps.len(),
+                        "a draft offered a time the owner is busy in; nothing published"
+                    );
+                    return Err(AnswerRefusal::ProposedNotFree {
+                        instant: instant.to_owned(),
+                    });
+                }
             }
         }
         info!(
@@ -1172,6 +1274,32 @@ impl Answers {
                 event["data"]["context"]["contact"] = json!(name);
             }
         }
+        // And whether the times it names were checked (#383). Written here
+        // because this is the component that did the checking: by the time
+        // this envelope is built, `check_proposals` has verified every
+        // instant in `proposed` against the windows the agent read and
+        // against the calendar, and an answer that failed never reached this
+        // line at all.
+        //
+        // The other branch is the one the ticket exists to close. A reply may
+        // name an hour in its prose and list nothing, and refusing that on a
+        // text pattern would refuse "je te réponds sous 24h", which is not a
+        // proposal. So it is published, and said to be unverified, and the
+        // owner reading the draft knows which of the two kinds they hold —
+        // which is the whole difference between a screen that informs and a
+        // screen that reassures.
+        //
+        // Absent when the reply names no time at all, which is most replies:
+        // a member that says "nothing to verify" on every "bien reçu" is
+        // noise on the one screen that must stay readable.
+        if !answer.proposed.is_empty() {
+            event["data"]["times"] = json!({
+                "state": "checked",
+                "count": answer.proposed.len(),
+            });
+        } else if names_a_time(&answer.reply) {
+            event["data"]["times"] = json!({ "state": "unverified" });
+        }
         if let Some(traceparent) = &trigger.traceparent {
             event["traceparent"] = Value::String(traceparent.clone());
         }
@@ -1314,6 +1442,39 @@ mod tests {
     use super::*;
 
     const TRIGGER: &str = "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0";
+
+    #[test]
+    fn a_reply_that_names_an_hour_is_recognised_and_one_that_names_none_is_not() {
+        // #383's second half: the case that must not become the loophole. The
+        // consequence of a yes here is a label on an approval screen, so
+        // being generous is correct and being clever would not be.
+        for names in [
+            "Lundi 12 à 14h ?",
+            "Lundi 12 à 14 h 30 ?",
+            "Le 12 à 14:00 me va",
+            "How about 2pm on Monday?",
+            "Monday at 10 AM works",
+            "On se voit à midi ?",
+            "Je te réponds sous 24h",
+            "Le créneau du 2026-10-12T12:00:00Z",
+        ] {
+            assert!(names_a_time(names), "{names}");
+        }
+        // The last two above are the price and are paid on purpose: "sous
+        // 24h" is not a proposal, and a draft that says so is published with
+        // a line the owner can ignore. Refusing it, as #383 says, is what
+        // this must not do.
+        for silent in [
+            "Bien reçu, je regarde et je reviens vers toi.",
+            "C'est noté !",
+            "Je suis en Midi-Pyrénées cette semaine.",
+            "Le score était de 2:1.",
+            "Nous sommes 14 au total.",
+            "Le document fait 12 pages.",
+        ] {
+            assert!(!names_a_time(silent), "{silent}");
+        }
+    }
 
     #[test]
     fn a_draft_says_which_instants_it_offers_and_a_bad_list_is_refused() {

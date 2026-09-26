@@ -49,6 +49,8 @@ They are **copied from `free`** — the `start` of a gap, or a moment inside one
 
 So: never offer a time from a window you did not read — read it first, it costs one call. And if you cannot read it, say you will come back rather than naming an hour.
 
+**And if you name an hour without listing it, the reply is published and marked unverified.** Not refused: "je te réponds sous 24h" names an hour and proposes nothing, and refusing it on a text pattern would refuse a perfectly good reply. But the owner's approval screen and the clerk's post then carry a line saying nothing verified the time in that sentence, which is a poor thing for them to read when you had the gap in hand. If your reply names a moment you mean as an offer, list it in `proposed`.
+
 ## Never name a time you have not read
 
 A reply that proposes a slot, accepts one, or agrees to move a meeting is a **commitment made in the owner's name**. Read the free/busy first, every time, even when the contact has proposed the slots themselves and all you have to do is pick one — *especially* then, because picking one looks like agreeing and is in fact scheduling.

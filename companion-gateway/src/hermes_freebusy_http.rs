@@ -125,11 +125,13 @@ fn answered(request: &ReadRequest, answer: FreeBusy) -> serde_json::Value {
         "to": request.to,
         "busy": answer.busy,
     });
-    // The gaps, when the collector answered any (#379). Absent rather than
+    // The gaps, when the collector answered them (#379). Absent rather than
     // empty from a collector that predates them, so a reader can tell "this
-    // deployment does not compute them" from "this window has none".
-    if !answer.free.is_empty() {
-        body["free"] = json!(answer.free);
+    // deployment does not compute them" from "this window has none" — and an
+    // empty list is relayed as an empty list, because a full week is an
+    // answer and an agent that is told nothing cannot say so.
+    if let Some(free) = &answer.free {
+        body["free"] = json!(free);
     }
     // And the amplitude those gaps were cut to, when there is one (#381).
     if let Some(day) = answer.working_day {
@@ -206,7 +208,7 @@ mod tests {
             &request(),
             FreeBusy {
                 busy: intervals(),
-                free: Vec::new(),
+                free: None,
                 working_day: None,
                 timezone: Some("Europe/Paris".to_owned()),
                 timezone_source: Some("calendar".to_owned()),
@@ -229,7 +231,7 @@ mod tests {
             &request(),
             FreeBusy {
                 busy: intervals(),
-                free: Vec::new(),
+                free: None,
                 working_day: None,
                 timezone: None,
                 timezone_source: None,
@@ -248,7 +250,7 @@ mod tests {
             &request(),
             FreeBusy {
                 busy: intervals(),
-                free: Vec::new(),
+                free: None,
                 working_day: None,
                 timezone: Some("Europe/Paris".to_owned()),
                 timezone_source: Some("calendar".to_owned()),

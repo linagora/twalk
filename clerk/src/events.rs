@@ -62,6 +62,29 @@ pub struct SuggestionData {
     pub context: Option<Answering>,
     #[serde(default)]
     pub expires_at: Option<String>,
+    /// Whether the times this reply names were verified before it was
+    /// published (#383), as the Companion Gateway asserted it. Absent from a
+    /// reply that names no time — most of them — and from every suggestion
+    /// published before #383.
+    ///
+    /// Read from the event and not from the Gateway: it is a fact the
+    /// publisher wrote into the suggestion, so the post can carry it whether
+    /// or not the clerk has a device to read with.
+    #[serde(default)]
+    pub times: Option<Verified>,
+}
+
+/// `data.times`: the two states of the contract, and a count with the first.
+///
+/// `state` is kept as the string it was written as. A state this build does
+/// not know is not drawn — decided where the line is written, not here,
+/// because a `Deserialize` that refused would drop a whole suggestion over
+/// one member.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Verified {
+    pub state: String,
+    #[serde(default)]
+    pub count: Option<u64>,
 }
 
 /// Who is answered and what they asked, as the suggestion carries it.
@@ -294,11 +317,16 @@ mod tests {
             value["data"].as_object().unwrap().keys().cloned().collect();
         assert_eq!(
             data,
-            ["persona_id", "suggestion", "context", "expires_at"]
+            ["persona_id", "suggestion", "context", "expires_at", "times"]
                 .into_iter()
                 .map(String::from)
                 .collect()
         );
+        // `times` is a fact about what the *Gateway checked* before it
+        // published, not anything a contact wrote, which is why this view may
+        // hold it at all (#383). `null` here: the fixture predates it, and a
+        // suggestion that names no time carries none.
+        assert_eq!(value["data"]["times"], serde_json::json!(null));
         assert_eq!(
             value["data"]["context"]["summary"],
             serde_json::json!(

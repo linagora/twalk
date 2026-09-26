@@ -212,7 +212,10 @@ TOOLS = [
             "checks each one — that you read the window it falls in, and that "
             "the owner is free then — and publishes nothing at all if one "
             "fails. A time from a window you did not read is refused, so read "
-            "the window first; it costs one call."
+            "the window first; it costs one call. A reply that names an hour "
+            "and lists none is published, and the owner is told that nothing "
+            "verified it \u2014 which is a poor line for them to read when you "
+            "had the gap in hand."
         ),
         "inputSchema": {
             "type": "object",

@@ -4535,6 +4535,46 @@ export interface components {
                  */
                 format: "text/plain" | "text/markdown" | "text/html";
             };
+            /**
+             * @description Whether the times this reply names were verified before it was
+             *     published (#383), or `null` when it names none — which is most
+             *     replies, and what every suggestion published before #383 carries.
+             *
+             *     The member exists because the two kinds of draft are otherwise
+             *     indistinguishable on this screen. A reply that offered instants
+             *     was checked against the windows its agent had read and against
+             *     the owner's calendar, and one that failed was never published at
+             *     all. But a reply may also name an hour in its prose and offer no
+             *     instants, and refusing that on a text pattern would refuse *"je
+             *     te réponds sous 24h"*, which is not a proposal. So it is
+             *     published, said to be unverified, and the owner reading it knows
+             *     which of the two they hold.
+             *
+             *     Asserted by the Gateway, never by an agent: it is a claim about
+             *     what was checked, and only the component that checked may make
+             *     it. A state this build does not know is served as `null` rather
+             *     than passed through — a word about verification the Gateway
+             *     cannot vouch for must not reach the screen.
+             */
+            times?: null | {
+                /**
+                 * @description How many instants were checked. Present with `checked`
+                 *     and absent otherwise: there is no count of things that
+                 *     were not counted.
+                 */
+                count?: number;
+                /**
+                 * @description `checked`: every instant the reply offered was inside a
+                 *     window its agent had read for this message and inside a
+                 *     free gap of the owner's calendar, asked again at the
+                 *     moment of publication. `unverified`: the text names
+                 *     something time-like and the reply offered no instants, so
+                 *     nothing here was verified — a label, not a refusal and
+                 *     not a defect.
+                 * @enum {string}
+                 */
+                state: "checked" | "unverified";
+            };
             trigger: components["schemas"]["SuggestionTrigger"];
         };
         /**

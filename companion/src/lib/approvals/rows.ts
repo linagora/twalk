@@ -91,6 +91,19 @@ export interface Row {
 	 * the contact's words, for the reason `context` is not them either.
 	 */
 	path: Suggestion['path'];
+	/**
+	 * Whether the times this reply names were verified before it was published
+	 * (#383), or `null` when it names none — which is most replies.
+	 *
+	 * Why a card carries it: the two kinds of draft are indistinguishable
+	 * otherwise. A reply that offered instants was checked against the windows
+	 * its agent read and against the user's own calendar, and one that failed
+	 * was never published at all; a reply that names an hour in its prose and
+	 * offered none is published, because refusing that on a text pattern would
+	 * refuse *"je te réponds sous 24h"*. The user deciding needs to know which
+	 * of the two they are reading, and nothing else on the card says it.
+	 */
+	times: Suggestion['times'];
 	format: string;
 	/**
 	 * The sentence the reply will disclose itself with, after the body and on
@@ -179,6 +192,7 @@ export function toRow(suggestion: Suggestion): Row {
 		format: suggestion.suggestion.format,
 		context: suggestion.context,
 		path: suggestion.path ?? [],
+		times: suggestion.times ?? null,
 		disclosure: suggestion.disclosure,
 		trigger: suggestion.trigger,
 		standing: suggestion.standing,

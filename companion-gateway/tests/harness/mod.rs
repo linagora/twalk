@@ -27,6 +27,7 @@ pub use stub_bridge::{StubBridge, STUB_AS_TOKEN, STUB_PROVISIONING_SECRET};
 pub use twalk_test_harness::*;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -1200,6 +1201,123 @@ pub fn gateway_env_with_hermes(static_dir: &Path, nats_url: &str) -> Vec<(String
     )
 }
 
+/// One `connection.status.changed.v1` as the collector publishes it about
+/// a calendar connection (#274): the state #281 refuses a read on.
+pub fn calendar_status_event(connection: &str, from: &str, to: &str) -> serde_json::Value {
+    let at = rfc3339_of(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after 1970")
+            .as_secs()
+            - 30,
+    );
+    let event = serde_json::json!({
+        "specversion": "1.0",
+        "id": sha256_hex(&format!("{connection}:{to}:{at}")),
+        "source": format!("collector://collector.test/connections/{connection}"),
+        "type": "fr.linagora.twalk.connection.status.changed.v1",
+        "time": at,
+        "subject": connection,
+        "datacontenttype": "application/json",
+        "connection": connection,
+        "data": {
+            "connection": connection,
+            "kind": "calendar",
+            "from_state": from,
+            "to_state": to,
+            "occurred_at": at,
+            "service": "caldav",
+            "hint": "Run `twalk-collector authorize --renew` on the host."
+        }
+    });
+    validate_against_contract(&event, "connection.status.changed")
+        .expect("the fixture is an event the contract allows");
+    event
+}
+
+/// The subject a connection state change is published on.
+pub const CONNECTION_STATUS_SUBJECT: &str = "twalk.connection.status.changed.v1";
+
+/// The collector's internal endpoint, stubbed. Here rather than in one suite
+/// because two of them need it: the free/busy reads suite, which asserts what
+/// the Gateway relays, and the answers suite, which needs a calendar to check
+/// the times a draft offers against (#383).
+/// One request the stub collector received: the request line, and the
+/// `authorization` header when there was one.
+pub type Relayed = (String, Option<String>);
+
+/// The collector's internal endpoint, stubbed: answers what a test tells
+/// it to, and keeps every request line and bearer it received, so the test
+/// asserts what the Gateway relayed and not only what came back.
+pub struct StubCollector {
+    addr: std::net::SocketAddr,
+    requests: Arc<Mutex<Vec<Relayed>>>,
+    answer: Arc<Mutex<(u16, Vec<u8>)>>,
+    accept_task: tokio::task::JoinHandle<()>,
+}
+
+impl StubCollector {
+    pub async fn answering(status: u16, body: serde_json::Value) -> Result<Self> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("failed to bind the stub collector")?;
+        let addr = listener.local_addr()?;
+        let requests: Arc<Mutex<Vec<Relayed>>> = Arc::default();
+        let seen = requests.clone();
+        let answer = Arc::new(Mutex::new((status, serde_json::to_vec(&body)?)));
+        let canned = answer.clone();
+        let accept_task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let seen = seen.clone();
+                let (status, body) = canned.lock().expect("not poisoned").clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buffer = vec![0_u8; 8192];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                    let line = head.lines().next().unwrap_or_default().to_owned();
+                    let bearer = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("authorization: "))
+                        .map(str::to_owned);
+                    seen.lock().expect("not poisoned").push((line, bearer));
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        });
+        Ok(Self {
+            addr,
+            requests,
+            answer,
+            accept_task,
+        })
+    }
+
+    /// What the stub answers from now on: a refusal of its own, say.
+    pub fn answer(&self, status: u16, body: serde_json::Value) {
+        *self.answer.lock().expect("not poisoned") =
+            (status, serde_json::to_vec(&body).expect("a JSON body"));
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn requests(&self) -> Vec<Relayed> {
+        self.requests.lock().expect("not poisoned").clone()
+    }
+
+    pub fn stop(self) {
+        self.accept_task.abort();
+    }
+}
+
 /// A calendar connection the Hermes Gateway declares and no collector has
 /// reported (#281).
 pub const UNSPOKEN_CALENDAR_CONNECTION: &str = "calendar-unspoken";
@@ -1245,6 +1363,34 @@ pub fn freebusy_query(connection: &str, from: &str, to: &str) -> String {
 /// states the contract.
 pub fn freebusy_signature(query: &str, timestamp: &str) -> String {
     hermes_read_signature("/_twalk/hermes/freebusy", query, timestamp)
+}
+
+/// The route the governed free/busy read is served on. Written out rather
+/// than imported from the Gateway, like the signature it carries: a test that
+/// reads the path off the code under test agrees with it instead of stating
+/// the contract.
+pub const FREEBUSY_PATH: &str = "/_twalk/hermes/freebusy";
+
+/// One free/busy read as Hermes makes it: the query string signed as sent,
+/// and the delivery it names itself by when it names one (#363).
+pub async fn freebusy_read(
+    base: &str,
+    query: &str,
+    signature: &str,
+    timestamp: &str,
+    delivery: Option<&str>,
+) -> Result<(u16, serde_json::Value)> {
+    let mut request = reqwest::Client::new()
+        .get(format!("{base}{FREEBUSY_PATH}?{query}"))
+        .header("X-Hermes-Timestamp", timestamp)
+        .header("X-Hermes-Signature-256", signature);
+    if let Some(delivery) = delivery {
+        request = request.header("X-Hermes-Delivery", delivery);
+    }
+    let response = request.send().await?;
+    let status = response.status().as_u16();
+    let body = response.json().await.unwrap_or(serde_json::Value::Null);
+    Ok((status, body))
 }
 
 /// The query of a read of what one event carries (#355), encoded as the

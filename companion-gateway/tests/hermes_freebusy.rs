@@ -28,20 +28,18 @@ mod harness;
 use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use harness::{
     companion_build, ensure_stack, event_facts_query, event_facts_signature,
-    freebusy_query as query, freebusy_signature as signature, gateway_env_with, gateway_state_dir,
-    nats_url, poll_until, validate_against_contract, Bus, GatewayProc, HERMES_ANSWER_SECRET,
-    HERMES_DOMAIN, SERVICE_TOKEN,
+    calendar_status_event, freebusy_query as query, freebusy_signature as signature,
+    freebusy_read as read, gateway_env_with, gateway_state_dir, nats_url, poll_until, Bus,
+    GatewayProc, StubCollector, HERMES_ANSWER_SECRET, HERMES_DOMAIN, SERVICE_TOKEN,
 };
 use serde_json::{json, Value};
 
 const STREAM: &str = "twalk";
 const CONNECTION_STATUS_SUBJECT: &str = "twalk.connection.status.changed.v1";
-const FREEBUSY_PATH: &str = "/_twalk/hermes/freebusy";
 const EVENT_FACTS_PATH: &str = "/_twalk/hermes/event-facts";
 
 fn unique(label: &str) -> String {
@@ -72,113 +70,11 @@ async fn bus() -> Result<Bus> {
     Ok(bus)
 }
 
-/// One `connection.status.changed.v1` as the collector publishes it about
-/// a calendar connection (#274): the state #281 refuses a read on.
-fn calendar_status_event(connection: &str, from: &str, to: &str) -> Value {
-    let at = in_seconds(-30);
-    let event = json!({
-        "specversion": "1.0",
-        "id": harness::sha256_hex(&format!("{connection}:{to}:{at}")),
-        "source": format!("collector://collector.test/connections/{connection}"),
-        "type": "fr.linagora.twalk.connection.status.changed.v1",
-        "time": at,
-        "subject": connection,
-        "datacontenttype": "application/json",
-        "connection": connection,
-        "data": {
-            "connection": connection,
-            "kind": "calendar",
-            "from_state": from,
-            "to_state": to,
-            "occurred_at": at,
-            "service": "caldav",
-            "hint": "Run `twalk-collector authorize --renew` on the host."
-        }
-    });
-    validate_against_contract(&event, "connection.status.changed")
-        .expect("the fixture is an event the contract allows");
-    event
-}
-
-/// One request the stub collector received: the request line, and the
-/// `authorization` header when there was one.
-type Relayed = (String, Option<String>);
 
 /// One `hermes_read` row as the test reads it back: connection, window
 /// from, window to, delivery, outcome, intervals.
 type Recorded = (String, String, String, Option<String>, String, Option<i64>);
 
-/// The collector's internal endpoint, stubbed: answers what a test tells
-/// it to, and keeps every request line and bearer it received, so the test
-/// asserts what the Gateway relayed and not only what came back.
-struct StubCollector {
-    addr: std::net::SocketAddr,
-    requests: Arc<Mutex<Vec<Relayed>>>,
-    answer: Arc<Mutex<(u16, Vec<u8>)>>,
-    accept_task: tokio::task::JoinHandle<()>,
-}
-
-impl StubCollector {
-    async fn answering(status: u16, body: Value) -> Result<Self> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("failed to bind the stub collector")?;
-        let addr = listener.local_addr()?;
-        let requests: Arc<Mutex<Vec<Relayed>>> = Arc::default();
-        let seen = requests.clone();
-        let answer = Arc::new(Mutex::new((status, serde_json::to_vec(&body)?)));
-        let canned = answer.clone();
-        let accept_task = tokio::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let seen = seen.clone();
-                let (status, body) = canned.lock().expect("not poisoned").clone();
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buffer = vec![0_u8; 8192];
-                    let read = stream.read(&mut buffer).await.unwrap_or(0);
-                    let head = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                    let line = head.lines().next().unwrap_or_default().to_owned();
-                    let bearer = head
-                        .lines()
-                        .find_map(|line| line.strip_prefix("authorization: "))
-                        .map(str::to_owned);
-                    seen.lock().expect("not poisoned").push((line, bearer));
-                    let response = format!(
-                        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    let _ = stream.write_all(&body).await;
-                    let _ = stream.flush().await;
-                });
-            }
-        });
-        Ok(Self {
-            addr,
-            requests,
-            answer,
-            accept_task,
-        })
-    }
-
-    /// What the stub answers from now on: a refusal of its own, say.
-    fn answer(&self, status: u16, body: Value) {
-        *self.answer.lock().expect("not poisoned") =
-            (status, serde_json::to_vec(&body).expect("a JSON body"));
-    }
-
-    fn url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-
-    fn requests(&self) -> Vec<Relayed> {
-        self.requests.lock().expect("not poisoned").clone()
-    }
-
-    fn stop(self) {
-        self.accept_task.abort();
-    }
-}
 
 /// A Gateway with the seam and the collector's URL, and the calendar
 /// connection of this run in its registry.
@@ -222,26 +118,6 @@ async fn gateway(
     Ok((gateway, base, gateway_state_dir(&static_dir)))
 }
 
-/// One read as Hermes makes it: the query string signed as sent.
-async fn read(
-    base: &str,
-    query: &str,
-    signature: &str,
-    timestamp: &str,
-    delivery: Option<&str>,
-) -> Result<(u16, Value)> {
-    let mut request = reqwest::Client::new()
-        .get(format!("{base}{FREEBUSY_PATH}?{query}"))
-        .header("X-Hermes-Timestamp", timestamp)
-        .header("X-Hermes-Signature-256", signature);
-    if let Some(delivery) = delivery {
-        request = request.header("X-Hermes-Delivery", delivery);
-    }
-    let response = request.send().await?;
-    let status = response.status().as_u16();
-    let body = response.json().await.unwrap_or(Value::Null);
-    Ok((status, body))
-}
 
 async fn signed_read(
     base: &str,
