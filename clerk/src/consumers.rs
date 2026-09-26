@@ -622,8 +622,11 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         skip(clerk, Skipped::Duplicate, "suggestion", &format!("id={id}"));
         return Ok(());
     }
-    let delivery_line = match read_before_post(clerk, id).await {
-        BeforePost::Post(line) => line,
+    let (delivery_line, path) = match read_before_post(clerk, id).await {
+        BeforePost::Post {
+            delivery_line,
+            path,
+        } => (delivery_line, path),
         BeforePost::AlreadyApproved => {
             skip(
                 clerk,
@@ -643,6 +646,7 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         &suggestion.data.suggestion.body,
         &suggestion.network,
         suggestion.data.context.as_ref(),
+        &path,
         suggestion.data.expires_at.as_deref(),
         &delivery_line,
         &reference,
@@ -669,8 +673,15 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
 /// line the post carries, or the one answer that means there is no post
 /// to make.
 enum BeforePost {
-    /// Post, with this as the third line.
-    Post(String),
+    /// Post, with the delivery line, and the path the draft took before it
+    /// wrote (#377) — both from the one read, since both are members of it.
+    Post {
+        delivery_line: String,
+        /// Already rendered as lines, and empty when there is nothing to
+        /// say: a Gateway older than #367, a read that could not be made, or
+        /// a draft that looked nothing up.
+        path: String,
+    },
     /// The Companion Gateway records the suggestion as `approved`: it was
     /// decided from the approval screen before the clerk got to it, and a
     /// post would ask the owner for a decision already made.
@@ -724,7 +735,10 @@ async fn read_before_post_uncounted(clerk: &Clerk, id: &str) -> (BeforePost, Del
     let l = clerk.lang;
     let Some(gateway) = clerk.gateway.as_ref() else {
         return (
-            BeforePost::Post(refusals::delivery_unread_line(l, Unread::NoDevice)),
+            BeforePost::Post {
+                delivery_line: refusals::delivery_unread_line(l, Unread::NoDevice),
+                path: String::new(),
+            },
             DeliveryRead::NoDevice,
         );
     };
@@ -736,7 +750,10 @@ async fn read_before_post_uncounted(clerk: &Clerk, id: &str) -> (BeforePost, Del
              delivery is not read and it is posted as such; run provision-clerk-device.sh"
         );
         return (
-            BeforePost::Post(refusals::delivery_unread_line(l, Unread::GatewayRefused)),
+            BeforePost::Post {
+                delivery_line: refusals::delivery_unread_line(l, Unread::GatewayRefused),
+                path: String::new(),
+            },
             DeliveryRead::Refused,
         );
     }
@@ -753,7 +770,12 @@ async fn read_before_post_uncounted(clerk: &Clerk, id: &str) -> (BeforePost, Del
                 "read the suggestion's delivery from the Companion Gateway"
             );
             return (
-                BeforePost::Post(refusals::delivery_line(l, &read.delivery)),
+                BeforePost::Post {
+                    delivery_line: refusals::delivery_line(l, &read.delivery),
+                    // The same read, which is the point: the post says what
+                    // the draft did without asking the Gateway twice (#377).
+                    path: crate::text::path_lines(l, &read.path),
+                },
                 DeliveryRead::Found,
             );
         }
@@ -798,7 +820,10 @@ async fn read_before_post_uncounted(clerk: &Clerk, id: &str) -> (BeforePost, Del
         }
     };
     (
-        BeforePost::Post(refusals::delivery_unread_line(l, unread)),
+        BeforePost::Post {
+            delivery_line: refusals::delivery_unread_line(l, unread),
+            path: String::new(),
+        },
         outcome,
     )
 }

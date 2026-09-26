@@ -383,6 +383,39 @@ pub struct Delivery {
 pub struct SuggestionRead {
     pub standing: String,
     pub delivery: Delivery,
+    /// What the draft did before it was written (#367, #377): the governed
+    /// reads it made and the questions it put to the owner, oldest first.
+    ///
+    /// Read from the answer the clerk already asks for, not from a second
+    /// call: the delivery line and this line come from one request, which is
+    /// what keeps this module a reader of the Gateway rather than a second
+    /// opinion about the bus (ADR 0035).
+    ///
+    /// Empty from a Gateway older than #367, which is not an error: the post
+    /// is then the post as it was.
+    #[serde(default)]
+    pub path: Vec<Step>,
+}
+
+/// One step of that path, as the Gateway serves it.
+///
+/// `kind` is the discriminator the Gateway writes, and an unknown one is
+/// kept rather than refused: a Gateway that grows a fourth kind must not
+/// stop a clerk from posting, so what this cannot name it simply does not
+/// draw.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Step {
+    pub kind: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub intervals: Option<u64>,
+    #[serde(default)]
+    pub asked: Option<String>,
 }
 
 /// What one read of a suggestion came to.
@@ -1446,6 +1479,7 @@ mod tests {
             read,
             Read::Found(SuggestionRead {
                 standing: "approvable".to_owned(),
+                path: Vec::new(),
                 delivery: Delivery {
                     reach: "cannot_reach".to_owned(),
                     detail: "owner_invited".to_owned(),
@@ -1468,6 +1502,7 @@ mod tests {
             read,
             Read::Found(SuggestionRead {
                 standing: "approved".to_owned(),
+                path: Vec::new(),
                 delivery: Delivery {
                     reach: "can_reach".to_owned(),
                     detail: "owner_joined".to_owned(),
