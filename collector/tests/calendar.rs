@@ -6,6 +6,12 @@
 //! owner revoked on the mail connection is withheld, one never decided about
 //! is carried — and nothing of a description or a withheld person reaches
 //! the bus, the log, or the state directory.
+//!
+//! And, since #350, that an event written by **Outlook** — a Windows zone name
+//! in its TZID, which is what a corporate calendar is full of — is published
+//! with the instants a calendar client shows and the IANA zone the contract
+//! asks for, while a zone in neither family is still refused, still named, and
+//! now counted.
 
 mod support;
 
@@ -25,6 +31,12 @@ const WEEKLY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBE
 /// A standing meeting the calendar already held before the collector ever
 /// ran: the past, which is not published.
 const STANDING: &str = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:standing-1\r\nSUMMARY:Standing meeting\r\nDTSTART;TZID=Europe/Paris:20261001T140000\r\nDTEND;TZID=Europe/Paris:20261001T150000\r\nATTENDEE;CN=Carol:mailto:carol@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+/// One event as Outlook publishes it: `Romance Standard Time`, which is a
+/// label of Microsoft's table and not an IANA zone. Sixty of these were read
+/// and refused on the reference deployment on 2026-09-24 (#350), which made
+/// the owner's free/busy a description of a calendar they do not have.
+const OUTLOOK: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Romance Standard Time\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:040000008200E00074C5B7101A82E008\r\nSUMMARY:Point hebdo\r\nDTSTART;TZID=Romance Standard Time:20261007T140000\r\nDTEND;TZID=Romance Standard Time:20261007T150000\r\nATTENDEE;CN=Alice Martin;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
 /// The calendar events this run's connection published, of one type.
 async fn events_of(bus: &Bus, run: &Run, kind: &str) -> Result<Vec<Value>> {
@@ -362,5 +374,65 @@ async fn a_calendar_is_asked_about_a_window_and_the_rest_is_never_read() -> Resu
             && events_of(&bus, &run, "removed").await?.is_empty()
     );
     collector.stop().await;
+    Ok(())
+}
+
+/// #350: the zone families a calendar actually writes.
+///
+/// The fake serves an Outlook-shaped event, because a fake that only ever
+/// wrote IANA names is the reason sixty real events were refused in silence
+/// for two days. And it serves one whose zone is in neither family, because
+/// the refusal is not a bug to be removed: an instant this collector cannot
+/// place must not be published an hour wrong.
+#[tokio::test]
+async fn an_event_written_by_outlook_is_published_and_an_unplaceable_one_is_counted() -> Result<()> {
+    ensure_stack().await?;
+    let bus = Bus::connect().await?;
+    let run = Run::prepare("outlook").await?;
+    run.authorize().await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
+    run.sso.create_calendar(&run.calendar, "Mine");
+    let collector = run.start_with_gateway()?;
+    collector
+        .wait_logged("calendar taken as it stands", 1)
+        .await?;
+
+    // The Windows name: published, with the instants a calendar client shows
+    // — 14:00 Paris in October is UTC+2 — and the IANA zone the contract
+    // defines `timezone` as.
+    run.sso.put_event(&run.calendar, "outlook", OUTLOOK);
+    let created = wait_for(&bus, &run, "created", 1).await?;
+    let created = &created[0];
+    validate_against_contract(created, "calendar.event.created")?;
+    assert_eq!(created["data"]["title"], "Point hebdo");
+    assert_eq!(created["data"]["start"], "2026-10-07T14:00:00+02:00");
+    assert_eq!(created["data"]["end"], "2026-10-07T15:00:00+02:00");
+    assert_eq!(
+        created["data"]["timezone"], "Europe/Paris",
+        "the event travels with the zone its TZID means, not with Outlook's word for it: {created}"
+    );
+    assert!(
+        !created.to_string().contains("Romance"),
+        "the Windows label reached the bus, where every consumer reads a zone: {created}"
+    );
+
+    // A zone in neither family: nothing published, the refusal names it, and
+    // the calendar's own line carries the count — which is what an operator
+    // reads instead of sixty lines.
+    let unplaceable = OUTLOOK
+        .replace("Romance Standard Time", "Middle-earth Standard Time")
+        .replace("040000008200E00074C5B7101A82E008", "unplaceable-1");
+    run.sso.put_event(&run.calendar, "unplaceable", &unplaceable);
+    collector
+        .wait_logged("neither an IANA zone nor a Windows zone name", 1)
+        .await?;
+    collector
+        .wait_logged("resources of this calendar were read and not published", 1)
+        .await?;
+    assert_eq!(
+        events_of(&bus, &run, "created").await?.len(),
+        1,
+        "an event this collector cannot place was published anyway"
+    );
     Ok(())
 }

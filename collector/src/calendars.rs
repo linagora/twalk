@@ -74,6 +74,45 @@ pub type SharedWorkingDay = Arc<std::sync::Mutex<Option<crate::freebusy::Working
 pub struct Poll {
     pub envelopes: Vec<Value>,
     pub cursors: Vec<(String, Cursor)>,
+    /// The resources of this poll that were read and **not published**, one
+    /// entry per resource, with why (#350).
+    ///
+    /// Kept because the sixty events the reference deployment refused on
+    /// 2026-09-24 were sixty log lines and no number: a calendar can stop being
+    /// published almost entirely with nothing saying so in one place, and an
+    /// operator cannot alert on a log line. The shape is the mail side's
+    /// (`mails::Poll::dropped`), for the same reason and with the same use —
+    /// the run loop counts them, by reason, on `/metrics`.
+    pub refused: Vec<Refused>,
+}
+
+/// Why one calendar resource was read and not published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// Its `DTSTART` names a zone this collector cannot place (#350) — the
+    /// sixty events of 2026-09-24, and the one case an operator can act on by
+    /// updating a table rather than by reading an ICS.
+    Zone(crate::zones::Unplaceable),
+    /// Anything else the parser would not take: no `DTSTART`, a DATE-TIME it
+    /// cannot read, a resource that is not a VEVENT at all.
+    Unreadable,
+}
+
+impl Refused {
+    /// Every reason, so the counter shows each at zero rather than appearing
+    /// only once something has gone wrong.
+    pub const REASONS: [&'static str; 3] = [
+        crate::zones::Unplaceable::REASONS[0],
+        crate::zones::Unplaceable::REASONS[1],
+        "unreadable",
+    ];
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Zone(unplaceable) => unplaceable.reason(),
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 /// The zone the owner's agenda is written in, and where that was read.
@@ -319,7 +358,7 @@ impl Calendars {
                 .read(&collection, &changes.to_read(), credential)
                 .await?;
             let first_poll = cursor.ctag.is_none() && cursor.known.is_empty();
-            let (envelopes, next) = self.reconcile(
+            let (envelopes, next, refused) = self.reconcile(
                 &calendar,
                 &collection,
                 &cursor,
@@ -328,6 +367,28 @@ impl Calendars {
                 &resources,
                 now,
             );
+            // What this calendar refused, as one line rather than as a run of
+            // them (#350). Said at WARN because a calendar that is read and not
+            // published is not a detail: it is an agenda the owner has and
+            // their assistant does not, and the free/busy built from it
+            // describes a week they are not living. The reasons are tallied so
+            // the line names them, and the run loop counts them on `/metrics` —
+            // an operator must be able to alert on this, not grep for it.
+            if !refused.is_empty() {
+                let mut by_reason: std::collections::BTreeMap<&'static str, usize> =
+                    Default::default();
+                for refusal in &refused {
+                    *by_reason.entry(refusal.reason()).or_default() += 1;
+                }
+                warn!(
+                    calendar = %calendar.id,
+                    refused = refused.len(),
+                    read = resources.len(),
+                    reasons = ?by_reason,
+                    "resources of this calendar were read and not published; the lines above say \
+                     why, one per resource"
+                );
+            }
             if first_poll {
                 // No backfill: what the calendar already holds is taken as
                 // the state, published as nothing.
@@ -335,6 +396,7 @@ impl Calendars {
             } else {
                 poll.envelopes.extend(envelopes);
             }
+            poll.refused.extend(refused);
             poll.cursors.push((calendar.id.clone(), next));
         }
         Ok(poll)
@@ -352,7 +414,7 @@ impl Calendars {
         changes: &Changes,
         resources: &[Resource],
         now: &str,
-    ) -> (Vec<Value>, Cursor) {
+    ) -> (Vec<Value>, Cursor, Vec<Refused>) {
         let envelopes = Envelopes::new(
             &self.connection,
             &self.owner_email,
@@ -364,6 +426,7 @@ impl Calendars {
             .map(|resource| (resource.href.as_str(), resource))
             .collect();
         let mut out = Vec::new();
+        let mut refused = Vec::new();
         let mut next = Cursor {
             ctag: listing.ctag.clone(),
             known: cursor.known.clone(),
@@ -379,7 +442,7 @@ impl Calendars {
                 .get(href)
                 .map(|known| &known.published)
                 .filter(|published| !published.is_null());
-            let published = self.publishable(resource);
+            let published = self.publishable(resource, &mut refused);
             match (&published, before) {
                 (Some(published), Some(before)) => {
                     let fields = caldav::changed_fields(before, published);
@@ -422,12 +485,12 @@ impl Calendars {
             }
             next.known.remove(href);
         }
-        (out, next)
+        (out, next, refused)
     }
 
     /// The resource as the contract publishes it, or `None` — said — for
     /// one that is not a VEVENT this collector can read.
-    fn publishable(&self, resource: &Resource) -> Option<Value> {
+    fn publishable(&self, resource: &Resource, refused: &mut Vec<Refused>) -> Option<Value> {
         match caldav::parse_vevent(&resource.ics) {
             Ok(event) => Some(caldav::reduce(
                 &event,
@@ -440,6 +503,15 @@ impl Calendars {
                 |identity| self.decide(identity),
             )),
             Err(error) => {
+                // Which refusal it was comes from the error itself, found in
+                // its chain rather than read out of its message: the zone case
+                // is the one an operator acts on differently, and it must be
+                // countable without anybody parsing prose.
+                let refusal = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<crate::zones::Unplaceable>())
+                    .map_or(Refused::Unreadable, |zone| Refused::Zone(zone.clone()));
+                refused.push(refusal);
                 warn!(href = %resource.href, error = %format!("{error:#}"), "the resource is not a VEVENT this collector reads; nothing published");
                 None
             }
@@ -686,10 +758,17 @@ fn tzid_in(body: &str) -> Option<String> {
         .find(|c: char| c == '\r' || c == '\n' || c == '<' || c == '&')
         .unwrap_or(rest.len());
     let name = rest[..end].trim();
-    // A zone is an IANA name, and this is the whole check: anything with a
-    // space or a slash-less shape is something else that happened to follow
-    // the letters TZID — say nothing rather than hand a model a word.
-    (!name.is_empty() && !name.contains(' ') && name.len() < 64).then(|| name.to_owned())
+    // A zone this collector can read, and its **IANA** name — not the word the
+    // collection wrote (#350). The shape check this replaces refused anything
+    // with a space, which refused every Outlook-shaped calendar: those declare
+    // `TZID:Romance Standard Time`, and a deployment whose collection says so
+    // was read as declaring nothing at all. It also let `Europe/Pariss`
+    // through, to fail two modules later.
+    //
+    // Reading it through the table is both halves at once: a name in neither
+    // family is still nothing, and a name in either is stored as the zone it
+    // means, so the owner's zone is an IANA name wherever it came from (#369).
+    crate::zones::read(name).map(|zone| zone.name().to_owned())
 }
 
 #[cfg(test)]
@@ -748,10 +827,20 @@ mod tests {
         // the `207`, and there is no TZID anywhere in it.
         assert_eq!(tzid_in("<d:prop><cal:calendar-timezone/></d:prop>"), None);
 
-        // And a word that follows the letters TZID without being a zone is
-        // not handed to a model to put in a sentence: Windows spells its
-        // zones with spaces, and no converter this side knows them.
-        assert_eq!(tzid_in("TZID: Romance Standard Time\r\n"), None);
+        // A Windows name is a zone this collector reads, and it is stored as
+        // the zone it means rather than as the word Outlook wrote (#350).
+        // Before that, a collection declaring one was read as declaring
+        // nothing, because the check refused any name with a space in it.
+        assert_eq!(
+            tzid_in("TZID: Romance Standard Time\r\n").as_deref(),
+            Some("Europe/Paris")
+        );
+
+        // And a word that follows the letters TZID without being a zone in
+        // either family is still nothing: it is not handed to a model to put
+        // in a sentence, and it is not guessed at.
+        assert_eq!(tzid_in("TZID:Not A Zone At All\r\n"), None);
+        assert_eq!(tzid_in("TZID:Europe/Pariss\r\n"), None);
         assert_eq!(tzid_in("TZID:\r\n"), None);
     }
 }

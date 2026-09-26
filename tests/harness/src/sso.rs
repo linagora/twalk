@@ -1267,6 +1267,27 @@ fn occurs_within(ics: &str, range_start: &str, range_end: &str) -> bool {
 ///
 /// A value this cannot read is passed through unchanged, so the fixture that
 /// breaks fails in the test rather than silently becoming another instant.
+/// The IANA zone a Windows zone name means — the handful the fixtures use.
+///
+/// A real calendar service converts these, because Outlook writes them and a
+/// corporate calendar is mostly Outlook (#350). A fake that could not was the
+/// reason sixty real events were refused for two days with every test green:
+/// the fixtures only ever wrote IANA names, so nothing here ever met one.
+///
+/// Written out rather than read from `twalk_collector::zones`, deliberately.
+/// This is the *other side* of the seam: a fake that converted with the table
+/// under test would agree with it by construction, and the one thing a test of
+/// a zone mapping has to do is disagree when the mapping is wrong.
+fn windows_zone(name: &str) -> Result<chrono_tz::Tz, ()> {
+    match name {
+        "Romance Standard Time" => Ok(chrono_tz::Europe::Paris),
+        "W. Europe Standard Time" => Ok(chrono_tz::Europe::Berlin),
+        "GMT Standard Time" => Ok(chrono_tz::Europe::London),
+        "Eastern Standard Time" => Ok(chrono_tz::America::New_York),
+        _ => Err(()),
+    }
+}
+
 fn local_instant(after_dtstart: &str) -> String {
     let value = after_dtstart
         .split(':')
@@ -1280,7 +1301,7 @@ fn local_instant(after_dtstart: &str) -> String {
     else {
         return value;
     };
-    let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
+    let Ok(zone) = zone.parse::<chrono_tz::Tz>().or_else(|_| windows_zone(zone)) else {
         return value;
     };
     let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&value, "%Y%m%dT%H%M%S") else {
@@ -1408,4 +1429,38 @@ fn base64url(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{free_busy_period, local_instant};
+
+    /// #350: a fake that only ever converted IANA names is the reason sixty
+    /// real events were refused for two days with every suite green.
+    #[test]
+    fn the_free_busy_periods_are_utc_whichever_family_the_zone_belongs_to() {
+        // IANA, as every fixture wrote before.
+        assert_eq!(
+            local_instant(";TZID=Europe/Paris:20261008T140000"),
+            "20261008T120000Z"
+        );
+        // And the Windows name Outlook writes for the same zone.
+        assert_eq!(
+            local_instant(";TZID=Romance Standard Time:20261008T140000"),
+            "20261008T120000Z"
+        );
+        // A name in neither family is passed through unchanged, so the fixture
+        // that uses one fails in the test rather than quietly becoming another
+        // instant.
+        assert_eq!(
+            local_instant(";TZID=Middle-earth Standard Time:20261008T140000"),
+            "20261008T140000"
+        );
+
+        let ics = "BEGIN:VEVENT\r\nDTSTART;TZID=Romance Standard Time:20261008T140000\r\nDTEND;TZID=Romance Standard Time:20261008T150000\r\nEND:VEVENT\r\n";
+        assert_eq!(
+            free_busy_period(ics, "20261008T000000Z", "20261009T000000Z").as_deref(),
+            Some("20261008T120000Z/20261008T130000Z")
+        );
+    }
 }

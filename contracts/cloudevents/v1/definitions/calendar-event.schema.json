@@ -58,7 +58,7 @@
     "timezone": {
       "type": ["string", "null"],
       "maxLength": 128,
-      "description": "The IANA zone the event was scheduled in (the TZID of DTSTART), or null for an all-day event, a floating time, or a time given in UTC — the offset in `start` is authoritative either way; this is what lets a consumer say 'Paris time' rather than '+02:00'."
+      "description": "The IANA zone the event was scheduled in (the TZID of DTSTART), or null for an all-day event, a floating time, or a time given in UTC — the offset in `start` is authoritative either way; this is what lets a consumer say 'Paris time' rather than '+02:00'. Always IANA, whatever the calendar wrote: an Outlook event says `TZID=Romance Standard Time`, a label of Microsoft's own table, and the publisher reads it through CLDR's windowsZones and publishes the zone it means (#350). A TZID in neither family is not translated and not guessed at — the event is refused and nothing is published."
     },
     "status": {
       "type": "string",
