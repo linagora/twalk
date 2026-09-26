@@ -249,6 +249,27 @@ pub struct Free {
     pub minutes: i64,
 }
 
+/// The owner's working day, as the Companion Gateway answers it (#381): the
+/// ISO weekdays they accept meetings on, and the wall clock their day runs
+/// between — `09:00` meaning nine in the morning where they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingDay {
+    pub days: Vec<u8>,
+    pub starts_at: String,
+    pub ends_at: String,
+}
+
+impl WorkingDay {
+    /// The minutes since midnight a wall clock names, or `None` for a
+    /// spelling this does not accept — in which case the caller offers every
+    /// gap rather than a window it guessed.
+    fn minutes(value: &str) -> Option<u32> {
+        let (hours, minutes) = value.split_once(':')?;
+        let (hours, minutes): (u32, u32) = (hours.parse().ok()?, minutes.parse().ok()?);
+        (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
+    }
+}
+
 /// The stretches of the window the busy intervals leave, in order (#379).
 ///
 /// The complement of what [`merge_answers`] produced, which is why it takes
@@ -261,7 +282,12 @@ pub struct Free {
 /// offering a person is the drafting agent's judgement, guided by its skill,
 /// and a collector that hid the night would be making a decision about
 /// somebody's working hours that nobody told it.
-pub fn free_between(busy: &[Busy], window: &Window, zone: Option<&str>) -> Vec<Free> {
+pub fn free_between(
+    busy: &[Busy],
+    window: &Window,
+    zone: Option<&str>,
+    working_day: Option<&WorkingDay>,
+) -> Vec<Free> {
     let zone = zone.and_then(|name| name.parse::<chrono_tz::Tz>().ok());
     let local = |at: &DateTime<Utc>| {
         zone.map(|zone| {
@@ -300,12 +326,97 @@ pub fn free_between(busy: &[Busy], window: &Window, zone: Option<&str>) -> Vec<F
         at = at.max(end);
     }
     push(at, window.to, &mut gaps);
-    gaps
+    // And the owner's working day, when they have said what it is (#381).
+    // Applied to the **gaps** and never to the busy intervals: "you are
+    // busy" is a fact and "I would rather not be offered that" is a
+    // preference, and a read that trimmed an occupation would be lying about
+    // a calendar.
+    //
+    // Nothing is filtered without a zone: an amplitude is a wall clock, and
+    // clipping by one without knowing where the owner is would cut the wrong
+    // hours. Every gap is offered instead, which is what happens for a
+    // deployment that never said either.
+    match (working_day, zone) {
+        (Some(day), Some(zone)) => within(gaps, day, zone),
+        _ => gaps,
+    }
+}
+
+/// The parts of each gap that fall inside the owner's working day (#381).
+///
+/// A gap is walked day by day in the owner's own zone, because that is what
+/// the amplitude is expressed in: a gap from Friday 18:00 to Monday 10:00
+/// contributes nothing on Saturday and Sunday when those are not accepted
+/// days, and on Monday only from 09:00. A gap that straddles an edge is
+/// **clipped, not dropped** — 07:00–09:30 against a day starting at 09:00 is
+/// a half-hour offer, and half an hour is a meeting.
+fn within(gaps: Vec<Free>, day: &WorkingDay, zone: chrono_tz::Tz) -> Vec<Free> {
+    use chrono::{Datelike, NaiveTime, TimeZone};
+    let (Some(from_minutes), Some(to_minutes)) = (
+        WorkingDay::minutes(&day.starts_at),
+        WorkingDay::minutes(&day.ends_at),
+    ) else {
+        // A spelling this cannot read: every gap, rather than a window
+        // invented out of half a value.
+        return gaps;
+    };
+    let mut kept = Vec::new();
+    for gap in &gaps {
+        let (Ok(start), Ok(end)) = (
+            DateTime::parse_from_rfc3339(&gap.start),
+            DateTime::parse_from_rfc3339(&gap.end),
+        ) else {
+            kept.push(gap.clone());
+            continue;
+        };
+        let (start, end) = (start.with_timezone(&Utc), end.with_timezone(&Utc));
+        let mut date = start.with_timezone(&zone).date_naive();
+        let last = end.with_timezone(&zone).date_naive();
+        while date <= last {
+            if day
+                .days
+                .contains(&(date.weekday().number_from_monday() as u8))
+            {
+                let at = |minutes: u32| {
+                    let time = NaiveTime::from_num_seconds_from_midnight_opt(minutes * 60, 0)?;
+                    zone.from_local_datetime(&date.and_time(time))
+                        .earliest()
+                        .map(|at| at.with_timezone(&Utc))
+                };
+                if let (Some(opens), Some(closes)) = (at(from_minutes), at(to_minutes)) {
+                    let (from, to) = (start.max(opens), end.min(closes));
+                    let minutes = (to - from).num_minutes();
+                    if minutes > 0 {
+                        kept.push(Free {
+                            start: from.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                            end: to.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                            start_local: Some(
+                                from.with_timezone(&zone)
+                                    .format("%Y-%m-%dT%H:%M:%S%:z")
+                                    .to_string(),
+                            ),
+                            end_local: Some(
+                                to.with_timezone(&zone)
+                                    .format("%Y-%m-%dT%H:%M:%S%:z")
+                                    .to_string(),
+                            ),
+                            minutes,
+                        });
+                    }
+                }
+            }
+            let Some(next) = date.succ_opt() else { break };
+            date = next;
+        }
+    }
+    kept
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{free_between, merge_answers, parse_free_busy, Busy, Free, Window, WindowError};
+    use super::{
+        free_between, merge_answers, parse_free_busy, Busy, Free, Window, WindowError, WorkingDay,
+    };
 
     fn window() -> Window {
         Window::parse("2026-09-24T00:00:00Z", "2026-09-25T00:00:00Z").unwrap()
@@ -325,7 +436,7 @@ mod tests {
                 end: "2026-10-12T13:00:00Z".to_owned(),
             },
         ];
-        let free = free_between(&busy, &window, Some("Europe/Paris"));
+        let free = free_between(&busy, &window, Some("Europe/Paris"), None);
         assert_eq!(
             free.iter().map(|gap| gap.start.as_str()).collect::<Vec<_>>(),
             vec![
@@ -345,7 +456,7 @@ mod tests {
         assert_eq!(midday.minutes, 120);
 
         // With no zone known, the local pair is absent rather than guessed.
-        let without = free_between(&busy, &window, None);
+        let without = free_between(&busy, &window, None, None);
         assert!(without.iter().all(|gap| gap.start_local.is_none()));
         assert_eq!(without.len(), free.len());
 
@@ -355,9 +466,9 @@ mod tests {
             start: "2026-10-12T06:00:00Z".to_owned(),
             end: "2026-10-12T18:00:00Z".to_owned(),
         }];
-        assert!(free_between(&whole, &window, None).is_empty());
+        assert!(free_between(&whole, &window, None, None).is_empty());
         assert_eq!(
-            free_between(&[], &window, None),
+            free_between(&[], &window, None, None),
             vec![Free {
                 start: "2026-10-12T06:00:00Z".to_owned(),
                 end: "2026-10-12T18:00:00Z".to_owned(),
@@ -374,7 +485,85 @@ mod tests {
             start: "not an instant".to_owned(),
             end: "2026-10-12T10:00:00Z".to_owned(),
         }];
-        assert!(free_between(&unreadable, &window, None).is_empty());
+        assert!(free_between(&unreadable, &window, None, None).is_empty());
+    }
+
+    /// #381: the owner's working day makes a free gap an offer.
+    #[test]
+    fn the_working_day_clips_the_gaps_and_never_the_occupations() {
+        // Friday 18:00 Paris to Monday 10:00 Paris, in one gap — the shape
+        // that made a draft offer a Friday at 19:30.
+        let window = Window::parse("2026-10-16T12:00:00Z", "2026-10-19T12:00:00Z").unwrap();
+        let weekdays = WorkingDay {
+            days: vec![1, 2, 3, 4, 5],
+            starts_at: "09:00".to_owned(),
+            ends_at: "18:00".to_owned(),
+        };
+        let free = free_between(&[], &window, Some("Europe/Paris"), Some(&weekdays));
+        assert_eq!(
+            free.iter()
+                .map(|gap| (gap.start_local.clone().unwrap(), gap.minutes))
+                .collect::<Vec<_>>(),
+            vec![
+                // Friday, clipped at both ends: the window opens at 14:00
+                // local and the day closes at 18:00.
+                ("2026-10-16T14:00:00+02:00".to_owned(), 240),
+                // Saturday and Sunday are not accepted days and contribute
+                // nothing at all.
+                ("2026-10-19T09:00:00+02:00".to_owned(), 300),
+            ],
+            "the weekend is gone and the weekdays are clipped to the amplitude"
+        );
+
+        // A gap that straddles an edge is clipped, not dropped: half an hour
+        // is a meeting.
+        let morning = Window::parse("2026-10-19T05:00:00Z", "2026-10-19T07:30:00Z").unwrap();
+        let free = free_between(&[], &morning, Some("Europe/Paris"), Some(&weekdays));
+        assert_eq!(free.len(), 1, "{free:?}");
+        assert_eq!(free[0].start_local.as_deref(), Some("2026-10-19T09:00:00+02:00"));
+        assert_eq!(free[0].minutes, 30);
+
+        // The busy intervals are untouched: "you are busy" is a fact, and a
+        // read that trimmed one would be lying about a calendar. The gap
+        // around a meeting is what narrows.
+        let busy = vec![Busy {
+            start: "2026-10-19T09:00:00Z".to_owned(),
+            end: "2026-10-19T10:00:00Z".to_owned(),
+        }];
+        let monday = Window::parse("2026-10-19T05:00:00Z", "2026-10-19T17:00:00Z").unwrap();
+        let free = free_between(&busy, &monday, Some("Europe/Paris"), Some(&weekdays));
+        assert!(
+            free.iter().all(|gap| {
+                gap.start.as_str() >= "2026-10-19T07:00:00Z" && gap.end.as_str() <= "2026-10-19T16:00:00Z"
+            }),
+            "a gap outside the amplitude was offered: {free:?}"
+        );
+        assert!(
+            free.iter().all(|gap| !(gap.start.as_str() < "2026-10-19T10:00:00Z"
+                && gap.end.as_str() > "2026-10-19T09:00:00Z")),
+            "a gap overlapping the meeting was offered: {free:?}"
+        );
+
+        // With no zone, nothing is clipped: an amplitude is a wall clock, and
+        // clipping by one without knowing where the owner is would cut the
+        // wrong hours.
+        assert_eq!(
+            free_between(&[], &monday, None, Some(&weekdays)).len(),
+            1,
+            "a gap was clipped by an amplitude with no zone to read it in"
+        );
+
+        // And a spelling the amplitude cannot be read from offers everything
+        // rather than a window invented out of half a value.
+        let broken = WorkingDay {
+            days: vec![1],
+            starts_at: "nine".to_owned(),
+            ends_at: "18:00".to_owned(),
+        };
+        assert_eq!(
+            free_between(&[], &monday, Some("Europe/Paris"), Some(&broken)).len(),
+            1
+        );
     }
 
     #[test]

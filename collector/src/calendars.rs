@@ -50,12 +50,22 @@ pub struct Calendars {
     /// Named for the decision and not for the field: `self.location` would
     /// read as a meeting's own place.
     pub locations_may_travel: SharedSwitch,
+    /// The owner's working day, as the Companion Gateway answers it (#381),
+    /// refreshed by the run loop beside the switch above and read when a
+    /// free/busy read is answered. `None` while they have said nothing, which
+    /// means every gap is offered — the state a deployment ships in.
+    pub working_day: SharedWorkingDay,
 }
 
 /// A switch the run loop refreshes and the poll reads. An atomic rather
 /// than a lock: one bool, read on every resource of every round, written
 /// once a round at most.
 pub type SharedSwitch = Arc<AtomicBool>;
+
+/// The working day the run loop refreshes and a read consults. A lock rather
+/// than an atomic, because what it holds is three values that must change
+/// together: a set of days and two clock times.
+pub type SharedWorkingDay = Arc<std::sync::Mutex<Option<crate::freebusy::WorkingDay>>>;
 
 
 /// What one poll found: the envelopes to publish, in order, and the cursors

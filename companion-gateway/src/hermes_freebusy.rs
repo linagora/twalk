@@ -162,6 +162,12 @@ pub struct FreeBusy {
     /// skill then tells the agent what it told it before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub free: Vec<serde_json::Value>,
+    /// The owner's working day, when they have set one (#381): the gaps
+    /// above are the parts of the window inside it. Relayed so that an agent
+    /// can say the offer it makes is bounded by their hours, and say "I am
+    /// taken on my usual hours" rather than "I have nothing at all".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_day: Option<serde_json::Value>,
     /// An IANA name, as the calendar declares it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -754,6 +760,10 @@ impl Reads {
                 .as_array()
                 .cloned()
                 .unwrap_or_default(),
+            working_day: body
+                .get("working_day")
+                .filter(|day| day.is_object())
+                .cloned(),
             timezone: member("timezone"),
             timezone_source: member("timezone_source"),
             now: member("now"),

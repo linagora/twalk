@@ -107,6 +107,10 @@ pub fn routes() -> Router<Gateway> {
             "/api/settings/calendar-location",
             get(read_calendar_location).put(write_calendar_location),
         )
+        .route(
+            "/api/settings/working-day",
+            get(read_working_day).put(write_working_day),
+        )
         .route("/api/settings/collection", get(collection_settings))
         .route("/api/settings/runtime", get(runtime_settings))
 }
@@ -532,6 +536,125 @@ async fn write_calendar_location(
     write_switch(&gateway, &device, Kind::CalendarLocation, &body).await
 }
 
+/// `GET /api/settings/working-day` — the days the owner accepts meetings on
+/// and how wide those days are (#381).
+///
+/// ```json
+/// {
+///   "day": { "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:00" },
+///   "since": "2026-09-26T15:12:04.000Z",
+///   "actor": "@michel:twalk.localhost",
+///   "reason": null
+/// }
+/// ```
+///
+/// `day: null` with `since: null` is a deployment where nobody ever said, and
+/// `day: null` with a `since` is one where somebody said and then cleared it.
+/// Both mean every free gap is offered; the screen can tell them apart, which
+/// is the only reason the difference is visible here.
+async fn read_working_day(State(gateway): State<Gateway>) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no working day: it has no consent store to journal one in",
+        );
+    };
+    match consent.store().working_day_state() {
+        Ok(state) => Json(working_day_json(&state)).into_response(),
+        Err(error) => {
+            error!(%error, "failed to read the working day journal");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the working day journal could not be read",
+            )
+        }
+    }
+}
+
+/// `PUT /api/settings/working-day` —
+/// `{"days": [1,2,3,4,5], "starts_at": "09:00", "ends_at": "18:00"}`, or
+/// `{"days": null}` to say nothing again.
+///
+/// Appends a row and answers the state it left behind, as the two switches
+/// do, and for the same reason: the journal is the record of what the owner
+/// decided and when, not a projection to keep tidy. Nothing is repaired on
+/// the way in — an hour of somebody's evening must not be given away by a
+/// parser being helpful.
+async fn write_working_day(
+    State(gateway): State<Gateway>,
+    Extension(device): Extension<Device>,
+    body: String,
+) -> Response {
+    let Some(consent) = gateway.consent() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "consent_not_configured",
+            "this Gateway keeps no working day: it has no consent store to journal one in",
+        );
+    };
+    let update = match crate::working_day::parse_update(&body) {
+        Ok(update) => update,
+        Err(invalid) => {
+            return api_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                invalid.code(),
+                &invalid.message(),
+            )
+        }
+    };
+    let occurred_at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
+    // The actor is the owner from configuration, as it is for the two
+    // switches: the device says a request is theirs, and configuration says
+    // who they are. See `write_switch` for the argument.
+    let _ = &device;
+    let actor = gateway.owner();
+    match consent
+        .store()
+        .record_working_day_decision(&update, &occurred_at, &actor)
+    {
+        Ok(state) => {
+            match &state.day {
+                Some(day) => info!(
+                    %actor,
+                    days = ?day.days,
+                    starts_at = %day.starts_at,
+                    ends_at = %day.ends_at,
+                    "the owner set their working day"
+                ),
+                None => info!(
+                    %actor,
+                    "the owner cleared their working day; every free gap is offered again"
+                ),
+            }
+            Json(working_day_json(&state)).into_response()
+        }
+        Err(error) => {
+            error!(%error, "failed to record a working day decision");
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "store_unavailable",
+                "the working day journal could not be written",
+            )
+        }
+    }
+}
+
+/// The working day as both of its routes answer it.
+fn working_day_json(state: &crate::working_day::State) -> Value {
+    json!({
+        "day": state.day.as_ref().map(|day| json!({
+            "days": day.days,
+            "starts_at": day.starts_at,
+            "ends_at": day.ends_at,
+        })),
+        "since": state.since,
+        "actor": state.actor,
+        "reason": state.reason,
+    })
+}
+
 /// `GET /api/settings/collection` — what a service that **collects** the
 /// owner's own data needs to know before it publishes (#354).
 ///
@@ -542,12 +665,19 @@ async fn write_calendar_location(
 /// it asks means handing it the answer and nothing else.
 ///
 /// ```json
-/// { "calendar_location": { "enabled": false } }
+/// {
+///   "calendar_location": { "enabled": false },
+///   "working_day": { "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:00" }
+/// }
 /// ```
 ///
 /// Only what a decision *is*, never who decided it or when: that belongs to
 /// the owner's screen, and a collector reading it would be a collector
 /// holding a fact about the owner it has no use for.
+///
+/// `working_day` is `null` when the owner never said, or said and cleared it
+/// (#381) — which means the read answers every free gap, as it did before
+/// that decision existed. A collector that finds `null` does not filter.
 async fn collection_settings(State(gateway): State<Gateway>, headers: HeaderMap) -> Response {
     let Some(service_token) = gateway.snapshots() else {
         return api_error(
@@ -569,20 +699,38 @@ async fn collection_settings(State(gateway): State<Gateway>, headers: HeaderMap)
     let Some(consent) = gateway.consent() else {
         return switch_not_configured(Kind::CalendarLocation);
     };
-    match consent.store().calendar_location_state() {
-        Ok(state) => Json(json!({
-            "calendar_location": { "enabled": state.enabled },
-        }))
-        .into_response(),
+    let location = match consent.store().calendar_location_state() {
+        Ok(state) => state.enabled,
         Err(error) => {
             error!(%error, "failed to read the calendar location journal");
-            api_error(
+            return api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "store_unavailable",
                 "the calendar location journal could not be read",
-            )
+            );
         }
-    }
+    };
+    // The working day, or `null` (#381). A journal that cannot be read
+    // answers `null` and says so in the log rather than refusing the whole
+    // document: a collector that cannot learn the amplitude must still learn
+    // whether a location may travel, and not filtering is the safe way to be
+    // wrong about an amplitude — every gap is offered, as before.
+    let working_day = match consent.store().working_day_state() {
+        Ok(state) => state.day,
+        Err(error) => {
+            error!(%error, "failed to read the working day journal; answering none");
+            None
+        }
+    };
+    Json(json!({
+        "calendar_location": { "enabled": location },
+        "working_day": working_day.map(|day| json!({
+            "days": day.days,
+            "starts_at": day.starts_at,
+            "ends_at": day.ends_at,
+        })),
+    }))
+    .into_response()
 }
 
 /// Which of the owner's two recorded switches a request is about (#121,

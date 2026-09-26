@@ -306,6 +306,96 @@ export function calendarLocationRecord(
 		: { kind: 'quiet', key: 'settings.calendarLocation.record.offSince', values };
 }
 
+/** The owner's working day as the Gateway answers it (#381). */
+export type WorkingDayState = components['schemas']['WorkingDayState'];
+
+/** What the working-day form holds while the user edits it. */
+export interface WorkingDayForm {
+	/** The ISO weekdays ticked, 1 for Monday. */
+	days: number[];
+	/** `HH:MM`, as a time input gives them. */
+	startsAt: string;
+	endsAt: string;
+}
+
+/** The form a state reads back into, or the shape a first visit starts from. */
+export function workingDayForm(state: WorkingDayState | null): WorkingDayForm {
+	const day = state?.day ?? null;
+	if (day === null) {
+		// Nothing said: the form opens on a plausible week rather than empty,
+		// because a form nobody can submit teaches nothing — but the *state*
+		// stays unset until they press the button, so no default is recorded
+		// on their behalf.
+		return { days: [1, 2, 3, 4, 5], startsAt: '09:00', endsAt: '18:00' };
+	}
+	return { days: [...day.days], startsAt: day.starts_at, endsAt: day.ends_at };
+}
+
+/**
+ * Why a form cannot be sent, or `null` when it can (#381).
+ *
+ * Checked here as well as at the Gateway, and the Gateway's check is the one
+ * that counts: this exists so the button says why it is disabled rather than
+ * making somebody discover it from a `422`.
+ */
+export function workingDayTrouble(
+	form: WorkingDayForm
+): 'days' | 'time' | 'order' | null {
+	if (form.days.length === 0) {
+		return 'days';
+	}
+	if (!isWallClock(form.startsAt) || !isWallClock(form.endsAt)) {
+		return 'time';
+	}
+	// Lexicographic on `HH:MM` is chronological, which is what the format is
+	// for. An amplitude that ends before it begins is a night, and a working
+	// day that wraps midnight is a different thing this form does not hold.
+	return form.endsAt <= form.startsAt ? 'order' : null;
+}
+
+/** `HH:MM` on a 24-hour clock, the only spelling the Gateway accepts. */
+export function isWallClock(value: string): boolean {
+	return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(value);
+}
+
+/** The working-day record line's three shapes (#381). */
+export type WorkingDayRecord =
+	/** Nothing was ever said: every gap is offered, as the deployment ships. */
+	| { kind: 'quiet'; key: 'settings.workingDay.record.unset'; values: Record<string, never> }
+	/** Said, then cleared, on a date and by somebody. */
+	| {
+			kind: 'quiet';
+			key: 'settings.workingDay.record.cleared';
+			values: { date: string; actor: string };
+	  }
+	/** Set, since a dated, attributed decision. */
+	| {
+			kind: 'set';
+			key: 'settings.workingDay.record.set';
+			values: { date: string; actor: string };
+	  };
+
+/**
+ * The one line the working-day card reads back (#381).
+ *
+ * The three shapes exist because "nobody ever said" and "somebody cleared it"
+ * look the same to a free/busy read and different to the person reading the
+ * card: both offer every gap, and only one of them was a decision. Dating a
+ * default would invent one.
+ */
+export function workingDayRecord(state: WorkingDayState, locale: string): WorkingDayRecord {
+	if (state.day === null && (state.since === null || state.actor === null)) {
+		return { kind: 'quiet', key: 'settings.workingDay.record.unset', values: {} };
+	}
+	const values = {
+		date: state.since === null ? '' : disclosureDate(state.since, locale),
+		actor: state.actor ?? ''
+	};
+	return state.day === null
+		? { kind: 'quiet', key: 'settings.workingDay.record.cleared', values }
+		: { kind: 'set', key: 'settings.workingDay.record.set', values };
+}
+
 /**
  * The Gateway's refusal codes for the two writes and the probe, each a
  * sentence the user can act on — the ones #98 handed over in #101's comment.

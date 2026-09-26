@@ -1789,6 +1789,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/settings/working-day": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The days the owner accepts meetings on, and how wide those days are.
+         * @description What makes a free gap an *offer* (#381).
+         *
+         *     A free/busy read hands a drafting agent every gap of the window
+         *     (#379), because a deployment that hid the night would be deciding
+         *     somebody's hours without being told them. Measured on the reference
+         *     deployment on 2026-09-26, the longest gaps of a week were all nights,
+         *     and the draft duly offered a Friday at 19:30 — free, correct, and not
+         *     a time a person offers a colleague. The skill has always said "inside
+         *     working hours"; nobody had ever said what they are.
+         *
+         *     An **amplitude**, not a set of ranges: a start, an end, and which
+         *     days. Somebody who takes meetings 09:00–12:00 and 14:00–18:00 is
+         *     describing their lunch, and their calendar already says when they eat.
+         *
+         *     `starts_at` and `ends_at` are wall clocks in the owner's own zone —
+         *     `09:00` is nine in the morning where they are, in summer and in winter
+         *     both. The zone is the calendar's own (#369), read where the gaps are
+         *     computed.
+         *
+         *     `day: null` with `since: null` is a deployment where nobody ever said;
+         *     `day: null` with a `since` is one where somebody said and cleared it.
+         *     Both offer every gap. The difference is visible so a screen can say
+         *     which it is.
+         */
+        get: operations["getWorkingDay"];
+        /**
+         * Set the working day, or clear it, as a recorded decision.
+         * @description Appends one decision to the journal and answers the state it leaves
+         *     behind, as the two switches do. `actor` is stamped by the Gateway —
+         *     this deployment's owner, from configuration.
+         *
+         *     `{"days": null}` clears it: recorded as a decision rather than a
+         *     delete, because "I no longer want to say" is something the owner did
+         *     on a day.
+         *
+         *     **Nothing is repaired on the way in.** `18:0` is refused rather than
+         *     read as `18:00`: an hour of somebody's evening must not be given away
+         *     by a parser being helpful. An amplitude whose end is not after its
+         *     start is refused by name, because a working day that wraps midnight
+         *     is a different thing this route does not hold.
+         *
+         *     It takes effect on the **next** free/busy read — the collector reads
+         *     this decision on each round, as it does the calendar-location switch —
+         *     and changes nothing about the busy intervals, ever.
+         */
+        put: operations["putWorkingDay"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/suggestions": {
         parameters: {
             query?: never;
@@ -2529,8 +2591,14 @@ export interface components {
         };
         /**
          * @description What a collecting service must know before it publishes (issue
-         *     #354). One member today; a decision that governs what a collector
-         *     may carry belongs here rather than in the runtime's document.
+         *     #354) or before it answers (#381). A decision that governs what a
+         *     collector may carry, or what it may offer, belongs here rather than
+         *     in the runtime's document — which carries the model's credential, and
+         *     a collector has no business holding one.
+         *
+         *     The state alone, never who decided it or when: that belongs to the
+         *     owner's screen, and a collector reading it would be holding a fact
+         *     about the owner it has no use for.
          */
         CollectionSettings: {
             calendar_location: {
@@ -2541,6 +2609,13 @@ export interface components {
                  */
                 enabled: boolean;
             };
+            /**
+             * @description The owner's working day (#381), or `null` when they have said
+             *     nothing — in which case a free/busy read offers every gap, as it
+             *     did before the decision existed. A collector that finds `null`
+             *     does not filter.
+             */
+            working_day: null | components["schemas"]["WorkingDay"];
         };
         ConfiguredBridge: {
             /**
@@ -3377,6 +3452,41 @@ export interface components {
             timezone_source?: "calendar" | "events";
             /** Format: date-time */
             to: string;
+            /**
+             * @description The owner's working day, when they have set one (#381): the days
+             *     they accept meetings on and the amplitude of those days. `free`
+             *     above is then the parts of the window inside it — clipped at the
+             *     edges, with the busy intervals untouched, because *you are busy*
+             *     is a fact and *I would rather not be offered that* is a
+             *     preference.
+             *
+             *     Absent when they have said nothing, which is how a deployment
+             *     ships: every gap is answered, night included. It is carried so a
+             *     reader can say the offer is bounded by the owner's hours — *"I am
+             *     taken on my usual hours that week"*, which is true, rather than
+             *     *"I have no slot at all"*, which is not.
+             */
+            working_day?: {
+                /**
+                 * @description The ISO weekdays accepted, 1 for Monday, ascending.
+                 * @example [
+                 *       1,
+                 *       2,
+                 *       3,
+                 *       4,
+                 *       5
+                 *     ]
+                 */
+                days: number[];
+                /** @example 18:00 */
+                ends_at: string;
+                /**
+                 * @description `HH:MM`, a wall clock in the owner's own zone: `09:00` is nine
+                 *     in the morning where they are, in summer and in winter both.
+                 * @example 09:00
+                 */
+                starts_at: string;
+            };
         };
         /**
          * @description The homeserver would not do what the Gateway relayed, or could not
@@ -4492,6 +4602,59 @@ export interface components {
              *     `fr.linagora.twalk.inbound.message.received.v1`.
              */
             event_type: string;
+        };
+        /**
+         * @description The days the owner accepts meetings on and the amplitude of those
+         *     days (#381), in their own zone.
+         */
+        WorkingDay: {
+            /**
+             * @description ISO weekdays, 1 for Monday, ascending and without repeats.
+             * @example [
+             *       1,
+             *       2,
+             *       3,
+             *       4,
+             *       5
+             *     ]
+             */
+            days: number[];
+            /** @example 18:00 */
+            ends_at: string;
+            /**
+             * @description `HH:MM`, a wall clock in the owner's own zone.
+             * @example 09:00
+             */
+            starts_at: string;
+        };
+        WorkingDayState: {
+            /** @description Who decided: this deployment's owner, from configuration. */
+            actor: null | string;
+            /**
+             * @description `null` when the owner has said nothing, or said and cleared it.
+             *     Either way every free gap is offered.
+             */
+            day: null | components["schemas"]["WorkingDay"];
+            reason: null | string;
+            /**
+             * @description When the last decision was taken. `null` together with a `null`
+             *     `day` means nobody ever decided — which is not the same as having
+             *     cleared it, and a screen may say so.
+             */
+            since: null | string;
+        };
+        /**
+         * @description `{"days": [1,2,3,4,5], "starts_at": "09:00", "ends_at": "18:00"}`, or
+         *     `{"days": null}` to say nothing again.
+         */
+        WorkingDayUpdate: {
+            days: null | number[];
+            /** @example 18:00 */
+            ends_at?: string;
+            /** @description The owner's own note, optional. */
+            reason?: null | string;
+            /** @example 09:00 */
+            starts_at?: string;
         };
     };
     responses: {
@@ -7825,6 +7988,108 @@ export interface operations {
                         /** @enum {unknown} */
                         error?: "sign_in_not_configured" | "service_token_not_configured" | "settings_not_configured";
                     };
+                };
+            };
+        };
+    };
+    getWorkingDay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The working day, and the last decision about it if any. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkingDayState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /** @description The working day journal could not be read. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /**
+             * @description This Gateway keeps no working day: it has no consent store to
+             *     journal one in.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    putWorkingDay: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkingDayUpdate"];
+            };
+        };
+        responses: {
+            /** @description The working day as it now stands. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkingDayState"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description - `working_day_days_invalid` — `days` is empty or holds something
+             *       that is not an ISO weekday.
+             *     - `working_day_time_invalid` — a time that is not `HH:MM` on a
+             *       24-hour clock.
+             *     - `working_day_order_invalid` — the end is not after the start.
+             *     - `working_day_reason_too_long` — over 1 024 characters.
+             *     - `invalid_request` — not the JSON object this route asks for.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The working day journal could not be written. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description This Gateway keeps no working day. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

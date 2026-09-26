@@ -6,17 +6,21 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
-	credentialState,
-	disclosureDate,
-	calendarLocationRecord,
-	disclosureRecord,
-	formOf,
-	PROBE_FAILURE_COPY,
-	REFUSAL_COPY,
-	requestOf,
 	type CalendarLocationState,
 	type DisclosureState,
-	type ModelConfiguration
+	type ModelConfiguration,
+	PROBE_FAILURE_COPY,
+	REFUSAL_COPY,
+	calendarLocationRecord,
+	credentialState,
+	disclosureDate,
+	disclosureRecord,
+	formOf,
+	isWallClock,
+	requestOf,
+	workingDayForm,
+	workingDayRecord,
+	workingDayTrouble
 } from './model';
 
 function configuration(over: Partial<ModelConfiguration> = {}): ModelConfiguration {
@@ -311,5 +315,55 @@ describe('the calendar location record (#354)', () => {
 		const withheld = calendarLocationRecord({ ...allowed, enabled: false }, 'en');
 		expect(withheld.kind).toBe('quiet');
 		expect(withheld.key).toBe('settings.calendarLocation.record.offSince');
+	});
+});
+
+describe("the owner's working day (#381)", () => {
+	const state = (day: unknown, since: string | null = null, actor: string | null = null) =>
+		({ day, since, actor, reason: null }) as Parameters<typeof workingDayRecord>[0];
+
+	it('opens on a plausible week when nothing was ever said, without recording one', () => {
+		// A form nobody can submit teaches nothing, so it opens filled — but
+		// the *state* stays unset until the user presses the button, which is
+		// what the record line says.
+		expect(workingDayForm(null)).toEqual({ days: [1, 2, 3, 4, 5], startsAt: '09:00', endsAt: '18:00' });
+		expect(workingDayRecord(state(null), 'fr').key).toBe('settings.workingDay.record.unset');
+	});
+
+	it('reads a state back into the form, and says who set it', () => {
+		const set = state({ days: [2, 4], starts_at: '10:00', ends_at: '16:30' }, '2026-09-26T15:12:04.000Z', '@michel:twalk.localhost');
+		expect(workingDayForm(set)).toEqual({ days: [2, 4], startsAt: '10:00', endsAt: '16:30' });
+		const record = workingDayRecord(set, 'fr');
+		expect(record.kind).toBe('set');
+		expect(record.key).toBe('settings.workingDay.record.set');
+		expect(record.values).toMatchObject({ actor: '@michel:twalk.localhost' });
+	});
+
+	it('tells a clearing from nobody ever having said', () => {
+		// Both offer every gap; only one of them was a decision, and dating a
+		// default would invent one.
+		const cleared = state(null, '2026-09-26T16:00:00.000Z', '@michel:twalk.localhost');
+		expect(workingDayRecord(cleared, 'fr').key).toBe('settings.workingDay.record.cleared');
+		expect(workingDayRecord(state(null), 'fr').key).toBe('settings.workingDay.record.unset');
+	});
+
+	it('says why a form cannot be sent, rather than leaving it to a 422', () => {
+		const form = { days: [1], startsAt: '09:00', endsAt: '18:00' };
+		expect(workingDayTrouble(form)).toBeNull();
+		expect(workingDayTrouble({ ...form, days: [] })).toBe('days');
+		expect(workingDayTrouble({ ...form, startsAt: '9:00' })).toBe('time');
+		// An amplitude that ends before it begins is a night, and a working
+		// day that wraps midnight is a different thing.
+		expect(workingDayTrouble({ ...form, startsAt: '18:00', endsAt: '09:00' })).toBe('order');
+		expect(workingDayTrouble({ ...form, startsAt: '09:00', endsAt: '09:00' })).toBe('order');
+	});
+
+	it('accepts only HH:MM on a 24-hour clock, the spelling the Gateway takes', () => {
+		for (const good of ['00:00', '09:05', '18:30', '23:59']) {
+			expect(isWallClock(good)).toBe(true);
+		}
+		for (const bad of ['9:05', '09:5', '24:00', '23:60', '0900', '09:00:00', '', 'ab:cd']) {
+			expect(isWallClock(bad)).toBe(false);
+		}
 	});
 });

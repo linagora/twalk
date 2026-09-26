@@ -131,6 +131,10 @@ fn answered(request: &ReadRequest, answer: FreeBusy) -> serde_json::Value {
     if !answer.free.is_empty() {
         body["free"] = json!(answer.free);
     }
+    // And the amplitude those gaps were cut to, when there is one (#381).
+    if let Some(day) = answer.working_day {
+        body["working_day"] = day;
+    }
     if let (Some(timezone), Some(source), Some(now)) =
         (answer.timezone, answer.timezone_source, answer.now)
     {
@@ -203,6 +207,7 @@ mod tests {
             FreeBusy {
                 busy: intervals(),
                 free: Vec::new(),
+                working_day: None,
                 timezone: Some("Europe/Paris".to_owned()),
                 timezone_source: Some("calendar".to_owned()),
                 now: Some("2026-09-24T20:36:26+02:00".to_owned()),
@@ -225,6 +230,7 @@ mod tests {
             FreeBusy {
                 busy: intervals(),
                 free: Vec::new(),
+                working_day: None,
                 timezone: None,
                 timezone_source: None,
                 now: None,
@@ -243,6 +249,7 @@ mod tests {
             FreeBusy {
                 busy: intervals(),
                 free: Vec::new(),
+                working_day: None,
                 timezone: Some("Europe/Paris".to_owned()),
                 timezone_source: Some("calendar".to_owned()),
                 now: None,
