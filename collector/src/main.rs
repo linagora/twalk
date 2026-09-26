@@ -279,7 +279,6 @@ async fn run(config: Config) -> Result<()> {
                 state_dir: config.state_dir.clone(),
                 consent: consent.clone(),
                 locations_may_travel: location_enabled.clone(),
-                zones_seen: Default::default(),
             })
         })
         .transpose()?;
