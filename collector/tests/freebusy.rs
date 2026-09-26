@@ -10,7 +10,7 @@
 
 mod support;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use support::Run;
 use twalk_test_harness::{ensure_stack, poll_until, Bus};
@@ -227,22 +227,63 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
     .await?;
     assert_eq!(status, 200, "{body}");
     assert_eq!(
-        body,
-        json!({
-            "connection": run.calendar,
-            "from": "2026-10-05T00:00:00Z",
-            "to": "2026-10-10T00:00:00Z",
-            "busy": [
-                { "start": "2026-10-06T08:00:00Z", "end": "2026-10-06T10:00:00Z" },
-                { "start": "2026-10-08T00:00:00Z", "end": "2026-10-09T00:00:00Z" },
-            ]
-        }),
+        body["busy"],
+        json!([
+            { "start": "2026-10-06T08:00:00Z", "end": "2026-10-06T10:00:00Z" },
+            { "start": "2026-10-08T00:00:00Z", "end": "2026-10-09T00:00:00Z" },
+        ]),
         "two calendars merged, the cancelled event nothing, the all-day one a day"
+    );
+    assert_eq!(
+        body
+            .as_object()
+            .context("an answer")?
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["busy", "connection", "from", "now", "timezone", "timezone_source", "to"],
+        "the answer is a closed list of members, and this is it"
+    );
+    // The owner's own time, beside the intervals (#369): the zone their
+    // calendar declares, where that came from, and the hour it is there.
+    assert_eq!(body["timezone"], json!("Europe/Paris"));
+    assert_eq!(body["timezone_source"], json!("calendar"));
+    let now = body["now"].as_str().context("the local hour")?;
+    assert!(
+        now.ends_with("+02:00") || now.ends_with("+01:00"),
+        "`now` is the hour in the owner's zone, offset and all, not another \
+         spelling of UTC: {now}"
     );
     let text = body.to_string();
     for word in ["CONFIDENTIEL", "Lovelace", "alice", "Entretien", "Annulé"] {
         assert!(!text.contains(word), "{word} left the collector");
     }
+    // And a calendar nobody ever told a zone to — the ordinary state of a
+    // collection on a server whose clients never set one. The three members
+    // go together, and their absence is what tells the agent to speak in UTC
+    // and say so rather than guess a zone (#369).
+    run.sso.forget_calendar_timezone(&run.calendar);
+    run.sso.forget_calendar_timezone(&other);
+    let (status, body) = read(
+        port,
+        SERVICE_TOKEN,
+        &run.calendar,
+        "2026-10-05T00:00:00Z",
+        "2026-10-10T00:00:00Z",
+    )
+    .await?;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        !body["busy"].as_array().context("intervals")?.is_empty(),
+        "a calendar with no declared zone still answers its intervals"
+    );
+    for member in ["timezone", "timezone_source", "now"] {
+        assert!(
+            body.get(member).is_none(),
+            "{member} was answered for a calendar that declares no zone: {body}"
+        );
+    }
+
     // A window clipped: the meeting is cut at the window's edge.
     let (status, body) = read(
         port,
@@ -328,7 +369,9 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
     // Each counted under its code: two served, and one of each refusal —
     // the `409` polled for above may have been counted more than once, and
     // a `caldav_refused` may have slipped in before the state moved.
-    assert_eq!(metric(metrics_port, "served").await?, 2);
+    // Three served: the window, the window clipped, and the one taken after
+    // the calendars forgot their zone (#369).
+    assert_eq!(metric(metrics_port, "served").await?, 3);
     assert_eq!(metric(metrics_port, "unauthenticated").await?, knocks + 1);
     for refusal in ["connection_unknown", "window_too_wide", "invalid_window"] {
         assert_eq!(metric(metrics_port, refusal).await?, 1, "{refusal}");

@@ -3252,6 +3252,15 @@ export interface components {
          *     clipped to it, merged where they touch, and nothing else — no
          *     title, no participant, no location, because the report they come
          *     from carries none.
+         *
+         *     Since #369 it also carries **the owner's own time**: the zone their
+         *     calendar declares, where that name came from, and what time it is
+         *     there now. The intervals are UTC and every sentence a human reads is
+         *     in local time, so something converts; these three are what it
+         *     converts with. They appear together or not at all — a calendar that
+         *     declares no zone produces an answer with none of them, and a reader
+         *     that finds none must speak in UTC and say so rather than guess a
+         *     zone, which is the error that reads perfectly and is wrong.
          */
         HermesFreeBusy: {
             busy: {
@@ -3269,6 +3278,26 @@ export interface components {
             connection: string;
             /** Format: date-time */
             from: string;
+            /**
+             * @description The current local time in that zone, RFC 3339 with its offset —
+             *     a fact rather than an arithmetic, because the arithmetic is what
+             *     a draft got wrong when it called 5–9 October "next week".
+             * @example 2026-09-24T20:36:26+02:00
+             */
+            now?: string;
+            /**
+             * @description An IANA name — `Europe/Paris`. Absent when the calendar declares
+             *     none, together with `timezone_source` and `now`.
+             * @example Europe/Paris
+             */
+            timezone?: string;
+            /**
+             * @description Where the name came from, so the owner can judge it rather than
+             *     take it on faith. `calendar`: the collection declares it
+             *     (`CALDAV:calendar-timezone`).
+             * @enum {string}
+             */
+            timezone_source?: "calendar";
             /** Format: date-time */
             to: string;
         };

@@ -384,6 +384,10 @@ async fn a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_rec
             "from": "2026-09-24T08:00:00Z",
             "to": "2026-09-26T18:00:00Z",
             "busy": busy,
+            // The owner's own time, as the collector answers it (#369).
+            "timezone": "Europe/Paris",
+            "timezone_source": "calendar",
+            "now": "2026-09-24T20:36:26+02:00",
         }),
     )
     .await?;
@@ -417,10 +421,17 @@ async fn a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_rec
     assert_eq!(body["busy"], busy);
     assert_eq!(body["connection"], connection);
     assert_eq!(body["from"], "2026-09-24T08:00:00Z");
+    // The owner's own time is relayed, unaltered and with its source, because
+    // the module that relays it adds nothing to what the collector said
+    // (#369). A draft that has to write "jeudi à 12h30" converts with these.
+    assert_eq!(body["timezone"], "Europe/Paris");
+    assert_eq!(body["timezone_source"], "calendar");
+    assert_eq!(body["now"], "2026-09-24T20:36:26+02:00");
     assert_eq!(
         body.as_object().map(|object| object.len()),
-        Some(4),
-        "connection, from, to, busy and nothing else: {body}"
+        Some(7),
+        "connection, from, to, busy, the three of the owner's own time, and \
+         nothing else: {body}"
     );
     // The relay: the Gateway's own service token, the window as asked, the
     // collector's route.

@@ -187,7 +187,16 @@ TOOLS = [
             "what the owner is doing or with whom, and you must not guess: "
             "\"Thursday morning is taken\" is right, \"Thursday morning she has "
             "a meeting\" is not. Call it again, with another window, when the "
-            "first comes back full."
+            "first comes back full. "
+            "The answer also carries the owner's own time: `timezone` (an IANA "
+            "name), `timezone_source` (where that came from), and `now` (what "
+            "time it is there, with its offset). Convert every hour you write "
+            "into that zone and name it — \"jeudi 12h30 (heure de Paris)\" — and "
+            "count `next week` and `tomorrow` from `now`, not from your own "
+            "idea of today. When those three are absent the deployment knows "
+            "no zone: write your times in UTC and say they are UTC, rather "
+            "than guessing a zone, because an hour in the wrong zone reads "
+            "perfectly and is wrong."
         ),
         "inputSchema": {
             "type": "object",

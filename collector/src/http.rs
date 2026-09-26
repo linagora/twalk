@@ -191,25 +191,49 @@ async fn free_busy(
         }
     };
     match calendars.free_busy(&owner_id, &token, &window).await {
-        Ok(busy) => {
+        Ok((busy, zone)) => {
             endpoint.metrics.record_freebusy_read("served");
+            // The zone and the hour it is there travel with the intervals
+            // (#369). A zone the calendar declares but that is not an IANA
+            // name is worth saying out loud and worth nothing to a reader, so
+            // it is dropped rather than passed on: a model handed "Romance
+            // Standard Time" will use it in a sentence.
+            let local = zone.as_ref().and_then(|zone| match zone.name.parse::<chrono_tz::Tz>() {
+                Ok(tz) => Some((zone, chrono::Utc::now().with_timezone(&tz))),
+                Err(_) => {
+                    warn!(
+                        connection,
+                        timezone = zone.name,
+                        "the calendar declares a zone this build does not know; the read says \
+                         it has none rather than name one nobody can convert"
+                    );
+                    None
+                }
+            });
             info!(
                 connection,
                 from = %window.from,
                 to = %window.to,
                 intervals = busy.len(),
+                timezone = local.as_ref().map(|(zone, _)| zone.name.as_str()).unwrap_or("(none declared)"),
                 "a free/busy read was served"
             );
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "connection": connection,
-                    "from": window.from.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                    "to": window.to.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                    "busy": busy,
-                })),
-            )
-                .into_response()
+            let mut answer = json!({
+                "connection": connection,
+                "from": window.from.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "to": window.to.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "busy": busy,
+            });
+            // Absent, not null, when there is no zone to name: a member that
+            // is there and empty says "I looked and the answer is nothing",
+            // which is a different sentence from "there is no such fact" —
+            // #359's rule, at a third door. The three go together.
+            if let Some((zone, at)) = local {
+                answer["timezone"] = json!(zone.name);
+                answer["timezone_source"] = json!(zone.source);
+                answer["now"] = json!(at.format("%Y-%m-%dT%H:%M:%S%:z").to_string());
+            }
+            (StatusCode::OK, Json(answer)).into_response()
         }
         Err(SideError::Refused { status, .. }) => refuse(
             &endpoint,

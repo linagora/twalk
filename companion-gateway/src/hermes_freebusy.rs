@@ -132,6 +132,35 @@ pub struct Busy {
     pub end: String,
 }
 
+/// What a free/busy read answers: the intervals, and the owner's own time.
+///
+/// The intervals are UTC and every sentence a human will read is in local
+/// time, so something converts. Before #369 the thing converting was a model
+/// with nothing to convert *to*: measured on 2026-09-24, a draft searched the
+/// machine for a timezone, found none, wrote "(Heures de Paris.)" and
+/// happened to be right — and in the same breath called 5–9 October "next
+/// week" when next week was 28 September. A zone and the hour it is there are
+/// facts the deployment holds; handing them over is cheaper than arithmetic
+/// done from two half-facts.
+///
+/// All three are `None` together, for a calendar that declares no zone. The
+/// draft then speaks UTC and says so, which is a sentence a person can act
+/// on — unlike an hour in the wrong zone, which reads perfectly and is wrong.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeBusy {
+    pub busy: Vec<Busy>,
+    /// An IANA name, as the calendar declares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Where that name came from, so the owner can judge it rather than
+    /// take it on faith.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone_source: Option<String>,
+    /// The current local time there, RFC 3339 with its offset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<String>,
+}
+
 /// A window checked: two instants in order, at most [`MAX_WINDOW_SECONDS`]
 /// apart. Kept as the strings the caller sent, since the collector parses
 /// them again and the record keeps them as asked.
@@ -426,10 +455,10 @@ impl Reads {
     /// One read: verified, checked, relayed, recorded — the record written
     /// whatever the outcome, since the point of the record is the reads
     /// that were refused as much as the ones that were served.
-    pub async fn read(&self, request: &ReadRequest) -> Result<Vec<Busy>, ReadRefusal> {
+    pub async fn read(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
         let outcome = self.serve(request).await;
         let (label, intervals) = match &outcome {
-            Ok(busy) => ("served".to_owned(), Some(busy.len() as u64)),
+            Ok(answer) => ("served".to_owned(), Some(answer.busy.len() as u64)),
             Err(refusal) => (refusal.code().to_owned(), None),
         };
         self.metrics.record_hermes_read(match &outcome {
@@ -460,12 +489,17 @@ impl Reads {
             warn!(%error, "a free/busy read could not be recorded");
         }
         match &outcome {
-            Ok(busy) => info!(
+            Ok(answer) => info!(
                 connection = %record.connection,
                 from = %record.window_from,
                 to = %record.window_to,
                 delivery = record.delivery.as_deref(),
-                intervals = busy.len(),
+                intervals = answer.busy.len(),
+                // Said in the log because it is the one member an operator
+                // cannot see any other way, and a deployment whose calendar
+                // declares no zone should learn it here rather than from a
+                // draft that spoke UTC a week later (#369).
+                timezone = answer.timezone.as_deref().unwrap_or("(none declared)"),
                 "hermes read the owner's free/busy"
             ),
             Err(refusal) => warn!(
@@ -673,7 +707,7 @@ impl Reads {
         })
     }
 
-    async fn serve(&self, request: &ReadRequest) -> Result<Vec<Busy>, ReadRefusal> {
+    async fn serve(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
         let connection = self.signed_for(request, FREEBUSY_PATH)?;
         let window = Window::parse(request.from.as_deref(), request.to.as_deref())?;
         let (collector_url, service_token) = self.connection_ready(&connection)?;
@@ -690,10 +724,22 @@ impl Reads {
                 ],
             )
             .await?;
-        serde_json::from_value(body["busy"].clone()).map_err(|error| {
+        let busy = serde_json::from_value(body["busy"].clone()).map_err(|error| {
             ReadRefusal::CollectorUnreachable(format!(
                 "its answer carries no busy intervals: {error}"
             ))
+        })?;
+        // The zone travels if the collector sent one, and its absence is not
+        // a defect: a collector that predates #369 answers without it, and a
+        // calendar that declares none makes even a current collector answer
+        // without it. Relayed rather than judged — this module adds nothing
+        // to what the collector says (see the module's own docstring).
+        let member = |name: &str| body[name].as_str().map(str::to_owned);
+        Ok(FreeBusy {
+            busy,
+            timezone: member("timezone"),
+            timezone_source: member("timezone_source"),
+            now: member("now"),
         })
     }
 }
