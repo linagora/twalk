@@ -95,11 +95,91 @@ pub fn network_name(network: &str) -> &str {
 /// gesture line names the three decisions `crate::decision` reads off the
 /// post (#284): the two emoji it takes as approve and refuse, and a reply
 /// as the edited text to send.
+/// What the draft did before it wrote, as lines under the context (#377).
+///
+/// Lines and not a paragraph: the post is read on a phone, in the minute it
+/// arrives, and a wall of prose above the text to approve would cost the
+/// reading of the text itself.
+///
+/// Three rules the approval screen already follows, kept here word for word.
+/// A **refused** read names its code and carries no count — `0 busy periods`
+/// would read as an empty agenda. Nothing says what a step *learned*:
+/// intervals are counted, not kept, and a question's answer is in the
+/// conversation where the owner wrote it. And a step whose `kind` this build
+/// does not know is skipped rather than guessed at, so a Gateway that grows a
+/// fourth kind does not stop a clerk from posting.
+pub fn path_lines(l: Lang, path: &[crate::gateway::Step]) -> String {
+    let mut lines = String::new();
+    for step in path {
+        let line = match (step.kind.as_str(), l) {
+            ("freebusy", l) => {
+                let (Some(from), Some(to)) = (step.from.as_deref(), step.to.as_deref()) else {
+                    continue;
+                };
+                // The day, not the instant: an owner reading this on a phone
+                // needs to recognise the window, not to check it to the
+                // second. A window this cannot format is not drawn at all,
+                // for the reason the post never shows a half-fact.
+                let (Some(from), Some(to)) = (day_utc(from), day_utc(to)) else {
+                    continue;
+                };
+                match (l, step.outcome.as_deref(), step.intervals) {
+                    (Lang::Fr, Some("served"), Some(intervals)) => format!(
+                        "· a lu vos disponibilités du {from} au {to} — {intervals} périodes occupées"
+                    ),
+                    (Lang::Fr, Some(outcome), _) => format!(
+                        "· a essayé de lire vos disponibilités du {from} au {to}, sans y arriver ({outcome})"
+                    ),
+                    (Lang::En, Some("served"), Some(intervals)) => format!(
+                        "· read your free/busy from {from} to {to} — {intervals} busy periods"
+                    ),
+                    (Lang::En, Some(outcome), _) => format!(
+                        "· tried to read your free/busy from {from} to {to}, and could not ({outcome})"
+                    ),
+                    _ => continue,
+                }
+            }
+            ("event_facts", Lang::Fr) => match step.outcome.as_deref() {
+                Some("served") => "· a demandé ce que porte un de vos événements".to_owned(),
+                Some(outcome) => format!(
+                    "· a essayé de demander ce que porte un de vos événements, sans y arriver ({outcome})"
+                ),
+                None => continue,
+            },
+            ("event_facts", Lang::En) => match step.outcome.as_deref() {
+                Some("served") => "· asked what one of your events carries".to_owned(),
+                Some(outcome) => format!(
+                    "· tried to ask what one of your events carries, and could not ({outcome})"
+                ),
+                None => continue,
+            },
+            ("asked", l) => {
+                let Some(asked) = step.asked.as_deref() else {
+                    continue;
+                };
+                match l {
+                    Lang::Fr => format!("· vous a demandé : {asked}"),
+                    Lang::En => format!("· asked you: {asked}"),
+                }
+            }
+            // A kind this build does not know: skipped, not guessed at.
+            _ => continue,
+        };
+        lines.push_str(&line);
+        lines.push('\n');
+    }
+    lines
+}
+
 pub fn approval_post(
     l: Lang,
     body: &str,
     network: &str,
     context: Option<&crate::events::Answering>,
+    // `path`: what the draft did before it wrote, already rendered as lines
+    // by `path_lines` — empty for a draft that looked nothing up, which is
+    // the post exactly as it was (#377).
+    path: &str,
     expires_at: Option<&str>,
     delivery_line: &str,
     reference: &str,
@@ -128,6 +208,7 @@ pub fn approval_post(
         Lang::Fr => format!(
             "Réponse proposée · {network}{expiry}\n\
              {context}\
+             {path}\
              « {body} »\n\
              {delivery_line}\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
@@ -136,6 +217,7 @@ pub fn approval_post(
         Lang::En => format!(
             "Proposed reply · {network}{expiry}\n\
              {context}\
+             {path}\
              “{body}”\n\
              {delivery_line}\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
@@ -534,6 +616,7 @@ mod tests {
                 body,
                 "whatsapp",
                 None,
+                "",
                 Some("2026-09-17T11:00:00Z"),
                 &unread(l),
                 REFERENCE,
@@ -558,6 +641,7 @@ mod tests {
                 contact: Some("Aïcha Benali".to_owned()),
                 summary: "Aïcha Benali demande si le dîner tient toujours.".to_owned(),
             }),
+            "",
             Some("2026-09-17T21:41:00Z"),
             &unread(Lang::Fr),
             REFERENCE,
@@ -584,6 +668,7 @@ mod tests {
                 contact: Some("Aïcha Benali".to_owned()),
                 summary: "She asks whether dinner is still on.".to_owned(),
             }),
+            "",
             Some("2026-09-17T21:41:00Z"),
             &unread(Lang::En),
             REFERENCE,
@@ -614,6 +699,7 @@ mod tests {
                     contact: contact.map(str::to_owned),
                     summary: summary.to_owned(),
                 }),
+                "",
                 None,
                 &unread(Lang::Fr),
                 REFERENCE,
@@ -630,6 +716,7 @@ mod tests {
             "Oui",
             "whatsapp",
             None,
+            "",
             None,
             &unread(Lang::Fr),
             REFERENCE,
@@ -637,6 +724,87 @@ mod tests {
         assert!(
             without.starts_with("Réponse proposée · WhatsApp\n« Oui »"),
             "a suggestion with no context is posted as before: {without}"
+        );
+    }
+
+    /// #377: the post says what the draft did, so Buzz alone is enough.
+    #[test]
+    fn the_post_says_what_the_draft_did_before_it_wrote() {
+        use crate::gateway::Step;
+        let step = |kind: &str| Step {
+            kind: kind.to_owned(),
+            from: Some("2026-09-28T06:00:00Z".to_owned()),
+            to: Some("2026-10-02T18:00:00Z".to_owned()),
+            outcome: Some("served".to_owned()),
+            intervals: Some(4),
+            asked: Some("de quel projet il parle".to_owned()),
+        };
+
+        let lines = path_lines(Lang::Fr, &[step("freebusy"), step("asked")]);
+        assert!(
+            lines.contains("a lu vos disponibilités du 28/09 au 02/10 — 4 périodes occupées"),
+            "{lines}"
+        );
+        assert!(lines.contains("vous a demandé : de quel projet il parle"), "{lines}");
+        assert!(
+            path_lines(Lang::En, &[step("freebusy")]).contains("read your free/busy"),
+            "both languages, and no English sentence left in a French post"
+        );
+
+        // A refused read names its code and carries **no count**: `0 busy
+        // periods` would read as an empty agenda.
+        let refused = Step {
+            outcome: Some("window_too_wide".to_owned()),
+            intervals: None,
+            ..step("freebusy")
+        };
+        let refused = path_lines(Lang::Fr, &[refused]);
+        assert!(refused.contains("sans y arriver (window_too_wide)"), "{refused}");
+        assert!(!refused.contains("0 "), "a refused read was given a count: {refused}");
+
+        // A kind this build does not know is skipped, not guessed at: a
+        // Gateway that grows a fourth kind must not stop a clerk posting.
+        assert_eq!(path_lines(Lang::Fr, &[step("something_new")]), "");
+        assert_eq!(path_lines(Lang::Fr, &[]), "");
+
+        // And in the post: under the context, above the text to approve —
+        // the order the owner decides in.
+        let post = approval_post(
+            Lang::Fr,
+            "Jeudi 12h30 me va",
+            "email",
+            Some(&crate::events::Answering {
+                contact: Some("Christelle".to_owned()),
+                summary: "Christelle demande trois créneaux.".to_owned(),
+            }),
+            &lines,
+            None,
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
+        let read: Vec<&str> = post.lines().collect();
+        // The contact is not prefixed when the summary already names them,
+        // which is this post's own older rule and not this ticket's.
+        assert_eq!(read[1], "Christelle demande trois créneaux.");
+        assert!(read[2].starts_with("· a lu vos disponibilités"), "{post}");
+        assert!(read[3].starts_with("· vous a demandé"), "{post}");
+        assert!(read[4].starts_with("« Jeudi"), "{post}");
+
+        // A draft that looked nothing up is posted exactly as before.
+        let without = approval_post(
+            Lang::Fr,
+            "Oui",
+            "email",
+            None,
+            "",
+            None,
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
+        assert_eq!(
+            without.lines().nth(1),
+            Some("« Oui »"),
+            "a draft that looked nothing up is posted exactly as before: {without}"
         );
     }
 
@@ -649,6 +817,7 @@ mod tests {
             "Oui",
             "whatsapp",
             None,
+            "",
             Some("2026-09-24T09:52:09Z"),
             &unread(Lang::Fr),
             REFERENCE,
@@ -672,7 +841,7 @@ mod tests {
                 detail: "owner_joined".to_owned(),
             },
         );
-        let post = approval_post(Lang::Fr, "Oui", "sms", None, None, &line, REFERENCE);
+        let post = approval_post(Lang::Fr, "Oui", "sms", None, "", None, &line, REFERENCE);
         let lines: Vec<&str> = post.lines().collect();
         assert_eq!(lines[0], "Réponse proposée · SMS");
         assert_eq!(lines[1], "« Oui »");
@@ -689,6 +858,7 @@ mod tests {
             "Oui",
             "sms",
             None,
+            "",
             None,
             &unread(Lang::Fr),
             "twalk:suggestion:abc",
@@ -701,6 +871,7 @@ mod tests {
             "Oui",
             "sms",
             None,
+            "",
             Some("bientôt"),
             &unread(Lang::Fr),
             "twalk:suggestion:abc",
@@ -719,6 +890,7 @@ mod tests {
             body,
             "whatsapp",
             None,
+            "",
             None,
             &unread(Lang::Fr),
             REFERENCE,
@@ -936,6 +1108,7 @@ mod tests {
                     "Oui",
                     "sms",
                     None,
+                    "",
                     Some("2026-09-17T11:00:00Z"),
                     &line,
                     REFERENCE,
@@ -1136,6 +1309,7 @@ mod tests {
                     "Oui · à 20h",
                     "whatsapp",
                     None,
+                    "",
                     expires,
                     &unread(lang),
                     &reference,
@@ -1147,7 +1321,7 @@ mod tests {
                     activity_approved(lang, "whatsapp", false)
                 );
                 let post =
-                    approval_post(lang, "Oui", "irc", None, expires, &unread(lang), &reference);
+                    approval_post(lang, "Oui", "irc", None, "", expires, &unread(lang), &reference);
                 assert_eq!(network_off_post(&post), Some("irc"), "{post}");
             }
         }
