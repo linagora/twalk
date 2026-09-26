@@ -25,6 +25,12 @@ pub struct Metrics {
     /// `calendar_invitation`, `owner`. A silence counted, since a silence
     /// is the one failure this product has shipped without noticing.
     mails_dropped: Mutex<BTreeMap<&'static str, u64>>,
+    /// Calendar resources read and not published, by reason (#350):
+    /// `zone_unknown`, `zone_windows_unmappable`, `unreadable`. The calendar's
+    /// half of `mails_dropped` above, and there for the same reason — sixty of
+    /// the owner's meetings were refused for two days, in sixty log lines and
+    /// no number nobody was watching.
+    calendar_refused: Mutex<BTreeMap<&'static str, u64>>,
     /// Free/busy reads served on the internal HTTP endpoint (#281), by
     /// outcome: `served`, or the refusal's code. Every read of the owner's
     /// agenda is counted, since a read nobody can see is the thing #281
@@ -56,6 +62,7 @@ impl Metrics {
             connection_state: Mutex::new(BTreeMap::new()),
             last_renewal_unix_seconds: AtomicU64::new(0),
             mails_dropped: Mutex::new(BTreeMap::new()),
+            calendar_refused: Mutex::new(BTreeMap::new()),
             freebusy_reads: Mutex::new(BTreeMap::new()),
             event_fact_reads: Mutex::new(BTreeMap::new()),
             push_connected: AtomicU64::new(0),
@@ -93,6 +100,15 @@ impl Metrics {
     pub fn record_mail_dropped(&self, reason: &'static str) {
         *self
             .mails_dropped
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(reason)
+            .or_insert(0) += 1;
+    }
+
+    pub fn record_calendar_refused(&self, reason: &'static str) {
+        *self
+            .calendar_refused
             .lock()
             .expect("the metrics mutex is never poisoned")
             .entry(reason)
@@ -196,6 +212,19 @@ impl Metrics {
             ));
         }
         drop(dropped);
+        out.push_str("# HELP twalk_collector_calendar_resources_refused_total Calendar resources read and not published, by reason (#350): a TZID in neither the IANA nor the Windows family (`zone_unknown`), one CLDR names and this build's zone database does not (`zone_windows_unmappable`), or anything else the parser would not take (`unreadable`). A calendar can stop being published almost entirely, and this is the number that says so.\n");
+        out.push_str("# TYPE twalk_collector_calendar_resources_refused_total counter\n");
+        let refused = self
+            .calendar_refused
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        for reason in crate::calendars::Refused::REASONS {
+            out.push_str(&format!(
+                "twalk_collector_calendar_resources_refused_total{{reason=\"{reason}\"}} {}\n",
+                refused.get(reason).copied().unwrap_or(0)
+            ));
+        }
+        drop(refused);
         out.push_str("# HELP twalk_collector_freebusy_reads_total Free/busy reads asked of the internal endpoint, by outcome: served, or the refusal's code.\n");
         out.push_str("# TYPE twalk_collector_freebusy_reads_total counter\n");
         let reads = self
@@ -283,6 +312,16 @@ mod tests {
         ));
         assert!(body.contains("twalk_collector_grant_age_seconds 100\n"));
         assert!(body.contains("twalk_collector_events_dropped_total{reason=\"owner\"} 0\n"));
+        // The calendar's half (#350): every reason rendered at zero, so a
+        // dashboard has the series before anything goes wrong.
+        for reason in crate::calendars::Refused::REASONS {
+            assert!(
+                body.contains(&format!(
+                    "twalk_collector_calendar_resources_refused_total{{reason=\"{reason}\"}} 0\n"
+                )),
+                "{reason} is missing from {body}"
+            );
+        }
         assert!(body.contains("twalk_collector_push_connected 0\n"));
         metrics.set_push_connected(true);
         metrics.record_push_wake();
@@ -292,6 +331,10 @@ mod tests {
         assert!(metrics
             .render(1_000)
             .contains("twalk_collector_push_wakes_total 1\n"));
+        metrics.record_calendar_refused("zone_unknown");
+        assert!(metrics.render(1_000).contains(
+            "twalk_collector_calendar_resources_refused_total{reason=\"zone_unknown\"} 1\n"
+        ));
         metrics.record_mail_dropped("non_human_sender");
         assert!(metrics
             .render(1_000)

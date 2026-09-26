@@ -275,7 +275,6 @@ async fn run(config: Config) -> Result<()> {
         .map(|held| {
             Ok::<_, anyhow::Error>(twalk_collector::calendars::Calendars {
                 connection: held.id.clone(),
-                refused: std::sync::Arc::default(),
                 owner_email: config.owner_email.clone(),
                 mail_connection: config
                     .connections
@@ -722,10 +721,19 @@ async fn run(config: Config) -> Result<()> {
                 .await
             {
                 Ok(found) => {
+                    // Counted, not only logged: a calendar that stops being
+                    // published is the kind of silence this product has shipped
+                    // before without noticing, and an operator alerts on a
+                    // counter (#350). By reason, so "your calendar speaks a
+                    // dialect this build's table is too old for" and "one event
+                    // is malformed" are two numbers.
+                    for refusal in &found.refused {
+                        metrics.record_calendar_refused(refusal.reason());
+                    }
                     debug!(
                         envelopes = found.envelopes.len(),
                         cursors = found.cursors.len(),
-                        refused = found.refused,
+                        refused = found.refused.len(),
                         "calendars polled"
                     );
                     for envelope in &found.envelopes {

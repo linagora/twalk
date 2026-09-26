@@ -50,11 +50,6 @@ pub struct Calendars {
     /// Named for the decision and not for the field: `self.location` would
     /// read as a meeting's own place.
     pub locations_may_travel: SharedSwitch,
-    /// Resources read and not published, ever, by this process (#350). Read as
-    /// a delta around each calendar, which is why it is a counter and not a
-    /// field the poll owns: `publishable` is called from the pure step, and
-    /// threading a tally through it would make every caller carry one.
-    pub refused: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// The owner's working day, as the Companion Gateway answers it (#381),
     /// refreshed by the run loop beside the switch above and read when a
     /// free/busy read is answered. `None` while they have said nothing, which
@@ -79,15 +74,45 @@ pub type SharedWorkingDay = Arc<std::sync::Mutex<Option<crate::freebusy::Working
 pub struct Poll {
     pub envelopes: Vec<Value>,
     pub cursors: Vec<(String, Cursor)>,
-    /// How many resources of this poll were read and **not published**, over
-    /// every calendar (#350).
+    /// The resources of this poll that were read and **not published**, one
+    /// entry per resource, with why (#350).
     ///
-    /// Counted because the sixty events the reference deployment refused on
+    /// Kept because the sixty events the reference deployment refused on
     /// 2026-09-24 were sixty log lines and no number: a calendar can stop being
-    /// published almost entirely without anything saying so in one place. The
-    /// reasons stay on the per-resource lines — this is the figure that sends
-    /// somebody to read them.
-    pub refused: usize,
+    /// published almost entirely with nothing saying so in one place, and an
+    /// operator cannot alert on a log line. The shape is the mail side's
+    /// (`mails::Poll::dropped`), for the same reason and with the same use —
+    /// the run loop counts them, by reason, on `/metrics`.
+    pub refused: Vec<Refused>,
+}
+
+/// Why one calendar resource was read and not published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// Its `DTSTART` names a zone this collector cannot place (#350) — the
+    /// sixty events of 2026-09-24, and the one case an operator can act on by
+    /// updating a table rather than by reading an ICS.
+    Zone(crate::zones::Unplaceable),
+    /// Anything else the parser would not take: no `DTSTART`, a DATE-TIME it
+    /// cannot read, a resource that is not a VEVENT at all.
+    Unreadable,
+}
+
+impl Refused {
+    /// Every reason, so the counter shows each at zero rather than appearing
+    /// only once something has gone wrong.
+    pub const REASONS: [&'static str; 3] = [
+        crate::zones::Unplaceable::REASONS[0],
+        crate::zones::Unplaceable::REASONS[1],
+        "unreadable",
+    ];
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Zone(unplaceable) => unplaceable.reason(),
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 /// The zone the owner's agenda is written in, and where that was read.
@@ -333,8 +358,7 @@ impl Calendars {
                 .read(&collection, &changes.to_read(), credential)
                 .await?;
             let first_poll = cursor.ctag.is_none() && cursor.known.is_empty();
-            let refused_before = self.refused.load(Ordering::Relaxed);
-            let (envelopes, next) = self.reconcile(
+            let (envelopes, next, refused) = self.reconcile(
                 &calendar,
                 &collection,
                 &cursor,
@@ -343,20 +367,24 @@ impl Calendars {
                 &resources,
                 now,
             );
-            // What this calendar refused, as one number rather than as a run
-            // of lines (#350). Said at WARN because a calendar that is read and
-            // not published is not a detail: it is an agenda the owner has and
-            // their assistant does not, and the free/busy built from it will
-             // describe a week they are not living.
-            let refused = self
-                .refused
-                .load(Ordering::Relaxed)
-                .saturating_sub(refused_before);
-            if refused > 0 {
+            // What this calendar refused, as one line rather than as a run of
+            // them (#350). Said at WARN because a calendar that is read and not
+            // published is not a detail: it is an agenda the owner has and
+            // their assistant does not, and the free/busy built from it
+            // describes a week they are not living. The reasons are tallied so
+            // the line names them, and the run loop counts them on `/metrics` —
+            // an operator must be able to alert on this, not grep for it.
+            if !refused.is_empty() {
+                let mut by_reason: std::collections::BTreeMap<&'static str, usize> =
+                    Default::default();
+                for refusal in &refused {
+                    *by_reason.entry(refusal.reason()).or_default() += 1;
+                }
                 warn!(
                     calendar = %calendar.id,
-                    refused,
+                    refused = refused.len(),
                     read = resources.len(),
+                    reasons = ?by_reason,
                     "resources of this calendar were read and not published; the lines above say \
                      why, one per resource"
                 );
@@ -368,7 +396,7 @@ impl Calendars {
             } else {
                 poll.envelopes.extend(envelopes);
             }
-            poll.refused += refused;
+            poll.refused.extend(refused);
             poll.cursors.push((calendar.id.clone(), next));
         }
         Ok(poll)
@@ -386,7 +414,7 @@ impl Calendars {
         changes: &Changes,
         resources: &[Resource],
         now: &str,
-    ) -> (Vec<Value>, Cursor) {
+    ) -> (Vec<Value>, Cursor, Vec<Refused>) {
         let envelopes = Envelopes::new(
             &self.connection,
             &self.owner_email,
@@ -398,6 +426,7 @@ impl Calendars {
             .map(|resource| (resource.href.as_str(), resource))
             .collect();
         let mut out = Vec::new();
+        let mut refused = Vec::new();
         let mut next = Cursor {
             ctag: listing.ctag.clone(),
             known: cursor.known.clone(),
@@ -413,7 +442,7 @@ impl Calendars {
                 .get(href)
                 .map(|known| &known.published)
                 .filter(|published| !published.is_null());
-            let published = self.publishable(resource);
+            let published = self.publishable(resource, &mut refused);
             match (&published, before) {
                 (Some(published), Some(before)) => {
                     let fields = caldav::changed_fields(before, published);
@@ -456,12 +485,12 @@ impl Calendars {
             }
             next.known.remove(href);
         }
-        (out, next)
+        (out, next, refused)
     }
 
     /// The resource as the contract publishes it, or `None` — said — for
     /// one that is not a VEVENT this collector can read.
-    fn publishable(&self, resource: &Resource) -> Option<Value> {
+    fn publishable(&self, resource: &Resource, refused: &mut Vec<Refused>) -> Option<Value> {
         match caldav::parse_vevent(&resource.ics) {
             Ok(event) => Some(caldav::reduce(
                 &event,
@@ -474,7 +503,15 @@ impl Calendars {
                 |identity| self.decide(identity),
             )),
             Err(error) => {
-                self.refused.fetch_add(1, Ordering::Relaxed);
+                // Which refusal it was comes from the error itself, found in
+                // its chain rather than read out of its message: the zone case
+                // is the one an operator acts on differently, and it must be
+                // countable without anybody parsing prose.
+                let refusal = error
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<crate::zones::Unplaceable>())
+                    .map_or(Refused::Unreadable, |zone| Refused::Zone(zone.clone()));
+                refused.push(refusal);
                 warn!(href = %resource.href, error = %format!("{error:#}"), "the resource is not a VEVENT this collector reads; nothing published");
                 None
             }

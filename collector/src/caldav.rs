@@ -581,18 +581,10 @@ impl Moment {
                 // and the refusal says which family it fell outside of, so an
                 // operator can tell "that is not a zone" from "your calendar
                 // speaks Windows and this build's table is too old".
-                let zone = crate::zones::read(tzid).ok_or_else(|| {
-                    if crate::zones::is_windows_name(tzid) {
-                        anyhow::anyhow!(
-                            "TZID {tzid:?} is a Windows zone name this build's CLDR table maps to \
-                             a zone its own database does not have"
-                        )
-                    } else {
-                        anyhow::anyhow!(
-                            "TZID {tzid:?} is neither an IANA zone nor a Windows zone name"
-                        )
-                    }
-                })?;
+                // The refusal travels as a value, not as a sentence: the
+                // caller logs it *and* counts it, and a metric that had to
+                // match on prose would drift from the line beside it.
+                let zone = crate::zones::place(tzid).map_err(anyhow::Error::new)?;
                 Ok(Self::Zoned(local, zone))
             }
             None => Ok(Self::Utc(local)),

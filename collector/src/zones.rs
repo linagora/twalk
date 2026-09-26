@@ -30,6 +30,8 @@
 //! day (#381), and a Windows name travelling into that path would break three
 //! things quietly instead of one loudly.
 
+use std::fmt;
+
 use crate::windows_zones::WINDOWS_ZONES;
 
 /// The zone a `TZID` means, or `None` when this collector cannot place it.
@@ -51,13 +53,66 @@ pub fn read(name: &str) -> Option<chrono_tz::Tz> {
     WINDOWS_ZONES[index].1.parse().ok()
 }
 
-/// Whether a name is a Windows one — used only to say so in a log line, so an
-/// operator reading a refusal can tell "your calendar speaks Windows and this
-/// build's table is too old" from "that is not a zone".
-pub fn is_windows_name(name: &str) -> bool {
-    WINDOWS_ZONES
-        .binary_search_by(|(windows, _)| (*windows).cmp(name.trim()))
-        .is_ok()
+/// A `TZID` this collector cannot place, and which of the two ways it could
+/// not be.
+///
+/// An error type rather than a message, so that the thing which *counts* the
+/// refusal and the thing which *logs* it read the same value. The alternative
+/// — one of them matching on the other's prose — is how a metric starts
+/// disagreeing with a log line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unplaceable {
+    /// What the calendar wrote, verbatim.
+    pub tzid: String,
+    /// Whether CLDR knows the name and this build's zone database does not —
+    /// which is "your calendar speaks Windows and this build's table is older
+    /// than it", a different sentence from "that is not a zone".
+    pub windows: bool,
+}
+
+impl Unplaceable {
+    /// The reason a counter carries, and the only two values it takes.
+    pub const REASONS: [&'static str; 2] = ["zone_unknown", "zone_windows_unmappable"];
+
+    pub fn reason(&self) -> &'static str {
+        if self.windows {
+            "zone_windows_unmappable"
+        } else {
+            "zone_unknown"
+        }
+    }
+}
+
+impl fmt::Display for Unplaceable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.windows {
+            write!(
+                formatter,
+                "TZID {:?} is a Windows zone name this build's CLDR table maps to a zone its own \
+                 database does not have",
+                self.tzid
+            )
+        } else {
+            write!(
+                formatter,
+                "TZID {:?} is neither an IANA zone nor a Windows zone name",
+                self.tzid
+            )
+        }
+    }
+}
+
+impl std::error::Error for Unplaceable {}
+
+/// The zone a `TZID` means, or the refusal that says why not — the form
+/// [`crate::caldav`] needs, since it both logs and counts it.
+pub fn place(name: &str) -> Result<chrono_tz::Tz, Unplaceable> {
+    read(name).ok_or_else(|| Unplaceable {
+        tzid: name.trim().to_owned(),
+        windows: WINDOWS_ZONES
+            .binary_search_by(|(windows, _)| (*windows).cmp(name.trim()))
+            .is_ok(),
+    })
 }
 
 #[cfg(test)]
@@ -84,6 +139,29 @@ mod tests {
         assert_eq!(read("Europe/Paris"), Some(chrono_tz::Europe::Paris));
         assert_eq!(read("UTC"), Some(chrono_tz::UTC));
         assert_eq!(read(" Europe/Paris "), Some(chrono_tz::Europe::Paris));
+    }
+
+    #[test]
+    fn a_refusal_says_which_of_the_two_ways_it_could_not_be_placed() {
+        // The reason a counter carries comes from the same value the log line
+        // does, so the two cannot disagree (#350).
+        let unknown = place("Middle-earth Standard Time").expect_err("a refusal");
+        assert_eq!(unknown.reason(), "zone_unknown");
+        assert!(!unknown.windows);
+        assert!(format!("{unknown}").contains("neither an IANA zone"));
+        assert!(Unplaceable::REASONS.contains(&unknown.reason()));
+
+        // And every name CLDR knows is placeable on this build, which is what
+        // the guard below asserts — so the other reason is unreachable here
+        // and is constructed rather than provoked.
+        let unmappable = Unplaceable {
+            tzid: "Romance Standard Time".to_owned(),
+            windows: true,
+        };
+        assert_eq!(unmappable.reason(), "zone_windows_unmappable");
+        assert!(format!("{unmappable}").contains("CLDR table"));
+
+        assert!(place("Europe/Paris").is_ok());
     }
 
     #[test]
@@ -116,6 +194,48 @@ mod tests {
             .map(|(windows, _)| *windows)
             .collect();
         assert!(unreadable.is_empty(), "{unreadable:?}");
+    }
+
+    #[test]
+    fn the_table_is_the_cldr_file_committed_beside_its_generator() {
+        // The provenance in `windows_zones.rs`'s header is a claim; this is
+        // what makes it checkable. The CLDR file is committed at
+        // `collector/tools/windowsZones.xml`, and the rows are derived from it
+        // again here — in Rust, so it runs in the suite that already runs —
+        // rather than trusting that somebody ran the generator and edited
+        // nothing afterwards.
+        //
+        // Updating CLDR is therefore: replace the XML, re-run
+        // `collector/tools/generate-windows-zones.py`, and watch this test.
+        let xml = include_str!("../tools/windowsZones.xml");
+        let mut derived: Vec<(&str, &str)> = Vec::new();
+        for element in xml.split("<mapZone ").skip(1) {
+            let attribute = |name: &str| -> Option<&str> {
+                let rest = element.split_once(&format!("{name}=\""))?.1;
+                rest.split_once('"').map(|(value, _)| value)
+            };
+            let (Some(other), Some(territory), Some(kind)) =
+                (attribute("other"), attribute("territory"), attribute("type"))
+            else {
+                panic!("a mapZone element with missing attributes: {element:.120}");
+            };
+            if territory == "001" {
+                // CLDR writes one or more zones in `type`; the first is the
+                // one the territory-001 row means.
+                derived.push((other, kind.split(' ').next().unwrap_or(kind)));
+            }
+        }
+        derived.sort_unstable();
+        assert!(
+            derived.len() > 100,
+            "the committed CLDR file parsed as {} rows, which is not a windowsZones.xml",
+            derived.len()
+        );
+        assert_eq!(
+            derived,
+            WINDOWS_ZONES.to_vec(),
+            "src/windows_zones.rs is not what tools/windowsZones.xml says"
+        );
     }
 
     #[test]

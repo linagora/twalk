@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Generates `collector/src/windows_zones.rs` from CLDR's windowsZones.xml.
 
-    curl -sSO https://raw.githubusercontent.com/unicode-org/cldr/<tag>/common/supplemental/windowsZones.xml
-    python3 collector/tools/generate-windows-zones.py windowsZones.xml <tag> > collector/src/windows_zones.rs
+    curl -sS -o collector/tools/windowsZones.xml \
+      https://raw.githubusercontent.com/unicode-org/cldr/<tag>/common/supplemental/windowsZones.xml
+    python3 collector/tools/generate-windows-zones.py collector/tools/windowsZones.xml <tag> \
+      > collector/src/windows_zones.rs
+
+The XML is committed beside this script, and `zones::tests` derives the table
+from it again in Rust and compares: the generated file is therefore pinned to
+its source rather than trusted, and updating CLDR means replacing the XML,
+re-running the line above, and watching that test.
 
 Only the `territory="001"` rows are read. CLDR maps one Windows zone name to
 several IANA zones, one per territory, and `001` is the row that says which of

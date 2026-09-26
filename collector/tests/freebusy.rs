@@ -22,6 +22,13 @@ const SERVICE_TOKEN: &str = "test-service-token";
 /// #369's second source reads — the zone their own agenda is written in.
 const IN_A_ZONE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:d369-zoned\r\nSUMMARY:Point hebdo\r\nDTSTART;TZID=Europe/Paris:20261007T090000\r\nDTEND;TZID=Europe/Paris:20261007T093000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 
+/// One event as Outlook publishes it, in the window this suite reads (#350):
+/// a Windows zone name, which every corporate calendar is full of and which
+/// this collector refused until the CLDR table existed. Here to prove the
+/// busy interval it produces is the one a calendar client shows — the number
+/// the owner's free/busy is built from.
+const OUTLOOK: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Microsoft Corporation//Outlook 16.0 MIMEDIR//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Romance Standard Time\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:d350-outlook\r\nSUMMARY:Comit\u{e9} de direction\r\nDTSTART;TZID=Romance Standard Time:20261009T140000\r\nDTEND;TZID=Romance Standard Time:20261009T150000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
 const MEETING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-meeting\r\nSUMMARY:Point budget CONFIDENTIEL\r\nLOCATION:Salle Ada Lovelace\r\nDTSTART:20261006T080000Z\r\nDTEND:20261006T090000Z\r\nATTENDEE;CN=Alice Martin:mailto:alice@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const OVERLAPPING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-overlap\r\nSUMMARY:Entretien\r\nDTSTART:20261006T083000Z\r\nDTEND:20261006T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const CANCELLED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-cancelled\r\nSUMMARY:Annulé\r\nSTATUS:CANCELLED\r\nDTSTART:20261006T140000Z\r\nDTEND:20261006T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -348,6 +355,47 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
             "a gap was spelled in UTC where the owner's zone was known: {gap}"
         );
         assert!(gap["minutes"].as_i64().unwrap_or_default() > 0, "{gap}");
+    }
+
+    // And an Outlook-shaped event reaches the busy intervals (#350). This is
+    // the number that matters: a free/busy built without these sixty events
+    // describes a week the owner is not living, and the Gateway's own check of
+    // a proposed time (#383) would then agree with it, wrongly.
+    //
+    // 14:00 Paris in October is 12:00 UTC. The fake converts with its own
+    // table, so the assertion is on two sides that were written apart — and
+    // the 9th, because the 8th is the all-day fixture above and a window that
+    // is busy anyway would prove nothing.
+    run.sso.put_event(&run.calendar, "outlook", OUTLOOK);
+    let body = poll_until(
+        || async {
+            let (_, body) = read(
+                port,
+                SERVICE_TOKEN,
+                &run.calendar,
+                "2026-10-09T00:00:00Z",
+                "2026-10-10T00:00:00Z",
+            )
+            .await
+            .ok()?;
+            (!body["busy"].as_array()?.is_empty()).then_some(body)
+        },
+        "the poll to read an event written in a Windows zone",
+    )
+    .await?;
+    assert_eq!(
+        body["busy"],
+        json!([{ "start": "2026-10-09T12:00:00Z", "end": "2026-10-09T13:00:00Z" }]),
+        "an Outlook-shaped event did not reach the owner's busy intervals: {body}"
+    );
+    // And no gap overlaps it, which is the property a draft's offer rests on.
+    for gap in body["free"].as_array().context("the gaps")? {
+        let start = gap["start"].as_str().unwrap_or_default();
+        let end = gap["end"].as_str().unwrap_or_default();
+        assert!(
+            end <= "2026-10-09T12:00:00Z" || start >= "2026-10-09T13:00:00Z",
+            "a gap overlaps the meeting Outlook wrote: {gap}"
+        );
     }
 
     // A window clipped: the meeting is cut at the window's edge.
