@@ -218,11 +218,20 @@ async fn free_busy(
                 timezone = local.as_ref().map(|(zone, _)| zone.name.as_str()).unwrap_or("(none declared)"),
                 "a free/busy read was served"
             );
+            // The gaps, spelled in the owner's own time when it is known
+            // (#379): a drafting agent that copies them cannot write an hour
+            // in the wrong zone, and one that computes them already has.
+            let free = crate::freebusy::free_between(
+                &busy,
+                &window,
+                local.as_ref().map(|(zone, _)| zone.name.as_str()),
+            );
             let mut answer = json!({
                 "connection": connection,
                 "from": window.from.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 "to": window.to.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                 "busy": busy,
+                "free": free,
             });
             // Absent, not null, when there is no zone to name: a member that
             // is there and empty says "I looked and the answer is nothing",

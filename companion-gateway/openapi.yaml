@@ -5027,6 +5027,55 @@ components:
                 type: string
                 format: date-time
                 description: RFC 3339, UTC; exclusive.
+        free:
+          type: array
+          description: |
+            The stretches of the window nothing occupies (#379), in order:
+            the complement of `busy`, clipped to the window.
+
+            Each carries the instants twice — in UTC, which is the fact, and
+            in the owner's own zone, which is the form a sentence needs. Both,
+            because the arithmetic between them is what a drafting agent was
+            measured getting wrong in silence: on 2026-09-26 one read three
+            windows, was told the zone, and proposed two times that overlapped
+            a meeting, having written UTC gaps as if they were local hours. A
+            reader that copies `start_local` cannot make that mistake.
+
+            Nothing is dropped for being short or nocturnal: which gap is
+            worth offering a person is the drafting agent's judgement, and a
+            deployment that hid the night would be deciding somebody's working
+            hours without being told them. `minutes` is there so that a
+            four-minute gap is visibly not a meeting slot.
+
+            Absent from a collector older than #379 — which a reader can tell
+            from "this window has no gaps", where the member is present and
+            empty.
+          items:
+            type: object
+            required: [start, end, minutes]
+            additionalProperties: false
+            properties:
+              start:
+                type: string
+                format: date-time
+                description: RFC 3339, UTC.
+              end:
+                type: string
+                format: date-time
+                description: RFC 3339, UTC; exclusive.
+              start_local:
+                type: string
+                description: |
+                  The same instant in the owner's zone, offset included.
+                  Absent with `end_local` when no zone is known — never
+                  guessed, for the reason the zone itself is not.
+                example: "2026-10-12T12:00:00+02:00"
+              end_local:
+                type: string
+                example: "2026-10-12T14:00:00+02:00"
+              minutes:
+                type: integer
+                description: How long the gap is.
         timezone:
           type: string
           description: |

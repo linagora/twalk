@@ -149,6 +149,19 @@ pub struct Busy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreeBusy {
     pub busy: Vec<Busy>,
+    /// The stretches of the window nothing occupies, each in UTC and — when
+    /// the deployment knows the owner's zone — in that zone too (#379).
+    ///
+    /// Relayed, not computed: the collector has the intervals and the zone,
+    /// so it is the one place the complement can be taken once. The reason
+    /// the member exists is that an agent asked to do that arithmetic was
+    /// measured getting it wrong in silence, proposing two times that
+    /// overlapped a meeting after correctly reading the calendar three times.
+    ///
+    /// Empty from a collector older than #379, which is not a defect: the
+    /// skill then tells the agent what it told it before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub free: Vec<serde_json::Value>,
     /// An IANA name, as the calendar declares it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -737,6 +750,10 @@ impl Reads {
         let member = |name: &str| body[name].as_str().map(str::to_owned);
         Ok(FreeBusy {
             busy,
+            free: body["free"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
             timezone: member("timezone"),
             timezone_source: member("timezone_source"),
             now: member("now"),

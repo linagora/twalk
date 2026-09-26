@@ -246,7 +246,16 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
-        vec!["busy", "connection", "from", "now", "timezone", "timezone_source", "to"],
+        vec![
+            "busy",
+            "connection",
+            "free",
+            "from",
+            "now",
+            "timezone",
+            "timezone_source",
+            "to"
+        ],
         "the answer is a closed list of members, and this is it"
     );
     // The owner's own time, beside the intervals (#369): the zone their
@@ -289,6 +298,14 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
              written in none: {body}"
         );
     }
+    // The gaps are still answered — they are UTC facts — and their local pair
+    // is absent rather than guessed (#379).
+    let free = body["free"].as_array().context("the gaps")?;
+    assert!(!free.is_empty(), "{body}");
+    assert!(
+        free.iter().all(|gap| gap.get("start_local").is_none()),
+        "a gap was spelled in a zone nobody declared: {body}"
+    );
 
     // But the owner's own events usually say where they work, and on the
     // reference deployment that is the only thing that does: measured on
@@ -320,6 +337,18 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
         now.ends_with("+02:00") || now.ends_with("+01:00"),
         "the hour is in that zone, offset and all: {now}"
     );
+    // And the gaps, spelled in that zone, so a drafting agent copies rather
+    // than converts (#379): the arithmetic it was measured getting wrong.
+    let free = body["free"].as_array().context("the gaps")?;
+    assert!(!free.is_empty(), "a window with room in it answered no gaps: {body}");
+    for gap in free {
+        let local = gap["start_local"].as_str().context("a local start")?;
+        assert!(
+            local.ends_with("+02:00") || local.ends_with("+01:00"),
+            "a gap was spelled in UTC where the owner's zone was known: {gap}"
+        );
+        assert!(gap["minutes"].as_i64().unwrap_or_default() > 0, "{gap}");
+    }
 
     // A window clipped: the meeting is cut at the window's edge.
     let (status, body) = read(

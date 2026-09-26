@@ -384,10 +384,18 @@ async fn a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_rec
             "from": "2026-09-24T08:00:00Z",
             "to": "2026-09-26T18:00:00Z",
             "busy": busy,
-            // The owner's own time, as the collector answers it (#369).
+            // The owner's own time, as the collector answers it (#369), and
+            // the gaps spelled in it (#379).
             "timezone": "Europe/Paris",
             "timezone_source": "calendar",
             "now": "2026-09-24T20:36:26+02:00",
+            "free": [{
+                "start": "2026-09-24T10:30:00Z",
+                "end": "2026-09-25T14:00:00Z",
+                "start_local": "2026-09-24T12:30:00+02:00",
+                "end_local": "2026-09-25T16:00:00+02:00",
+                "minutes": 1650,
+            }],
         }),
     )
     .await?;
@@ -427,11 +435,19 @@ async fn a_signed_read_on_a_connected_calendar_answers_busy_intervals_and_is_rec
     assert_eq!(body["timezone"], "Europe/Paris");
     assert_eq!(body["timezone_source"], "calendar");
     assert_eq!(body["now"], "2026-09-24T20:36:26+02:00");
+    // The gaps are relayed as the collector spelled them, local pair and all:
+    // this module adds nothing, and an agent that copies them cannot write an
+    // hour in the wrong zone (#379).
+    assert_eq!(
+        body["free"][0]["start_local"], "2026-09-24T12:30:00+02:00",
+        "the gaps did not reach the agent: {body}"
+    );
+    assert_eq!(body["free"][0]["minutes"], 1650);
     assert_eq!(
         body.as_object().map(|object| object.len()),
-        Some(7),
-        "connection, from, to, busy, the three of the owner's own time, and \
-         nothing else: {body}"
+        Some(8),
+        "connection, from, to, busy, the gaps, the three of the owner's own \
+         time, and nothing else: {body}"
     );
     // The relay: the Gateway's own service token, the window as asked, the
     // collector's route.
