@@ -1229,12 +1229,29 @@ fn delivery_reads_sample(outcome: &str, total: u64) -> String {
 
 /// The delivery line of one `approbations` post: the third line, where
 /// `text::approval_post` puts it (the staged body is one line).
+/// The delivery line of a post: **third from the end**, and not third from
+/// the start.
+///
+/// Counted from the tail because the tail is what has not moved. The post ends
+/// with the delivery line, the gestures the owner may make, and the reference —
+/// three lines, in that order, since the post existed. Its head has grown
+/// twice: #335 put what the reply answers above the text, and #367 the path
+/// the draft took, and #383 whether the hours it names were checked. A fixed
+/// index from the start was right once and has been wrong at every addition
+/// since; a body with a newline in it would break it too.
 fn delivery_line_of(post: &Event) -> Result<String> {
-    post.content
-        .lines()
-        .nth(2)
-        .map(str::to_owned)
-        .with_context(|| format!("a post has at least three lines:\n{}", post.content))
+    let lines: Vec<&str> = post.content.lines().collect();
+    lines
+        .len()
+        .checked_sub(3)
+        .and_then(|third_from_the_end| lines.get(third_from_the_end))
+        .map(|line| (*line).to_owned())
+        .with_context(|| {
+            format!(
+                "a post ends with a delivery line, the gestures and the reference:\n{}",
+                post.content
+            )
+        })
 }
 
 #[tokio::test]
@@ -1344,6 +1361,17 @@ async fn the_owners_check_is_one_row_in_the_gateways_approval_table_through_the_
         "the post carries the suggestion's body verbatim: {}",
         post.content
     );
+    // What reaches Buzz, and what does not, as #335 decided it — and both
+    // halves, because a test that only asserts absences cannot notice the day
+    // something starts leaving.
+    //
+    // The line this draws is not "nothing about the contact". It is the one
+    // the owner took: *the contact's name and the persona's summary, on a line
+    // above the proposed reply, and nothing else of the conversation.* The
+    // relay is somebody else's server (ADR 0012), so what is withheld is what
+    // would let that server read the conversation — the identity, the number
+    // behind it, the words the contact wrote, the room they were written in —
+    // and not the two sentences the owner asked to see before deciding.
     let display_name = talk.trigger["data"]["contact"]["display_name"]
         .as_str()
         .unwrap_or_default();
@@ -1351,19 +1379,51 @@ async fn the_owners_check_is_one_row_in_the_gateways_approval_table_through_the_
         .as_str()
         .unwrap_or_default();
     let contact_body = talk.trigger["data"]["body"].as_str().unwrap_or_default();
+    // The portal room, as the trigger's own source names it: the last
+    // identifier of the conversation, and the one nothing on this surface has
+    // ever needed.
+    let portal_room = talk.trigger["source"]
+        .as_str()
+        .unwrap_or_default()
+        .rsplit_once('/')
+        .map(|(_, room)| room.to_owned())
+        .unwrap_or_default();
     for (what, marker) in [
         ("the contact's Matrix ID", talk.contact.as_str()),
-        ("the contact's display name", display_name),
         ("the contact's network identifier", network_identifier),
         ("the contact's own words", contact_body),
+        ("the portal room", portal_room.as_str()),
     ] {
         anyhow::ensure!(
+            !marker.is_empty(),
+            "{what} is not in the fixture, so its absence from the post proves nothing"
+        );
+        anyhow::ensure!(
             !post.content.contains(marker),
-            "the post names {what}, which the approval screen cannot and this surface cannot \
-             either (#160, ADR 0012): {}",
+            "the post names {what}, which this surface must not carry (#160, ADR 0012): {}",
             post.content
         );
     }
+    let summary = talk.suggestion["data"]["context"]["summary"]
+        .as_str()
+        .unwrap_or_default();
+    anyhow::ensure!(
+        post.content.contains(summary),
+        "the post does not say what the reply answers, which is half of what #335 sends to \
+         this surface: {}",
+        post.content
+    );
+    // Once, not twice: the clerk prefixes the name only when the summary does
+    // not already carry it, and a persona writing two sentences about who
+    // asked what usually names them. Counting is how that rule is asserted
+    // rather than assumed — and it is also what catches the opposite
+    // regression, a post that has stopped naming the contact at all.
+    anyhow::ensure!(
+        post.content.matches(display_name).count() == 1,
+        "the contact is named {} times and #334 puts them on this surface exactly once: {}",
+        post.content.matches(display_name).count(),
+        post.content
+    );
     anyhow::ensure!(
         stack.approval(talk.suggestion_id()).await?.0 == reqwest::StatusCode::NOT_FOUND,
         "nothing is approved before the owner decides"
@@ -1421,9 +1481,22 @@ async fn the_owners_check_is_one_row_in_the_gateways_approval_table_through_the_
         published["data"]["suggestion_event_id"].as_str() == Some(talk.suggestion_id()),
         "the published approval names the suggestion: {published}"
     );
+    // What went out is what the persona wrote, and the one line the owner
+    // cannot edit out of it: the disclosure, appended at approval by the
+    // Gateway and never part of the body (#121, ADR 0019, ADR 0031). Asserted
+    // as "the persona's words, then the sentence the event itself names" —
+    // rather than against a literal — because which sentence it is depends on
+    // the language the reply was written in, and the event is where that
+    // decision is recorded.
+    let sent = published["data"]["final"]["body"].as_str().unwrap_or_default();
+    let disclosure = published["data"]["disclosure"].as_str();
+    let expected = match disclosure {
+        Some(sentence) => format!("{}\n{sentence}", talk.suggestion_body()),
+        None => talk.suggestion_body().to_owned(),
+    };
     anyhow::ensure!(
-        published["data"]["final"]["body"].as_str() == Some(talk.suggestion_body()),
-        "what went out is what the persona wrote: {published}"
+        sent == expected,
+        "what went out is the persona's words plus the disclosure and nothing else: {published}"
     );
 
     // The post is gone, the activity feed says so, and the clerk counted it.
