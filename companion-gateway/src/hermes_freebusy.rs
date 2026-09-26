@@ -475,7 +475,26 @@ impl Reads {
     /// whatever the outcome, since the point of the record is the reads
     /// that were refused as much as the ones that were served.
     pub async fn read(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
-        let outcome = self.serve(request).await;
+        self.record(self.serve(request).await, request)
+    }
+
+    /// The same, for the Gateway checking a time the draft proposed (#383):
+    /// the connection is known rather than taken from a signature, and the
+    /// read is recorded exactly as every other is — the owner's journal shows
+    /// the check that was made on their behalf.
+    async fn read_checked(
+        &self,
+        connection: &str,
+        request: &ReadRequest,
+    ) -> Result<FreeBusy, ReadRefusal> {
+        self.record(self.serve_checked(connection, request).await, request)
+    }
+
+    fn record(
+        &self,
+        outcome: Result<FreeBusy, ReadRefusal>,
+        request: &ReadRequest,
+    ) -> Result<FreeBusy, ReadRefusal> {
         let (label, intervals) = match &outcome {
             Ok(answer) => ("served".to_owned(), Some(answer.busy.len() as u64)),
             Err(refusal) => (refusal.code().to_owned(), None),
@@ -726,8 +745,68 @@ impl Reads {
         })
     }
 
+    /// Whether an instant the draft offers is inside a free gap (#383).
+    ///
+    /// Asked of the collector rather than answered from a store, because the
+    /// Gateway keeps **no intervals** and must not start: an audit log of the
+    /// owner's occupations is the thing the governed pull exists to avoid
+    /// (store v11). So this is one more read of a window the agent already
+    /// read, served by the component that holds the calendar, and **recorded
+    /// like every other** — the owner's journal shows the check that was made
+    /// on their behalf, which is the point of having a journal at all.
+    ///
+    /// `Ok(false)` means the instant is inside a meeting. An error means the
+    /// check could not be made, and the caller refuses rather than publishing
+    /// something nobody verified.
+    pub async fn is_free(
+        &self,
+        connection: &str,
+        window: (&str, &str),
+        instant: &str,
+        delivery: &str,
+    ) -> Result<bool, ReadRefusal> {
+        let request = ReadRequest {
+            connection: Some(connection.to_owned()),
+            from: Some(window.0.to_owned()),
+            to: Some(window.1.to_owned()),
+            delivery: Some(delivery.to_owned()),
+            ..ReadRequest::default()
+        };
+        let answer = self.read_checked(connection, &request).await?;
+        let at = crate::hermes_answer::parse_rfc3339_seconds(instant).ok_or_else(|| {
+            ReadRefusal::InvalidWindow(format!("{instant:?} is not an RFC 3339 instant"))
+        })?;
+        // Inside one of the gaps the collector answered, end exclusive — the
+        // same rule the intervals themselves are read by.
+        Ok(answer.free.iter().any(|gap| {
+            let bound = |name: &str| {
+                gap.get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(crate::hermes_answer::parse_rfc3339_seconds)
+            };
+            matches!((bound("start"), bound("end")), (Some(start), Some(end)) if start <= at && at < end)
+        }))
+    }
+
     async fn serve(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
         let connection = self.signed_for(request, FREEBUSY_PATH)?;
+        self.serve_checked(&connection, request).await
+    }
+
+    /// The half of a read after the signature: the window, the connection's
+    /// readiness, the relay, the answer.
+    ///
+    /// Apart from [`serve`] so that the Gateway's own check of a proposed
+    /// time (#383) reaches it without forging a signature for itself. The
+    /// signature authenticates **Hermes**, and a caller inside this process
+    /// is not Hermes — it is the Gateway verifying what Hermes said, which is
+    /// a different act and should not have to look like the other one.
+    async fn serve_checked(
+        &self,
+        connection: &str,
+        request: &ReadRequest,
+    ) -> Result<FreeBusy, ReadRefusal> {
+        let connection = connection.to_owned();
         let window = Window::parse(request.from.as_deref(), request.to.as_deref())?;
         let (collector_url, service_token) = self.connection_ready(&connection)?;
         let connection = connection.as_str();

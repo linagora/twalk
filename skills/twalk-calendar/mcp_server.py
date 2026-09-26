@@ -206,7 +206,13 @@ TOOLS = [
             "`now`: name the zone in your reply, and count `next week` and "
             "`tomorrow` from `now` rather than from your own idea of today. "
             "When `start_local` is absent the deployment knows no zone: write "
-            "your times in UTC and say they are UTC, rather than guessing."
+            "your times in UTC and say they are UTC, rather than guessing. "
+            "**And say which gaps you offer**: put their instants in your "
+            "answer's `proposed`, copied from these gaps, in UTC. The Gateway "
+            "checks each one — that you read the window it falls in, and that "
+            "the owner is free then — and publishes nothing at all if one "
+            "fails. A time from a window you did not read is refused, so read "
+            "the window first; it costs one call."
         ),
         "inputSchema": {
             "type": "object",

@@ -582,6 +582,72 @@ async fn a_wake_that_asks_the_owner_is_recorded_and_is_not_a_refusal() -> Result
     Ok(())
 }
 
+/// #383: a draft that offers a time it never read publishes nothing.
+///
+/// Measured on the reference deployment on 2026-09-26: a draft read two
+/// windows and then offered two Monday slots from a week it never read, both
+/// of them meetings the owner was already in. Three rounds of clearer
+/// instructions had not stopped it, and a fourth would not have either — so
+/// the Gateway checks instead of asking.
+///
+/// This case needs no collector: an instant with **no** read behind it fails
+/// the first question, which is the one the defect failed.
+#[tokio::test]
+async fn a_draft_that_offers_a_time_it_never_read_publishes_nothing() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-proposed").await?;
+    let (contact, room) = conversation("proposed");
+
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &hermes_reference("assistant", &trigger_id, 1),
+        "Lundi 12 octobre à 14h ?",
+        &["2026-10-12T12:00:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_str(&response.text().await?)?;
+
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "hermes_answer_proposed_not_read");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("2026-10-12T12:00:00Z") && detail.contains("Read the window"),
+        "the refusal says which time and what to do about it: {body}"
+    );
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a draft offering a time nobody read was published anyway"
+    );
+
+    // Counted under its own code, so "how often does my assistant make a
+    // time up" is a question an operator can answer.
+    let metrics = reqwest::get(format!("{}/metrics", running.base))
+        .await?
+        .text()
+        .await?;
+    assert!(
+        metrics.contains(
+            "twalk_companion_gateway_hermes_answers_total{outcome=\"hermes_answer_proposed_not_read\"} 1"
+        ),
+        "{metrics}"
+    );
+
+    // And a reply that offers nothing is published exactly as before, which
+    // is almost every reply.
+    let (status, plain) = running
+        .answer(&hermes_reference("assistant", &trigger_id, 2), Some("fr"))
+        .await?;
+    assert_eq!(status, 200, "{plain}");
+    Ok(())
+}
+
 /// #367's second half: the approval screen shows what the draft **did**.
 ///
 /// A draft that read a calendar, asked a question and then wrote is more

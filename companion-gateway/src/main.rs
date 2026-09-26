@@ -227,28 +227,6 @@ async fn main() -> Result<()> {
             // approval half rather than beside it: the trigger lookup, the
             // consent read at that moment, the refusal vocabulary and the
             // in-request publish are the same, and two implementations of
-            // any of them would be two vocabularies for one fact.
-            let answers = match &config.hermes_answers {
-                Some(seam) => {
-                    info!(
-                        hermes_domain = %seam.domain,
-                        suggestion_ttl_seconds = seam.suggestion_ttl_seconds,
-                        "the seam to Hermes is on: POST {} turns a signed answer into a \
-                         persona.suggest.produced, refused if the sender's consent is no longer \
-                         granted at that moment and refused if the answer names no language",
-                        twalk_companion_gateway::hermes_answer::ANSWER_PATH
-                    );
-                    Some(Arc::new(Answers::new(
-                        approvals.clone(),
-                        metrics.clone(),
-                        seam.secret.clone(),
-                        seam.domain.clone(),
-                        seam.suggestion_ttl_seconds,
-                        std::time::SystemTime::now,
-                    )))
-                }
-                None => None,
-            };
             // Hermes's free/busy reads (ticket #281): the one governed pull,
             // on the same secret, relayed to the collector when one is
             // named, recorded in the store whatever the outcome.
@@ -281,6 +259,31 @@ async fn main() -> Result<()> {
                     std::time::SystemTime::now,
                 ))
             });
+            // any of them would be two vocabularies for one fact.
+            let answers = match &config.hermes_answers {
+                Some(seam) => {
+                    info!(
+                        hermes_domain = %seam.domain,
+                        suggestion_ttl_seconds = seam.suggestion_ttl_seconds,
+                        "the seam to Hermes is on: POST {} turns a signed answer into a \
+                         persona.suggest.produced, refused if the sender's consent is no longer \
+                         granted at that moment and refused if the answer names no language",
+                        twalk_companion_gateway::hermes_answer::ANSWER_PATH
+                    );
+                    Some(Arc::new(Answers::new(
+                        approvals.clone(),
+                        metrics.clone(),
+                        seam.secret.clone(),
+                        seam.domain.clone(),
+                        seam.suggestion_ttl_seconds,
+                        std::time::SystemTime::now,
+                    )
+                    // The same reads that serve Hermes are what verify the
+                    // times its drafts offer (#383).
+                    .with_reads(reads.clone())))
+                }
+                None => None,
+            };
             (
                 Some(outbox),
                 Some(projection),

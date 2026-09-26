@@ -1334,6 +1334,17 @@ pub fn hermes_answer_saying(
     answer.to_string()
 }
 
+/// A reply that offers times, saying which instants they are (#383).
+pub fn hermes_answer_proposing(reference: &str, reply: &str, proposed: &[&str]) -> String {
+    serde_json::json!({
+        "reference": reference,
+        "reply": reply,
+        "language": "fr",
+        "proposed": proposed,
+    })
+    .to_string()
+}
+
 /// A wake that ends in a question to the owner instead of a draft (#367):
 /// the reference, and what the agent says it needs, and no reply at all.
 pub fn hermes_deferral(reference: &str, asked: &str) -> String {
