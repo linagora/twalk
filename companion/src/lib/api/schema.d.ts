@@ -3279,6 +3279,14 @@ export interface components {
                  *     `summary`, what the message asks in the agent's own words
                  *     (#360). A fenced code block around it is unwrapped.
                  *
+                 *     A reply that proposes a time also carries `proposed`: the
+                 *     instants it offers, RFC 3339 and copied from the `free` gaps
+                 *     the calendar read gave it (#383). The Gateway checks each one
+                 *     against the windows that agent actually read for the message,
+                 *     and against the owner's calendar again at that moment —
+                 *     a time that was never read, or that falls in a meeting,
+                 *     produces **no suggestion** and a refusal naming it.
+                 *
                  *     **Or a deferral** (#367): `reference` and `deferred`, the
                  *     question the agent put to the owner in their own channel, and
                  *     no reply. That is not a refusal and produces no suggestion —
@@ -4527,6 +4535,46 @@ export interface components {
                  */
                 format: "text/plain" | "text/markdown" | "text/html";
             };
+            /**
+             * @description Whether the times this reply names were verified before it was
+             *     published (#383), or `null` when it names none — which is most
+             *     replies, and what every suggestion published before #383 carries.
+             *
+             *     The member exists because the two kinds of draft are otherwise
+             *     indistinguishable on this screen. A reply that offered instants
+             *     was checked against the windows its agent had read and against
+             *     the owner's calendar, and one that failed was never published at
+             *     all. But a reply may also name an hour in its prose and offer no
+             *     instants, and refusing that on a text pattern would refuse *"je
+             *     te réponds sous 24h"*, which is not a proposal. So it is
+             *     published, said to be unverified, and the owner reading it knows
+             *     which of the two they hold.
+             *
+             *     Asserted by the Gateway, never by an agent: it is a claim about
+             *     what was checked, and only the component that checked may make
+             *     it. A state this build does not know is served as `null` rather
+             *     than passed through — a word about verification the Gateway
+             *     cannot vouch for must not reach the screen.
+             */
+            times?: null | {
+                /**
+                 * @description How many instants were checked. Present with `checked`
+                 *     and absent otherwise: there is no count of things that
+                 *     were not counted.
+                 */
+                count?: number;
+                /**
+                 * @description `checked`: every instant the reply offered was inside a
+                 *     window its agent had read for this message and inside a
+                 *     free gap of the owner's calendar, asked again at the
+                 *     moment of publication. `unverified`: the text names
+                 *     something time-like and the reply offered no instants, so
+                 *     nothing here was verified — a label, not a refusal and
+                 *     not a defect.
+                 * @enum {string}
+                 */
+                state: "checked" | "unverified";
+            };
             trigger: components["schemas"]["SuggestionTrigger"];
         };
         /**
@@ -5323,6 +5371,21 @@ export interface operations {
              *       the contract's cap on `data.context.summary`. Refused rather
              *       than cut: a summary trimmed mid-sentence is worse on an
              *       approval screen than none.
+             *     - `hermes_answer_deferral_is_empty` — the answer defers and says
+             *       nothing about what it needs (#367).
+             *     - `hermes_answer_proposed_unreadable` — `proposed` is there and is
+             *       not a list of RFC 3339 instants (#383).
+             *     - `hermes_answer_proposed_too_many` — more instants than a reply
+             *       can be offering.
+             *     - `hermes_answer_proposed_not_read` — one of them falls outside
+             *       every window that agent read for this message: a time nobody
+             *       looked at, which is indistinguishable from a verified one once
+             *       it is in a sentence.
+             *     - `hermes_answer_proposed_not_free` — one of them falls in a
+             *       meeting, asked of the calendar again at that moment.
+             *     - `hermes_answer_proposed_uncheckable` — the check could not be
+             *       made. Nothing is published, because a proposal nobody verified
+             *       is what the check exists against.
              */
             422: {
                 headers: {
@@ -5331,7 +5394,7 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
-                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long" | "hermes_answer_summary_is_empty" | "hermes_answer_summary_too_long";
+                        error?: "hermes_answer_unreadable" | "hermes_answer_has_no_reference" | "hermes_answer_has_no_language" | "hermes_answer_language_unreadable" | "hermes_answer_language_unsupported" | "hermes_answer_is_empty" | "hermes_answer_too_long" | "hermes_answer_summary_is_empty" | "hermes_answer_summary_too_long" | "hermes_answer_deferral_is_empty" | "hermes_answer_proposed_unreadable" | "hermes_answer_proposed_too_many" | "hermes_answer_proposed_not_read" | "hermes_answer_proposed_not_free" | "hermes_answer_proposed_uncheckable";
                     };
                 };
             };

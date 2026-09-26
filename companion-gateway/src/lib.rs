@@ -197,10 +197,10 @@ pub mod store;
 pub mod suggestions;
 pub mod suggestions_http;
 pub mod switch;
+pub mod trace;
 /// The owner's working day: the days they accept meetings and how wide
 /// those days are (#381), which is what makes a free gap an offer.
 pub mod working_day;
-pub mod trace;
 
 /// The Gateway's version, as the health endpoint reports it: the package
 /// version. This is the stable half of the version handshake — the Companion

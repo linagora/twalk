@@ -406,6 +406,29 @@ describe('the disclosure (#121)', () => {
 	});
 });
 
+describe('whether the hours a reply names were checked (#383)', () => {
+	it('carries the state and the count onto the row', () => {
+		const row = toRow(suggestion({ times: { state: 'checked', count: 2 } } as Partial<Suggestion>));
+		expect(row.times).toEqual({ state: 'checked', count: 2 });
+	});
+
+	it('carries the unverified state, which is the one the user most needs', () => {
+		// A reply that names an hour and offered no instants is published on
+		// purpose — refusing on a text pattern would refuse "je te réponds sous
+		// 24h" — so the card says nothing verified it.
+		const row = toRow(suggestion({ times: { state: 'unverified' } } as Partial<Suggestion>));
+		expect(row.times).toEqual({ state: 'unverified' });
+	});
+
+	it('is null, never undefined, for a reply that names no time', () => {
+		// Most replies, and every suggestion published before #383: the card
+		// then says nothing at all, and must not branch on a missing member.
+		const older = suggestion();
+		delete (older as Record<string, unknown>).times;
+		expect(toRow(older).times).toBeNull();
+	});
+});
+
 describe('what the draft did before it wrote (#367)', () => {
 	it('carries the path onto the row, in the order the screen draws it', () => {
 		const row = toRow(

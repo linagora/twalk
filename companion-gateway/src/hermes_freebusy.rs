@@ -158,10 +158,16 @@ pub struct FreeBusy {
     /// measured getting it wrong in silence, proposing two times that
     /// overlapped a meeting after correctly reading the calendar three times.
     ///
-    /// Empty from a collector older than #379, which is not a defect: the
-    /// skill then tells the agent what it told it before.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub free: Vec<serde_json::Value>,
+    /// `None` from a collector older than #379, which is not a defect: the
+    /// skill then tells the agent what it told it before. An **empty list**
+    /// is a different answer — this window has no gap in it — and the two
+    /// are kept apart because the Gateway's own check of a proposed time
+    /// (#383) concludes "the owner is busy then" from the second and
+    /// "nobody could check" from the first. Folded together, a deployment
+    /// whose collector answers no gaps would have every draft refused for a
+    /// reason that names the owner's calendar instead of the deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free: Option<Vec<serde_json::Value>>,
     /// The owner's working day, when they have set one (#381): the gaps
     /// above are the parts of the window inside it. Relayed so that an agent
     /// can say the offer it makes is bounded by their hours, and say "I am
@@ -475,7 +481,26 @@ impl Reads {
     /// whatever the outcome, since the point of the record is the reads
     /// that were refused as much as the ones that were served.
     pub async fn read(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
-        let outcome = self.serve(request).await;
+        self.record(self.serve(request).await, request)
+    }
+
+    /// The same, for the Gateway checking a time the draft proposed (#383):
+    /// the connection is known rather than taken from a signature, and the
+    /// read is recorded exactly as every other is — the owner's journal shows
+    /// the check that was made on their behalf.
+    async fn read_checked(
+        &self,
+        connection: &str,
+        request: &ReadRequest,
+    ) -> Result<FreeBusy, ReadRefusal> {
+        self.record(self.serve_checked(connection, request).await, request)
+    }
+
+    fn record(
+        &self,
+        outcome: Result<FreeBusy, ReadRefusal>,
+        request: &ReadRequest,
+    ) -> Result<FreeBusy, ReadRefusal> {
         let (label, intervals) = match &outcome {
             Ok(answer) => ("served".to_owned(), Some(answer.busy.len() as u64)),
             Err(refusal) => (refusal.code().to_owned(), None),
@@ -726,8 +751,73 @@ impl Reads {
         })
     }
 
+    /// The free gaps of one window, as instants, for the Gateway's own check
+    /// of the times a draft offers (#383).
+    ///
+    /// Asked of the collector rather than answered from a store, because the
+    /// Gateway keeps **no intervals** and must not start: an audit log of the
+    /// owner's occupations is the thing the governed pull exists to avoid
+    /// (store v11). So this is one more read of a window the agent already
+    /// read, served by the component that holds the calendar, and **recorded
+    /// like every other** — the owner's journal shows the check that was made
+    /// on their behalf, which is the point of having a journal at all.
+    ///
+    /// A **window** and not an instant, so that a reply offering three times
+    /// in the same week costs one read rather than three. The caller holds
+    /// the instants and does the covering test itself.
+    ///
+    /// `Ok(None)` is the answer that carried no `free` member at all — a
+    /// collector older than #379 — and means *nothing can be concluded*,
+    /// which the caller must not read as "busy". `Ok(Some(vec![]))` is a
+    /// window with no gap in it, which is a fact about the owner's week. An
+    /// error means the read itself failed.
+    pub async fn free_gaps(
+        &self,
+        connection: &str,
+        window: (&str, &str),
+        delivery: &str,
+    ) -> Result<Option<Vec<(i64, i64)>>, ReadRefusal> {
+        let request = ReadRequest {
+            connection: Some(connection.to_owned()),
+            from: Some(window.0.to_owned()),
+            to: Some(window.1.to_owned()),
+            delivery: Some(delivery.to_owned()),
+            ..ReadRequest::default()
+        };
+        let answer = self.read_checked(connection, &request).await?;
+        Ok(answer.free.map(|gaps| {
+            gaps.iter()
+                .filter_map(|gap| {
+                    let bound = |name: &str| {
+                        gap.get(name)
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(crate::hermes_answer::parse_rfc3339_seconds)
+                    };
+                    Some((bound("start")?, bound("end")?))
+                })
+                .collect()
+        }))
+    }
+
     async fn serve(&self, request: &ReadRequest) -> Result<FreeBusy, ReadRefusal> {
         let connection = self.signed_for(request, FREEBUSY_PATH)?;
+        self.serve_checked(&connection, request).await
+    }
+
+    /// The half of a read after the signature: the window, the connection's
+    /// readiness, the relay, the answer.
+    ///
+    /// Apart from [`serve`] so that the Gateway's own check of a proposed
+    /// time (#383) reaches it without forging a signature for itself. The
+    /// signature authenticates **Hermes**, and a caller inside this process
+    /// is not Hermes — it is the Gateway verifying what Hermes said, which is
+    /// a different act and should not have to look like the other one.
+    async fn serve_checked(
+        &self,
+        connection: &str,
+        request: &ReadRequest,
+    ) -> Result<FreeBusy, ReadRefusal> {
+        let connection = connection.to_owned();
         let window = Window::parse(request.from.as_deref(), request.to.as_deref())?;
         let (collector_url, service_token) = self.connection_ready(&connection)?;
         let connection = connection.as_str();
@@ -756,10 +846,7 @@ impl Reads {
         let member = |name: &str| body[name].as_str().map(str::to_owned);
         Ok(FreeBusy {
             busy,
-            free: body["free"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default(),
+            free: body.get("free").and_then(|free| free.as_array()).cloned(),
             working_day: body
                 .get("working_day")
                 .filter(|day| day.is_object())

@@ -1923,6 +1923,30 @@ impl Store {
         Ok(())
     }
 
+    /// The windows of every free/busy read **served** for one trigger (#383),
+    /// with the connection each was served on.
+    ///
+    /// What a proposed time is checked against: an instant outside every one
+    /// of them is an instant the agent never looked at. Refused reads are not
+    /// here — a read that did not happen cannot have covered anything.
+    ///
+    /// The join is the one `hermes_path` uses and for the same reason: a read
+    /// records the delivery its caller named it by, and the skill tells the
+    /// agent to put the reference there (#363).
+    pub fn windows_read_for(&self, trigger_event_id: &str) -> Result<Vec<(String, String, String)>> {
+        let connection = self.connection();
+        let named = format!("%{trigger_event_id}%");
+        let mut statement = connection.prepare(
+            "SELECT connection, window_from, window_to FROM hermes_read
+             WHERE delivery LIKE ?1 AND outcome = 'served' ORDER BY sequence",
+        )?;
+        let rows = statement
+            .query_map([&named], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read the windows of a trigger")?;
+        Ok(rows)
+    }
+
     /// What a draft did before it was written, oldest first (#367): the
     /// governed reads it made and the questions it put to the owner.
     ///

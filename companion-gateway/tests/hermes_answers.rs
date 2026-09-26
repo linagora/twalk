@@ -54,9 +54,10 @@ mod harness;
 
 use anyhow::{Context, Result};
 use harness::{
-    companion_build, ensure_stack, gateway_env_with, gateway_env_with_hermes, hermes_answer,
-    hermes_push, hermes_reference, hermes_signature, nats_url, poll_until, post_hermes_answer,
-    unreachable_nats_url, validate_against_contract, Bus, GatewayProc, HERMES_DOMAIN, SERVER_NAME,
+    calendar_status_event, companion_build, ensure_stack, gateway_env_with, gateway_env_with_hermes,
+    hermes_answer, hermes_push, hermes_reference, hermes_signature, nats_url, poll_until,
+    post_hermes_answer, unreachable_nats_url, validate_against_contract, Bus, GatewayProc,
+    StubCollector, CONNECTION_STATUS_SUBJECT, HERMES_DOMAIN, SERVER_NAME,
 };
 use serde_json::{json, Value};
 
@@ -148,6 +149,32 @@ impl Running {
         let static_dir = companion_build(test_name)?;
         let state_dir = harness::gateway_state_dir(&static_dir);
         let mut running = Self::start_with(gateway_env_with_hermes(&static_dir, &nats_url())).await?;
+        running.state_dir = state_dir;
+        Ok(running)
+    }
+
+    /// The same, with a collector to relay calendar reads to and a calendar
+    /// connection in the registry — what the Gateway needs to check the times
+    /// a draft offers (#383).
+    async fn start_with_collector(
+        test_name: &str,
+        connection: &str,
+        collector_url: &str,
+    ) -> Result<Self> {
+        let static_dir = companion_build(test_name)?;
+        let state_dir = harness::gateway_state_dir(&static_dir);
+        let mut env = gateway_env_with_hermes(&static_dir, &nats_url());
+        let connections = format!("{},{connection}=calendar", harness::TEST_CONNECTIONS);
+        for (key, value) in env.iter_mut() {
+            if key == "GATEWAY_CONNECTIONS" {
+                *value = connections.clone();
+            }
+        }
+        env.push((
+            "GATEWAY_COLLECTOR_URL".to_owned(),
+            collector_url.to_owned(),
+        ));
+        let mut running = Self::start_with(env).await?;
         running.state_dir = state_dir;
         Ok(running)
     }
@@ -582,6 +609,280 @@ async fn a_wake_that_asks_the_owner_is_recorded_and_is_not_a_refusal() -> Result
     Ok(())
 }
 
+/// #383: a draft that offers a time it never read publishes nothing.
+///
+/// Measured on the reference deployment on 2026-09-26: a draft read two
+/// windows and then offered two Monday slots from a week it never read, both
+/// of them meetings the owner was already in. Three rounds of clearer
+/// instructions had not stopped it, and a fourth would not have either — so
+/// the Gateway checks instead of asking.
+///
+/// This case needs no collector: an instant with **no** read behind it fails
+/// the first question, which is the one the defect failed.
+#[tokio::test]
+async fn a_draft_that_offers_a_time_it_never_read_publishes_nothing() -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let running = Running::start("hermes-answer-proposed").await?;
+    let (contact, room) = conversation("proposed");
+
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &hermes_reference("assistant", &trigger_id, 1),
+        "Lundi 12 octobre à 14h ?",
+        &["2026-10-12T12:00:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_str(&response.text().await?)?;
+
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "hermes_answer_proposed_not_read");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("2026-10-12T12:00:00Z") && detail.contains("Read the window"),
+        "the refusal says which time and what to do about it: {body}"
+    );
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a draft offering a time nobody read was published anyway"
+    );
+
+    // Counted under its own code, so "how often does my assistant make a
+    // time up" is a question an operator can answer.
+    let metrics = reqwest::get(format!("{}/metrics", running.base))
+        .await?
+        .text()
+        .await?;
+    assert!(
+        metrics.contains(
+            "twalk_companion_gateway_hermes_answers_total{outcome=\"hermes_answer_proposed_not_read\"} 1"
+        ),
+        "{metrics}"
+    );
+
+    // And a reply that offers nothing is published exactly as before, which
+    // is almost every reply.
+    let (status, plain) = running
+        .answer(&hermes_reference("assistant", &trigger_id, 2), Some("fr"))
+        .await?;
+    assert_eq!(status, 200, "{plain}");
+    Ok(())
+}
+
+/// #383's other two refusals, and the line the owner reads.
+///
+/// The window is really read, through the signed route, with the delivery the
+/// skill tells the agent to send — so the Gateway has a served read to join
+/// on, and the question becomes the one the ticket is about: *of the times in
+/// a window it did read, which are free?* Four answers are proved here, on one
+/// Gateway and one calendar:
+///
+/// - an hour inside a meeting publishes nothing;
+/// - an hour inside a gap publishes, and the suggestion says how many times
+///   were checked;
+/// - a reply that names an hour and offers none publishes, and says nothing
+///   verified it — the case #383 refuses to refuse, because refusing on a text
+///   pattern would refuse *"je te réponds sous 24h"*;
+/// - and a calendar that answers no gaps at all publishes nothing, rather
+///   than calling the owner busy on a deployment that cannot tell.
+#[tokio::test]
+async fn a_draft_is_checked_against_the_calendar_and_the_suggestion_says_what_was_checked(
+) -> Result<()> {
+    ensure_stack().await?;
+    let bus = bus().await?;
+    let connection = "calendar-answers";
+    // A day with one meeting in it, and the gaps either side, as the
+    // collector answers them (#379).
+    let answered = json!({
+        "connection": connection,
+        "from": "2026-10-12T06:00:00Z",
+        "to": "2026-10-12T18:00:00Z",
+        "busy": [{ "start": "2026-10-12T12:00:00Z", "end": "2026-10-12T13:00:00Z" }],
+        "free": [
+            {
+                "start": "2026-10-12T06:00:00Z",
+                "end": "2026-10-12T12:00:00Z",
+                "start_local": "2026-10-12T08:00:00+02:00",
+                "end_local": "2026-10-12T14:00:00+02:00",
+                "minutes": 360,
+            },
+            {
+                "start": "2026-10-12T13:00:00Z",
+                "end": "2026-10-12T18:00:00Z",
+                "start_local": "2026-10-12T15:00:00+02:00",
+                "end_local": "2026-10-12T20:00:00+02:00",
+                "minutes": 300,
+            },
+        ],
+        "timezone": "Europe/Paris",
+        "timezone_source": "calendar",
+        "now": "2026-10-10T09:00:00+02:00",
+    });
+    let collector = StubCollector::answering(200, answered.clone()).await?;
+    bus.publish_event(
+        CONNECTION_STATUS_SUBJECT,
+        &calendar_status_event(connection, "unknown", "connected"),
+    )
+    .await?;
+    let running =
+        Running::start_with_collector("hermes-answer-checked", connection, &collector.url()).await?;
+    let (contact, room) = conversation("checked");
+    running.decide(&contact, "granted").await?;
+    let trigger = inbound_event(&contact, &room, "granted");
+    let trigger_id = trigger["id"].as_str().unwrap().to_owned();
+    bus.publish_event(INBOUND_SUBJECT, &trigger).await?;
+
+    // The read the agent makes, under the reference of this message — the
+    // delivery rule of #363, which is what makes the join possible at all.
+    let reference = hermes_reference("assistant", &trigger_id, 1);
+    let (status, read) = poll_until(
+        || async {
+            let query = harness::freebusy_query(connection, "2026-10-12T06:00:00Z", "2026-10-12T18:00:00Z");
+            let timestamp = harness::rfc3339_now();
+            let answer = harness::freebusy_read(
+                &running.base,
+                &query,
+                &harness::freebusy_signature(&query, &timestamp),
+                &timestamp,
+                Some(&reference),
+            )
+            .await
+            .ok()?;
+            (answer.0 != 409).then_some(answer)
+        },
+        "the calendar connection's state to be read off the bus",
+    )
+    .await?;
+    assert_eq!(status, 200, "the agent's own read was refused: {read}");
+
+    // An hour inside the meeting: nothing published, and the refusal says
+    // which hour and what to do instead.
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &reference,
+        "Lundi 12 à 14h ?",
+        &["2026-10-12T12:30:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_str(&response.text().await?)?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "hermes_answer_proposed_not_free");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("2026-10-12T12:30:00Z"),
+        "{body}"
+    );
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a draft offering an hour the owner is busy in was published anyway"
+    );
+
+    // An hour inside a gap: published, and the suggestion says how many
+    // times were checked — the fact the approval screen and the clerk's post
+    // both draw their line from.
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &hermes_reference("assistant", &trigger_id, 2),
+        "Lundi 12 à 16h ?",
+        &["2026-10-12T14:00:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+    assert_eq!(status, 200, "{body}");
+    let published = published_about(watch, &trigger_id)
+        .await
+        .context("the verified draft was not published")?;
+    assert_eq!(
+        published["data"]["times"],
+        json!({ "state": "checked", "count": 1 }),
+        "{published}"
+    );
+    validate_against_contract(&published, "persona.suggest.produced")
+        .context("the suggestion the check marks is one the contract allows")?;
+
+    // A reply that names an hour and offers none: published, and said to be
+    // unverified. Not refused — this is the case the ticket refuses to
+    // refuse — and not silent either.
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&hermes_answer(
+        &hermes_reference("assistant", &trigger_id, 3),
+        "Je te propose lundi vers 14h, ça te va ?",
+        Some("fr"),
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+    assert_eq!(status, 200, "{body}");
+    let published = published_about(watch, &trigger_id)
+        .await
+        .context("the unverified draft was not published")?;
+    assert_eq!(
+        published["data"]["times"],
+        json!({ "state": "unverified" }),
+        "{published}"
+    );
+
+    // And a reply that names no time at all says nothing about verification,
+    // which is most replies. Not this suite's own `REPLY`: *"D'accord, à 20h
+    // alors !"* agrees to an hour and verified nothing, so it is marked
+    // unverified — correctly, and which is the clearest illustration of the
+    // case there is.
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&hermes_answer(
+        &hermes_reference("assistant", &trigger_id, 4),
+        "Bien reçu, je regarde et je reviens vers toi.",
+        Some("fr"),
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body = response.text().await?;
+    assert_eq!(status, 200, "{body}");
+    let published = published_about(watch, &trigger_id)
+        .await
+        .context("the plain draft was not published")?;
+    assert_eq!(published["data"]["times"], json!(null), "{published}");
+
+    // A calendar that answers no gaps at all: uncheckable, and nothing
+    // published. Before #383's second pass this was read as "the owner is
+    // busy", which is a sentence about their week and not about the
+    // deployment that cannot tell.
+    let mut silent = answered.clone();
+    silent
+        .as_object_mut()
+        .expect("an object")
+        .remove("free")
+        .expect("the member was there");
+    collector.answer(200, silent);
+    let watch = bus.subscribe_raw(SUGGEST_SUBJECT).await?;
+    let push = hermes_push(&harness::hermes_answer_proposing(
+        &hermes_reference("assistant", &trigger_id, 5),
+        "Lundi 12 à 16h ?",
+        &["2026-10-12T14:00:00Z"],
+    ));
+    let response = post_hermes_answer(&running.base, Some(&hermes_signature(&push)), &push).await?;
+    let status = response.status().as_u16();
+    let body: Value = serde_json::from_str(&response.text().await?)?;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"], "hermes_answer_proposed_uncheckable");
+    assert!(
+        nothing_about(watch, &trigger_id).await,
+        "a time nobody could check was published anyway, which is what the check exists against"
+    );
+
+    collector.stop();
+    Ok(())
+}
+
 /// #367's second half: the approval screen shows what the draft **did**.
 ///
 /// A draft that read a calendar, asked a question and then wrote is more
@@ -941,6 +1242,26 @@ async fn a_message_the_read_did_not_reach_is_a_410_and_not_a_404() -> Result<()>
         "{body}"
     );
     Ok(())
+}
+
+/// The first event published about this trigger, or `None` if none was.
+///
+/// The mirror of [`nothing_about`]: one waits for silence, this one waits for
+/// the event, and a test that asserts on what a suggestion *says* needs the
+/// second.
+async fn published_about(
+    mut watch: tokio::sync::mpsc::UnboundedReceiver<Value>,
+    trigger_id: &str,
+) -> Option<Value> {
+    for _ in 0..50 {
+        while let Ok(event) = watch.try_recv() {
+            if event["subject"].as_str() == Some(trigger_id) {
+                return Some(event);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    None
 }
 
 /// Whether nothing at all was published about this trigger, read off core NATS

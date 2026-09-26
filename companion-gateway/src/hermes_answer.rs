@@ -75,6 +75,7 @@
 //! the contract had nowhere to put it; that header is gone, because the
 //! member it stood in for exists.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -211,6 +212,19 @@ pub struct Answer {
     /// context is the screen as it was. What is refused is a summary that
     /// is *there* and unusable: empty, or longer than the contract allows.
     pub summary: Option<String>,
+    /// The instants this reply offers, copied from the free gaps the read
+    /// handed the agent (#383).
+    ///
+    /// The member that makes verification possible at all: without it the
+    /// Gateway would have to read "lundi vers 14h" out of prose and guess
+    /// what it meant. With it, each one is checked against the windows the
+    /// agent actually read and against the gaps the collector answers for
+    /// them — which is what stops a draft proposing two meetings the owner
+    /// is already in, as one did on 2026-09-26.
+    ///
+    /// Empty for the overwhelming majority of replies, which propose no time
+    /// at all, and for an agent older than this member.
+    pub proposed: Vec<String>,
 }
 
 /// A wake that ended in a question to the owner instead of a draft (#367).
@@ -247,6 +261,90 @@ pub enum Outcome {
 /// summary's, for the same reason: it is a sentence a human reads on a
 /// screen, not a document.
 pub const MAX_ASKED: usize = MAX_SUMMARY;
+
+/// Whether a reply's text names something time-like: a digit against an hour
+/// mark (`14h`, `14 h 30`, `14:00`), a digit against a meridiem (`2pm`), or
+/// one of the few hours that have names (`midi`, `noon`).
+///
+/// **Generous on purpose, and it may not be otherwise.** What it decides is a
+/// *label* on an approval screen — "nothing here was verified" — and never a
+/// refusal, so a false positive costs the owner one true sentence about a
+/// draft that named no time, and a false negative costs them the one warning
+/// this exists to give. #383 is explicit about why the refusal is not
+/// available here: refusing on a text pattern would refuse *"je te réponds
+/// sous 24h"*, which is not a proposal. This function will call that reply
+/// time-like, and that is the intended answer.
+///
+/// It reads the text the agent wrote and nothing else. No parsing of *which*
+/// time is meant: "lundi vers 14h" is a time-like reply whatever Monday it
+/// meant, and guessing which would be the prose-parsing that `proposed`
+/// exists to make unnecessary.
+fn names_a_time(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for (index, byte) in bytes.iter().enumerate() {
+        if !byte.is_ascii_digit() {
+            continue;
+        }
+        // The start of a run of digits, so `2026-10-12T12:00:00Z` is examined
+        // once from its year and not four times from its middle.
+        if index > 0 && bytes[index - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut after = index;
+        while after < bytes.len() && bytes[after].is_ascii_digit() {
+            after += 1;
+        }
+        if after - index > 2 {
+            continue;
+        }
+        let rest = &bytes[after..];
+        // `14h`, `14 h 30`: an hour mark, with or without the space a French
+        // typographer puts before it.
+        let marked = |rest: &[u8]| matches!(rest.first(), Some(b'h' | b'H'));
+        if marked(rest) || (rest.first() == Some(&b' ') && marked(&rest[1..])) {
+            return true;
+        }
+        // `14:00`: two digits after the colon, so a ratio or a score is not
+        // an hour.
+        if rest.first() == Some(&b':')
+            && rest.len() >= 3
+            && rest[1].is_ascii_digit()
+            && rest[2].is_ascii_digit()
+        {
+            return true;
+        }
+        // `2pm`, `10 am`.
+        let meridiem = |rest: &[u8]| {
+            matches!(rest.first(), Some(b'a' | b'A' | b'p' | b'P'))
+                && matches!(rest.get(1), Some(b'm' | b'M'))
+        };
+        if meridiem(rest) || (rest.first() == Some(&b' ') && meridiem(&rest[1..])) {
+            return true;
+        }
+    }
+    // The hours that are words, as whole words: the hyphen counts as part of
+    // one, so `Midi-Pyrénées` is a region and `à midi` is an hour.
+    text.to_lowercase()
+        .split(|character: char| !character.is_alphanumeric() && character != '-')
+        .any(|word| matches!(word, "midi" | "minuit" | "noon" | "midnight"))
+}
+
+/// Whether an instant falls inside a half-open range of instants, both as
+/// seconds since the epoch: `start <= at < end`.
+///
+/// One function because the rule is used twice — once against the windows the
+/// agent read, once against the gaps the calendar answers — and a half-open
+/// range written twice is a half-open range written two ways eventually.
+fn covers(range: (i64, i64), at: i64) -> bool {
+    range.0 <= at && at < range.1
+}
+
+/// The most instants one reply may offer. Eight is a fortnight's worth of one
+/// offer a weekday, which is more than any reply this project has drafted and
+/// less than a timetable; the cap is there because every distinct window in
+/// the list costs one governed read of the owner's calendar, and a malformed
+/// answer must not be able to ask for an unbounded number of them.
+pub const MAX_PROPOSED: usize = 8;
 
 /// The most a summary may carry, as `persona.suggest.produced.v1`'s
 /// `data.context.summary` allows. Two sentences, which is what the member
@@ -460,12 +558,40 @@ pub fn parse_answer(written: &str) -> Result<Answer, AnswerRefusal> {
             ))
         }
     };
+    // The instants the reply offers (#383). Refused rather than ignored when
+    // unreadable: a member that is there and wrong is a claim about the
+    // owner's calendar, and dropping it silently would publish the claim
+    // unchecked.
+    let proposed = match object.get("proposed") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(instants)) => {
+            if instants.len() > MAX_PROPOSED {
+                return Err(AnswerRefusal::TooManyProposed(instants.len()));
+            }
+            let mut parsed = Vec::new();
+            for instant in instants {
+                // What was *said*, whatever it was: a refusal that quotes
+                // `""` back at an agent that sent `1` tells it nothing, and
+                // this message is the only thing it gets to act on.
+                let Some(said) = instant.as_str().map(str::trim) else {
+                    return Err(AnswerRefusal::ProposedUnreadable(instant.to_string()));
+                };
+                if parse_rfc3339_seconds(said).is_none() {
+                    return Err(AnswerRefusal::ProposedUnreadable(said.to_owned()));
+                }
+                parsed.push(said.to_owned());
+            }
+            parsed
+        }
+        Some(said) => return Err(AnswerRefusal::ProposedUnreadable(said.to_string())),
+    };
     Ok(Answer {
         reference,
         reply,
         language,
         disclosure,
         summary,
+        proposed,
     })
 }
 
@@ -545,6 +671,19 @@ pub enum AnswerRefusal {
     /// A `deferred` that is there and says nothing (#367): an agent that
     /// stopped to ask the owner something, without saying what.
     EmptyDeferral,
+    /// A `proposed` this build cannot read as instants (#383).
+    ProposedUnreadable(String),
+    /// More instants than a reply can be offering.
+    TooManyProposed(usize),
+    /// A proposed instant outside every window this agent read for the
+    /// message (#383): a time it never looked at.
+    ProposedNotRead { instant: String },
+    /// A proposed instant inside a window it read, and inside a meeting.
+    ProposedNotFree { instant: String },
+    /// The freedom of a proposed instant could not be checked, so nothing is
+    /// published: an unverified proposal is the thing this refusal exists
+    /// against.
+    ProposedUncheckable(String),
     /// A fact the approval path establishes the same way.
     Shared(Refusal),
 }
@@ -571,6 +710,11 @@ impl AnswerRefusal {
             AnswerRefusal::EmptySummary => "hermes_answer_summary_is_empty",
             AnswerRefusal::SummaryTooLong(_) => "hermes_answer_summary_too_long",
             AnswerRefusal::EmptyDeferral => "hermes_answer_deferral_is_empty",
+            AnswerRefusal::ProposedUnreadable(_) => "hermes_answer_proposed_unreadable",
+            AnswerRefusal::TooManyProposed(_) => "hermes_answer_proposed_too_many",
+            AnswerRefusal::ProposedNotRead { .. } => "hermes_answer_proposed_not_read",
+            AnswerRefusal::ProposedNotFree { .. } => "hermes_answer_proposed_not_free",
+            AnswerRefusal::ProposedUncheckable(_) => "hermes_answer_proposed_uncheckable",
             AnswerRefusal::Shared(refusal) => refusal.code(),
         }
     }
@@ -594,7 +738,12 @@ impl AnswerRefusal {
             | AnswerRefusal::ReplyTooLong(_)
             | AnswerRefusal::EmptySummary
             | AnswerRefusal::SummaryTooLong(_)
-            | AnswerRefusal::EmptyDeferral => StatusCode::UNPROCESSABLE_ENTITY,
+            | AnswerRefusal::EmptyDeferral
+            | AnswerRefusal::ProposedUnreadable(_)
+            | AnswerRefusal::TooManyProposed(_)
+            | AnswerRefusal::ProposedNotRead { .. }
+            | AnswerRefusal::ProposedNotFree { .. }
+            | AnswerRefusal::ProposedUncheckable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AnswerRefusal::Shared(refusal) => refusal.status(),
         }
     }
@@ -653,6 +802,27 @@ impl AnswerRefusal {
                  the silence this member exists to end."
                     .to_owned()
             }
+            AnswerRefusal::ProposedUnreadable(said) => format!(
+                "the answer's proposed is the list of instants the reply offers, each RFC 3339 \
+                 and copied from a free gap the calendar read gave you: {said:?}"
+            ),
+            AnswerRefusal::TooManyProposed(count) => format!(
+                "the answer proposes {count} instants and the limit is {MAX_PROPOSED}: a reply \
+                 naming that many times is a timetable, not an offer"
+            ),
+            AnswerRefusal::ProposedNotRead { instant } => format!(
+                "the answer offers {instant}, which is outside every window you read for this \
+                 message. Read the window it falls in before offering a time in it — a time \
+                 nobody looked at is a guess, and the user cannot tell one from the other"
+            ),
+            AnswerRefusal::ProposedNotFree { instant } => format!(
+                "the answer offers {instant}, and the user is busy then. Offer a moment inside \
+                 one of the `free` gaps the read gave you"
+            ),
+            AnswerRefusal::ProposedUncheckable(detail) => format!(
+                "the answer offers a time this Gateway could not check ({detail}), so nothing \
+                 was published: a proposal nobody verified is what this check exists against"
+            ),
             AnswerRefusal::EmptyDeferral => "the answer defers and says nothing about what it \
                  needs. `deferred` is the question you put to the user, in your own words, so \
                  that their own record says what the draft was waiting for. Leave the member \
@@ -717,9 +887,26 @@ pub struct Answers {
     hermes_domain: String,
     suggestion_ttl: Duration,
     now: fn() -> SystemTime,
+    /// The governed reads, for checking the times a draft offers (#383).
+    ///
+    /// `None` on a deployment with no calendar seam — where an agent has no
+    /// way to read a calendar either, so a draft that proposes a verified
+    /// time cannot exist and one that proposes any time is unverifiable and
+    /// says so.
+    reads: Option<Arc<crate::hermes_freebusy::Reads>>,
 }
 
 impl Answers {
+    /// Gives the answers the reads they check proposals against (#383).
+    ///
+    /// Set after construction, because the two halves are built from the same
+    /// configuration and neither owns the other: the reads serve Hermes, and
+    /// the answers verify what Hermes says with them.
+    pub fn with_reads(mut self, reads: Option<Arc<crate::hermes_freebusy::Reads>>) -> Self {
+        self.reads = reads;
+        self
+    }
+
     pub fn new(
         approvals: Arc<Approvals>,
         metrics: Arc<Metrics>,
@@ -729,6 +916,7 @@ impl Answers {
         now: fn() -> SystemTime,
     ) -> Self {
         Self {
+            reads: None,
             approvals,
             metrics,
             secret,
@@ -787,6 +975,13 @@ impl Answers {
         self.approvals
             .consent_now(&trigger.contact, &trigger.connection, trigger.network)?;
 
+        // Every time the draft offers, checked before anything is published
+        // (#383). Not advice to a model this time: a verification, made with
+        // the journal of what it read and with one more read of the window
+        // it read. Three rounds of clearer instructions left a draft
+        // proposing two meetings the owner was already in.
+        self.check_proposals(&answer).await?;
+
         let suggestion_event_id = answer.reference.suggestion_event_id();
         let produced_at = (self.now)();
         let envelope = self.envelope(&answer, &trigger, &suggestion_event_id, produced_at);
@@ -830,6 +1025,117 @@ impl Answers {
             language: answer.language,
             stream_sequence,
         })
+    }
+
+    /// Every instant the draft offers, against what it actually read (#383).
+    ///
+    /// Two questions, in the order that makes the refusals worth reading.
+    /// **Was it read?** The reads journal holds the window of every read
+    /// served for this trigger, so an instant outside all of them is a time
+    /// nobody looked at — the defect this exists against, measured on
+    /// 2026-09-26 when a draft offered a Monday from a week it never read.
+    /// **Was it free?** Asked of the collector, because the Gateway keeps no
+    /// intervals and must not start; that read is journalled like any other.
+    ///
+    /// An answer that offers nothing — which is almost every answer — costs
+    /// nothing here and reaches neither the store nor the collector.
+    async fn check_proposals(&self, answer: &Answer) -> Result<(), AnswerRefusal> {
+        if answer.proposed.is_empty() {
+            return Ok(());
+        }
+        let Some(reads) = &self.reads else {
+            // No calendar seam: an agent here cannot have read a calendar, so
+            // a time it offers was read nowhere. Refused rather than
+            // published unverified, which is the whole point.
+            return Err(AnswerRefusal::ProposedUncheckable(
+                "this deployment relays no calendar read".to_owned(),
+            ));
+        };
+        let windows = self
+            .approvals
+            .store()
+            .windows_read_for(&answer.reference.trigger_event_id)
+            .map_err(|error| {
+                warn!(%error, "the windows read for a trigger could not be read");
+                AnswerRefusal::ProposedUncheckable(format!("{error:#}"))
+            })?;
+        // Which window each offered time falls in, before any of them is
+        // checked. Grouped by window, so a reply offering three times in one
+        // week costs the owner's calendar one read and not three — and two
+        // offers of the same instant cost nothing twice.
+        let mut by_window: BTreeMap<usize, Vec<(&str, i64)>> = BTreeMap::new();
+        for instant in &answer.proposed {
+            let at = parse_rfc3339_seconds(instant)
+                .ok_or_else(|| AnswerRefusal::ProposedUnreadable(instant.clone()))?;
+            // Among the windows actually served: a read that was refused
+            // covered nothing, and is not in this list.
+            let covering = windows.iter().position(|(_, from, to)| {
+                matches!(
+                    (parse_rfc3339_seconds(from), parse_rfc3339_seconds(to)),
+                    (Some(from), Some(to)) if covers((from, to), at)
+                )
+            });
+            let Some(index) = covering else {
+                warn!(
+                    %instant,
+                    trigger = %answer.reference.trigger_event_id,
+                    windows = windows.len(),
+                    "a draft offered a time outside every window it read; nothing published"
+                );
+                return Err(AnswerRefusal::ProposedNotRead {
+                    instant: instant.clone(),
+                });
+            };
+            by_window
+                .entry(index)
+                .or_default()
+                .push((instant.as_str(), at));
+        }
+        // Journalled under the reference, like the agent's own reads: the
+        // owner's record then shows the check beside what it checked (#367's
+        // path reads the same column).
+        let delivery = format!(
+            "{REFERENCE_PREFIX}{}:{}:{}",
+            answer.reference.persona_id,
+            answer.reference.trigger_event_id,
+            answer.reference.attempt
+        );
+        for (index, offered) in by_window {
+            let (connection, from, to) = &windows[index];
+            let gaps = reads
+                .free_gaps(connection, (from, to), &delivery)
+                .await
+                .map_err(|refusal| AnswerRefusal::ProposedUncheckable(refusal.message()))?;
+            // No `free` member at all is a collector that predates #379, and
+            // it is *not* an empty week: concluding "the owner is busy" from
+            // it would refuse every draft of that deployment with a sentence
+            // about the owner's calendar instead of about the deployment.
+            let Some(gaps) = gaps else {
+                return Err(AnswerRefusal::ProposedUncheckable(format!(
+                    "the calendar read of {from}–{to} answered no free gaps at all, so this \
+                     deployment cannot tell a free moment from a busy one"
+                )));
+            };
+            for (instant, at) in offered {
+                if !gaps.iter().any(|gap| covers(*gap, at)) {
+                    warn!(
+                        %instant,
+                        trigger = %answer.reference.trigger_event_id,
+                        gaps = gaps.len(),
+                        "a draft offered a time the owner is busy in; nothing published"
+                    );
+                    return Err(AnswerRefusal::ProposedNotFree {
+                        instant: instant.to_owned(),
+                    });
+                }
+            }
+        }
+        info!(
+            trigger = %answer.reference.trigger_event_id,
+            proposed = answer.proposed.len(),
+            "every time the draft offers was read and is free"
+        );
+        Ok(())
     }
 
     /// A wake that ended in a question to the owner instead of a draft
@@ -967,6 +1273,32 @@ impl Answers {
             if let Some(name) = &trigger.display_name {
                 event["data"]["context"]["contact"] = json!(name);
             }
+        }
+        // And whether the times it names were checked (#383). Written here
+        // because this is the component that did the checking: by the time
+        // this envelope is built, `check_proposals` has verified every
+        // instant in `proposed` against the windows the agent read and
+        // against the calendar, and an answer that failed never reached this
+        // line at all.
+        //
+        // The other branch is the one the ticket exists to close. A reply may
+        // name an hour in its prose and list nothing, and refusing that on a
+        // text pattern would refuse "je te réponds sous 24h", which is not a
+        // proposal. So it is published, and said to be unverified, and the
+        // owner reading the draft knows which of the two kinds they hold —
+        // which is the whole difference between a screen that informs and a
+        // screen that reassures.
+        //
+        // Absent when the reply names no time at all, which is most replies:
+        // a member that says "nothing to verify" on every "bien reçu" is
+        // noise on the one screen that must stay readable.
+        if !answer.proposed.is_empty() {
+            event["data"]["times"] = json!({
+                "state": "checked",
+                "count": answer.proposed.len(),
+            });
+        } else if names_a_time(&answer.reply) {
+            event["data"]["times"] = json!({ "state": "unverified" });
         }
         if let Some(traceparent) = &trigger.traceparent {
             event["traceparent"] = Value::String(traceparent.clone());
@@ -1110,6 +1442,91 @@ mod tests {
     use super::*;
 
     const TRIGGER: &str = "20be32e73506b9104a6a1bf76fc2d2a15cbd2b8a0a421833be01f865ca9886d0";
+
+    #[test]
+    fn a_reply_that_names_an_hour_is_recognised_and_one_that_names_none_is_not() {
+        // #383's second half: the case that must not become the loophole. The
+        // consequence of a yes here is a label on an approval screen, so
+        // being generous is correct and being clever would not be.
+        for names in [
+            "Lundi 12 à 14h ?",
+            "Lundi 12 à 14 h 30 ?",
+            "Le 12 à 14:00 me va",
+            "How about 2pm on Monday?",
+            "Monday at 10 AM works",
+            "On se voit à midi ?",
+            "Je te réponds sous 24h",
+            "Le créneau du 2026-10-12T12:00:00Z",
+        ] {
+            assert!(names_a_time(names), "{names}");
+        }
+        // The last two above are the price and are paid on purpose: "sous
+        // 24h" is not a proposal, and a draft that says so is published with
+        // a line the owner can ignore. Refusing it, as #383 says, is what
+        // this must not do.
+        for silent in [
+            "Bien reçu, je regarde et je reviens vers toi.",
+            "C'est noté !",
+            "Je suis en Midi-Pyrénées cette semaine.",
+            "Le score était de 2:1.",
+            "Nous sommes 14 au total.",
+            "Le document fait 12 pages.",
+        ] {
+            assert!(!names_a_time(silent), "{silent}");
+        }
+    }
+
+    #[test]
+    fn a_draft_says_which_instants_it_offers_and_a_bad_list_is_refused() {
+        // #383: the member that makes verification possible. Without it the
+        // Gateway would have to read "lundi vers 14h" out of prose.
+        let answer = parse_answer(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "reply": "Lundi 14h ?",
+                 "language": "fr",
+                 "proposed": ["2026-10-12T12:00:00Z", "2026-10-13T08:00:00Z"]}}"#
+        ))
+        .expect("an answer");
+        assert_eq!(
+            answer.proposed,
+            vec!["2026-10-12T12:00:00Z", "2026-10-13T08:00:00Z"]
+        );
+
+        // Almost every reply proposes nothing, and costs this check nothing.
+        let plain = parse_answer(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "reply": "Bien reçu",
+                 "language": "fr"}}"#
+        ))
+        .expect("an answer");
+        assert!(plain.proposed.is_empty());
+
+        // A member that is there and wrong is a claim about the owner's
+        // calendar: refused, never dropped, because dropping it would publish
+        // the claim unchecked.
+        for (body, code) in [
+            (r#""proposed": ["lundi 14h"]"#, "hermes_answer_proposed_unreadable"),
+            (r#""proposed": "2026-10-12T12:00:00Z""#, "hermes_answer_proposed_unreadable"),
+            (r#""proposed": [1, 2]"#, "hermes_answer_proposed_unreadable"),
+        ] {
+            let refusal = parse_answer(&format!(
+                r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "reply": "x",
+                     "language": "fr", {body}}}"#
+            ))
+            .expect_err("a refusal");
+            assert_eq!(refusal.code(), code, "{body}");
+            assert_eq!(refusal.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        let many: Vec<String> = (0..MAX_PROPOSED + 1)
+            .map(|hour| format!(r#""2026-10-12T{hour:02}:00:00Z""#))
+            .collect();
+        let refusal = parse_answer(&format!(
+            r#"{{"reference": "TWALK-REF:assistant:{TRIGGER}:1", "reply": "x",
+                 "language": "fr", "proposed": [{}]}}"#,
+            many.join(", ")
+        ))
+        .expect_err("a refusal");
+        assert_eq!(refusal.code(), "hermes_answer_proposed_too_many");
+    }
 
     #[test]
     fn a_wake_may_end_in_a_question_to_the_owner_instead_of_a_draft() {

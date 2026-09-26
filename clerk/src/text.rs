@@ -171,6 +171,54 @@ pub fn path_lines(l: Lang, path: &[crate::gateway::Step]) -> String {
     lines
 }
 
+/// One line about whether the times this reply names were checked (#383), or
+/// nothing at all.
+///
+/// Nothing is the common case and is the right answer for it: most replies
+/// name no time, and a line saying "nothing to verify" above every *bien
+/// reçu* is noise on the post the owner actually has to read.
+///
+/// The two states are not symmetrical in what they are for. `checked` is the
+/// Gateway vouching for hours it verified against the calendar a moment
+/// earlier, which is worth one sentence because the owner cannot see it
+/// otherwise. `unverified` is the case #383 exists to close: a reply that
+/// names an hour and offered no instants is published, because refusing on a
+/// text pattern would refuse *"je te réponds sous 24h"* — so the post says
+/// so, and the owner reads a draft knowing which of the two kinds it is.
+///
+/// A state this build does not know draws nothing, like an unknown step of
+/// the path: a word about verification the clerk cannot vouch for must not
+/// reach the owner's phone.
+pub fn times_line(l: Lang, times: Option<&crate::events::Verified>) -> String {
+    let Some(times) = times else {
+        return String::new();
+    };
+    let line = match (times.state.as_str(), times.count, l) {
+        ("checked", Some(1), Lang::Fr) => {
+            "· l'horaire proposé a été vérifié dans votre agenda".to_owned()
+        }
+        ("checked", Some(count), Lang::Fr) => {
+            format!("· les {count} horaires proposés ont été vérifiés dans votre agenda")
+        }
+        ("checked", None, Lang::Fr) => "· les horaires proposés ont été vérifiés".to_owned(),
+        ("checked", Some(1), Lang::En) => {
+            "· the time it offers was checked against your calendar".to_owned()
+        }
+        ("checked", Some(count), Lang::En) => {
+            format!("· the {count} times it offers were checked against your calendar")
+        }
+        ("checked", None, Lang::En) => "· the times it offers were checked".to_owned(),
+        ("unverified", _, Lang::Fr) => {
+            "⚠️ cette réponse nomme une heure que rien n'a vérifiée".to_owned()
+        }
+        ("unverified", _, Lang::En) => {
+            "⚠️ this reply names a time nothing has verified".to_owned()
+        }
+        _ => return String::new(),
+    };
+    format!("{line}\n")
+}
+
 pub fn approval_post(
     l: Lang,
     body: &str,
@@ -180,6 +228,9 @@ pub fn approval_post(
     // by `path_lines` — empty for a draft that looked nothing up, which is
     // the post exactly as it was (#377).
     path: &str,
+    // `times`: whether the hours it names were checked, already rendered by
+    // `times_line` — empty for a reply that names none (#383).
+    times: &str,
     expires_at: Option<&str>,
     delivery_line: &str,
     reference: &str,
@@ -209,6 +260,7 @@ pub fn approval_post(
             "Réponse proposée · {network}{expiry}\n\
              {context}\
              {path}\
+             {times}\
              « {body} »\n\
              {delivery_line}\n\
              ✅ envoyer tel quel · ❌ refuser · répondre ici pour envoyer un autre texte\n\
@@ -218,6 +270,7 @@ pub fn approval_post(
             "Proposed reply · {network}{expiry}\n\
              {context}\
              {path}\
+             {times}\
              “{body}”\n\
              {delivery_line}\n\
              ✅ send as is · ❌ decline · reply here to send a different text\n\
@@ -617,6 +670,7 @@ mod tests {
                 "whatsapp",
                 None,
                 "",
+                "",
                 Some("2026-09-17T11:00:00Z"),
                 &unread(l),
                 REFERENCE,
@@ -641,6 +695,7 @@ mod tests {
                 contact: Some("Aïcha Benali".to_owned()),
                 summary: "Aïcha Benali demande si le dîner tient toujours.".to_owned(),
             }),
+            "",
             "",
             Some("2026-09-17T21:41:00Z"),
             &unread(Lang::Fr),
@@ -668,6 +723,7 @@ mod tests {
                 contact: Some("Aïcha Benali".to_owned()),
                 summary: "She asks whether dinner is still on.".to_owned(),
             }),
+            "",
             "",
             Some("2026-09-17T21:41:00Z"),
             &unread(Lang::En),
@@ -700,6 +756,7 @@ mod tests {
                     summary: summary.to_owned(),
                 }),
                 "",
+                "",
                 None,
                 &unread(Lang::Fr),
                 REFERENCE,
@@ -716,6 +773,7 @@ mod tests {
             "Oui",
             "whatsapp",
             None,
+            "",
             "",
             None,
             &unread(Lang::Fr),
@@ -778,6 +836,7 @@ mod tests {
                 summary: "Christelle demande trois créneaux.".to_owned(),
             }),
             &lines,
+            "",
             None,
             &unread(Lang::Fr),
             REFERENCE,
@@ -797,6 +856,7 @@ mod tests {
             "email",
             None,
             "",
+            "",
             None,
             &unread(Lang::Fr),
             REFERENCE,
@@ -808,6 +868,80 @@ mod tests {
         );
     }
 
+    /// #383: the owner has to be able to tell a draft whose hours were
+    /// checked from one that merely sounds checked.
+    #[test]
+    fn a_post_says_whether_the_hours_it_names_were_verified() {
+        let checked = |count| {
+            Some(crate::events::Verified {
+                state: "checked".to_owned(),
+                count,
+            })
+        };
+        assert!(times_line(Lang::Fr, checked(Some(2)).as_ref())
+            .contains("les 2 horaires proposés ont été vérifiés"));
+        assert!(times_line(Lang::Fr, checked(Some(1)).as_ref())
+            .contains("l'horaire proposé a été vérifié"));
+        assert!(times_line(Lang::En, checked(Some(3)).as_ref())
+            .contains("the 3 times it offers were checked"));
+
+        let unverified = Some(crate::events::Verified {
+            state: "unverified".to_owned(),
+            count: None,
+        });
+        for l in [Lang::Fr, Lang::En] {
+            let line = times_line(l, unverified.as_ref());
+            assert!(line.starts_with('⚠'), "{line}");
+            assert!(line.ends_with('\n'), "{line}");
+        }
+
+        // Nothing at all for the common reply, and nothing for a state this
+        // build cannot vouch for.
+        assert_eq!(times_line(Lang::Fr, None), "");
+        assert_eq!(
+            times_line(
+                Lang::Fr,
+                Some(&crate::events::Verified {
+                    state: "something_new".to_owned(),
+                    count: None,
+                })
+            ),
+            ""
+        );
+
+        // In the post: under what the draft did, above the text to approve,
+        // so the caution is read before the decision.
+        let post = approval_post(
+            Lang::Fr,
+            "Jeudi vers 14h ?",
+            "email",
+            None,
+            "· a lu vos disponibilités du 28 septembre au 2 octobre\n",
+            &times_line(Lang::Fr, unverified.as_ref()),
+            None,
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
+        let read: Vec<&str> = post.lines().collect();
+        assert!(read[1].starts_with("· a lu vos disponibilités"), "{post}");
+        assert!(read[2].starts_with('⚠'), "{post}");
+        assert!(read[3].starts_with("« Jeudi"), "{post}");
+
+        // And a reply that names no time is posted exactly as before.
+        let plain = approval_post(
+            Lang::Fr,
+            "Bien reçu",
+            "email",
+            None,
+            "",
+            "",
+            None,
+            &unread(Lang::Fr),
+            REFERENCE,
+        );
+        assert_eq!(plain.lines().nth(1), Some("« Bien reçu »"), "{plain}");
+    }
+
     /// #326: a window longer than an hour read as already expired, because
     /// the post said a time of day and nothing else.
     #[test]
@@ -817,6 +951,7 @@ mod tests {
             "Oui",
             "whatsapp",
             None,
+            "",
             "",
             Some("2026-09-24T09:52:09Z"),
             &unread(Lang::Fr),
@@ -841,7 +976,7 @@ mod tests {
                 detail: "owner_joined".to_owned(),
             },
         );
-        let post = approval_post(Lang::Fr, "Oui", "sms", None, "", None, &line, REFERENCE);
+        let post = approval_post(Lang::Fr, "Oui", "sms", None, "", "", None, &line, REFERENCE);
         let lines: Vec<&str> = post.lines().collect();
         assert_eq!(lines[0], "Réponse proposée · SMS");
         assert_eq!(lines[1], "« Oui »");
@@ -859,6 +994,7 @@ mod tests {
             "sms",
             None,
             "",
+            "",
             None,
             &unread(Lang::Fr),
             "twalk:suggestion:abc",
@@ -871,6 +1007,7 @@ mod tests {
             "Oui",
             "sms",
             None,
+            "",
             "",
             Some("bientôt"),
             &unread(Lang::Fr),
@@ -890,6 +1027,7 @@ mod tests {
             body,
             "whatsapp",
             None,
+            "",
             "",
             None,
             &unread(Lang::Fr),
@@ -1109,6 +1247,7 @@ mod tests {
                     "sms",
                     None,
                     "",
+                    "",
                     Some("2026-09-17T11:00:00Z"),
                     &line,
                     REFERENCE,
@@ -1310,6 +1449,7 @@ mod tests {
                     "whatsapp",
                     None,
                     "",
+                    "",
                     expires,
                     &unread(lang),
                     &reference,
@@ -1321,7 +1461,7 @@ mod tests {
                     activity_approved(lang, "whatsapp", false)
                 );
                 let post =
-                    approval_post(lang, "Oui", "irc", None, "", expires, &unread(lang), &reference);
+                    approval_post(lang, "Oui", "irc", None, "", "", expires, &unread(lang), &reference);
                 assert_eq!(network_off_post(&post), Some("irc"), "{post}");
             }
         }

@@ -647,6 +647,9 @@ async fn handle_suggestion(clerk: &Clerk, message: &Message) -> Result<(), Relay
         &suggestion.network,
         suggestion.data.context.as_ref(),
         &path,
+        // From the event, not from a read: the Gateway wrote it into the
+        // suggestion when it published it (#383).
+        &text::times_line(clerk.lang, suggestion.data.times.as_ref()),
         suggestion.data.expires_at.as_deref(),
         &delivery_line,
         &reference,

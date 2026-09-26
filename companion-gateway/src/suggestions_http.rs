@@ -292,6 +292,18 @@ fn suggestion_json(listed: &Listed) -> Value {
         // into the other two. A reply that could not be sent showed as
         // `published` for ever until this member existed.
         "given_up": listed.given_up.as_ref().map(given_up_json),
+        // Whether the times this reply names were checked before it was
+        // published (#383). `null` when it names none, which is most
+        // replies — the screen then says nothing, because a line saying
+        // "nothing to verify" above every "bien reçu" is noise on the one
+        // screen that has to stay readable.
+        "times": listed.times.as_ref().map(|times| {
+            let mut rendered = json!({ "state": times.state });
+            if let Some(count) = times.count {
+                rendered["count"] = json!(count);
+            }
+            rendered
+        }),
         // What the draft did before it wrote (#367): oldest first, so the
         // screen renders a sequence rather than a set. Always an array,
         // empty when the draft looked nothing up — a member that is
@@ -461,6 +473,35 @@ mod tests {
         assert_eq!(rendered["path"], json!([]));
     }
 
+    #[test]
+    fn whether_the_times_a_reply_names_were_checked_reaches_the_screen() {
+        // #383: the two kinds of draft are indistinguishable on this screen
+        // otherwise, and the one that named an hour nobody verified is the
+        // one the owner most needs told.
+        let rendered = suggestion_json(&listed(Standing::Approvable, None));
+        assert_eq!(rendered["times"], json!({"state": "checked", "count": 2}));
+
+        let mut unverified = listed(Standing::Approvable, None);
+        unverified.times = Some(crate::suggestions::Verified {
+            state: "unverified".to_owned(),
+            count: None,
+        });
+        // No count, and not a count of zero: there is no number of things
+        // that were not counted.
+        assert_eq!(
+            suggestion_json(&unverified)["times"],
+            json!({"state": "unverified"})
+        );
+
+        let mut silent = listed(Standing::Approvable, None);
+        silent.times = None;
+        assert_eq!(
+            suggestion_json(&silent)["times"],
+            json!(null),
+            "a reply that names no time says nothing about verification"
+        );
+    }
+
     fn listed(standing: Standing, approval: Option<RecordedApproval>) -> Listed {
         Listed {
             event_id: "a".repeat(64),
@@ -481,6 +522,10 @@ mod tests {
             context: Some(crate::suggestions::Answering {
                 contact: Some("Aïcha Benali".to_owned()),
                 summary: "Aïcha Benali demande si le dîner tient toujours.".to_owned(),
+            }),
+            times: Some(crate::suggestions::Verified {
+                state: "checked".to_owned(),
+                count: Some(2),
             }),
             stream_sequence: 42,
             standing,

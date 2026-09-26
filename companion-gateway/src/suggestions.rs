@@ -202,6 +202,15 @@ pub struct Listed {
     /// does not fold in *current* consent: that stays where this module
     /// put it, at `POST /api/approvals`, the moment it matters.
     pub context: Option<Answering>,
+    /// Whether the times this reply names were verified before it was
+    /// published (#383), or `None` when it names none — which is most
+    /// replies, and what every suggestion published before #383 carries.
+    ///
+    /// One of the contract's two states, verbatim, or `None`: a value on the
+    /// bus that is neither is listed as `None` and logged rather than drawn,
+    /// the same rule as `disclosure`'s. A screen must not show the owner a
+    /// word about verification that this Gateway cannot vouch for.
+    pub times: Option<Verified>,
     pub stream_sequence: u64,
     pub standing: Standing,
     /// The approval this Gateway recorded, when there is one. `publication`
@@ -311,6 +320,22 @@ struct SuggestionData {
     attempt: Option<u64>,
     #[serde(default)]
     expires_at: Option<String>,
+    #[serde(default)]
+    times: Option<Verified>,
+}
+
+/// `data.times`: whether the times the reply names were checked (#383).
+///
+/// `state` is the contract's word and is kept as written. An unknown value is
+/// not an error and is not drawn — a Gateway that grows a third state must not
+/// make an older screen refuse a suggestion — which is enforced where it is
+/// listed rather than here, because a `Deserialize` that refused would lose
+/// the whole suggestion over one member.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Verified {
+    pub state: String,
+    #[serde(default)]
+    pub count: Option<u64>,
 }
 
 /// The trigger as the *suggestion* names it: two identity values, and no
@@ -539,6 +564,7 @@ impl Suggestions {
                 );
                 Vec::new()
             });
+        let times = listed_times(&document.id, document.data.times);
         Ok(Listed {
             event_id: document.id,
             source: document.source,
@@ -556,6 +582,7 @@ impl Suggestions {
             },
             disclosure,
             context,
+            times,
             stream_sequence: sequence,
             standing,
             approval,
@@ -1009,6 +1036,28 @@ pub fn standing(
 /// `POST /api/approvals`.
 fn listed_context(context: Option<Answering>, label: State) -> Option<Answering> {
     context.filter(|_| label == State::Granted)
+}
+
+/// The `data.times` a listing draws: one of the contract's two states, or
+/// nothing.
+///
+/// Refused for a state this build does not know, in the sense of `None` and a
+/// log line rather than an error — the reply is still the owner's to decide
+/// about, and a member nobody can interpret is exactly what must not reach
+/// the screen. "Unverified" and "checked" are claims about what was done on
+/// the owner's behalf; a third word drawn as if it were one of them would be
+/// this Gateway asserting something it was never told.
+fn listed_times(suggestion: &str, member: Option<Verified>) -> Option<Verified> {
+    let times = member?;
+    if matches!(times.state.as_str(), "checked" | "unverified") {
+        return Some(times);
+    }
+    warn!(
+        suggestion = %suggestion,
+        state = %times.state,
+        "a suggestion's times state is not one this build knows; the screen says nothing about it"
+    );
+    None
 }
 
 /// The `data.disclosure` a listing draws: the contract's own sentence,

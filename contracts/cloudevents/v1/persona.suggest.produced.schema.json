@@ -177,6 +177,24 @@
           "minLength": 1,
           "maxLength": 200,
           "description": "Optional. The sentence disclosing that this reply was drafted with an AI assistant, in the language the persona wrote in (ADR 0019), selected from contracts/disclosure/v1/sentences.json by the only component that knows that language. Never part of the suggestion body itself: the Companion Gateway appends it, at approval, to the body a human can otherwise edit freely (ADR 0031). Its addition to this v1 schema, closed with additionalProperties: false, is a deliberate exception to the new-suffix rule this schema's own type field states, recorded and accepted in ADR 0031."
+        },
+        "times": {
+          "type": "object",
+          "required": ["state"],
+          "additionalProperties": false,
+          "description": "Optional. Whether the times this reply names were verified before it was published (#383), and absent when it names none — which is most replies. Written by the publishing side, never by an agent: a value here is an assertion about what was checked, and the component that did the checking is the only one that may make it. The member exists because the two kinds of draft are otherwise indistinguishable on an approval screen. A reply that offers instants in proposed is checked against the windows its agent read and against the owner's calendar, and one that fails is never published at all; but a reply may also name a time in its prose and list nothing, and refusing that on a text pattern would refuse \"je te réponds sous 24h\", which is not a proposal. So it is published and said to be unverified, and the owner reading it knows which of the two they hold. Added to this v1 schema, closed with additionalProperties: false, on the same reasoning ADR 0031 recorded for disclosure.",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": ["checked", "unverified"],
+              "description": "checked: every instant the reply offered was inside a window its agent had read for this message and inside a free gap of the owner's calendar, asked again at the moment of publication. unverified: the reply's text names something time-like and it offered no instants, so nothing here was verified — not a refusal and not a defect, a label."
+            },
+            "count": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How many instants were checked. Present with checked and absent otherwise: there is no count of things that were not counted."
+            }
+          }
         }
       }
     }
