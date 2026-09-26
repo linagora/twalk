@@ -13,7 +13,8 @@ import type {
 	LanguagePreference,
 	ModelConfiguration,
 	ModelRequest,
-	Probe
+	Probe,
+	WorkingDayState
 } from './model';
 
 /** A refusal: which kind of trouble, the Gateway's code when it gave one, and its own words. */
@@ -51,6 +52,9 @@ export type DisclosureAnswer = { ok: true; state: DisclosureState } | Refused;
 export type CalendarLocationAnswer =
 	| { ok: true; state: CalendarLocationState }
 	| Refused;
+
+/** The owner's working day, or why it could not be read (#381). */
+export type WorkingDayAnswer = { ok: true; state: WorkingDayState } | Refused;
 
 export async function loadModel(): Promise<ModelAnswer> {
 	const answer = await gateway.GET('/api/settings/model').catch(() => null);
@@ -139,6 +143,41 @@ export async function saveCalendarLocation(
 			body: note === '' ? { enabled } : { enabled, reason: note }
 		})
 		.catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, state: answer.data };
+	}
+	return refused(answer);
+}
+
+/** The days the user accepts meetings on, and how wide those days are (#381). */
+export async function loadWorkingDay(): Promise<WorkingDayAnswer> {
+	const answer = await gateway.GET('/api/settings/working-day').catch(() => null);
+	if (answer?.data !== undefined) {
+		return { ok: true, state: answer.data };
+	}
+	return refused(answer);
+}
+
+/**
+ * One decision about the working day: these days, this wide, from now on —
+ * or `null` days to say nothing again, in which case a free/busy read offers
+ * every gap as it did before the decision existed.
+ *
+ * Appended to the Gateway's journal with the owner as actor and the instant
+ * it was taken. It changes what the **next** read offers and never touches a
+ * busy interval: what the user is doing is a fact, and when they would rather
+ * not be asked is a preference.
+ */
+export async function saveWorkingDay(
+	day: { days: number[]; starts_at: string; ends_at: string } | null,
+	reason?: string
+): Promise<WorkingDayAnswer> {
+	const note = reason?.trim() ?? '';
+	const body =
+		day === null
+			? { days: null, ...(note === '' ? {} : { reason: note }) }
+			: { ...day, ...(note === '' ? {} : { reason: note }) };
+	const answer = await gateway.PUT('/api/settings/working-day', { body }).catch(() => null);
 	if (answer?.data !== undefined) {
 		return { ok: true, state: answer.data };
 	}

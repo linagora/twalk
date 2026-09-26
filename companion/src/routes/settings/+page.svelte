@@ -54,15 +54,20 @@
 		loadDisclosure,
 		loadLanguage,
 		loadModel,
+		loadWorkingDay,
 		probeModel,
 		saveCalendarLocation,
 		saveDisclosure,
 		saveLanguage,
+		saveWorkingDay,
 		saveModel,
 		type Refused
 	} from '$lib/settings/api';
 	import {
 		calendarLocationRecord,
+		workingDayForm,
+		workingDayRecord,
+		workingDayTrouble,
 		credentialState,
 		disclosureRecord,
 		formOf,
@@ -71,6 +76,7 @@
 		refusalCopy,
 		requestOf,
 		type CalendarLocationState,
+		type WorkingDayState,
 		type CredentialState,
 		type DisclosureState,
 		type FormProblem,
@@ -95,7 +101,14 @@
 	let advanced = $state(false);
 	let formProblems = $state<FormProblem[]>([]);
 	let busy = $state<
-		'save' | 'forget' | 'probe' | 'language' | 'disclosure' | 'calendar-location' | null
+		| 'save'
+		| 'forget'
+		| 'probe'
+		| 'language'
+		| 'disclosure'
+		| 'calendar-location'
+		| 'working-day'
+		| null
 	>(null);
 	let outcome = $state<ModelOutcome | null>(null);
 
@@ -117,6 +130,26 @@
 	let calendarLocationReason = $state('');
 	let calendarLocationOutcome = $state<'saved' | { refused: Refused } | null>(null);
 
+	// The week, as pairs rather than a template: `$t` checks every key against
+	// the catalogue's own type, and a key built by interpolation is a key
+	// nothing checks (#381).
+	const WEEK = [
+		[1, 'settings.workingDay.day.1'],
+		[2, 'settings.workingDay.day.2'],
+		[3, 'settings.workingDay.day.3'],
+		[4, 'settings.workingDay.day.4'],
+		[5, 'settings.workingDay.day.5'],
+		[6, 'settings.workingDay.day.6'],
+		[7, 'settings.workingDay.day.7']
+	] as const;
+
+	// The owner's working day (#381): what makes a free gap an offer.
+	let workingDay = $state<WorkingDayState | null>(null);
+	let workingDayProblem = $state<Refused | null>(null);
+	let workingDayReason = $state('');
+	let workingDayOutcome = $state<'saved' | 'cleared' | { refused: Refused } | null>(null);
+	let workingDayDraft = $state(workingDayForm(null));
+
 	const credential = $derived<CredentialState | null>(
 		configuration === null ? null : credentialState(configuration)
 	);
@@ -124,6 +157,9 @@
 	const locationRecord = $derived(
 		calendarLocation === null ? null : calendarLocationRecord(calendarLocation, $locale)
 	);
+	const dayRecord = $derived(workingDay === null ? null : workingDayRecord(workingDay, $locale));
+	/** Why the button is disabled, said rather than left to a `422` (#381). */
+	const dayTrouble = $derived(workingDayTrouble(workingDayDraft));
 	const problemOf = $derived(
 		(field: FormProblem['field']) => formProblems.find((problem) => problem.field === field) ?? null
 	);
@@ -133,11 +169,12 @@
 	});
 
 	async function load() {
-		const [model, preference, switched, located] = await Promise.all([
+		const [model, preference, switched, located, worked] = await Promise.all([
 			loadModel(),
 			loadLanguage(),
 			loadDisclosure(),
-			loadCalendarLocation()
+			loadCalendarLocation(),
+			loadWorkingDay()
 		]);
 		if (model.ok) {
 			configuration = model.configuration;
@@ -166,7 +203,70 @@
 		} else {
 			calendarLocationProblem = located;
 		}
+		if (worked.ok) {
+			workingDay = worked.state;
+			workingDayDraft = workingDayForm(worked.state);
+			workingDayProblem = null;
+		} else {
+			workingDayProblem = worked;
+		}
 		loaded = true;
+	}
+
+	/**
+	 * One decision about the working day (#381): these days, this wide, from
+	 * the next free/busy read on. Never retroactive and never a busy
+	 * interval: what the user is doing is a fact, and when they would rather
+	 * not be asked is a preference.
+	 */
+	async function commitWorkingDay() {
+		if (dayTrouble !== null) {
+			return;
+		}
+		workingDayOutcome = null;
+		busy = 'working-day';
+		const answer = await saveWorkingDay(
+			{
+				days: [...workingDayDraft.days].sort((left, right) => left - right),
+				starts_at: workingDayDraft.startsAt,
+				ends_at: workingDayDraft.endsAt
+			},
+			workingDayReason
+		);
+		if (answer.ok) {
+			workingDay = answer.state;
+			workingDayDraft = workingDayForm(answer.state);
+			workingDayReason = '';
+			workingDayOutcome = 'saved';
+		} else {
+			workingDayOutcome = { refused: answer };
+		}
+		busy = null;
+	}
+
+	/** Say nothing again: every free gap is offered, as the deployment ships. */
+	async function clearWorkingDay() {
+		workingDayOutcome = null;
+		busy = 'working-day';
+		const answer = await saveWorkingDay(null, workingDayReason);
+		if (answer.ok) {
+			workingDay = answer.state;
+			workingDayReason = '';
+			workingDayOutcome = 'cleared';
+		} else {
+			workingDayOutcome = { refused: answer };
+		}
+		busy = null;
+	}
+
+	/** Tick or untick one day of the week. */
+	function toggleDay(day: number) {
+		workingDayDraft = {
+			...workingDayDraft,
+			days: workingDayDraft.days.includes(day)
+				? workingDayDraft.days.filter((ticked) => ticked !== day)
+				: [...workingDayDraft.days, day]
+		};
 	}
 
 	async function save(event: SubmitEvent) {
@@ -735,6 +835,151 @@
 		{/if}
 	</section>
 
+	<!-- The owner's working day (#381): what turns a free gap into an offer.
+	     Beside the calendar-location card, because both are decisions about
+	     the same agenda — that one about what leaves the machine, this one
+	     about what the assistant may offer of the user's time. -->
+	<section class="card stack" data-testid="settings-working-day" aria-busy={!loaded}>
+		<h2 class="card__title">
+			<Icon name="calendar" size="dense" />
+			{$t('settings.workingDay.title')}
+		</h2>
+		<p class="small">{$t('settings.workingDay.intro')}</p>
+		<p class="small muted">{$t('settings.workingDay.why')}</p>
+
+		{#if workingDayProblem !== null}
+			<p
+				class="card card--warning small"
+				role="alert"
+				data-testid="working-day-problem"
+				data-code={workingDayProblem.code}
+			>
+				{refusalText(workingDayProblem)}
+			</p>
+		{:else if loaded && workingDay !== null && dayRecord !== null}
+			<fieldset class="days" data-testid="working-day-days">
+				<legend class="small">{$t('settings.workingDay.days')}</legend>
+				{#each WEEK as [day, key] (day)}
+					<label class="day">
+						<input
+							type="checkbox"
+							checked={workingDayDraft.days.includes(day)}
+							disabled={busy !== null}
+							onchange={() => toggleDay(day)}
+							data-testid="working-day-{day}"
+						/>
+						<span class="small">{$t(key)}</span>
+					</label>
+				{/each}
+			</fieldset>
+
+			<div class="amplitude">
+				<label class="field">
+					<span class="small">{$t('settings.workingDay.startsAt')}</span>
+					<input
+						class="input"
+						type="time"
+						bind:value={workingDayDraft.startsAt}
+						disabled={busy !== null}
+						data-testid="working-day-starts-at"
+					/>
+				</label>
+				<label class="field">
+					<span class="small">{$t('settings.workingDay.endsAt')}</span>
+					<input
+						class="input"
+						type="time"
+						bind:value={workingDayDraft.endsAt}
+						disabled={busy !== null}
+						data-testid="working-day-ends-at"
+					/>
+				</label>
+			</div>
+
+			<!-- Said, rather than left to the Gateway's 422: a button that is
+			     disabled without saying why teaches nothing. -->
+			{#if dayTrouble !== null}
+				<p class="small muted" role="status" data-testid="working-day-trouble" data-kind={dayTrouble}>
+					{$t(`settings.workingDay.trouble.${dayTrouble}`)}
+				</p>
+			{/if}
+
+			<label class="field">
+				<span class="small">{$t('settings.workingDay.reason.label')}</span>
+				<input
+					class="input"
+					type="text"
+					autocomplete="off"
+					maxlength="1024"
+					bind:value={workingDayReason}
+					disabled={busy !== null}
+					data-testid="working-day-reason"
+				/>
+			</label>
+
+			<div class="row">
+				<button
+					class="button"
+					type="button"
+					disabled={busy !== null || dayTrouble !== null}
+					onclick={commitWorkingDay}
+					data-testid="working-day-save"
+				>
+					{$t('settings.workingDay.save')}
+				</button>
+				{#if workingDay.day !== null}
+					<button
+						class="button button--quiet"
+						type="button"
+						disabled={busy !== null}
+						onclick={clearWorkingDay}
+						data-testid="working-day-clear"
+					>
+						{$t('settings.workingDay.clear')}
+					</button>
+				{/if}
+			</div>
+
+			<p
+				class="small muted"
+				data-testid="working-day-record"
+				data-kind={dayRecord.kind}
+			>
+				{$t(dayRecord.key, dayRecord.values)}
+			</p>
+			{#if workingDay.reason !== null && workingDay.reason !== ''}
+				<p class="small muted" data-testid="working-day-reason-given">
+					{$t('settings.workingDay.record.reason', { reason: workingDay.reason })}
+				</p>
+			{/if}
+			<p class="small muted">{$t('settings.workingDay.notRetroactive')}</p>
+
+			{#if workingDayOutcome === 'saved' || workingDayOutcome === 'cleared'}
+				<p
+					class="card card--info small"
+					role="status"
+					data-testid="working-day-outcome"
+					data-kind={workingDayOutcome}
+				>
+					{$t(
+						workingDayOutcome === 'saved'
+							? 'settings.workingDay.saved'
+							: 'settings.workingDay.clearedNotice'
+					)}
+				</p>
+			{:else if workingDayOutcome !== null}
+				<p
+					class="card card--warning small"
+					role="alert"
+					data-testid="working-day-outcome"
+					data-kind="refused"
+				>
+					{refusalText(workingDayOutcome.refused)}
+				</p>
+			{/if}
+		{/if}
+	</section>
+
 	<!-- Tracing: decided (ADR 0017), and not yet storable (#99). -->
 	<section class="card stack" data-testid="settings-tracing">
 		<h2 class="card__title">
@@ -747,6 +992,32 @@
 </section>
 
 <style>
+	/* The week as a row of ticks, wrapping on a phone: seven checkboxes are a
+	   week, and a dropdown per day would be four taps for what is one glance
+	   (#381). */
+	.days {
+		border: 0;
+		margin: 0;
+		padding: 0;
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2) var(--space-3);
+	}
+
+	.day {
+		display: flex;
+		align-items: center;
+		gap: var(--space-1);
+	}
+
+	/* Two times side by side, because they are one amplitude, and stacked
+	   when the screen is narrow. */
+	.amplitude {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-3);
+	}
+
 	h2 {
 		font-size: var(--text-lg);
 	}

@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 15] = [
+pub const MIGRATIONS: [&str; 16] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -818,6 +818,50 @@ pub const MIGRATIONS: [&str; 15] = [
     CREATE TRIGGER hermes_deferral_no_update BEFORE UPDATE ON hermes_deferral
     BEGIN
         SELECT RAISE(ABORT, 'the deferral journal is append-only');
+    END;
+    "#,
+    // v16 — the owner's working day (#381): the days they accept meetings on
+    // and the amplitude of those days, which is what decides whether a free
+    // gap is an *offer*.
+    //
+    // Why the deployment cannot know it otherwise: #379 hands a drafting
+    // agent every gap of the window, because hiding the night would be
+    // deciding somebody's hours without being told them. Measured the same
+    // afternoon, the longest gaps of a week were all nights, and the draft
+    // duly offered a Friday 19:30. The skill has always said "inside working
+    // hours"; nobody had ever said what they are.
+    //
+    // A journal like every other decision here — append-only, with who and
+    // when — and a `cleared` row rather than a delete, because "I no longer
+    // want to say" is itself a decision the owner made on a day.
+    //
+    // Wall-clock times, not instants: `09:00` means nine in the morning where
+    // the owner is, in summer and in winter both. The zone is the calendar's
+    // (#369), read at the moment the gaps are computed.
+    //
+    // `days` is the ISO weekday numbers they accept, `1` for Monday, comma
+    // separated — a set small enough that a string is honest and a table
+    // would be ceremony.
+    r#"
+    CREATE TABLE working_day_decision (
+        sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- 'set' or 'cleared'. On 'cleared' the three below are NULL and the
+        -- deployment is back to having no opinion, which is how it shipped.
+        new_state   TEXT NOT NULL CHECK (new_state IN ('set', 'cleared')),
+        days        TEXT,
+        starts_at   TEXT,
+        ends_at     TEXT,
+        occurred_at TEXT NOT NULL,
+        actor       TEXT NOT NULL,
+        reason      TEXT
+    );
+    CREATE TRIGGER working_day_decision_no_delete BEFORE DELETE ON working_day_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the working day journal is append-only');
+    END;
+    CREATE TRIGGER working_day_decision_no_update BEFORE UPDATE ON working_day_decision
+    BEGIN
+        SELECT RAISE(ABORT, 'the working day journal is append-only');
     END;
     "#,
 ];
@@ -2391,6 +2435,94 @@ impl Store {
         reason: Option<&str>,
     ) -> Result<SwitchState> {
         self.record_switch_decision(CALENDAR_LOCATION, enabled, occurred_at, actor, reason)
+    }
+
+    /// The owner's working day, recorded (#381): the days they accept
+    /// meetings and how wide those days are, or a clearing.
+    pub fn record_working_day_decision(
+        &self,
+        update: &crate::working_day::Update,
+        occurred_at: &str,
+        actor: &str,
+    ) -> Result<crate::working_day::State> {
+        use crate::working_day::Update;
+        let (state, days, starts_at, ends_at, reason) = match update {
+            Update::Set { day, reason } => (
+                "set",
+                Some(
+                    day.days
+                        .iter()
+                        .map(|day| day.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                Some(day.starts_at.clone()),
+                Some(day.ends_at.clone()),
+                reason.clone(),
+            ),
+            Update::Clear { reason } => ("cleared", None, None, None, reason.clone()),
+        };
+        self.connection()
+            .execute(
+                "INSERT INTO working_day_decision
+                 (new_state, days, starts_at, ends_at, occurred_at, actor, reason)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params![state, days, starts_at, ends_at, occurred_at, actor, reason],
+            )
+            .context("failed to record a working day decision")?;
+        self.working_day_state()
+    }
+
+    /// The working day as it stands: the journal's last row, or nothing —
+    /// a deployment where nobody said has no opinion, and every free gap is
+    /// answered exactly as it was before this existed (#381).
+    pub fn working_day_state(&self) -> Result<crate::working_day::State> {
+        use crate::working_day::{State, WorkingDay};
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT new_state, days, starts_at, ends_at, occurred_at, actor, reason
+             FROM working_day_decision ORDER BY sequence DESC LIMIT 1",
+        )?;
+        let row = statement
+            .query_row([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            })
+            .optional()
+            .context("failed to read the working day")?;
+        let Some((state, days, starts_at, ends_at, occurred_at, actor, reason)) = row else {
+            return Ok(State::default());
+        };
+        // A row whose three members are not all there is a row this build
+        // cannot use: answered as no opinion rather than as half a working
+        // day, which would clip somebody's gaps by an amplitude nobody set.
+        let day = match (state.as_str(), days, starts_at, ends_at) {
+            ("set", Some(days), Some(starts_at), Some(ends_at)) => {
+                let days: Vec<u8> = days
+                    .split(',')
+                    .filter_map(|day| day.trim().parse().ok())
+                    .collect();
+                (!days.is_empty()).then_some(WorkingDay {
+                    days,
+                    starts_at,
+                    ends_at,
+                })
+            }
+            _ => None,
+        };
+        Ok(State {
+            day,
+            since: Some(occurred_at),
+            actor: Some(actor),
+            reason,
+        })
     }
 
     /// The switch as it stands: the journal's last row, or **off**, since a

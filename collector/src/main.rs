@@ -214,12 +214,27 @@ async fn run(config: Config) -> Result<()> {
     // owner's decision and is read from the same place, with the same
     // token, at the same moment.
     let location_enabled = Arc::new(AtomicBool::new(false));
+    // The owner's working day (#381), read from the same document as the
+    // switch above and refreshed on the same rounds. `None` until they say.
+    let working_day: twalk_collector::calendars::SharedWorkingDay = Default::default();
     let snapshot = match (&config.gateway_url, &config.gateway_service_token) {
         (Some(url), Some(token)) => {
             let document = consent_snapshot(url, token).await?;
             config.refuse_unknown_connections(&registry_ids(&document))?;
-            let enabled = calendar_location_enabled(url, token).await?;
+            let (enabled, day) = collection_settings(url, token).await?;
             location_enabled.store(enabled, Ordering::Relaxed);
+            match &day {
+                Some(day) => info!(
+                    days = ?day.days,
+                    starts_at = %day.starts_at,
+                    ends_at = %day.ends_at,
+                    "the owner's working day is set: a free/busy read offers only the gaps inside it"
+                ),
+                None => info!(
+                    "no working day is set: a free/busy read offers every gap, night included"
+                ),
+            }
+            *working_day.lock().expect("the working day mutex is never poisoned") = day;
             if enabled {
                 warn!("the calendar location is ON: published events carry where a meeting is, by a decision recorded on the Companion Gateway. Turn it off there to stop it");
             } else {
@@ -279,6 +294,7 @@ async fn run(config: Config) -> Result<()> {
                 state_dir: config.state_dir.clone(),
                 consent: consent.clone(),
                 locations_may_travel: location_enabled.clone(),
+                working_day: working_day.clone(),
             })
         })
         .transpose()?;
@@ -653,9 +669,15 @@ async fn run(config: Config) -> Result<()> {
             // switch as it stands rather than as it stood at start.
             let mut may_publish = true;
             if let (Some(url), Some(token)) = (&config.gateway_url, &config.gateway_service_token) {
-                match calendar_location_enabled(url, token).await {
-                    Ok(enabled) => {
+                match collection_settings(url, token).await {
+                    Ok((enabled, day)) => {
                         location_unreadable = false;
+                        // The working day as it stands, beside the switch: an
+                        // owner who narrows their hours at noon has narrowed
+                        // them for the next read, not for the next restart.
+                        *working_day
+                            .lock()
+                            .expect("the working day mutex is never poisoned") = day;
                         if location_enabled.swap(enabled, Ordering::Relaxed) != enabled {
                             if enabled {
                                 warn!("the calendar location was turned ON: published events now carry where a meeting is");
@@ -971,7 +993,10 @@ async fn publish(
 /// leaves its cursor where it is. Publishing with the switch shut would put
 /// `location` in `changed_fields` for a meeting nobody moved, and the
 /// owner's journal would say something untrue. The next round reads both.
-async fn calendar_location_enabled(gateway_url: &str, service_token: &str) -> Result<bool> {
+async fn collection_settings(
+    gateway_url: &str,
+    service_token: &str,
+) -> Result<(bool, Option<twalk_collector::freebusy::WorkingDay>)> {
     let url = format!(
         "{}/api/settings/collection",
         gateway_url.trim_end_matches('/')
@@ -987,11 +1012,30 @@ async fn calendar_location_enabled(gateway_url: &str, service_token: &str) -> Re
         .json()
         .await
         .context("the Companion Gateway's collection settings are not JSON")?;
-    document
+    let enabled = document
         .get("calendar_location")
         .and_then(|switch| switch.get("enabled"))
         .and_then(serde_json::Value::as_bool)
-        .context("the collection settings do not say whether the calendar location is enabled")
+        .context("the collection settings do not say whether the calendar location is enabled")?;
+    // The working day, or nothing (#381). Absent and null are the same
+    // absence — a Gateway older than the decision, and one where nobody made
+    // it — and both mean every gap is offered. A half-read value is treated
+    // as none for the same reason: an amplitude nobody set must not clip
+    // somebody's gaps.
+    let day = document.get("working_day").and_then(|day| {
+        Some(twalk_collector::freebusy::WorkingDay {
+            days: day
+                .get("days")?
+                .as_array()?
+                .iter()
+                .filter_map(|day| day.as_u64().map(|day| day as u8))
+                .collect(),
+            starts_at: day.get("starts_at")?.as_str()?.to_owned(),
+            ends_at: day.get("ends_at")?.as_str()?.to_owned(),
+        })
+        .filter(|day| !day.days.is_empty())
+    });
+    Ok((enabled, day))
 }
 
 /// The Companion Gateway's consent snapshot, the document the Sensor reads too

@@ -210,6 +210,21 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "500",
         "store_unavailable, as the disclosure's above",
     ),
+    // #381's journal is in that same store and out of reach here for the same
+    // reason: `working_day::tests` covers the parsing, `store::tests` the
+    // journal, and `settings_http::tests` the shapes.
+    (
+        "get",
+        "/api/settings/working-day",
+        "500",
+        "store_unavailable, as the disclosure's above",
+    ),
+    (
+        "put",
+        "/api/settings/working-day",
+        "500",
+        "store_unavailable, as the disclosure's above",
+    ),
     (
         "get",
         "/api/settings/collection",
@@ -1689,6 +1704,18 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/calendar-location",
             "/api/settings/calendar-location",
         ),
+        // The working day (#381) is the owner's decision like the two
+        // switches, so it answers the same word to a caller the guard closes.
+        (
+            Method::GET,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+        ),
         // As the snapshot above: a different reason — no service token
         // rather than no device token — and deliberately the same answer.
         (
@@ -2364,6 +2391,15 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/calendar-location",
             Some(json!({ "enabled": true })),
         ),
+        // #381's decision lives in the same journal store, so it is missing
+        // for the same reason, and says so with its own word because what is
+        // absent is the store rather than a switch.
+        (Method::GET, "/api/settings/working-day", None),
+        (
+            Method::PUT,
+            "/api/settings/working-day",
+            Some(json!({ "days": [1], "starts_at": "09:00", "ends_at": "18:00" })),
+        ),
     ] {
         call.check(
             method,
@@ -2512,6 +2548,18 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             Method::PUT,
             "/api/settings/calendar-location",
             "/api/settings/calendar-location",
+        ),
+        // The working day (#381) is the owner's decision like the two
+        // switches, so it answers the same word to a caller the guard closes.
+        (
+            Method::GET,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
         ),
         (
             Method::GET,
@@ -3297,6 +3345,93 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         allowed.body
     );
     assert!(allowed.body["since"].is_string(), "{}", allowed.body);
+
+    // --- the owner's working day (#381), on the same journal store: nothing
+    // said, then said, then cleared, and nothing repaired on the way in.
+    let unsaid = call
+        .check(
+            Method::GET,
+            &consenting_base,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+            &deciding_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        unsaid.body,
+        json!({ "day": null, "since": null, "actor": null, "reason": null }),
+        "a deployment ships with no working day, and the nulls say nobody decided: {}",
+        unsaid.body
+    );
+    let set = call
+        .check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+            &deciding_cookie,
+            Some(json!({
+                "days": [1, 2, 3, 4, 5],
+                "starts_at": "09:00",
+                "ends_at": "18:00",
+                "reason": "the conformance suite",
+            })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        set.body["day"],
+        json!({ "days": [1, 2, 3, 4, 5], "starts_at": "09:00", "ends_at": "18:00" })
+    );
+    assert_eq!(
+        set.body["actor"].as_str(),
+        Some(owner.user_id.as_str()),
+        "the actor is the owner, stamped by the Gateway: {}",
+        set.body
+    );
+    // Nothing is repaired on the way in: `18:0` is an hour of an evening.
+    for body in [
+        json!({ "days": [], "starts_at": "09:00", "ends_at": "18:00" }),
+        json!({ "days": [1], "starts_at": "18:0", "ends_at": "19:00" }),
+        json!({ "days": [1], "starts_at": "18:00", "ends_at": "09:00" }),
+    ] {
+        call.check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+            &deciding_cookie,
+            Some(body),
+            422,
+            None,
+        )
+        .await?;
+    }
+    // Cleared again, so the rest of this suite reads a deployment with no
+    // opinion — the state its other assertions assume.
+    let cleared = call
+        .check(
+            Method::PUT,
+            &consenting_base,
+            "/api/settings/working-day",
+            "/api/settings/working-day",
+            &deciding_cookie,
+            Some(json!({ "days": null })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(cleared.body["day"], Value::Null);
+    assert!(
+        cleared.body["since"].is_string(),
+        "a clearing is a decision with a date, which is how a screen tells it from nobody \
+         ever having said: {}",
+        cleared.body
+    );
     call.check(
         Method::PUT,
         &consenting_base,
@@ -3325,8 +3460,14 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         .await?;
     assert_eq!(
         collection.body,
-        json!({ "calendar_location": { "enabled": true } }),
-        "what a collector is told is what it may publish, and nothing about the owner: {}",
+        json!({
+            "calendar_location": { "enabled": true },
+            // The working day (#381), `null` here because nobody set one in
+            // this run: a collector that finds it null does not filter.
+            "working_day": null,
+        }),
+        "what a collector is told is what it may publish and what it may offer, and nothing \
+         about the owner: {}",
         collection.body
     );
     // Back off, so nothing this suite runs afterwards publishes a location

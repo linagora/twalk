@@ -221,10 +221,19 @@ async fn free_busy(
             // The gaps, spelled in the owner's own time when it is known
             // (#379): a drafting agent that copies them cannot write an hour
             // in the wrong zone, and one that computes them already has.
+            // The owner's working day, when they have said what it is (#381):
+            // read here rather than in the gap computation, so that the pure
+            // function stays pure and the decision is fetched once.
+            let working_day = calendars
+                .working_day
+                .lock()
+                .ok()
+                .and_then(|day| day.clone());
             let free = crate::freebusy::free_between(
                 &busy,
                 &window,
                 local.as_ref().map(|(zone, _)| zone.name.as_str()),
+                working_day.as_ref(),
             );
             let mut answer = json!({
                 "connection": connection,
@@ -233,6 +242,17 @@ async fn free_busy(
                 "busy": busy,
                 "free": free,
             });
+            // The amplitude that was applied, so that an agent can say the
+            // gaps it was given are the ones inside it — and write "I am
+            // taken on my usual hours that week", which is true, rather than
+            // "I have no slot at all", which is not (#381).
+            if let Some(day) = &working_day {
+                answer["working_day"] = json!({
+                    "days": day.days,
+                    "starts_at": day.starts_at,
+                    "ends_at": day.ends_at,
+                });
+            }
             // Absent, not null, when there is no zone to name: a member that
             // is there and empty says "I looked and the answer is nothing",
             // which is a different sentence from "there is no such fact" —
