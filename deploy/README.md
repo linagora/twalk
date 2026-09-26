@@ -174,6 +174,19 @@ choose no time — a guessed time is a commitment made in the user's name.
 ```
 
    The sentence about turns is the one to keep when trimming. A route's prompt asking for one object and nothing else is read as a ban on tool calls, and an agent that may not act can only invent.
+
+   **And it may stop and ask you** (#367), which is the other half of the same freedom: the draft that matters sometimes depends on one thing only the owner knows — which of two projects a message is about, whether they want to meet this person at all. An agent with nowhere to put that question invents an answer to it. So the answer has a second shape: the reference, and `deferred`, the question it asks, and no reply at all. The Gateway records it in the owner's journal, counts it under `deferred`, answers `200` and publishes nothing — because nothing went wrong and there is nothing to approve yet. Before this it was read as an unreadable answer and counted as a refusal, which was a statement that something had. The question itself reaches the owner through their own channel, which is Hermes's side of the seam: the prompt names that channel, and the runbook cannot, because it is the owner's.
+
+```
+If you need something only the user can tell you before you can write a good
+reply — which project this is about, whether they want this meeting at all —
+ask them in their own channel, and then answer with the reference and a
+`deferred` member saying what you asked, and no reply:
+{"reference": "{reference}", "deferred": "<what you asked them, in your own words>"}
+Their answer will reach you there; write the draft then.
+```
+
+   One rule holds whichever shape the answer takes: what you say about the message is **your own words, never a quotation of it** — the rule #360 set for the summary, applied to the question, because a contact's mail quoted into the owner's channel is the contact's words travelling somewhere they were not sent (ADR 0012).
 3. **A change in your calendar is an event, its participants reduced as you decided.** Create a meeting in your calendar with a contact you granted on the mail connection and one you revoked: within `COLLECTOR_CALENDAR_POLL_SECONDS` the bus carries `calendar.event.created.v1` (`published fr.linagora.twalk.calendar.event.created.v1` in the log) with the granted participant named and `participants_withheld` counting the revoked one; move it, and `calendar.event.changed.v1` names the fields that moved; delete it, and `calendar.event.removed.v1` carries the title. No description and no attachment leaves the collector at any point, and no location either until you say so: **where** a meeting is travels only once the owner turns it on in the Companion's settings (#354), off as this ships. Opening it takes effect on the next calendar poll — the collector reads the decision before each one — and the log says which way it went, at `warn` when it is on, because that is the direction in which something leaves the machine.
 4. **"Are you free Thursday?" is answered with slots that are really free.** Install the skill on Hermes's side: copy `skills/twalk-calendar/` into its skills directory and add `TWALK_GATEWAY_URL` (the Gateway's origin) and `TWALK_CALENDAR_CONNECTION` (the calendar connection this deployment reads) beside `TWALK_ANSWER_SECRET` in its `.env`. **Then give the agent the tool**, because a skill it cannot run teaches it nothing — in `config.yaml` on the Hermes host:
 

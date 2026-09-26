@@ -83,7 +83,7 @@ const DATABASE_FILE: &str = "consent.sqlite3";
 /// database's `user_version`; a new migration is appended to this array and
 /// never edited in place, so an existing store upgrades by applying exactly
 /// the tail it has not seen.
-pub const MIGRATIONS: [&str; 14] = [
+pub const MIGRATIONS: [&str; 15] = [
     // v1 — the decision journal, its per-network scope rows, and the current
     // state as a view over both.
     r#"
@@ -785,6 +785,40 @@ pub const MIGRATIONS: [&str; 14] = [
         found        INTEGER
     );
     CREATE INDEX hermes_event_read_connection ON hermes_event_read (connection, sequence);
+    "#,
+    // v15 — a wake that ended in a question to the owner instead of a draft
+    // (#367). Until this existed, an agent that stopped to ask produced an
+    // answer with no reply, which the route read as an unreadable answer and
+    // counted as a refusal: a lie about what happened, in the owner's own
+    // journal, every single time the system did the right thing.
+    //
+    // Its own table, for v14's reason: a deferral is not a read and not a
+    // suggestion, and the question it asks is the one column neither of the
+    // others has.
+    //
+    // `asked` is the agent's own words about what it needs, capped like
+    // every other member this journal keeps. It is deliberately not the
+    // contact's words: what the owner is asked is *"about the message from
+    // Christelle, which project is this?"*, never a quotation of her mail
+    // (#360's rule, ADR 0012's line).
+    r#"
+    CREATE TABLE hermes_deferral (
+        sequence         INTEGER PRIMARY KEY AUTOINCREMENT,
+        trigger_event_id TEXT NOT NULL,
+        persona_id       TEXT NOT NULL,
+        attempt          INTEGER NOT NULL,
+        asked            TEXT NOT NULL,
+        deferred_at      TEXT NOT NULL
+    );
+    CREATE INDEX hermes_deferral_trigger ON hermes_deferral (trigger_event_id, sequence);
+    CREATE TRIGGER hermes_deferral_no_delete BEFORE DELETE ON hermes_deferral
+    BEGIN
+        SELECT RAISE(ABORT, 'the deferral journal is append-only');
+    END;
+    CREATE TRIGGER hermes_deferral_no_update BEFORE UPDATE ON hermes_deferral
+    BEGIN
+        SELECT RAISE(ABORT, 'the deferral journal is append-only');
+    END;
     "#,
 ];
 
@@ -1773,6 +1807,46 @@ impl Store {
             )
             .context("failed to record a read of an event's facts")?;
         Ok(())
+    }
+
+    /// A wake that ended in a question to the owner instead of a draft
+    /// (#367), recorded so that the owner's journal says what happened
+    /// rather than counting a refusal for it.
+    pub fn record_hermes_deferral(
+        &self,
+        deferral: &crate::hermes_answer::Deferral,
+        deferred_at: &str,
+    ) -> Result<()> {
+        self.connection()
+            .execute(
+                "INSERT INTO hermes_deferral
+                 (trigger_event_id, persona_id, attempt, asked, deferred_at)
+                 VALUES (?, ?, ?, ?, ?)",
+                rusqlite::params![
+                    deferral.reference.trigger_event_id,
+                    deferral.reference.persona_id,
+                    deferral.reference.attempt as i64,
+                    deferral.asked,
+                    deferred_at,
+                ],
+            )
+            .context("failed to record a deferral")?;
+        Ok(())
+    }
+
+    /// What was asked about one trigger, oldest first: the path a draft took
+    /// before it was written, for the approval screen that has to show it.
+    pub fn hermes_deferrals(&self, trigger_event_id: &str) -> Result<Vec<(String, String)>> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT asked, deferred_at FROM hermes_deferral
+             WHERE trigger_event_id = ? ORDER BY sequence",
+        )?;
+        let rows = statement
+            .query_map([trigger_event_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to read the deferrals of a trigger")?;
+        Ok(rows)
     }
 
     /// The most recent transitions, newest first, for the dashboard's feed.
