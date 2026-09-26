@@ -1257,6 +1257,45 @@ fn occurs_within(ics: &str, range_start: &str, range_end: &str) -> bool {
     start.as_str() < range_end && end.as_str() > range_start
 }
 
+/// One `DTSTART`/`DTEND` line's value, as the UTC a free/busy answer is in.
+///
+/// A real service answers `VFREEBUSY` periods in UTC (RFC 5545 §3.8.2.6) and
+/// the collector refuses anything else, correctly. An event written in a zone
+/// — which most events in a person's calendar are — therefore has to be
+/// converted here, with a zone table rather than a fixed offset: a fake that
+/// got summer time wrong would teach the collector that summer time works.
+///
+/// A value this cannot read is passed through unchanged, so the fixture that
+/// breaks fails in the test rather than silently becoming another instant.
+fn local_instant(after_dtstart: &str) -> String {
+    let value = after_dtstart
+        .split(':')
+        .next_back()
+        .unwrap_or_default()
+        .to_owned();
+    let Some(zone) = after_dtstart
+        .split(';')
+        .find_map(|parameter| parameter.strip_prefix("TZID="))
+        .and_then(|zone| zone.split(':').next())
+    else {
+        return value;
+    };
+    let Ok(zone) = zone.parse::<chrono_tz::Tz>() else {
+        return value;
+    };
+    let Ok(naive) = chrono::NaiveDateTime::parse_from_str(&value, "%Y%m%dT%H%M%S") else {
+        return value;
+    };
+    use chrono::TimeZone;
+    match zone.from_local_datetime(&naive).earliest() {
+        Some(at) => at
+            .with_timezone(&chrono::Utc)
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string(),
+        None => value,
+    }
+}
+
 fn free_busy_period(ics: &str, range_start: &str, range_end: &str) -> Option<String> {
     let mut dtstart = None;
     let mut dtend = None;
@@ -1264,9 +1303,9 @@ fn free_busy_period(ics: &str, range_start: &str, range_end: &str) -> Option<Str
     for line in ics.lines() {
         let line = line.trim_end();
         if let Some(value) = line.strip_prefix("DTSTART") {
-            dtstart = value.split(':').next_back().map(str::to_owned);
+            dtstart = Some(local_instant(value));
         } else if let Some(value) = line.strip_prefix("DTEND") {
-            dtend = value.split(':').next_back().map(str::to_owned);
+            dtend = Some(local_instant(value));
         } else if line == "STATUS:CANCELLED" || line == "TRANSP:TRANSPARENT" {
             busy = false;
         }

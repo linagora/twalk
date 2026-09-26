@@ -3316,11 +3316,20 @@ export interface components {
             timezone?: string;
             /**
              * @description Where the name came from, so the owner can judge it rather than
-             *     take it on faith. `calendar`: the collection declares it
-             *     (`CALDAV:calendar-timezone`).
+             *     take it on faith, since the two are not equally strong.
+             *
+             *     `calendar`: the collection declares it
+             *     (`CALDAV:calendar-timezone`) — the owner's own configuration,
+             *     asked first.
+             *
+             *     `events`: no collection declared one, so it is the zone most of
+             *     the owner's own events are written in, counted from the `TZID`
+             *     the collector already reads on every event it publishes. Weaker,
+             *     and the ordinary case on a server whose clients never set a zone
+             *     — which the reference deployment measured itself to be.
              * @enum {string}
              */
-            timezone_source?: "calendar";
+            timezone_source?: "calendar" | "events";
             /** Format: date-time */
             to: string;
         };

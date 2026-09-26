@@ -17,6 +17,11 @@ use twalk_test_harness::{ensure_stack, poll_until, Bus};
 
 const SERVICE_TOKEN: &str = "test-service-token";
 
+/// An event written **in a zone**, which the plain fixtures are not: they are
+/// in UTC, so they say nothing about where the owner works. This one is what
+/// #369's second source reads — the zone their own agenda is written in.
+const IN_A_ZONE: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Paris\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:d369-zoned\r\nSUMMARY:Point hebdo\r\nDTSTART;TZID=Europe/Paris:20261007T090000\r\nDTEND;TZID=Europe/Paris:20261007T093000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
 const MEETING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-meeting\r\nSUMMARY:Point budget CONFIDENTIEL\r\nLOCATION:Salle Ada Lovelace\r\nDTSTART:20261006T080000Z\r\nDTEND:20261006T090000Z\r\nATTENDEE;CN=Alice Martin:mailto:alice@example.org\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const OVERLAPPING: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-overlap\r\nSUMMARY:Entretien\r\nDTSTART:20261006T083000Z\r\nDTEND:20261006T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
 const CANCELLED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:d281-cancelled\r\nSUMMARY:Annulé\r\nSTATUS:CANCELLED\r\nDTSTART:20261006T140000Z\r\nDTEND:20261006T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
@@ -280,9 +285,41 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
     for member in ["timezone", "timezone_source", "now"] {
         assert!(
             body.get(member).is_none(),
-            "{member} was answered for a calendar that declares no zone: {body}"
+            "{member} was answered for a calendar that declares no zone and events \
+             written in none: {body}"
         );
     }
+
+    // But the owner's own events usually say where they work, and on the
+    // reference deployment that is the only thing that does: measured on
+    // 2026-09-26, its collections declare no zone at all. So one event
+    // written in a zone, one poll to read it, and the read answers that zone
+    // — saying `events`, because it is a weaker fact than a declaration and
+    // the owner is told which they are looking at (#369).
+    run.sso.put_event(&run.calendar, "zoned", IN_A_ZONE);
+    let body = poll_until(
+        || async {
+            let (_, body) = read(
+                port,
+                SERVICE_TOKEN,
+                &run.calendar,
+                "2026-10-05T00:00:00Z",
+                "2026-10-10T00:00:00Z",
+            )
+            .await
+            .ok()?;
+            body.get("timezone").is_some().then_some(body)
+        },
+        "the poll to read an event written in a zone",
+    )
+    .await?;
+    assert_eq!(body["timezone"], json!("Europe/Paris"));
+    assert_eq!(body["timezone_source"], json!("events"));
+    let now = body["now"].as_str().context("the local hour")?;
+    assert!(
+        now.ends_with("+02:00") || now.ends_with("+01:00"),
+        "the hour is in that zone, offset and all: {now}"
+    );
 
     // A window clipped: the meeting is cut at the window's edge.
     let (status, body) = read(
@@ -369,9 +406,11 @@ async fn a_read_with_the_service_token_answers_busy_intervals_and_nothing_else()
     // Each counted under its code: two served, and one of each refusal —
     // the `409` polled for above may have been counted more than once, and
     // a `caldav_refused` may have slipped in before the state moved.
-    // Three served: the window, the window clipped, and the one taken after
-    // the calendars forgot their zone (#369).
-    assert_eq!(metric(metrics_port, "served").await?, 3);
+    // At least four served: the window, the window clipped, the one taken
+    // after the calendars forgot their zone, and however many the wait for
+    // the zoned event's poll took (#369) — a count, not a fixed number,
+    // because that wait is a poll and a poll has no fixed length.
+    assert!(metric(metrics_port, "served").await? >= 4);
     assert_eq!(metric(metrics_port, "unauthenticated").await?, knocks + 1);
     for refusal in ["connection_unknown", "window_too_wide", "invalid_window"] {
         assert_eq!(metric(metrics_port, refusal).await?, 1, "{refusal}");
