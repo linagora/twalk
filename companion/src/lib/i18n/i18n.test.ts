@@ -182,7 +182,15 @@ describe('the catalogues', () => {
 			// What a suggestion says it answers (#334): the contact's display
 			// name and the persona's own summary of what they asked.
 			contact: 'Aïcha Benali',
-			summary: 'Aïcha Benali demande si le dîner de ce soir tient toujours.'
+			summary: 'Aïcha Benali demande si le dîner de ce soir tient toujours.',
+			// What the draft did before it wrote (#367): a window it read, how
+			// many busy periods came back, why a read was refused, and the
+			// question it put to the user in their own channel.
+			from: 'lundi 28 septembre',
+			to: 'vendredi 2 octobre',
+			intervals: 4,
+			outcome: 'window_too_wide',
+			asked: 'de quel projet il s\'agit'
 		};
 		for (const locale of LOCALES) {
 			for (const key of Object.keys(en) as (keyof typeof en)[]) {

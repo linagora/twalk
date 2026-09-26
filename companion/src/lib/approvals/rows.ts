@@ -76,6 +76,21 @@ export interface Row {
 	 * itself, which is a deliberate click and not a line on a card (#336).
 	 */
 	context: Suggestion['context'];
+	/**
+	 * What the draft did before it was written (#367), oldest first: the
+	 * governed reads it made of the user's own calendar, and the questions it
+	 * put to them in their channel.
+	 *
+	 * Why a card carries it: a draft that read a calendar, asked a question
+	 * and then wrote is more useful than one that guessed, and less
+	 * transparent — the user approves an outcome whose path they did not see.
+	 * Showing the path makes the approval cover the path as well as the text.
+	 *
+	 * Never what a step learned. A read's intervals are counted, not kept; a
+	 * question's answer is in the channel where the user wrote it. And never
+	 * the contact's words, for the reason `context` is not them either.
+	 */
+	path: Suggestion['path'];
 	format: string;
 	/**
 	 * The sentence the reply will disclose itself with, after the body and on
@@ -163,6 +178,7 @@ export function toRow(suggestion: Suggestion): Row {
 		body: suggestion.suggestion.body,
 		format: suggestion.suggestion.format,
 		context: suggestion.context,
+		path: suggestion.path ?? [],
 		disclosure: suggestion.disclosure,
 		trigger: suggestion.trigger,
 		standing: suggestion.standing,

@@ -292,7 +292,56 @@ fn suggestion_json(listed: &Listed) -> Value {
         // into the other two. A reply that could not be sent showed as
         // `published` for ever until this member existed.
         "given_up": listed.given_up.as_ref().map(given_up_json),
+        // What the draft did before it wrote (#367): oldest first, so the
+        // screen renders a sequence rather than a set. Always an array,
+        // empty when the draft looked nothing up — a member that is
+        // sometimes absent and sometimes empty makes a screen ask twice.
+        "path": listed.path.iter().map(step_json).collect::<Vec<_>>(),
     })
+}
+
+/// One step of that path, as the screen reads it.
+///
+/// A `kind` and the facts that kind carries, rather than one flat object
+/// with everything optional: the screen draws a different sentence for each
+/// and would otherwise have to guess which by looking for nulls.
+fn step_json(step: &crate::store::Step) -> Value {
+    use crate::store::Step;
+    match step {
+        Step::FreeBusy {
+            from,
+            to,
+            outcome,
+            intervals,
+            at,
+        } => json!({
+            "kind": "freebusy",
+            "at": at,
+            "from": from,
+            "to": to,
+            "outcome": outcome,
+            "intervals": intervals,
+        }),
+        Step::EventFacts {
+            uid,
+            outcome,
+            found,
+            at,
+        } => json!({
+            "kind": "event_facts",
+            "at": at,
+            "uid": uid,
+            "outcome": outcome,
+            "found": found,
+        }),
+        // The question, never its answer: that lives in the owner's own
+        // channel, where they read it and where it belongs.
+        Step::Asked { asked, at } => json!({
+            "kind": "asked",
+            "at": at,
+            "asked": asked,
+        }),
+    }
 }
 
 /// The Sensor's report, as both the listing and `GET /api/approvals/{id}`
@@ -362,6 +411,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_path_is_rendered_oldest_first_with_a_kind_per_sentence() {
+        use crate::store::Step;
+        let mut listed = listed(Standing::Approvable, None);
+        listed.path = vec![
+            Step::FreeBusy {
+                from: "2026-09-28T06:00:00Z".to_owned(),
+                to: "2026-10-02T18:00:00Z".to_owned(),
+                outcome: "served".to_owned(),
+                intervals: Some(4),
+                at: "2026-09-26T09:00:00Z".to_owned(),
+            },
+            Step::Asked {
+                asked: "De quel projet il parle".to_owned(),
+                at: "2026-09-26T09:01:00Z".to_owned(),
+            },
+            Step::EventFacts {
+                uid: "8f3a2b1c".to_owned(),
+                outcome: "window_too_wide".to_owned(),
+                found: None,
+                at: "2026-09-26T09:02:00Z".to_owned(),
+            },
+        ];
+        let rendered = suggestion_json(&listed);
+        let path = rendered["path"].as_array().expect("an array");
+        assert_eq!(
+            path.iter()
+                .map(|step| step["kind"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["freebusy", "asked", "event_facts"],
+            "the screen draws a sequence, so the order is the path's own"
+        );
+        assert_eq!(path[0]["intervals"], json!(4));
+        assert_eq!(path[1]["asked"], json!("De quel projet il parle"));
+        // A refused read keeps its code and carries no count: the screen
+        // says the calendar could not be checked rather than "0 intervals",
+        // which would read as an empty agenda.
+        assert_eq!(path[2]["outcome"], json!("window_too_wide"));
+        assert_eq!(path[2]["found"], Value::Null);
+    }
+
+    #[test]
+    fn a_draft_that_looked_nothing_up_has_an_empty_path_and_not_a_missing_one() {
+        // Every suggestion made before #363 is this case, and so is every
+        // message that needed nothing looked up. A member that is sometimes
+        // absent and sometimes empty makes a screen ask twice.
+        let rendered = suggestion_json(&listed(Standing::Approvable, None));
+        assert_eq!(rendered["path"], json!([]));
+    }
+
     fn listed(standing: Standing, approval: Option<RecordedApproval>) -> Listed {
         Listed {
             event_id: "a".repeat(64),
@@ -391,6 +490,7 @@ mod tests {
             },
             posted: None,
             given_up: None,
+            path: Vec::new(),
         }
     }
 

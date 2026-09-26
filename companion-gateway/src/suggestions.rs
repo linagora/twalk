@@ -228,6 +228,20 @@ pub struct Listed {
     /// folded into either: see [`GivenUp`] for why it is not a variant of
     /// them and why it is not called "undelivered".
     pub given_up: Option<GivenUp>,
+    /// What the draft did before it was written (#367): the governed reads
+    /// it made and the questions it put to the owner, oldest first.
+    ///
+    /// The reason this member exists is the reason the autonomy is safe to
+    /// want. A draft that read a calendar, asked a question and then wrote
+    /// is more useful than one that guessed, and less transparent — the
+    /// owner approves an outcome whose path they did not see. Every step of
+    /// that path is already journalled, so the screen can show it, and the
+    /// approval then covers the path as well as the text.
+    ///
+    /// Empty for a suggestion whose draft did nothing but write, which is
+    /// every suggestion made before #363 and every one where the message
+    /// needed nothing looked up. Empty is a fact, not a gap.
+    pub path: Vec<crate::store::Step>,
 }
 
 /// The stretch of the stream a read covered, reported so the bound is
@@ -505,6 +519,26 @@ impl Suggestions {
         // text, and the user may still refuse it — and what it answers
         // does not.
         let context = listed_context(document.data.context, consent_label);
+        // What the draft did before it wrote (#367). Read here rather than on
+        // the single-suggestion route, because the listing and the single read
+        // are deliberately one shape — a member present in one and absent in
+        // the other is how a screen grows two code paths.
+        //
+        // A store that cannot answer does not lose the suggestion: the path is
+        // then empty and said so in the log. The text is what the owner has to
+        // decide about; the path helps them decide, and helping is not a
+        // reason to refuse.
+        let path = self
+            .store
+            .hermes_path(&document.data.trigger.event_id)
+            .unwrap_or_else(|error| {
+                warn!(
+                    %error,
+                    suggestion = %document.id,
+                    "what the draft did could not be read; the approval screen shows no path"
+                );
+                Vec::new()
+            });
         Ok(Listed {
             event_id: document.id,
             source: document.source,
@@ -530,6 +564,7 @@ impl Suggestions {
             },
             posted: None,
             given_up: None,
+            path,
         })
     }
 

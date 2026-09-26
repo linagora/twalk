@@ -506,6 +506,53 @@
 				</p>
 			{/if}
 
+			{#if row.path.length > 0}
+				<!-- What the assistant did before writing this (#367): the reads
+				     it made of the user's own calendar and the questions it put
+				     to them. Shown after what it answers and before the text it
+				     proposes, because that is the order the user decides in —
+				     what this is about, how it was worked out, what it says.
+
+				     An agent that may read and ask is more useful than one that
+				     guesses, and less transparent: the user approves an outcome
+				     whose path they did not see. This is that path. It is never
+				     what a step learned — a read's intervals are counted, not
+				     kept, and a question's answer is in the channel where the
+				     user wrote it. -->
+				<details class="small" data-testid="path">
+					<summary>{$t('approvals.path.title')}</summary>
+					<ul class="path">
+						{#each row.path as step (step.at + step.kind)}
+							<li>
+								{#if step.kind === 'freebusy'}
+									{#if step.outcome === 'served'}
+										{$t('approvals.path.freebusy', {
+											from: step.from,
+											to: step.to,
+											intervals: step.intervals ?? 0
+										})}
+									{:else}
+										{$t('approvals.path.freebusyRefused', {
+											from: step.from,
+											to: step.to,
+											outcome: step.outcome
+										})}
+									{/if}
+								{:else if step.kind === 'event_facts'}
+									{#if step.outcome === 'served'}
+										{$t('approvals.path.eventFacts')}
+									{:else}
+										{$t('approvals.path.eventFactsRefused', { outcome: step.outcome })}
+									{/if}
+								{:else}
+									{$t('approvals.path.asked', { asked: step.asked })}
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				</details>
+			{/if}
+
 			{#if outcome !== undefined && outcome.kind === 'sent' && outcome.edited}
 				<!-- Once an edited reply has gone out, what matters is what went
 				     out, and that is the user's text — which this screen has in
@@ -811,6 +858,20 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-3);
+	}
+
+	/* What the assistant did before writing (#367): a list, because it is a
+	   sequence, and quiet, because it explains the text rather than competing
+	   with it. Folded into a `details` for the same reason the message itself
+	   is a deliberate click: most approvals need no explanation, and the one
+	   that does should be one gesture away. */
+	.path {
+		margin: var(--space-2) 0 0;
+		padding-left: var(--space-4);
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-1);
+		color: var(--color-text-muted);
 	}
 
 	/* The proposed reply, set apart from everything that describes it: it is
