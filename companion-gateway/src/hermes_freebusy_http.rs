@@ -125,6 +125,12 @@ fn answered(request: &ReadRequest, answer: FreeBusy) -> serde_json::Value {
         "to": request.to,
         "busy": answer.busy,
     });
+    // The gaps, when the collector answered any (#379). Absent rather than
+    // empty from a collector that predates them, so a reader can tell "this
+    // deployment does not compute them" from "this window has none".
+    if !answer.free.is_empty() {
+        body["free"] = json!(answer.free);
+    }
     if let (Some(timezone), Some(source), Some(now)) =
         (answer.timezone, answer.timezone_source, answer.now)
     {
@@ -196,6 +202,7 @@ mod tests {
             &request(),
             FreeBusy {
                 busy: intervals(),
+                free: Vec::new(),
                 timezone: Some("Europe/Paris".to_owned()),
                 timezone_source: Some("calendar".to_owned()),
                 now: Some("2026-09-24T20:36:26+02:00".to_owned()),
@@ -217,6 +224,7 @@ mod tests {
             &request(),
             FreeBusy {
                 busy: intervals(),
+                free: Vec::new(),
                 timezone: None,
                 timezone_source: None,
                 now: None,
@@ -234,6 +242,7 @@ mod tests {
             &request(),
             FreeBusy {
                 busy: intervals(),
+                free: Vec::new(),
                 timezone: Some("Europe/Paris".to_owned()),
                 timezone_source: Some("calendar".to_owned()),
                 now: None,

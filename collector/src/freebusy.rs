@@ -224,12 +224,157 @@ pub fn merge_answers(answers: Vec<Vec<Busy>>, window: &Window) -> Vec<Busy> {
     merge(periods, window)
 }
 
+/// One stretch of the window nothing occupies, in UTC and in the owner's own
+/// time (#379).
+///
+/// The UTC pair is the fact; the local pair is the same fact in the form a
+/// sentence needs. Both, because the arithmetic between them is what a
+/// drafting agent was measured getting wrong in silence: on 2026-09-26 one
+/// read three windows, was told `Europe/Paris`, and proposed two times that
+/// overlapped a meeting — it had found the gaps in the UTC intervals and
+/// written them as if they were Paris hours. An agent that copies cannot
+/// make that mistake; an agent that converts already has.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Free {
+    pub start: String,
+    pub end: String,
+    /// The same instants in the owner's zone, absent together when no zone
+    /// is known — never guessed, for the reason the zone itself is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_local: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_local: Option<String>,
+    /// How long it is. A four-minute gap is visibly not a meeting slot, and
+    /// an agent can prefer a long one without measuring it.
+    pub minutes: i64,
+}
+
+/// The stretches of the window the busy intervals leave, in order (#379).
+///
+/// The complement of what [`merge_answers`] produced, which is why it takes
+/// that output rather than recomputing it: the intervals are already merged,
+/// clipped to the window and in order, so the gaps are what lies between
+/// them, plus the ends of the window.
+///
+/// `zone` spells each gap in the owner's time when the deployment knows it.
+/// Nothing is dropped for being short or nocturnal: which gap is worth
+/// offering a person is the drafting agent's judgement, guided by its skill,
+/// and a collector that hid the night would be making a decision about
+/// somebody's working hours that nobody told it.
+pub fn free_between(busy: &[Busy], window: &Window, zone: Option<&str>) -> Vec<Free> {
+    let zone = zone.and_then(|name| name.parse::<chrono_tz::Tz>().ok());
+    let local = |at: &DateTime<Utc>| {
+        zone.map(|zone| {
+            at.with_timezone(&zone)
+                .format("%Y-%m-%dT%H:%M:%S%:z")
+                .to_string()
+        })
+    };
+    let mut gaps = Vec::new();
+    let mut at = window.from;
+    let push = |from: DateTime<Utc>, to: DateTime<Utc>, gaps: &mut Vec<Free>| {
+        let minutes = (to - from).num_minutes();
+        if minutes <= 0 {
+            return;
+        }
+        gaps.push(Free {
+            start: from.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            end: to.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            start_local: local(&from),
+            end_local: local(&to),
+            minutes,
+        });
+    };
+    for interval in busy {
+        let (Ok(start), Ok(end)) = (
+            DateTime::parse_from_rfc3339(&interval.start),
+            DateTime::parse_from_rfc3339(&interval.end),
+        ) else {
+            // An interval this cannot read is left in place rather than
+            // skipped: pretending it is not there would answer a gap the
+            // owner is busy in, which is the whole error this exists against.
+            return Vec::new();
+        };
+        let (start, end) = (start.with_timezone(&Utc), end.with_timezone(&Utc));
+        push(at, start, &mut gaps);
+        at = at.max(end);
+    }
+    push(at, window.to, &mut gaps);
+    gaps
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{merge_answers, parse_free_busy, Busy, Window, WindowError};
+    use super::{free_between, merge_answers, parse_free_busy, Busy, Free, Window, WindowError};
 
     fn window() -> Window {
         Window::parse("2026-09-24T00:00:00Z", "2026-09-25T00:00:00Z").unwrap()
+    }
+
+    /// #379: the gaps, and the arithmetic an agent must not be asked to do.
+    #[test]
+    fn the_free_gaps_are_the_windows_complement_in_the_owners_own_time() {
+        let window = Window::parse("2026-10-12T06:00:00Z", "2026-10-12T18:00:00Z").unwrap();
+        let busy = vec![
+            Busy {
+                start: "2026-10-12T07:30:00Z".to_owned(),
+                end: "2026-10-12T10:00:00Z".to_owned(),
+            },
+            Busy {
+                start: "2026-10-12T12:00:00Z".to_owned(),
+                end: "2026-10-12T13:00:00Z".to_owned(),
+            },
+        ];
+        let free = free_between(&busy, &window, Some("Europe/Paris"));
+        assert_eq!(
+            free.iter().map(|gap| gap.start.as_str()).collect::<Vec<_>>(),
+            vec![
+                "2026-10-12T06:00:00Z",
+                "2026-10-12T10:00:00Z",
+                "2026-10-12T13:00:00Z"
+            ],
+            "the gaps are what the intervals leave, including both ends of the window"
+        );
+
+        // The pair that stops the error this ticket comes from: 10:00 UTC is
+        // 12:00 in Paris, and an agent that copies the local pair cannot
+        // write "10h30" for a moment the owner is in a meeting.
+        let midday = &free[1];
+        assert_eq!(midday.start_local.as_deref(), Some("2026-10-12T12:00:00+02:00"));
+        assert_eq!(midday.end_local.as_deref(), Some("2026-10-12T14:00:00+02:00"));
+        assert_eq!(midday.minutes, 120);
+
+        // With no zone known, the local pair is absent rather than guessed.
+        let without = free_between(&busy, &window, None);
+        assert!(without.iter().all(|gap| gap.start_local.is_none()));
+        assert_eq!(without.len(), free.len());
+
+        // A window entirely taken answers no gap at all, and one entirely
+        // free answers itself.
+        let whole = vec![Busy {
+            start: "2026-10-12T06:00:00Z".to_owned(),
+            end: "2026-10-12T18:00:00Z".to_owned(),
+        }];
+        assert!(free_between(&whole, &window, None).is_empty());
+        assert_eq!(
+            free_between(&[], &window, None),
+            vec![Free {
+                start: "2026-10-12T06:00:00Z".to_owned(),
+                end: "2026-10-12T18:00:00Z".to_owned(),
+                start_local: None,
+                end_local: None,
+                minutes: 720,
+            }]
+        );
+
+        // An interval this cannot read answers **no** gaps rather than gaps
+        // that ignore it: a gap the owner is busy in is the one answer worse
+        // than no answer.
+        let unreadable = vec![Busy {
+            start: "not an instant".to_owned(),
+            end: "2026-10-12T10:00:00Z".to_owned(),
+        }];
+        assert!(free_between(&unreadable, &window, None).is_empty());
     }
 
     #[test]
