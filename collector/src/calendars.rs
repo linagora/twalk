@@ -50,12 +50,35 @@ pub struct Calendars {
     /// Named for the decision and not for the field: `self.location` would
     /// read as a meeting's own place.
     pub locations_may_travel: SharedSwitch,
+    /// The zones the owner's own events are written in, counted as the poll
+    /// reads them (#369's second source).
+    ///
+    /// The calendar service is asked first, and on the reference deployment
+    /// it answers nothing: measured on 2026-09-26, its collections declare
+    /// no `calendar-timezone` at all, which is the ordinary state of a
+    /// collection whose clients never set one. But every event the owner
+    /// wrote carries a `TZID`, and this collector already parses it for
+    /// every event it publishes — so the zone their agenda is *written in*
+    /// is a fact already passing through this process, and all that was
+    /// missing was to remember it.
+    pub zones_seen: SeenZones,
 }
 
 /// A switch the run loop refreshes and the poll reads. An atomic rather
 /// than a lock: one bool, read on every resource of every round, written
 /// once a round at most.
 pub type SharedSwitch = Arc<AtomicBool>;
+
+/// How many of the owner's events each zone was seen on. A tally rather
+/// than the last one seen, because one invitation authored in Tokyo must not
+/// move the owner to Tokyo — what is wanted is the zone their agenda is
+/// written in, which is the one most of it is written in.
+///
+/// In memory and per process: it is rebuilt by the first round after a
+/// start, which reads the whole window, and refined by every round after.
+/// Nothing is persisted, because a tally on disk would be a second opinion
+/// about the calendar that could disagree with the calendar.
+pub type SeenZones = Arc<std::sync::Mutex<BTreeMap<String, u64>>>;
 
 /// What one poll found: the envelopes to publish, in order, and the cursors
 /// to write once they are on the bus.
@@ -148,7 +171,35 @@ impl Calendars {
                     });
             }
         }
+        // And when no collection declares one — which is the reference
+        // deployment's case, measured on 2026-09-26 — the zone the owner's
+        // own events are written in. A weaker source than a declaration, so
+        // it is asked second and says which it is.
+        let zone = zone.or_else(|| self.zone_of_their_events());
         Ok((crate::freebusy::merge_answers(answers, window), zone))
+    }
+
+    /// The zone most of the owner's events are written in, or `None` before
+    /// this process has read any (#369).
+    ///
+    /// The mode, not the latest: one invitation authored in Tokyo must not
+    /// move the owner to Tokyo. Ties go to the name, so that a calendar
+    /// genuinely split between two zones answers the same thing on every
+    /// round rather than alternating — an unstable answer here would make
+    /// every draft's hours unstable, which is worse than either zone.
+    fn zone_of_their_events(&self) -> Option<Zone> {
+        let seen = self.zones_seen.lock().ok()?;
+        let (name, count) = modal_zone(&seen)?;
+        info!(
+            zone = name,
+            events = count,
+            zones = seen.len(),
+            "no calendar declares a zone; the one the owner's events are written in is the answer"
+        );
+        Some(Zone {
+            name: name.clone(),
+            source: "events",
+        })
     }
 
     /// What one of the owner's events carries, without its words (#355):
@@ -363,7 +414,17 @@ impl Calendars {
     /// one that is not a VEVENT this collector can read.
     fn publishable(&self, resource: &Resource) -> Option<Value> {
         match caldav::parse_vevent(&resource.ics) {
-            Ok(event) => Some(caldav::reduce(
+            Ok(event) => {
+                // Counted here because here is where every event is already
+                // read (#369). An all-day event carries no zone and is not
+                // counted: it is the same day everywhere, which is why
+                // `parse_vevent` drops its `TZID` in the first place.
+                if let Some(zone) = event.timezone.as_deref() {
+                    if let Ok(mut seen) = self.zones_seen.lock() {
+                        *seen.entry(zone.to_owned()).or_insert(0) += 1;
+                    }
+                }
+                Some(caldav::reduce(
                 &event,
                 &self.owner_email,
                 if self.locations_may_travel.load(Ordering::Relaxed) {
@@ -372,7 +433,8 @@ impl Calendars {
                     caldav::Location::Withheld
                 },
                 |identity| self.decide(identity),
-            )),
+                ))
+            }
             Err(error) => {
                 warn!(href = %resource.href, error = %format!("{error:#}"), "the resource is not a VEVENT this collector reads; nothing published");
                 None
@@ -592,6 +654,20 @@ impl Side {
     }
 }
 
+/// The zone a tally was seen on most, and how often.
+///
+/// A free function so that the test exercises the selection itself rather
+/// than a copy of it: a test that recomputes the answer the way the code does
+/// passes by construction and can never disagree with it.
+///
+/// Ties go to the name, so a calendar genuinely split between two zones
+/// answers the same thing on every round. An unstable answer here would make
+/// every draft's hours unstable, which is worse than either zone.
+fn modal_zone(seen: &BTreeMap<String, u64>) -> Option<(&String, &u64)> {
+    seen.iter()
+        .max_by(|left, right| left.1.cmp(right.1).then(right.0.cmp(left.0)))
+}
+
 /// The `TZID` of the first `VTIMEZONE` in a `calendar-timezone` answer.
 ///
 /// Read out of the XML as text rather than parsed as iCalendar, because the
@@ -614,7 +690,42 @@ fn tzid_in(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::tzid_in;
+    use super::{tzid_in, SeenZones};
+
+    fn seen(counts: &[(&str, u64)]) -> SeenZones {
+        let mut tally = std::collections::BTreeMap::new();
+        for (zone, count) in counts {
+            tally.insert((*zone).to_owned(), *count);
+        }
+        std::sync::Arc::new(std::sync::Mutex::new(tally))
+    }
+
+    /// The mode, and the same mode every time (#369).
+    #[test]
+    fn the_zone_of_their_events_is_the_one_most_of_them_are_written_in() {
+        // One invitation authored in Tokyo must not move the owner to Tokyo.
+        let tally = seen(&[("Europe/Paris", 194), ("Asia/Tokyo", 1)]);
+        assert_eq!(pick(&tally).as_deref(), Some("Europe/Paris"));
+
+        // A tie answers the same thing on every round: an unstable answer
+        // here would make every draft's hours unstable, which is worse than
+        // either zone.
+        let split = seen(&[("Europe/Paris", 7), ("America/New_York", 7)]);
+        let first = pick(&split);
+        assert!(first.is_some());
+        for _ in 0..5 {
+            assert_eq!(pick(&split), first);
+        }
+
+        // And nothing at all before a round has read anything.
+        assert_eq!(pick(&seen(&[])), None);
+    }
+
+    /// The selection itself, on the tally it takes — not a copy of it.
+    fn pick(tally: &SeenZones) -> Option<String> {
+        let seen = tally.lock().ok()?;
+        super::modal_zone(&seen).map(|(name, _)| name.clone())
+    }
 
     #[test]
     fn a_zone_is_read_out_of_the_property_however_it_is_escaped() {

@@ -2830,6 +2830,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-nats",
+ "chrono",
+ "chrono-tz",
  "futures",
  "jsonschema",
  "reqwest 0.12.28",
