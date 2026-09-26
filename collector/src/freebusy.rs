@@ -260,14 +260,26 @@ pub struct WorkingDay {
     /// The weekdays that run other hours than the default, by ISO number
     /// (#386), as the Gateway answers them. Empty on a deployment with one
     /// amplitude, and then every gap is clipped exactly as it was before.
-    pub exceptions: std::collections::BTreeMap<u8, (String, String)>,
+    pub exceptions: std::collections::BTreeMap<u8, Span>,
+}
+
+/// One day's own hours, as the Gateway's document spells them.
+///
+/// Named rather than a pair of strings, because the pair travelled through
+/// three functions and a `.0` is not a start of day. The Gateway has a type of
+/// the same shape; the two crates share none by design (ADR 0033), and what
+/// keeps them agreeing is the document between them plus a test on each side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub starts_at: String,
+    pub ends_at: String,
 }
 
 impl WorkingDay {
     /// The hours a weekday runs: its own exception, or the default.
     fn span(&self, weekday: u8) -> (&str, &str) {
         match self.exceptions.get(&weekday) {
-            Some((starts_at, ends_at)) => (starts_at.as_str(), ends_at.as_str()),
+            Some(span) => (span.starts_at.as_str(), span.ends_at.as_str()),
             None => (self.starts_at.as_str(), self.ends_at.as_str()),
         }
     }
@@ -402,7 +414,15 @@ fn within(gaps: Vec<Free>, day: &WorkingDay, zone: chrono_tz::Tz) -> Vec<Free> {
                     WorkingDay::minutes(starts_at),
                     WorkingDay::minutes(ends_at),
                 ) {
-                    (Some(from), Some(to)) => (from, to),
+                    // An end after its start, as well as two readable clocks:
+                    // an inverted span is two valid times, and clipping by it
+                    // would leave that day offering **nothing** — which looks
+                    // like a week the owner has no room in rather than like a
+                    // value nobody can use. The Gateway refuses to write one
+                    // and refuses to read one back; this is the third place
+                    // that must agree, because it is the one that decides what
+                    // is offered.
+                    (Some(from), Some(to)) if to > from => (from, to),
                     _ => (default_from, default_to),
                 };
                 let at = |minutes: u32| {
@@ -443,7 +463,8 @@ fn within(gaps: Vec<Free>, day: &WorkingDay, zone: chrono_tz::Tz) -> Vec<Free> {
 #[cfg(test)]
 mod tests {
     use super::{
-        free_between, merge_answers, parse_free_busy, Busy, Free, Window, WindowError, WorkingDay,
+        free_between, merge_answers, parse_free_busy, Busy, Free, Span, Window, WindowError,
+        WorkingDay,
     };
 
     fn window() -> Window {
@@ -527,9 +548,15 @@ mod tests {
             days: vec![1, 2, 3, 4, 5],
             starts_at: "09:00".to_owned(),
             ends_at: "18:00".to_owned(),
-            exceptions: [(3, ("09:00".to_owned(), "12:30".to_owned()))]
-                .into_iter()
-                .collect(),
+            exceptions: [(
+                3,
+                Span {
+                    starts_at: "09:00".to_owned(),
+                    ends_at: "12:30".to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
         };
         let free = free_between(&[], &window, Some("Europe/Paris"), Some(&day));
         let offered: Vec<(String, String)> = free
@@ -564,27 +591,33 @@ mod tests {
             "{free:?}"
         );
 
-        // A day whose own spelling cannot be read is offered whole rather than
-        // clipped by half a value — the answer the default already gets.
-        let broken = WorkingDay {
-            exceptions: [(3, ("nine".to_owned(), "12:30".to_owned()))]
-                .into_iter()
-                .collect(),
-            ..day.clone()
-        };
-        let free = free_between(&[], &window, Some("Europe/Paris"), Some(&broken));
-        assert_eq!(free.len(), 3);
-        assert_eq!(
-            (
-                free[1].start_local.as_deref(),
-                free[1].end_local.as_deref()
-            ),
-            (
-                Some("2026-10-14T09:00:00+02:00"),
-                Some("2026-10-14T18:00:00+02:00")
-            ),
-            "the day whose own hours could not be read runs the default: {free:?}"
-        );
+        // A day whose own hours cannot be used runs the **default** — both for
+        // a spelling this cannot read and for an inverted span, which is two
+        // valid clocks and would otherwise clip the day to nothing at all.
+        for unusable in [("nine", "12:30"), ("18:00", "09:00"), ("12:00", "12:00")].map(
+            |(starts_at, ends_at)| Span {
+                starts_at: starts_at.to_owned(),
+                ends_at: ends_at.to_owned(),
+            },
+        ) {
+            let broken = WorkingDay {
+                exceptions: [(3, unusable.clone())].into_iter().collect(),
+                ..day.clone()
+            };
+            let free = free_between(&[], &window, Some("Europe/Paris"), Some(&broken));
+            assert_eq!(free.len(), 3, "{unusable:?} dropped a day: {free:?}");
+            assert_eq!(
+                (
+                    free[1].start_local.as_deref(),
+                    free[1].end_local.as_deref()
+                ),
+                (
+                    Some("2026-10-14T09:00:00+02:00"),
+                    Some("2026-10-14T18:00:00+02:00")
+                ),
+                "{unusable:?} did not fall back to the default: {free:?}"
+            );
+        }
     }
 
     #[test]

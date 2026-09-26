@@ -50,6 +50,8 @@
 //! day, because a default would be a decision about somebody's life taken by
 //! whoever wrote the migration.
 
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 /// The most days a week has, and the numbers they are named by: ISO weekday,
@@ -88,21 +90,86 @@ pub struct WorkingDay {
     /// Every key is one of [`WorkingDay::days`]: an exception for a day the
     /// owner does not accept meetings on is two statements that contradict each
     /// other, and it is refused by name rather than resolved by a parser.
-    pub exceptions: std::collections::BTreeMap<u8, Span>,
+    pub exceptions: BTreeMap<u8, Span>,
 }
 
 impl WorkingDay {
     /// The hours a weekday runs: its own exception, or the default.
     ///
-    /// The one function that answers that question, so that the collector's
-    /// clipping and the Companion's sentence cannot read the same state two
-    /// ways.
+    /// This side's one answer to that question, so that the journal, the two
+    /// routes and the screen cannot read one state three ways. The collector
+    /// has a function of the same name over its own type — the two crates
+    /// share no types by design (ADR 0033: it reads the owner's accounts and
+    /// this one holds their decisions) — and what keeps them agreeing is the
+    /// shape of the document between them, `exceptions` keyed by weekday, plus
+    /// the test on each side.
     pub fn span(&self, weekday: u8) -> (&str, &str) {
         match self.exceptions.get(&weekday) {
             Some(span) => (span.starts_at.as_str(), span.ends_at.as_str()),
             None => (self.starts_at.as_str(), self.ends_at.as_str()),
         }
     }
+}
+
+/// The exceptions as one column of the journal: `3=09:00-12:30,5=09:00-16:00`.
+///
+/// Here rather than in [`crate::store`] because it is a format of this type,
+/// and a format written in one module and read in another is a format with two
+/// homes and no round trip. `None` when there are none, so a deployment with
+/// one amplitude writes the row it wrote before #386 and a reader has nothing
+/// to tell apart.
+pub fn exceptions_column(exceptions: &BTreeMap<u8, Span>) -> Option<String> {
+    (!exceptions.is_empty()).then(|| {
+        exceptions
+            .iter()
+            .map(|(weekday, span)| format!("{weekday}={}-{}", span.starts_at, span.ends_at))
+            .collect::<Vec<_>>()
+            .join(",")
+    })
+}
+
+/// That column, read back. An entry this cannot read is **dropped**, and the
+/// day it named then runs the default.
+///
+/// That is the least-wrong of three answers and it is worth saying why:
+/// refusing the whole row would answer "no working day at all", which offers
+/// the owner's nights; inventing hours for the day is not available; so the day
+/// falls back to the amplitude the owner did set, which is the narrowest honest
+/// reading of a state this build wrote and can no longer parse.
+///
+/// "Cannot read" is every rule the write path enforces, and deliberately not a
+/// subset of them: a weekday outside `1..=7` (the route answers keys matching
+/// `^[1-7]$`), a clock that is not `HH:MM`, and an end that is not after its
+/// start. The last one is the reason this list is explicit — an inverted span
+/// is two valid clocks, so a reader that checked only their spelling would pass
+/// it on, and the day would then be clipped to nothing rather than to the
+/// default. A day silently offering no hour at all is exactly the failure the
+/// fallback exists to avoid.
+pub fn exceptions_from_column(column: Option<&str>) -> BTreeMap<u8, Span> {
+    let Some(column) = column else {
+        return BTreeMap::new();
+    };
+    column
+        .split(',')
+        .filter_map(|entry| {
+            let (weekday, hours) = entry.trim().split_once('=')?;
+            let weekday: u8 = weekday
+                .trim()
+                .parse()
+                .ok()
+                .filter(|day| (MONDAY..=SUNDAY).contains(day))?;
+            let (starts_at, ends_at) = hours.trim().split_once('-')?;
+            (is_wall_clock(starts_at) && is_wall_clock(ends_at) && ends_at > starts_at).then(|| {
+                (
+                    weekday,
+                    Span {
+                        starts_at: starts_at.to_owned(),
+                        ends_at: ends_at.to_owned(),
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 /// The working day as its journal answers it: the last decision, or nothing.
@@ -280,7 +347,7 @@ pub fn parse_update(body: &str) -> Result<Update, Invalid> {
 
     // The days that differ (#386), keyed by ISO weekday because that is what
     // `days` is keyed by and a screen must not have to map one to the other.
-    let mut exceptions: std::collections::BTreeMap<u8, Span> = Default::default();
+    let mut exceptions: BTreeMap<u8, Span> = BTreeMap::new();
     match object.get("exceptions") {
         None | Some(Value::Null) => {}
         Some(Value::Object(given)) => {
@@ -527,6 +594,48 @@ mod tests {
             ),
             Ok(Update::Set { .. })
         ));
+    }
+
+    #[test]
+    fn the_column_round_trips_and_drops_what_the_write_path_would_have_refused() {
+        let day = |exceptions: BTreeMap<u8, Span>| WorkingDay {
+            days: vec![1, 2, 3, 4, 5],
+            starts_at: "09:00".to_owned(),
+            ends_at: "18:30".to_owned(),
+            exceptions,
+        };
+        let span = |starts_at: &str, ends_at: &str| Span {
+            starts_at: starts_at.to_owned(),
+            ends_at: ends_at.to_owned(),
+        };
+        let exceptions: BTreeMap<u8, Span> = [(3, span("09:00", "12:30")), (5, span("09:00", "16:00"))]
+            .into_iter()
+            .collect();
+        let column = exceptions_column(&exceptions).expect("a column");
+        assert_eq!(column, "3=09:00-12:30,5=09:00-16:00");
+        assert_eq!(exceptions_from_column(Some(&column)), exceptions);
+
+        // None, not an empty column: the row a deployment with one amplitude
+        // writes is the row it wrote before #386.
+        assert_eq!(exceptions_column(&BTreeMap::new()), None);
+        assert!(exceptions_from_column(None).is_empty());
+        assert!(exceptions_from_column(Some("")).is_empty());
+
+        // And every rule the write path enforces is enforced here too — a
+        // reader that checked fewer of them would pass on a span the route
+        // would have refused. The inverted one is the reason this is a list:
+        // two valid clocks, and a day clipped to nothing instead of to the
+        // default.
+        let read = exceptions_from_column(Some(
+            "3=09:00-12:30,5=bananas,x=09:00-10:00,7=09:00,0=09:00-10:00,9=09:00-10:00,\
+             2=18:00-09:00,4=12:00-12:00",
+        ));
+        assert_eq!(
+            read.keys().copied().collect::<Vec<u8>>(),
+            vec![3],
+            "{read:?}"
+        );
+        assert_eq!(day(read).span(2), ("09:00", "18:30"), "the default");
     }
 
     #[test]

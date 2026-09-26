@@ -881,42 +881,6 @@ pub const MIGRATIONS: [&str; 17] = [
     "#,
 ];
 
-/// `3=09:00-12:30,5=09:00-16:00` as the working day's exceptions (#386).
-///
-/// An entry this cannot read is **dropped**, and the day it named then runs the
-/// default. That is the least-wrong of three answers and it is worth saying
-/// why: refusing the whole row would answer "no working day at all", which
-/// offers the owner's nights; keeping the row and inventing hours for the day
-/// is not available; so the day falls back to the amplitude the owner did set,
-/// which is the narrowest honest reading of a state this build wrote and can no
-/// longer parse. It cannot happen without a defect on the writing side, which is
-/// why it is a `filter_map` and not a refusal — and why the unit test asserts
-/// what it does rather than leaving it to be discovered.
-fn read_exceptions(column: Option<&str>) -> std::collections::BTreeMap<u8, crate::working_day::Span> {
-    let Some(column) = column else {
-        return Default::default();
-    };
-    column
-        .split(',')
-        .filter_map(|entry| {
-            let (weekday, hours) = entry.trim().split_once('=')?;
-            let weekday: u8 = weekday.trim().parse().ok()?;
-            let (starts_at, ends_at) = hours.trim().split_once('-')?;
-            (crate::working_day::is_wall_clock(starts_at)
-                && crate::working_day::is_wall_clock(ends_at))
-            .then(|| {
-                (
-                    weekday,
-                    crate::working_day::Span {
-                        starts_at: starts_at.to_owned(),
-                        ends_at: ends_at.to_owned(),
-                    },
-                )
-            })
-        })
-        .collect()
-}
-
 /// One thing a draft did before it was written (#367).
 ///
 /// Three kinds because they are three different sentences on the approval
@@ -2537,15 +2501,7 @@ impl Store {
                 // deployment with one amplitude writes the row it wrote before
                 // #386, and a reader cannot tell the two apart because there is
                 // nothing to tell apart.
-                (!day.exceptions.is_empty()).then(|| {
-                    day.exceptions
-                        .iter()
-                        .map(|(weekday, span)| {
-                            format!("{weekday}={}-{}", span.starts_at, span.ends_at)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",")
-                }),
+                crate::working_day::exceptions_column(&day.exceptions),
                 reason.clone(),
             ),
             Update::Clear { reason } => ("cleared", None, None, None, None, reason.clone()),
@@ -2575,7 +2531,8 @@ impl Store {
     /// answered exactly as it was before this existed (#381).
     ///
     /// Its `exceptions` are the days that run other hours (#386), read from the
-    /// column this build writes: see [`read_exceptions`] for what an entry it
+    /// column this build writes: see
+    /// [`crate::working_day::exceptions_from_column`] for what an entry it
     /// cannot read does.
     pub fn working_day_state(&self) -> Result<crate::working_day::State> {
         use crate::working_day::{State, WorkingDay};
@@ -2616,7 +2573,7 @@ impl Store {
                     days,
                     starts_at,
                     ends_at,
-                    exceptions: read_exceptions(exceptions.as_deref()),
+                    exceptions: crate::working_day::exceptions_from_column(exceptions.as_deref()),
                 })
             }
             _ => None,
@@ -4645,20 +4602,6 @@ mod bridge_status_tests {
             .expect("the decision records");
         assert!(state.day.is_none());
         assert_eq!(state.since.as_deref(), Some("2026-09-26T20:10:00.000Z"));
-    }
-
-    #[test]
-    fn an_exception_this_build_cannot_read_leaves_its_day_on_the_default() {
-        // It takes a defect on the writing side to get here, which is why it
-        // is asserted rather than left to be met: the day falls back to the
-        // amplitude the owner *did* set — narrower than answering "no working
-        // day", which would offer their nights, and honest in a way inventing
-        // hours for that day would not be.
-        let read = read_exceptions(Some("3=09:00-12:30,5=bananas,x=09:00-10:00,7=09:00"));
-        assert_eq!(read.len(), 1, "{read:?}");
-        assert_eq!(read[&3].ends_at, "12:30");
-        assert!(read_exceptions(None).is_empty());
-        assert!(read_exceptions(Some("")).is_empty());
     }
 
     fn transition(from: ContractState, to: ContractState, occurred_at: &str) -> Transition {

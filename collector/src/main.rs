@@ -1047,10 +1047,10 @@ async fn collection_settings(
                         .filter_map(|(weekday, hours)| {
                             Some((
                                 weekday.parse::<u8>().ok()?,
-                                (
-                                    hours.get("starts_at")?.as_str()?.to_owned(),
-                                    hours.get("ends_at")?.as_str()?.to_owned(),
-                                ),
+                                twalk_collector::freebusy::Span {
+                                    starts_at: hours.get("starts_at")?.as_str()?.to_owned(),
+                                    ends_at: hours.get("ends_at")?.as_str()?.to_owned(),
+                                },
                             ))
                         })
                         .collect()

@@ -425,7 +425,8 @@ export function workingDayTrouble(
 	}
 	// And every day that runs other hours is held to the same two rules
 	// (#386), so the button says why rather than the Gateway saying it in a
-	// 422 about a day the user has to find again.
+	// 422. Which day is not named: the rows the screen shows are the days that
+	// differ, usually one or two, and they are on the screen while this reads.
 	for (const day of exceptionDays(form)) {
 		const hours = form.exceptions[day];
 		if (!isWallClock(hours.startsAt) || !isWallClock(hours.endsAt)) {

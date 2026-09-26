@@ -641,8 +641,7 @@ async fn write_working_day(
     }
 }
 
-/// The working day as both of its routes answer it.
-/// The working day as both routes answer it: the three members #381 defined and,
+/// The working day as both of its routes answer it: the three members #381 defined and,
 /// when there are any, the days that run other hours (#386).
 ///
 /// `exceptions` is **absent** and not an empty object on a deployment with one
@@ -671,6 +670,8 @@ fn day_json(day: &crate::working_day::WorkingDay) -> Value {
     rendered
 }
 
+/// `GET /api/settings/working-day`'s whole answer: the day above, and who
+/// decided it and when.
 fn working_day_json(state: &crate::working_day::State) -> Value {
     json!({
         "day": state.day.as_ref().map(day_json),

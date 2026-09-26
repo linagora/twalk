@@ -152,8 +152,8 @@
 	let workingDayReason = $state('');
 	let workingDayOutcome = $state<'saved' | 'cleared' | { refused: Refused } | null>(null);
 	let workingDayDraft = $state(workingDayForm(null));
-	/** The day the "hours of its own" control is about to add, or `0` for none. */
-	let dayToAdd = $state(0);
+	/** The day the "hours of its own" control is about to add, or `null`. */
+	let dayToAdd = $state<number | null>(null);
 
 	const credential = $derived<CredentialState | null>(
 		configuration === null ? null : credentialState(configuration)
@@ -286,8 +286,8 @@
 	}
 
 	/** Give one day hours of its own, starting from the default (#386). */
-	function giveOwnHours(day: number) {
-		if (day === 0 || workingDayDraft.exceptions[day] !== undefined) {
+	function giveOwnHours(day: number | null) {
+		if (day === null || workingDayDraft.exceptions[day] !== undefined) {
 			return;
 		}
 		workingDayDraft = {
@@ -300,7 +300,7 @@
 				[day]: { startsAt: workingDayDraft.startsAt, endsAt: workingDayDraft.endsAt }
 			}
 		};
-		dayToAdd = 0;
+		dayToAdd = null;
 	}
 
 	/** And back to the default: "as usual again", not a day removed. */
@@ -1014,7 +1014,7 @@
 								disabled={busy !== null}
 								data-testid="working-day-exception-add"
 							>
-								<option value={0}>{$t('settings.workingDay.exceptions.choose')}</option>
+								<option value={null}>{$t('settings.workingDay.exceptions.choose')}</option>
 								{#each onTheDefault as day (day)}
 									<option value={day}>{dayName(day)}</option>
 								{/each}
@@ -1023,7 +1023,7 @@
 						<button
 							class="button button--quiet small"
 							type="button"
-							disabled={busy !== null || dayToAdd === 0}
+							disabled={busy !== null || dayToAdd === null}
 							onclick={() => giveOwnHours(dayToAdd)}
 							data-testid="working-day-exception-add-confirm"
 						>
@@ -1147,8 +1147,6 @@
 		gap: var(--space-1);
 	}
 
-	/* Two times side by side, because they are one amplitude, and stacked
-	   when the screen is narrow. */
 	/* The days that run other hours (#386): rows under the amplitude, each one
 	   a day, its two times and the way back to the default. Quiet, because they
 	   are exceptions to the sentence above them and not a second form. */
@@ -1170,6 +1168,8 @@
 		min-width: 6rem;
 	}
 
+	/* Two times side by side, because they are one amplitude, and stacked
+	   when the screen is narrow. */
 	.amplitude {
 		display: flex;
 		flex-wrap: wrap;
