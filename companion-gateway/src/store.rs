@@ -18,6 +18,16 @@
 //!   outbox publishes afterwards and marks the row. A crash in between
 //!   republishes (deduplicated on the bus by `Nats-Msg-Id`) rather than
 //!   losing the decision.
+//! - **One thread never holds the connection twice.** There is a single
+//!   connection behind a single mutex, and the guard is not reentrant, so a
+//!   writer that takes it and then calls a reader that takes it again
+//!   deadlocks — for the life of the process, with no panic, no message and
+//!   no log line. This was the one property here left to discipline, and
+//!   discipline lost: it shipped in `record_mail_triage_decision` and reached
+//!   the reference deployment, where the first rule the owner saved would
+//!   have taken the Gateway's whole consent surface down (#426). A debug
+//!   build now refuses it at the moment it happens and names it; see
+//!   [`Store::connection`] for the shape a writer must use instead (#427).
 //!
 //! Ticket #50 added a fourth, which is what makes a cold consumer's hand-off
 //! safe: **the snapshot's position is consistent with its content**
@@ -3372,10 +3382,113 @@ impl Store {
         )
     }
 
-    fn connection(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.connection
-            .lock()
-            .expect("the consent store mutex is never poisoned")
+    /// The connection, locked.
+    ///
+    /// **Do not bind the guard if the same function goes on to call another
+    /// method of this store.** The mutex is not reentrant, so holding it
+    /// across such a call deadlocks permanently. A writer that reads its own
+    /// state back writes through the temporary instead —
+    /// `self.connection().execute(...)`, dropped at the end of the statement
+    /// — and only then reads. `record_working_day_decision` and
+    /// `record_mail_triage_decision` are both written that way.
+    ///
+    /// In a debug build, taking it twice on one thread panics here by name
+    /// rather than hanging. A release build keeps the bare lock, so the
+    /// deployed Gateway pays nothing: the check buys an early failure in the
+    /// tests, not a guarantee in production.
+    fn connection(&self) -> ConnectionGuard<'_> {
+        // Taken **before** the lock, on purpose: the check has to fire where
+        // the deadlock would have been, not after the thread is already
+        // waiting on itself.
+        #[cfg(debug_assertions)]
+        let held = held::take(&self.connection as *const Mutex<Connection> as usize);
+        ConnectionGuard {
+            guard: self
+                .connection
+                .lock()
+                .expect("the consent store mutex is never poisoned"),
+            #[cfg(debug_assertions)]
+            held,
+        }
+    }
+}
+
+/// The store's connection, locked — and in a debug build, the knowledge that
+/// this thread was not already holding it.
+///
+/// Derefs to [`Connection`], so every call site reads exactly as it did when
+/// this was a bare `MutexGuard`.
+struct ConnectionGuard<'a> {
+    guard: std::sync::MutexGuard<'a, Connection>,
+    /// Which store's connection to stop accounting for on drop: the address
+    /// of its mutex, which is what [`held`] keys on.
+    #[cfg(debug_assertions)]
+    held: usize,
+}
+
+impl std::ops::Deref for ConnectionGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for ConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.guard
+    }
+}
+
+impl Drop for ConnectionGuard<'_> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        held::release(self.held);
+    }
+}
+
+/// Which store connections this thread is holding, so that taking one twice
+/// is a panic that names the bug instead of a process that stops answering
+/// (#427).
+///
+/// Keyed on the address of each store's mutex rather than counted once: one
+/// thread holding **two different** stores is ordinary — the tests open
+/// several — and only re-entering the same one deadlocks.
+///
+/// Compiled out of a release build entirely.
+#[cfg(debug_assertions)]
+mod held {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HELD: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+    }
+
+    /// Records that this thread is taking `store`'s connection, and panics if
+    /// it is already holding it. Returns the key, so the guard can hand it
+    /// back on drop.
+    pub(super) fn take(store: usize) -> usize {
+        // `try_with` and not `with`: a thread being torn down has no
+        // thread-local left, and a missing ledger must not turn into a second
+        // failure on top of whatever is already unwinding.
+        let _ = HELD.try_with(|held| {
+            let mut held = held.borrow_mut();
+            assert!(
+                !held.contains(&store),
+                "this thread already holds the consent store's connection, and                  taking it twice deadlocks for the life of the process. A writer                  that reads its own state back must write through the temporary                  — self.connection().execute(..) — so that the guard is dropped                  before the read. See the note on Store::connection (#426, #427)."
+            );
+            held.push(store);
+        });
+        store
+    }
+
+    pub(super) fn release(store: usize) {
+        let _ = HELD.try_with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(at) = held.iter().rposition(|holding| *holding == store) {
+                held.remove(at);
+            }
+        });
     }
 }
 
@@ -3871,6 +3984,42 @@ mod tests {
                 registry.iter().any(|row| &row[0] == network),
                 "the connection {network} the migration needed is registered: {registry:?}"
             );
+        }
+    }
+
+    /// Taking the connection twice on one thread is the deadlock that reached
+    /// production in #426: the second take waits on a mutex the first one
+    /// holds, forever, and nothing says so. A debug build must refuse it
+    /// where it happens.
+    ///
+    /// This is the guard on the guard: if the check is ever compiled out or
+    /// keyed wrongly, this test stops panicking and fails — it cannot hang,
+    /// because a passing run never reaches the second lock.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "already holds the consent store's connection")]
+    fn taking_the_connection_twice_on_one_thread_is_refused_rather_than_hung() {
+        let store = store("reentrant-connection");
+        let _first = store.connection();
+        let _second = store.connection();
+    }
+
+    /// The other half of the check, and the reason it is keyed on each
+    /// store's own mutex: holding two **different** stores at once is
+    /// ordinary, and a single counter would have called it a deadlock.
+    #[test]
+    fn holding_two_different_stores_at_once_is_not_a_deadlock() {
+        let one = store("two-stores-one");
+        let other = store("two-stores-other");
+        let first = one.connection();
+        let second = other.connection();
+        for (which, connection) in [("one", &first), ("other", &second)] {
+            let decisions: i64 = connection
+                .query_row("SELECT COUNT(*) FROM consent_decision", [], |row| {
+                    row.get(0)
+                })
+                .expect("the journal reads");
+            assert_eq!(decisions, 0, "the {which} store starts with no decision");
         }
     }
 
