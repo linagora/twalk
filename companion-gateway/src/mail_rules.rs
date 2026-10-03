@@ -513,19 +513,26 @@ mod the_agent_can_only_propose {
             include_str!("hermes_answer_http.rs"),
             include_str!("hermes_freebusy_http.rs"),
         );
-        // Insensitive to formatting: rustfmt breaks a long `.route(…)` across
-        // lines, so the path is the first string literal after `.route(`
-        // rather than the text immediately following it.
+        // The needle is assembled rather than written out. `tests/openapi.rs`
+        // scans this crate's sources for the same call to check the router
+        // against `openapi.yaml`, and a literal spelling here reads to that
+        // scanner as a route whose path it cannot parse — which is exactly
+        // how #422 broke it, and why `hermes_answer_http.rs` carries the same
+        // warning. Two tests reading one source must not collide in it.
+        const CALL: &str = concat!(".rou", "te(");
+        // Insensitive to formatting: rustfmt breaks a long call across lines,
+        // so the path is the first string literal after it rather than the
+        // text immediately following it.
         let mounted: Vec<&str> = seam
-            .match_indices(".route(")
+            .match_indices(CALL)
             .filter_map(|(at, _)| {
-                let rest = &seam[at + ".route(".len()..];
+                let rest = &seam[at + CALL.len()..];
                 let open = rest.find('"')?;
                 let rest = &rest[open + 1..];
                 Some(&rest[..rest.find('"')?])
             })
-            // `.route("…")` also appears inside the doc comments that explain
-            // why these literals are written out; only real paths count.
+            // The call also appears inside the doc comments that explain why
+            // these literals are written out; only real paths count.
             .filter(|path: &&str| path.starts_with('/'))
             .collect();
         assert_eq!(

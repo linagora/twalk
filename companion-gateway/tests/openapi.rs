@@ -3469,6 +3469,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             // The working day (#381), `null` here because nobody set one in
             // this run: a collector that finds it null does not filter.
             "working_day": null,
+            // The triage rules and the undos still owed (#416, #418), both
+            // empty because nobody decided in this run. Empty and not absent:
+            // a collector reads this seam to learn it has nothing to apply,
+            // and a missing member would be a collector guessing.
+            "mail_triage": { "destinations": [], "rules": [] },
+            "mail_undos": [],
         }),
         "what a collector is told is what it may publish and what it may offer, and nothing \
          about the owner: {}",

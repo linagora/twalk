@@ -172,6 +172,15 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
         // collector has no business holding one — the same token opens both,
         // so what keeps them apart is which answer each route gives.
         (&Method::GET, "/api/settings/collection") => Requirement::ServiceToken,
+        // The move report (#418): the collector again, and the other half of
+        // the seam above — it reads the owner's rules there and reports what
+        // it moved here, holding the one token. This row was missing when the
+        // route was added, so the default below applied, and a collector that
+        // has no device token was refused: the mail moved and the owner's
+        // record of it did not exist. Both the handler's own documentation and
+        // `openapi.yaml` said service token from the start; it was this table
+        // that disagreed, and the description was right.
+        (&Method::POST, "/api/internal/mail-moves") => Requirement::ServiceToken,
         _ => Requirement::DeviceToken,
     }
 }
