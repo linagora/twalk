@@ -201,10 +201,10 @@
 		},
 
 		"gateway": {
-			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, the connections' registry and what each said about itself off the bus (#275), approvals — refused towards a connection that cannot send —, Hermes's one governed pull (#281: a free/busy read signed with the answers' secret, capped at fourteen days, refused on a connection that is not connected, relayed to a stub collector, recorded and counted; the skill's script run against the route), suggestions, settings, the disclosure switch and its journal, the portal register, whether a runtime is present, and the OpenAPI description against the routes it serves.",
+			"what": "The Companion Gateway at its process boundary: the session, the consent journal and its snapshot, bootstrap, the bridge facade and its status webhook, the connections' registry and what each said about itself off the bus (#275), approvals — refused towards a connection that cannot send —, Hermes's one governed pull (#281: a free/busy read signed with the answers' secret, capped at fourteen days, refused on a connection that is not connected, relayed to a stub collector, recorded and counted; the skill's script run against the route), the owner's search of their archive relayed behind the session guard (lot 3a: a device-token read whose hits carry a snippet and never a body, whose filters are relayed and not applied here, whose collector refusals keep their own codes, and whose index status relays the document count), suggestions, settings, the disclosure switch and its journal, the portal register, whether a runtime is present, and the OpenAPI description against the routes it serves.",
 			"component": "companion-gateway",
 			"workdir": "companion-gateway",
-			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test disclosure --test hermes_answers --test hermes_freebusy --test openapi --test pending --test portals --test runtime --test service --test settings --test signin --test suggestions",
+			"run": "cargo test --lib --test approvals --test bootstrap --test bridge_status --test bridges --test consent --test consent_snapshot --test disclosure --test hermes_answers --test hermes_freebusy --test openapi --test pending --test portals --test runtime --test search --test service --test settings --test signin --test suggestions",
 			"targets": [
 				"approvals",
 				"bootstrap",
@@ -219,6 +219,7 @@
 				"pending",
 				"portals",
 				"runtime",
+				"search",
 				"service",
 				"settings",
 				"signin",

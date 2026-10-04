@@ -88,6 +88,11 @@ pub struct Metrics {
     /// free/busy series: two questions an owner asks separately, and one
     /// series holding both would answer neither.
     hermes_event_reads: Mutex<BTreeMap<&'static str, u64>>,
+    /// Searches through the Gateway (lot 3a), by outcome: `served` or the
+    /// refusal code the browser was given — including this Gateway's own
+    /// `search_unavailable`, since a search that reached no collector is the
+    /// failure worth seeing on a slope.
+    searches: Mutex<BTreeMap<&'static str, u64>>,
     /// Bridge transitions the outbox published, and how many are still
     /// waiting — the same pair as consent's, for the same question.
     bridge_status_published: Mutex<u64>,
@@ -210,6 +215,7 @@ impl Metrics {
             hermes_answers: Mutex::new(BTreeMap::new()),
             hermes_reads: Mutex::new(BTreeMap::new()),
             hermes_event_reads: Mutex::new(BTreeMap::new()),
+            searches: Mutex::new(BTreeMap::new()),
             bridge_status_published: Mutex::new(0),
             bridge_status_outbox_pending: Mutex::new(None),
             approvals_published: Mutex::new(0),
@@ -316,6 +322,18 @@ impl Metrics {
     pub fn record_hermes_read(&self, outcome: &'static str) {
         *self
             .hermes_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
+    /// Counts one search the owner made (lot 3a): `served`, or the code it
+    /// was refused with. The outcome is the refusal's own `code()`, so the
+    /// label and the body a browser was given are one word.
+    pub fn record_search(&self, outcome: &'static str) {
+        *self
+            .searches
             .lock()
             .expect("the metrics mutex is never poisoned")
             .entry(outcome)
@@ -659,6 +677,18 @@ impl Metrics {
             {
                 out.push_str(&format!(
                     "twalk_companion_gateway_hermes_event_reads_total{{outcome=\"{outcome}\"}} {count}\n"
+                ));
+            }
+            out.push_str("# HELP twalk_companion_gateway_searches_total Searches the owner made through this Gateway, by outcome: served, or the refusal code (lot 3a). Never the query, never a hit.\n");
+            out.push_str("# TYPE twalk_companion_gateway_searches_total counter\n");
+            for (outcome, count) in self
+                .searches
+                .lock()
+                .expect("the metrics mutex is never poisoned")
+                .iter()
+            {
+                out.push_str(&format!(
+                    "twalk_companion_gateway_searches_total{{outcome=\"{outcome}\"}} {count}\n"
                 ));
             }
             out.push_str("# HELP twalk_companion_gateway_approval_refusals_total Approvals refused, by the code the caller was given.\n");

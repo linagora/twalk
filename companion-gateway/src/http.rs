@@ -50,6 +50,7 @@ use crate::portals::Portals;
 use crate::portals_http;
 use crate::runtime_presence::RuntimePresence;
 use crate::runtime_presence_http;
+use crate::search_http;
 use crate::session::Sessions;
 use crate::session_http;
 use crate::settings::Settings;
@@ -154,6 +155,11 @@ pub struct Gateway {
     /// Hermes's free/busy reads ([`crate::hermes_freebusy`], ticket #281).
     /// `None` on the same terms as [`Self::answers`].
     reads: Option<Arc<crate::hermes_freebusy::Reads>>,
+    /// The owner's search of their archive ([`crate::search`], lot 3a).
+    /// `None` when the Gateway holds no collector to relay to, on the same
+    /// terms as [`Self::reads`] — but with a refusal of its own,
+    /// `search_unavailable`, since its caller is a browser and not Hermes.
+    searches: Option<Arc<crate::search::Searches>>,
     /// Hermes's answers ([`crate::hermes_answer`], ticket #206). `None` when
     /// no seam is configured, which is every deployment that has not opted
     /// into ADR 0032's integration — and then the route says which variable
@@ -187,6 +193,7 @@ impl Gateway {
             connections: Arc::new(crate::connections::Registry::default()),
             connection_statuses: None,
             reads: None,
+            searches: None,
             answers: None,
             now_unix_seconds,
         }
@@ -286,6 +293,19 @@ impl Gateway {
 
     pub fn reads(&self) -> Option<Arc<crate::hermes_freebusy::Reads>> {
         self.reads.clone()
+    }
+
+    /// Adds the half that serves the owner's search of their archive (lot
+    /// 3a), the same way: it relays to the same collector as
+    /// [`Self::with_reads`], and is kept separate because its route is the
+    /// owner's session and not Hermes's signature.
+    pub fn with_searches(mut self, searches: Option<Arc<crate::search::Searches>>) -> Self {
+        self.searches = searches;
+        self
+    }
+
+    pub fn searches(&self) -> Option<Arc<crate::search::Searches>> {
+        self.searches.clone()
     }
 
     /// Adds the pending-contact projection (ticket #54), the same way. It is
@@ -473,6 +493,10 @@ pub fn router(gateway: Gateway) -> Router {
         // same caller, the same secret over the request line, and the same
         // guard entry.
         .merge(hermes_freebusy_http::routes())
+        // The owner's search of their archive (lot 3a): the same collector as
+        // the free/busy read, but a route of the owner's own session — a
+        // browser calls it, so the guard's default puts a device token on it.
+        .merge(search_http::routes())
         // The Gateway's API surface keeps growing this way, and the prefix
         // answers as an API throughout: a JSON 404, never the app shell.
         .route("/api", any(api_not_found))
