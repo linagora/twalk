@@ -906,9 +906,19 @@ services:
       # at a fixed path; the entrypoint copies it for the collector's account
       # and refuses a file readable by others (see collector-entrypoint.sh).
       - ${COLLECTOR_OIDC_CLIENT_SECRET_FILE:-/dev/null}:/run/secrets/collector-client-secret:ro
+      # The search index's key (lot 3a), when there is one — /dev/null and
+      # an empty COLLECTOR_INDEX_KEY_FILE otherwise, which leaves the index
+      # off. Same shape as the client secret, one entrypoint copy at 0600;
+      # the entrypoint does NOT refuse a looser mode here, because this is
+      # at-rest encryption material for the deployment and not the
+      # credential that makes the collector this SSO's client.
+      - ${COLLECTOR_INDEX_KEY_FILE:-/dev/null}:/run/secrets/collector-index-key:ro
       # The grant (`oidc/grant.json`, mode 0600), written by `authorize` and
       # rewritten on every renewal — atomically, a temporary file beside it
       # renamed over, which is why the mount is a volume and never a file.
+      # The search index lives here too, at `/data/index` (lot 3a): it must
+      # be encrypted at rest, so this volume's host path is what a gocryptfs
+      # mount is pointed at before a key is named — see deploy/README.md.
       - collector-data:/data
     # Every operator variable passes through as `${VAR:-}` rather than
     # `${VAR:?…}`: the collector itself refuses to start naming the missing
@@ -946,6 +956,10 @@ services:
       # to (#281), on the compose network only; its bearer is the service
       # token above. The Gateway finds it at GATEWAY_COLLECTOR_URL.
       COLLECTOR_HTTP_LISTEN: ${COLLECTOR_HTTP_LISTEN:-${GATEWAY_SERVICE_TOKEN:+0.0.0.0:8090}}
+      # Set only when the operator named a key (lot 3a): the entrypoint has
+      # copied it to /run/collector/index-key and exported the path itself,
+      # so an unset variable here means an index that stays off (§4.2).
+      COLLECTOR_INDEX_KEY_FILE: ${COLLECTOR_INDEX_KEY_FILE:+/run/secrets/collector-index-key}
       COLLECTOR_LOG_LEVEL: ${COLLECTOR_LOG_LEVEL:-info}
     # The collector exits on configuration it refuses — a connection the
     # registry does not know, a secret file it will not accept — and compose

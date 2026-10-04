@@ -72,4 +72,37 @@ esac
 install -m 0600 -o collector -g collector "$mount" /run/collector/client-secret
 chown collector:collector /data
 export COLLECTOR_OIDC_CLIENT_SECRET_FILE=/run/collector/client-secret
+
+# The search index's key (lot 3a), when there is one. Handled like the client
+# secret — the operator's file is a bind mount of a host file its own account
+# owns, so a fixed uid this image could pick would not own it; the entrypoint
+# copies it for the `collector` account it drops to. Unlike the client secret
+# there is no mode refusal here: that refusal exists because the client secret
+# is what makes this process *this SSO's client*, while this key is at-rest
+# encryption material for the deployment — the encryption itself is the
+# gocryptfs mount of the state volume (spec §4.2–4.3), not this process — and
+# a loose mode on a host-local file is not the same claim about identity. An
+# absent file is legitimate, not a fault: no key means the index is off, and
+# `/search` answers `503 index_not_configured` (spec §4.2) — a capability that
+# will hold years of other people's words does not switch itself on by
+# omission, and its absence must never be a startup refusal that would turn an
+# optional capability into a failure of the mail.
+index_key=/run/secrets/collector-index-key
+if [ -f "$index_key" ]; then
+	install -m 0600 -o collector -g collector "$index_key" /run/collector/index-key
+	export COLLECTOR_INDEX_KEY_FILE=/run/collector/index-key
+elif [ -d "$index_key" ]; then
+	# A path named in COLLECTOR_INDEX_KEY_FILE that did not exist became a
+	# directory instead of a mount — a typo in `.env`. compose has already
+	# put that directory's path in COLLECTOR_INDEX_KEY_FILE, and the binary
+	# would refuse to start trying to read a directory as a key; the index
+	# is optional, so blank the variable and let the mail flow — warned,
+	# not hidden, because silence would leave the operator believing they
+	# had turned search on.
+	echo "collector: COLLECTOR_INDEX_KEY_FILE names a path that does not exist on the" >&2
+	echo "host, so Docker mounted a directory at $index_key. The search index stays OFF" >&2
+	echo "(no key, no index). Check the path in .env and start again." >&2
+	export COLLECTOR_INDEX_KEY_FILE=
+fi
+
 exec setpriv --reuid=collector --regid=collector --clear-groups /usr/local/bin/twalk-collector "$@"
