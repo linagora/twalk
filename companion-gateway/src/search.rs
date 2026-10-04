@@ -193,9 +193,9 @@ impl SearchRefusal {
                 "this deployment has no search index configured".to_owned()
             }
             SearchRefusal::IndexUnavailable => "the search index could not be read".to_owned(),
-            SearchRefusal::InvalidQuery => {
-                "q is the text to search, between 1 and 512 characters".to_owned()
-            }
+            SearchRefusal::InvalidQuery => "q is the text to search, between 1 and 512 characters, \
+                 and limit is a whole number between 1 and 100"
+                .to_owned(),
             SearchRefusal::InvalidWindow => "from is after to".to_owned(),
             SearchRefusal::CollectorNotConfigured => {
                 "the search is unavailable on this deployment: GATEWAY_COLLECTOR_URL is not \

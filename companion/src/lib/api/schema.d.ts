@@ -1642,7 +1642,10 @@ export interface paths {
          *     **The filters are the collector's.** `source`, `from` and `to` are
          *     relayed untouched and applied on the collector's side; a second
          *     filtering here would be a second answer to a question that already has
-         *     one. `limit` is a hint the collector clamps.
+         *     one. `limit` is the collector's: absent it answers 20, and a value
+         *     outside 1–100 is refused `invalid_query`, never silently clamped — a
+         *     client that asked for 1000 and received 100 would believe the archive
+         *     held no more.
          *
          *     **The refusals are the collector's codes, relayed unchanged**
          *     (`index_not_configured`, `index_unavailable`, `invalid_query`,
@@ -8513,7 +8516,7 @@ export interface operations {
             query: {
                 /** @description The earliest date to search, RFC 3339. Absent has no lower bound. */
                 from?: string;
-                /** @description The most hits to answer. The collector clamps it to its own bounds. */
+                /** @description The most hits to answer, between 1 and 100. Absent answers 20; a value outside the bounds is the collector's `400 invalid_query`. */
                 limit?: number;
                 /** @description The text to search, between 1 and 512 characters. An empty or over-long `q` is the collector's `400 invalid_query`. */
                 q: string;
@@ -8541,7 +8544,7 @@ export interface operations {
                 };
             };
             /**
-             * @description - `invalid_query` — `q` is empty or longer than the collector accepts.
+             * @description - `invalid_query` — `q` is empty or longer than the collector accepts, or `limit` is not a whole number between 1 and 100.
              *     - `invalid_window` — `from` is after `to`, or a bound is not a date.
              */
             400: {

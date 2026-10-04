@@ -246,8 +246,8 @@ export function explain(trouble: ApiTrouble, code: string | null): Refusal {
 /**
  * How many hits one search asks for.
  *
- * Named here so the screen and its bound sentence cannot disagree: the
- * collector clamps the number to its own bounds, and this is the number the
+ * Named here so the screen and its bound sentence cannot disagree: 20 is
+ * inside the collector's accepted 1–100, so this is exactly the number the
  * screen asked with. When the answer comes back full, the screen says the list
  * is at its bound — the bound is in the answer (`count`) and not only in the
  * configuration (the `window.reached_start_of_stream` pattern, spec §5.4).
