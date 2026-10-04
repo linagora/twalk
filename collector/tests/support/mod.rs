@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use twalk_collector::oidc::{Client, Settings};
+use twalk_test_harness::jmap_fake::FakeMail;
 use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
 use twalk_test_harness::{nats_url, poll_until, Bus, FakeSso};
 
@@ -220,6 +221,77 @@ impl Run {
         CollectorProc::start(&self.env_with_gateway())
     }
 
+    /// The environment of the suites that need the internal HTTP endpoint
+    /// (lot 3a): the Gateway's snapshot seam, the endpoint on a free port,
+    /// the metrics on another so the counters can be read, and — when
+    /// `index` — a throwaway key file in this run's state directory, which is
+    /// what opens the search index (the key is read, proving it is there; the
+    /// index itself is the deployment's encrypted mount, spec §4.2).
+    /// Returns the environment and the two ports, so one builder serves both
+    /// starters rather than the suite growing a second way to start the
+    /// binary.
+    fn env_serving(&self, index: bool) -> Result<(Vec<(String, String)>, u16, u16)> {
+        let http_port = free_port()?;
+        let metrics_port = free_port()?;
+        let mut env = self.env_with_gateway();
+        env.push((
+            "COLLECTOR_HTTP_LISTEN".to_owned(),
+            format!("127.0.0.1:{http_port}"),
+        ));
+        env.push((
+            "COLLECTOR_METRICS_LISTEN".to_owned(),
+            format!("127.0.0.1:{metrics_port}"),
+        ));
+        if index {
+            let key = self.dir.path().join("index.key");
+            std::fs::write(&key, b"test-only-key")
+                .with_context(|| format!("failed to write the index key {}", key.display()))?;
+            env.push((
+                "COLLECTOR_INDEX_KEY_FILE".to_owned(),
+                key.to_string_lossy().into_owned(),
+            ));
+        }
+        Ok((env, http_port, metrics_port))
+    }
+
+    /// The collector, against the fake Gateway, with the internal HTTP
+    /// endpoint served and **no** search index: `/search` is the structured
+    /// `503 index_not_configured` the suite asserts. Returns the process and
+    /// the endpoint's port.
+    pub fn start_with_gateway_and_http(&self) -> Result<(CollectorProc, u16)> {
+        let (env, http_port, _metrics_port) = self.env_serving(false)?;
+        Ok((CollectorProc::start(&env)?, http_port))
+    }
+
+    /// The collector, against the fake Gateway, with the internal HTTP
+    /// endpoint **and a search index** (lot 3a): the second free port carries
+    /// the metrics, for `wait_metric` and the refusal counters, and the first
+    /// is the endpoint `/search` and `/index/status` answer on. Returns
+    /// `(process, http_port, metrics_port)`.
+    pub fn start_with_gateway_and_index(&self) -> Result<(CollectorProc, u16, u16)> {
+        let (env, http_port, metrics_port) = self.env_serving(true)?;
+        Ok((CollectorProc::start(&env)?, http_port, metrics_port))
+    }
+
+    /// Un mail arrive dans l'INBOX du propriétaire, d'un tiers : poussé au
+    /// fake JMAP, qui bouge l'état et règle la sonnette du push — le poll le
+    /// lit au tour suivant (#276, #277).
+    pub fn deliver_mail(&self, name: &str, from: &str, subject: &str) -> String {
+        self.sso.deliver(FakeMail::from_person(
+            name,
+            from,
+            OWNER,
+            subject,
+            &format!("Corps de {name}."),
+        ))
+    }
+
+    /// L'index de recherche écrit sous le répertoire d'état de ce run :
+    /// `COLLECTOR_STATE_DIR/index` par défaut (config.rs).
+    pub fn index_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("index")
+    }
+
     /// Every byte the collector wrote under its state directory, the grant
     /// and the cursors alike: what "never on disk" is asserted on.
     pub fn stored_bytes(&self) -> Result<String> {
@@ -369,4 +441,42 @@ impl CollectorProc {
 
 pub fn sha256_hex(input: &str) -> String {
     twalk_test_harness::sha256_hex(input)
+}
+
+/// A free port on the loopback, for an endpoint a test must know the address
+/// of: what `freebusy.rs` and this suite both need.
+pub fn free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
+/// The `/metrics` text as it stands, and one gauge's value off it: "the
+/// index is behind" is read off the same text a dashboard scrapes.
+pub async fn metric(port: u16, name: &str) -> Result<Option<f64>> {
+    let text = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
+        .await?
+        .text()
+        .await?;
+    Ok(text.lines().find_map(|line| {
+        line.strip_prefix(&format!("{name} "))
+            .and_then(|value| value.trim().parse::<f64>().ok())
+    }))
+}
+
+/// Waits until the named gauge equals `value` (to the Prometheus text's own
+/// spelling, so `1.0` is `1`). Used for the search index's document count,
+/// which no route serves before T6 (C25).
+pub async fn wait_metric(port: u16, name: &str, value: f64) -> Result<()> {
+    poll_until(
+        || async {
+            metric(port, name)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|found| found == value)
+                .then_some(())
+        },
+        &format!("{name} to reach {value}"),
+    )
+    .await
 }

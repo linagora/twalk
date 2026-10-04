@@ -317,6 +317,40 @@ async fn main() -> Result<()> {
         }
     };
 
+    // The owner's search of their archive (lot 3a). Built always, even with
+    // no collector: the route's refusal to relay is then `search_unavailable`,
+    // counted like any other, rather than a dead branch that would answer
+    // without leaving a trace. It holds the same `(collector_url,
+    // service_token)` couple as the free/busy reads — one collector, one
+    // bearer, whatever the read.
+    let searches = {
+        let collector = config.hermes_answers.as_ref().and_then(|seam| {
+            seam.collector_url.clone().zip(
+                config
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.service_token.clone()),
+            )
+        });
+        match &collector {
+            Some((url, _)) => info!(
+                collector_url = %url,
+                "the archive search is on: GET {} relays to the collector, which holds the \
+                 index and applies the consent filter",
+                twalk_companion_gateway::search::SEARCH_PATH
+            ),
+            None => warn!(
+                "GATEWAY_COLLECTOR_URL is not set: GET {} answers 503 search_unavailable, \
+                 since the index lives in the collector",
+                twalk_companion_gateway::search::SEARCH_PATH
+            ),
+        }
+        Some(Arc::new(twalk_companion_gateway::search::Searches::new(
+            collector,
+            metrics.clone(),
+        )))
+    };
+
     // The bridge login facade (ticket #55). Built from configuration alone:
     // no bridge is contacted at startup, because a bridge that is down must
     // not keep the Companion's origin from coming up. A misconfigured bridge
@@ -632,7 +666,8 @@ async fn main() -> Result<()> {
             .with_connections(connections.clone())
             .with_connection_statuses(store.clone())
             .with_answers(answers)
-            .with_reads(reads),
+            .with_reads(reads)
+            .with_searches(searches),
     );
     // Startup reconciliation (ticket #56): one `whoami` per bridge, after
     // the origin is bound so a slow bridge never delays the Companion coming

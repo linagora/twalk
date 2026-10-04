@@ -352,6 +352,59 @@ Filter Subjects: twalk.persona.reply.approved.v1.posted, twalk.persona.reply.app
 
 Nothing already on the relay is lost — the clerk holds no state of its own (ADR 0035) — but a report published while the durable is gone is one the journal will not carry, so do it while nothing is being approved.
 
+## The search archive: an index you must encrypt before you turn it on
+
+The collector can hold a **full-text index of the owner's archive** — their mail, then their messaging — so the Companion's `/search` can find a message from three years ago instead of the owner opening each client and remembering which of them has to say what (lot 3a). **What it does today, before you read further:** turning the index on makes searchable the mail the collector **reads from that moment on** — the live poll. The existing history is **not yet enumerated**: the archive-wide enumeration (JMAP `Email/query` paginated, resumable) arrives at **lot 3b**. Until then, a message from three years ago is not found because it has not been indexed at all. It is off unless you ask for it, and asking for it is one thing: a key file, named by `COLLECTOR_INDEX_KEY_FILE`. There is no other switch.
+
+**It is the longest holder of other people's words in the whole deployment.** The bus keeps a contact's plaintext seven days ([ADR 0028](../docs/architecture/adr/0028-a-contacts-words-live-apart-from-the-event-that-identifies-them.md)); an archive of twenty-five years of mail keeps it for as long as the owner keeps the archive. That is the point — the archive is the owner's and they want it searchable — but it means the index is *the* place a stolen disk, a snapshot or a backup would yield the words, and the deployment is what has to make that costly. Twalk **names the requirement and cannot enforce it**: it writes the index under the state volume and refuses to open an index without a key, and it is you who puts that volume on an encrypted store ([ADR 0043](../docs/architecture/adr/0043-the-search-archive-is-the-only-long-term-holder-of-third-parties-words.md)).
+
+**What the encryption protects, and what it does not.** It protects the bytes at rest: a disk lifted from the host, a filesystem snapshot, a backup taken while the collector is stopped. It does **not** protect a running process: while the collector runs, the decrypted index is mounted and readable by whoever can read the container's memory or the mount — an attacker already inside the deployment, or root on the host, sees plain text like the collector does. Encrypting at rest is not access control; it is what turns "the disk left the building" from a leak into a locked box. Say that plainly rather than letting "encrypted" read as "safe".
+
+**Generate the key, once, off the repository.** The key is a passphrase file: it lives on this host at mode 0600, owned by you, and its *contents* never enter `.env`, the repository or a command line (the lesson of [#239](https://github.com/linagora/twalk/issues/239) — a secret on a `ps` line or in a committed file is a secret published). Keep a copy somewhere you would keep the archive's other keys, because the index is unreadable without it.
+
+```bash
+head -c 64 /dev/urandom > ~/deploy/twalk-secrets/collector-index-key
+chmod 0600 ~/deploy/twalk-secrets/collector-index-key
+```
+
+**Then make the index sit on ciphertext.** The index lives at `/data/index`, inside the `collector-data` volume — the same volume as the grant and the cursors — so there is no second directory to mount: you encrypt the volume's backing store, and everything under `/data` is on ciphertext at rest. The clean way is to back the volume with a **gocryptfs** mount instead of a plain directory:
+
+```bash
+mkdir -p /mnt/twalk-archive/cipher /mnt/twalk-archive/plain
+gocryptfs -init -passfile ~/deploy/twalk-secrets/collector-index-key /mnt/twalk-archive/cipher
+gocryptfs -passfile ~/deploy/twalk-secrets/collector-index-key /mnt/twalk-archive/cipher /mnt/twalk-archive/plain
+```
+
+Then point the service's `/data` at the **decrypted mount point** with a compose override, kept out of git so the manifest stays the plain deployment. The named `collector-data` volume is simply not used once `/data` is bound to a host path:
+
+```yaml
+# docker-compose.override.yml — the encrypted backing store for the archive
+services:
+  collector:
+    volumes:
+      - /mnt/twalk-archive/plain:/data
+```
+
+The container mounts `/mnt/twalk-archive/plain` and sees below it a normal directory; the disk, under `/mnt/twalk-archive/cipher`, holds only ciphertext. The gocryptfs mount must be up **before** the container starts, or the collector writes an index onto the unencrypted mount point — an init service, an `fstab` entry with the passfile, or a start-up script is where that belongs. A deployment that already encrypts its Docker data root, or that runs the whole host on an encrypted filesystem, satisfies the requirement with no override at all — what matters is that the bytes on the platter are not the owner's mail.
+
+**Name the key and bring the collector up.** One line in `docker-compose/.env`:
+
+```bash
+COLLECTOR_INDEX_KEY_FILE=/home/<operator>/deploy/twalk-secrets/collector-index-key
+```
+
+The container mounts that file read-only, the entrypoint copies it for the unprivileged `collector` account at 0600 and exports the path, and the collector opens the index on the decrypted mount. Unset, the index stays off and `/search` answers `503 index_not_configured` — which is a legitimate state and not an error, so the collector starts either way: a missing key is a capability not asked for, never a failure of the mail. `COLLECTOR_INDEX_KEY_FILE` names a **file on the host**; its contents are an operator secret and are never committed, exactly like `token-or.env`.
+
+**Verify the disk sees only ciphertext.** Stop nothing; just look under the cipher directory for what the collector has been writing, and confirm it is not readable mail:
+
+```bash
+ls /mnt/twalk-archive/cipher          # gocryptfs's own layout: gocryptfs.conf, gocryptfs.diriv, and opaque names
+gocryptfs -passfile ~/deploy/twalk-secrets/collector-index-key -info /mnt/twalk-archive/cipher
+strings /mnt/twalk-archive/cipher/* 2>/dev/null | grep -i subject | head   # nothing: the disk holds no plaintext
+```
+
+If the third command prints a subject you recognise, the index is not on the encrypted store and the mount is wrong — stop the collector, fix the override, and start it again. The proof is the same shape as the other production proofs in this runbook: not "encryption is configured" but "the disk was read and held no words".
+
 ## Publishing the Companion: two lines, and one that must stay unpublished
 
 The Companion is a browser application, so publishing it means publishing the **homeserver** too — and that is the part a deployment gets wrong silently. The browser signs a device in with Matrix OpenID (ADR 0011): it asks the owner's homeserver for a token and posts it to the Gateway. To find that homeserver it used the deployment's **server name**, turned into `https://<server name>`.

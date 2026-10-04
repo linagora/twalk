@@ -744,6 +744,23 @@ mod tests {
     }
 
     #[test]
+    fn search_is_a_device_token_route() {
+        // The owner's search of their archive (lot 3a) is a capability of the
+        // owner in their session, so it falls through to the default rather
+        // than declaring a credential of its own. Stated as a test because a
+        // later ticket adding a `_twalk/`-style row would otherwise move it
+        // without anything failing.
+        assert_eq!(
+            Requirement::DeviceToken,
+            requirement(&Method::GET, "/api/search")
+        );
+        assert_eq!(
+            Requirement::DeviceToken,
+            requirement(&Method::GET, "/api/index/status")
+        );
+    }
+
+    #[test]
     fn a_cookie_is_read_out_of_the_header_it_shares_with_others() {
         let mut headers = HeaderMap::new();
         headers.insert(

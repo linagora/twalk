@@ -46,6 +46,18 @@ pub struct Metrics {
     push_connected: AtomicU64,
     /// How many times the server woke the mail poll.
     push_wakes: AtomicU64,
+    /// Combien de documents l'index de recherche détient (lot 3a, #XXX) :
+    /// la preuve observable de l'indexation temps réel tant que
+    /// `/index/status` n'existe pas (C25).
+    index_documents: AtomicU64,
+    /// Les hits qu'une recherche a retirés par décision de consentement
+    /// (lot 3a, #XXX), par raison : un révoqué n'est pas une absence, c'est
+    /// un retrait, et le produit compte ses silences.
+    search_hits_withheld: Mutex<BTreeMap<&'static str, u64>>,
+    /// Les recherches servies ou refusées sur l'endpoint interne (lot 3a),
+    /// par code : `served`, ou le code du refus. Une recherche qui n'est pas
+    /// comptée est une lecture de l'archive de l'owner que personne ne voit.
+    search_reads: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl Default for Metrics {
@@ -67,7 +79,43 @@ impl Metrics {
             event_fact_reads: Mutex::new(BTreeMap::new()),
             push_connected: AtomicU64::new(0),
             push_wakes: AtomicU64::new(0),
+            index_documents: AtomicU64::new(0),
+            search_hits_withheld: Mutex::new(BTreeMap::new()),
+            search_reads: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// `twalk_collector_search_reads_total{outcome}` — une recherche servie
+    /// ou refusée, par code (lot 3a). Le calque de `record_freebusy_read` :
+    /// toute lecture de l'archive de l'owner est comptée, et le code du refus
+    /// est ce qui dit laquelle des façons elle a échoué.
+    pub fn record_search_read(&self, outcome: &'static str) {
+        *self
+            .search_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
+    }
+
+    /// Les hits qu'une recherche a retirés par décision de consentement
+    /// (lot 3a, #XXX) : un révoqué n'est pas une absence, c'est un retrait,
+    /// et le produit compte ses silences.
+    pub fn record_search_hit_withheld(&self, reason: &'static str) {
+        *self
+            .search_hits_withheld
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(reason)
+            .or_insert(0) += 1;
+    }
+
+    /// `twalk_collector_index_documents` — combien de documents l'index de
+    /// recherche détient (lot 3a, #XXX). C'est la preuve observable de
+    /// l'indexation temps réel tant que `/index/status` n'existe pas (C25).
+    pub fn set_index_documents(&self, count: usize) {
+        self.index_documents
+            .store(count as u64, Ordering::Relaxed);
     }
 
     pub fn record_event_fact_read(&self, outcome: &'static str) {
@@ -263,6 +311,37 @@ impl Metrics {
             "twalk_collector_push_wakes_total {}\n",
             self.push_wakes.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP twalk_collector_index_documents How many documents the search index holds (lot 3a, #XXX). A gauge: it says how far the archive has come, not how much it wrote. Absent — zero — until the index is opened and a poll has indexed something.\n");
+        out.push_str("# TYPE twalk_collector_index_documents gauge\n");
+        out.push_str(&format!(
+            "twalk_collector_index_documents {}\n",
+            self.index_documents.load(Ordering::Relaxed)
+        ));
+        out.push_str("# HELP twalk_collector_search_hits_withheld_total Hits withdrawn from search results by consent, by reason.\n");
+        out.push_str("# TYPE twalk_collector_search_hits_withheld_total counter\n");
+        for (reason, count) in self
+            .search_hits_withheld
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .iter()
+        {
+            out.push_str(&format!(
+                "twalk_collector_search_hits_withheld_total{{reason=\"{reason}\"}} {count}\n"
+            ));
+        }
+        out.push_str("# HELP twalk_collector_search_reads_total Searches served or refused on the internal endpoint, by outcome: served, or the refusal's code (lot 3a).\n");
+        out.push_str("# TYPE twalk_collector_search_reads_total counter\n");
+        let search_reads = self
+            .search_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        for outcome in crate::http::SEARCH_OUTCOMES {
+            out.push_str(&format!(
+                "twalk_collector_search_reads_total{{outcome=\"{outcome}\"}} {}\n",
+                search_reads.get(outcome).copied().unwrap_or(0)
+            ));
+        }
+        drop(search_reads);
         out.push_str("# HELP twalk_collector_connection_state Each connection's state: 1 on the state it is in, 0 on the three it is not.\n");
         out.push_str("# TYPE twalk_collector_connection_state gauge\n");
         for ((connection, state), value) in self
@@ -323,6 +402,33 @@ mod tests {
             );
         }
         assert!(body.contains("twalk_collector_push_connected 0\n"));
+        // The index gauge is rendered at zero before anything is indexed, so a
+        // dashboard has the series (#XXX, C25).
+        assert!(body.contains("twalk_collector_index_documents 0\n"));
+        metrics.set_index_documents(3);
+        assert!(metrics.render(1_000).contains("twalk_collector_index_documents 3\n"));
+        // Un hit retiré par consentement est compté, par raison (#XXX, §5.3).
+        // Le libellé vient de la production, pas d'un littéral : c'est la
+        // même chaîne qui part dans la métrique et qui est assertée ici.
+        metrics.record_search_hit_withheld(crate::http::SEARCH_WITHHELD_CONSENT);
+        assert!(metrics.render(1_000).contains(&format!(
+            "twalk_collector_search_hits_withheld_total{{reason=\"{}\"}} 1\n",
+            crate::http::SEARCH_WITHHELD_CONSENT
+        )));
+        // Chaque code de refus de recherche est rendu à zéro avant toute
+        // lecture, alors qu'un tableau de bord a la série sous la main (lot 3a).
+        for outcome in crate::http::SEARCH_OUTCOMES {
+            assert!(
+                body.contains(&format!(
+                    "twalk_collector_search_reads_total{{outcome=\"{outcome}\"}} 0\n"
+                )),
+                "{outcome} is missing from the search read series"
+            );
+        }
+        metrics.record_search_read("index_not_configured");
+        assert!(metrics.render(1_000).contains(
+            "twalk_collector_search_reads_total{outcome=\"index_not_configured\"} 1\n"
+        ));
         metrics.set_push_connected(true);
         metrics.record_push_wake();
         assert!(metrics

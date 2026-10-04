@@ -49,6 +49,11 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# L'index de recherche plein-texte de l'archive de l'owner (#XXX, lot 3a) :
+# Tantivy, pur Rust, dans le répertoire d'état du collecteur. Sans support
+# vectoriel (vérifié 0.20–0.26) — la moitié sémantique est un index ANN
+# séparé, lot 3b.
+tantivy = "0.22"
 
 [dev-dependencies]
 twalk-test-harness = { path = "../tests/harness" }

@@ -1,9 +1,13 @@
-//! The collector's internal HTTP endpoint (issue #281): the one route the
-//! Companion Gateway calls on this process, `GET /freebusy`, the snapshot
-//! seam the other way round. The Gateway reads the owner's free/busy here
-//! on Hermes's behalf and never from the side service itself, so the one
-//! process that holds the owner's grant is the one that reads their agenda,
-//! and what leaves it is the intervals `freebusy.rs` allows — nothing else.
+//! The collector's internal HTTP endpoint (issue #281): the routes the
+//! Companion Gateway calls on this process — `GET /freebusy` and
+//! `GET /event-facts` (the snapshot seam the other way round), and, since
+//! lot 3a, `GET /search` and `GET /index/status` over the owner's archive.
+//! The Gateway reads the owner's free/busy here on Hermes's behalf and never
+//! from the side service itself, so the one process that holds the owner's
+//! grant is the one that reads their agenda, and what leaves it is the
+//! intervals `freebusy.rs` allows — nothing else. A search answers hits —
+//! id, source, correspondent, date, subject, a bounded snippet — and never a
+//! body.
 //!
 //! The caller is the Gateway and only the Gateway: the bearer is the same
 //! service token this collector presents to read the registry
@@ -86,12 +90,26 @@ pub struct Endpoint {
     pub calendar_access: SharedCalendarAccess,
     pub access: crate::replies::SharedCredential,
     pub metrics: Arc<Metrics>,
+    /// L'index de recherche (lot 3a), `None` quand aucune clé n'est
+    /// configurée (`COLLECTOR_INDEX_KEY_FILE`) : un index absent est un `503
+    /// index_not_configured`, jamais un refus de démarrage (§4.2).
+    ///
+    /// C27 : c'est **le même** `Arc<Mutex<Stored>>` que la boucle de poll
+    /// tient dans `main.rs` — le poll l'écrit, la route le lit, un seul
+    /// `Stored` pour un seul index. Un second `Stored` sur le même
+    /// répertoire divergerait.
+    pub search: Option<Arc<std::sync::Mutex<crate::search_index::Stored>>>,
+    /// Le cache de consentement, pour retirer les révoqués des résultats
+    /// (§5.3) : le collecteur le détient déjà, la route ne l'ouvre pas.
+    pub consent: twalk_consent_cache::ConsentCache,
 }
 
 pub fn router(endpoint: Endpoint) -> Router {
     Router::new()
         .route("/freebusy", get(free_busy))
         .route("/event-facts", get(event_facts))
+        .route("/search", get(search))
+        .route("/index/status", get(index_status))
         .with_state(endpoint)
 }
 
@@ -432,6 +450,177 @@ async fn event_facts(
             None,
         ),
     }
+}
+
+/// Every outcome a search is counted under (lot 3a), `served` first: the
+/// search series holds the reads of the owner's archive, apart from the
+/// agenda's, because a search is the read that touches the most words.
+pub const SEARCH_OUTCOMES: [&str; 6] = [
+    "served",
+    "unauthenticated",
+    "index_not_configured",
+    "index_unavailable",
+    "invalid_query",
+    "invalid_window",
+];
+
+/// La raison d'un retrait par consentement, telle qu'elle part dans la
+/// métrique — une seule chaîne, lue par la production et par son test.
+pub const SEARCH_WITHHELD_CONSENT: &str = "consent";
+
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    source: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    limit: Option<String>,
+}
+
+/// Parse une borne de fenêtre (RFC 3339) en secondes Unix. `None` = absente
+/// ou vide ; une chaîne illisible est une `Err`, pour un `400 invalid_window`
+/// plutôt qu'un filtre silencieusement ignoré.
+fn parse_bound(value: Option<&str>) -> Result<Option<i64>, ()> {
+    match value {
+        None => Ok(None),
+        Some(text) if text.is_empty() => Ok(None),
+        Some(text) => chrono::DateTime::parse_from_rfc3339(text)
+            .map(|at| at.timestamp())
+            .map(Some)
+            .map_err(|_| ()),
+    }
+}
+
+/// `GET /search?q=&source=&from=&to=&limit=` — l'archive de l'owner
+/// interrogée sur l'endpoint interne, le chemin que le Companion Gateway
+/// relaira au nom de l'owner dans sa session.
+///
+/// Ce que la route rend est des hits — id, source, correspondant, date,
+/// sujet, extrait — **jamais un corps**. Le filtre de consentement est
+/// appliqué ici, côté collecteur qui détient déjà le cache (§5.3) ; les hits
+/// d'un révoqué sont retirés et le nombre est rendu, parce que le produit
+/// compte ses silences.
+async fn search(
+    State(endpoint): State<Endpoint>,
+    headers: HeaderMap,
+    Query(query): Query<SearchQuery>,
+) -> Response {
+    if !authenticated(&endpoint, &headers) {
+        return refuse_search(&endpoint, StatusCode::UNAUTHORIZED, "unauthenticated");
+    }
+    let Some(stored) = &endpoint.search else {
+        return refuse_search(&endpoint, StatusCode::SERVICE_UNAVAILABLE, "index_not_configured");
+    };
+    let text = query.q.unwrap_or_default();
+    if text.trim().is_empty() || text.chars().count() > 512 {
+        return refuse_search(&endpoint, StatusCode::BAD_REQUEST, "invalid_query");
+    }
+    // La fenêtre est parsée AVANT la recherche : une borne illisible ou
+    // inversée est un refus, pas un filtre que l'on ignore.
+    let (Ok(from), Ok(to)) = (
+        parse_bound(query.from.as_deref()),
+        parse_bound(query.to.as_deref()),
+    ) else {
+        return refuse_search(&endpoint, StatusCode::BAD_REQUEST, "invalid_window");
+    };
+    if let (Some(from), Some(to)) = (from, to) {
+        if from > to {
+            return refuse_search(&endpoint, StatusCode::BAD_REQUEST, "invalid_window");
+        }
+    }
+    // Un `limit` hors bornes est un refus, jamais une borne silencieuse : un
+    // client qui demande 1000 résultats et en reçoit 100 croit que l'archive
+    // n'en contient pas plus (Review Focus classe 2, spec §5.1). Le code de
+    // refus est `invalid_query`, déjà déclaré pour cette route.
+    let limit = match query.limit.as_deref() {
+        None => 20usize,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if (1..=100).contains(&n) => n,
+            _ => return refuse_search(&endpoint, StatusCode::BAD_REQUEST, "invalid_query"),
+        },
+    };
+    // C27 : le `Stored` est partagé avec l'indexation temps réel — on le
+    // verrouille le temps de la lecture, et l'on ne fait aucune I/O sous le
+    // verrou (`Stored::search` lit l'index en mémoire).
+    let stored = stored.lock().expect("the index lock is not poisoned");
+    match stored.search(&text, limit) {
+        Ok(hits) => {
+            // Les filtres source/from/to s'appliquent APRÈS la recherche : le
+            // moteur Tantivy ne les connaît pas, `source` et `date` sont des
+            // champs `stored`. Coût accepté : moins que `limit` résultats
+            // (spec §5.1, §5.4).
+            let hits: Vec<_> = hits
+                .into_iter()
+                .filter(|hit| {
+                    query
+                        .source
+                        .as_deref()
+                        .is_none_or(|source| hit.source == source)
+                })
+                .filter(|hit| from.is_none_or(|from| hit.date >= from))
+                .filter(|hit| to.is_none_or(|to| hit.date <= to))
+                .collect();
+            // La connexion du filtre vient du `source` de chaque hit, jamais
+            // de la requête (C18/C19) : il n'y a pas de paramètre à passer.
+            let (kept, withheld) =
+                crate::search_index::filter_by_consent(hits, &endpoint.consent);
+            if withheld > 0 {
+                endpoint.metrics.record_search_hit_withheld(SEARCH_WITHHELD_CONSENT);
+            }
+            endpoint.metrics.record_search_read("served");
+            info!(
+                query_length = text.chars().count(),
+                hits = kept.len(),
+                withheld,
+                "a search was served"
+            );
+            let mut body = json!({
+                "hits": kept,
+                "count": kept.len(),
+                "withheld": withheld,
+            });
+            if withheld > 0 {
+                body["withheld_reason"] = json!("consent");
+            }
+            (StatusCode::OK, Json(body)).into_response()
+        }
+        Err(error) => {
+            // Le détail est loggé, jamais rendu : c'est un fait de l'index,
+            // et le corps d'un refus a la forme `{ "error": <code> }` que le
+            // Companion Gateway et `openapi.yaml` décrivent.
+            warn!(
+                error = %format!("{error:#}"),
+                "the search index could not be read"
+            );
+            refuse_search(&endpoint, StatusCode::SERVICE_UNAVAILABLE, "index_unavailable")
+        }
+    }
+}
+
+/// `GET /index/status` — l'état d'indexation, pour la barre de progression.
+async fn index_status(State(endpoint): State<Endpoint>, headers: HeaderMap) -> Response {
+    if !authenticated(&endpoint, &headers) {
+        return refuse_search(&endpoint, StatusCode::UNAUTHORIZED, "unauthenticated");
+    }
+    let Some(stored) = &endpoint.search else {
+        return refuse_search(&endpoint, StatusCode::SERVICE_UNAVAILABLE, "index_not_configured");
+    };
+    // `document_count` existe depuis T3 (C17 : ne pas le redéfinir). C27 :
+    // lu sous le même verrou que la recherche.
+    let documents = stored
+        .lock()
+        .expect("the index lock is not poisoned")
+        .document_count();
+    (StatusCode::OK, Json(json!({ "documents": documents }))).into_response()
+}
+
+/// Un refus de recherche : compté sous son code, dit à `warn`, dans la forme
+/// `Error` du Companion Gateway (`{ "error": <code> }`) — le détail reste au
+/// log.
+fn refuse_search(endpoint: &Endpoint, status: StatusCode, code: &'static str) -> Response {
+    endpoint.metrics.record_search_read(code);
+    warn!(%code, status = status.as_u16(), "a search was refused");
+    (status, Json(json!({ "error": code }))).into_response()
 }
 
 /// One refusal: counted under its code, said at `warn`, answered in the

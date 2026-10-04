@@ -25,8 +25,6 @@
 use serde_json::{json, Value};
 use twalk_consent_cache::Consent;
 
-use crate::status::sha256_hex;
-
 pub const MESSAGE_RECEIVED_TYPE: &str = "fr.linagora.twalk.inbound.message.received.v1";
 const SCHEMA: &str =
     "https://schemas.twalk.dev/cloudevents/v1/inbound.message.received.schema.json";
@@ -1174,7 +1172,7 @@ impl Envelopes {
         }
         json!({
             "specversion": "1.0",
-            "id": sha256_hex(&format!("jmap:{}:{}", self.account_id, mail.id)),
+            "id": crate::source::mail_event_id(&self.account_id, &mail.id),
             "source": self.source,
             "type": MESSAGE_RECEIVED_TYPE,
             "time": time,

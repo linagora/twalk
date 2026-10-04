@@ -11,6 +11,7 @@
 //! The pure, seam-independent logic lives in these modules; the binary in
 //! `main.rs` wires them to the SSO, the services and NATS.
 
+pub mod backfill;
 pub mod caldav;
 pub mod calendars;
 pub mod config;
@@ -26,7 +27,9 @@ pub mod outbound;
 pub mod owner;
 pub mod push;
 pub mod replies;
+pub mod search_index;
 pub mod side;
+pub mod source;
 pub mod status;
 pub mod triage;
 /// Windows time-zone names and the IANA zone each one means: CLDR's table,

@@ -49,9 +49,10 @@ use harness::{
     bridge_status_path, companion_build, ensure_stack, fresh_owner_user_id, gateway_env,
     gateway_env_with, gateway_env_with_bridges_and_consent, gateway_env_with_consent,
     gateway_env_without_sign_in, missing_static_dir, nats_url, owner_user_id, poll_until,
-    GatewayProc, MatrixUser, StubBridge, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART,
-    OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN, STUB_AS_TOKEN, STUB_BRIDGE_ID,
-    STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID, UNREACHABLE_STATUS_BRIDGE_ID,
+    GatewayProc, MatrixUser, StubBridge, StubCollector, FALLBACK_HTML, HERMES_ANSWER_SECRET,
+    HERMES_DOMAIN, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN,
+    STUB_AS_TOKEN, STUB_BRIDGE_ID, STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID,
+    UNREACHABLE_STATUS_BRIDGE_ID,
 };
 use harness::{sha256_hex, unreachable_nats_url, validate_against_contract, Bus};
 use harness::{StubEndpoint, StubLlm};
@@ -1875,6 +1876,12 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/internal/mail-moves",
             "/api/internal/mail-moves",
         ),
+        // The owner's search (lot 3a): a capability of the owner in their
+        // session, so the guard closes it to a caller with no device token
+        // like every other `/api` route. Both routes, since one is the
+        // other's progress read and they must not diverge on who may call.
+        (Method::GET, "/api/search", "/api/search?q=x"),
+        (Method::GET, "/api/index/status", "/api/index/status"),
     ] {
         call.check(
             method,
@@ -5859,6 +5866,178 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     )
     .await?;
     seamless_gateway.stop().await;
+
+    // --- the owner's search of their archive (lot 3a): `GET /api/search` and
+    // `GET /api/index/status`, both behind the device-token guard. A Gateway
+    // of its own, because the one above carries the Hermes seam this route's
+    // collector URL rides on and a relay needs a collector to relay to. The
+    // stub stands in for the collector; what is asserted here is the wire —
+    // the collector's own route and its code travelling — while the property
+    // that no `body` ever crosses is `tests/search.rs`'s, on the wire and on
+    // the bytes.
+    let search_static = companion_build("openapi-search")?;
+    let collector = StubCollector::start_search(json!({
+        "hits": [{ "id": "doc-1", "snippet": "…" }],
+        "count": 1,
+        "withheld": 0,
+        "withheld_reason": "consent",
+    }))
+    .await?;
+    let search_gateway = GatewayProc::start(&gateway_env_with(
+        &search_static,
+        &[
+            ("GATEWAY_NATS_URL", nats_url().as_str()),
+            ("GATEWAY_HERMES_ANSWER_SECRET", HERMES_ANSWER_SECRET),
+            ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
+            ("GATEWAY_COLLECTOR_URL", collector.url().as_str()),
+        ],
+    ))?;
+    let search_base = search_gateway.base_url().await?;
+    wait_until_answering(&search_base).await?;
+    let (search_device, _) =
+        sign_in_cookies(&http, &search_base, &owner, "the searching device").await?;
+    let search_cookie = [("twalk_device", search_device.as_str())];
+
+    // Served: the collector's hits, relayed.
+    let served = call
+        .check(
+            Method::GET,
+            &search_base,
+            "/api/search",
+            "/api/search?q=hebdo",
+            &search_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(served.body["count"], 1, "{}", served.body);
+    assert_eq!(served.body["hits"][0]["snippet"], "…", "{}", served.body);
+
+    // A `400` of the collector's own, relayed with its code unchanged.
+    collector.answer(400, json!({ "error": "invalid_query" }));
+    call.check(
+        Method::GET,
+        &search_base,
+        "/api/search",
+        "/api/search?q=",
+        &search_cookie,
+        None,
+        400,
+        Some("invalid_query"),
+    )
+    .await?;
+
+    // The collector answers a code this Gateway does not map, and a `502` for
+    // a code that is not one: `collector_refused`, with the code in `detail`.
+    collector.answer(502, json!({ "error": "index_corrupt" }));
+    call.check(
+        Method::GET,
+        &search_base,
+        "/api/search",
+        "/api/search?q=hebdo",
+        &search_cookie,
+        None,
+        502,
+        Some("collector_refused"),
+    )
+    .await?;
+
+    // And a collector that stops answering at all: `collector_unreachable`.
+    collector.stop();
+    call.check(
+        Method::GET,
+        &search_base,
+        "/api/search",
+        "/api/search?q=hebdo",
+        &search_cookie,
+        None,
+        502,
+        Some("collector_unreachable"),
+    )
+    .await?;
+
+    // The progress route on the same Gateway: served while the collector was
+    // up, and `collector_unreachable` once it is gone — the two doors onto one
+    // refusal.
+    let progress = StubCollector::answering(200, json!({ "documents": 7 })).await?;
+    let progress_gateway = GatewayProc::start(&gateway_env_with(
+        &search_static,
+        &[
+            ("GATEWAY_NATS_URL", nats_url().as_str()),
+            ("GATEWAY_HERMES_ANSWER_SECRET", HERMES_ANSWER_SECRET),
+            ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
+            ("GATEWAY_COLLECTOR_URL", progress.url().as_str()),
+        ],
+    ))?;
+    let progress_base = progress_gateway.base_url().await?;
+    wait_until_answering(&progress_base).await?;
+    let (progress_device, _) =
+        sign_in_cookies(&http, &progress_base, &owner, "the progress device").await?;
+    let progress_cookie = [("twalk_device", progress_device.as_str())];
+    let status = call
+        .check(
+            Method::GET,
+            &progress_base,
+            "/api/index/status",
+            "/api/index/status",
+            &progress_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(status.body["documents"], 7, "{}", status.body);
+    progress.stop();
+    call.check(
+        Method::GET,
+        &progress_base,
+        "/api/index/status",
+        "/api/index/status",
+        &progress_cookie,
+        None,
+        502,
+        Some("collector_unreachable"),
+    )
+    .await?;
+    progress_gateway.stop().await;
+
+    // The `503` of this Gateway's own, on a deployment with no collector URL:
+    // `search_unavailable`, its own code and not freebusy's
+    // `collector_not_configured` (C8), on both routes. A Gateway with the
+    // device-token guard on and no collector — the shape an operator who runs
+    // no collector has.
+    let collectorless_static = companion_build("openapi-search-no-collector")?;
+    let collectorless = GatewayProc::start(&gateway_env(&collectorless_static))?;
+    let collectorless_base = collectorless.base_url().await?;
+    wait_until_answering(&collectorless_base).await?;
+    let (collectorless_device, _) =
+        sign_in_cookies(&http, &collectorless_base, &owner, "the collectorless device").await?;
+    let collectorless_cookie = [("twalk_device", collectorless_device.as_str())];
+    call.check(
+        Method::GET,
+        &collectorless_base,
+        "/api/search",
+        "/api/search?q=hebdo",
+        &collectorless_cookie,
+        None,
+        503,
+        Some("search_unavailable"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &collectorless_base,
+        "/api/index/status",
+        "/api/index/status",
+        &collectorless_cookie,
+        None,
+        503,
+        Some("search_unavailable"),
+    )
+    .await?;
+    collectorless.stop().await;
+    search_gateway.stop().await;
 
     // --- and now the coverage assertion: everything the description
     // declares was either exercised above, or is listed with its reason.

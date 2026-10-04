@@ -1350,6 +1350,22 @@ impl StubCollector {
         })
     }
 
+    /// A stub standing in for the collector's search route (lot 3a): the
+    /// same listener, named for what the test is about so a suite reads as a
+    /// search test rather than as a free/busy one. It answers `body` to
+    /// `GET /search`, exactly as the real collector does.
+    pub async fn start_search(body: serde_json::Value) -> Result<Self> {
+        Self::answering(200, body).await
+    }
+
+    /// A stub whose search route refuses with a code of the collector's own
+    /// (`index_not_configured`, `index_unavailable`, …), so a test can prove
+    /// the Gateway relays it unchanged. The body is the collector's own
+    /// refusal shape: `{ "error": <code> }`.
+    pub async fn start_search_refusing(status: u16, code: &str) -> Result<Self> {
+        Self::answering(status, serde_json::json!({ "error": code })).await
+    }
+
     /// What the stub answers from now on: a refusal of its own, say.
     pub fn answer(&self, status: u16, body: serde_json::Value) {
         *self.answer.lock().expect("not poisoned") =
