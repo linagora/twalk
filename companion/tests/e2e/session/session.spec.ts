@@ -211,15 +211,16 @@ test('a token that died while nothing was refreshing is repaired centrally, once
 			message: 'exactly one refresh repaired the refusal'
 		})
 		.toBe(1);
-	// The screen reads two things on mount — its perimeter and whether a
-	// runtime is here (#177) — and both were issued with the dead token, so
-	// both were refused; the point above is that one refresh repaired both.
+	// The screen reads three things on mount — the registry of connections
+	// (`GET /api/connections`, ADR 0033, since #272), its bridges, and whether
+	// a runtime is here (#177) — and each was issued with the dead token, so
+	// each was refused; the point above is that one refresh repaired them all.
 	// Every refusal is one of those reads, and there is at least one.
 	const refused = traffic.refusals.map((entry) => entry.url);
 	expect(refused.length).toBeGreaterThan(0);
 	expect(new Set(refused).size).toBe(refused.length);
 	for (const url of refused) {
-		expect(['/api/bridges', '/api/runtime']).toContain(url);
+		expect(['/api/connections', '/api/bridges', '/api/runtime']).toContain(url);
 	}
 });
 
