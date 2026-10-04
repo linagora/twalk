@@ -50,6 +50,10 @@ pub struct Metrics {
     /// la preuve observable de l'indexation temps réel tant que
     /// `/index/status` n'existe pas (C25).
     index_documents: AtomicU64,
+    /// Les hits qu'une recherche a retirés par décision de consentement
+    /// (lot 3a, #XXX), par raison : un révoqué n'est pas une absence, c'est
+    /// un retrait, et le produit compte ses silences.
+    search_hits_withheld: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl Default for Metrics {
@@ -72,7 +76,20 @@ impl Metrics {
             push_connected: AtomicU64::new(0),
             push_wakes: AtomicU64::new(0),
             index_documents: AtomicU64::new(0),
+            search_hits_withheld: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Les hits qu'une recherche a retirés par décision de consentement
+    /// (lot 3a, #XXX) : un révoqué n'est pas une absence, c'est un retrait,
+    /// et le produit compte ses silences.
+    pub fn record_search_hit_withheld(&self, reason: &'static str) {
+        *self
+            .search_hits_withheld
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(reason)
+            .or_insert(0) += 1;
     }
 
     /// `twalk_collector_index_documents` — combien de documents l'index de
@@ -282,6 +299,18 @@ impl Metrics {
             "twalk_collector_index_documents {}\n",
             self.index_documents.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP twalk_collector_search_hits_withheld_total Hits withdrawn from search results by consent, by reason.\n");
+        out.push_str("# TYPE twalk_collector_search_hits_withheld_total counter\n");
+        for (reason, count) in self
+            .search_hits_withheld
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .iter()
+        {
+            out.push_str(&format!(
+                "twalk_collector_search_hits_withheld_total{{reason=\"{reason}\"}} {count}\n"
+            ));
+        }
         out.push_str("# HELP twalk_collector_connection_state Each connection's state: 1 on the state it is in, 0 on the three it is not.\n");
         out.push_str("# TYPE twalk_collector_connection_state gauge\n");
         for ((connection, state), value) in self
@@ -347,6 +376,11 @@ mod tests {
         assert!(body.contains("twalk_collector_index_documents 0\n"));
         metrics.set_index_documents(3);
         assert!(metrics.render(1_000).contains("twalk_collector_index_documents 3\n"));
+        // Un hit retiré par consentement est compté, par raison (#XXX, §5.3).
+        metrics.record_search_hit_withheld("revoked");
+        assert!(metrics.render(1_000).contains(
+            "twalk_collector_search_hits_withheld_total{reason=\"revoked\"} 1\n"
+        ));
         metrics.set_push_connected(true);
         metrics.record_push_wake();
         assert!(metrics

@@ -12,8 +12,9 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use tantivy::schema::{Field, Schema as TantivySchema, INDEXED, STORED, STRING, TEXT};
+use tantivy::schema::{Field, Schema as TantivySchema, Value, INDEXED, STORED, STRING, TEXT};
 use tantivy::Index;
+use twalk_consent_cache::{Consent, ConsentCache};
 
 use crate::source::Document;
 
@@ -144,6 +145,103 @@ impl Stored {
     pub fn reader_reload(&self) {
         let _ = self.reader.reload();
     }
+
+    /// Une recherche BM25 plein-texte (lot 3a ; le vectoriel est 3b) : le
+    /// sujet, le corps et le correspondant, jamais le document entier —
+    /// l'écran reçoit un extrait borné, pas un mail (§5.3, §9).
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        use tantivy::collector::TopDocs;
+        use tantivy::query::QueryParser;
+
+        let searcher = self.reader.searcher();
+        let parser = QueryParser::for_index(
+            &self.index,
+            vec![self.schema.subject, self.schema.body, self.schema.correspondent],
+        );
+        let query = parser
+            .parse_query(query)
+            .context("the search query cannot be parsed")?;
+        let top = searcher
+            .search(&query, &TopDocs::with_limit(limit.max(1)))
+            .context("the search failed")?;
+        let mut hits = Vec::with_capacity(top.len());
+        for (_score, address) in top {
+            let doc: tantivy::TantivyDocument = searcher
+                .doc(address)
+                .context("a search result could not be read")?;
+            let text = |field| {
+                doc.get_first(field)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let date = doc
+                .get_first(self.schema.date)
+                .and_then(|value| value.as_i64())
+                .unwrap_or_default();
+            let body = text(self.schema.body);
+            hits.push(Hit {
+                id: text(self.schema.id),
+                source: text(self.schema.source),
+                correspondent: text(self.schema.correspondent),
+                mailbox: doc
+                    .get_first(self.schema.mailbox)
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+                date,
+                subject: text(self.schema.subject),
+                snippet: snippet(&body, 240),
+            });
+        }
+        Ok(hits)
+    }
+}
+
+/// Un résultat de recherche : ce que le Companion affiche, jamais un corps
+/// entier (§5.3, §9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub id: String,
+    pub source: String,
+    pub correspondent: String,
+    pub mailbox: Option<String>,
+    pub date: i64,
+    pub subject: String,
+    /// Un extrait autour du terme trouvé, borné — jamais le document.
+    pub snippet: String,
+}
+
+/// Un extrait borné du corps : jamais le corps entier.
+fn snippet(body: &str, limit: usize) -> String {
+    let mut cut: String = body.chars().take(limit).collect();
+    if body.chars().count() > limit {
+        cut.push('…');
+    }
+    cut
+}
+
+/// Retire les hits d'un correspondant `revoked`, et rend combien ont été
+/// retirés — le nombre que l'écran affiche (§5.3).
+///
+/// La connexion vient du **`source` de chaque hit**, jamais d'un paramètre :
+/// un hit issu du backfill peut nommer une autre connexion que celle de la
+/// requête, et un hit orphelin (source vide) retomberait alors sur la
+/// décision d'un autre. `cache.state` est indexé sur `(sujet, connexion)` :
+/// passer la mauvaise connexion lit la mauvaise décision.
+///
+/// `pending` n'est pas `revoked` (ADR 0010) : une absence de décision n'est
+/// pas un retrait, et un contact jamais décidé reste visible.
+pub fn filter_by_consent(hits: Vec<Hit>, cache: &ConsentCache) -> (Vec<Hit>, usize) {
+    let mut kept = Vec::with_capacity(hits.len());
+    let mut withheld = 0usize;
+    for hit in hits {
+        if cache.state(&hit.correspondent, &hit.source) == Consent::Revoked {
+            withheld += 1;
+        } else {
+            kept.push(hit);
+        }
+    }
+    (kept, withheld)
 }
 
 /// Écrit des documents, en remplaçant tout document de même `id`.
@@ -245,6 +343,88 @@ mod tests {
         let store = store(&dir, None).expect("a keyless store is not an error");
         assert!(store.is_none(), "an index was opened without a key");
         assert!(!dir.exists(), "a keyless store created a directory");
+    }
+
+    /// Un hit de test : le `source` porte la connexion du filtre (C18/C19).
+    fn hit(id: &str, correspondent: &str, subject: &str) -> Hit {
+        Hit {
+            id: id.to_owned(),
+            // Le `source` du hit porte la connexion du filtre (C18/C19).
+            source: "mail-linagora".to_owned(),
+            correspondent: correspondent.to_owned(),
+            mailbox: Some("inbox".to_owned()),
+            date: 1_756_700_000,
+            subject: subject.to_owned(),
+            snippet: String::new(),
+        }
+    }
+
+    /// Le filtre de consentement retire les révoqués et **compte** (§5.3) :
+    /// le silence est dit, pas caché.
+    #[test]
+    fn a_revoked_correspondent_is_withheld_and_counted() {
+        let cache = twalk_consent_cache::ConsentCache::for_people_only(None, Default::default());
+        let revoked = twalk_consent_cache::ConsentChange::parse(&serde_json::json!({
+            "specversion": "1.0",
+            "type": twalk_consent_cache::CONSENT_CHANGED_TYPE,
+            "source": "https://gateway.example/",
+            "id": "d1",
+            "subject": "mailto:alice@example.org",
+            "time": "2026-09-01T00:00:00Z",
+            "data": {
+                "subject": { "type": "contact", "id": "mailto:alice@example.org" },
+                "new_state": "revoked",
+                "scope": { "connections": ["mail-linagora"] },
+            },
+        }))
+        .unwrap();
+        cache.apply(&revoked);
+
+        let hits = vec![
+            hit("id-1", "mailto:alice@example.org", "Alice wrote"),
+            hit("id-2", "mailto:bob@example.org", "Bob wrote"),
+        ];
+        let (kept, withheld) = filter_by_consent(hits, &cache);
+        assert_eq!(1, kept.len(), "the revoked hit is gone");
+        assert_eq!("mailto:bob@example.org", kept[0].correspondent);
+        assert_eq!(1, withheld, "and the withdrawal is counted");
+    }
+
+    /// Un correspondant `pending` n'est pas retiré : l'absence de décision
+    /// n'est pas une révocation (ADR 0010).
+    #[test]
+    fn a_pending_correspondent_is_not_withheld() {
+        let cache = twalk_consent_cache::ConsentCache::for_people_only(None, Default::default());
+        let hits = vec![hit("id-1", "mailto:carol@example.org", "Carol wrote")];
+        let (kept, withheld) = filter_by_consent(hits, &cache);
+        assert_eq!(1, kept.len());
+        assert_eq!(0, withheld);
+    }
+
+    /// La propriété « replace » que T3 a déplacée ici (ruling C13) :
+    /// réindexer le même `id` avec un autre sujet ne laisse pas l'ancien
+    /// texte gagnant — le document est remplacé, pas dédoublonné seulement.
+    /// Sert aussi de premier test direct de `Stored::search`.
+    #[test]
+    fn the_last_write_for_an_id_wins() {
+        let dir = std::env::temp_dir().join(format!("twalk-idx-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let stored = Stored::open_or_create(&dir).expect("an index");
+        let mut writer = stored.writer().expect("a writer");
+        let mut document = crate::source::Document {
+            subject: "Premier sujet".to_owned(),
+            ..sample_document()
+        };
+        writer.add(&document).unwrap();
+        document.subject = "Un sujet corrigé".to_owned();
+        writer.add(&document).unwrap();
+        writer.commit().unwrap();
+        stored.reader_reload();
+
+        let hits = stored.search("corrigé", 10).expect("a search");
+        assert_eq!(1, hits.len(), "the same id was indexed twice: {hits:?}");
+        assert_eq!("Un sujet corrigé", hits[0].subject);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Avec une clé (ici un fichier présent), l'index s'ouvre ou se crée et
