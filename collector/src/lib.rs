@@ -28,6 +28,7 @@ pub mod push;
 pub mod replies;
 pub mod search_index;
 pub mod side;
+pub mod source;
 pub mod status;
 pub mod triage;
 /// Windows time-zone names and the IANA zone each one means: CLDR's table,
