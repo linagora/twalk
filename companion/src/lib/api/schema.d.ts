@@ -1255,6 +1255,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/index/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How many documents the archive's index holds, for a progress bar.
+         * @description The collector's index in one number (lot 3a), relayed behind the same
+         *     device-token guard as `GET /api/search`. It is what a progress bar
+         *     needs, and it carries a document count and nothing else: a second
+         *     member — a cursor, a per-source breakdown — would be a second thing to
+         *     keep in step with the collector, and the search itself is the read
+         *     that answers whether the archive is readable.
+         *
+         *     The collector's refusals are relayed unchanged, including the same
+         *     `search_unavailable` this Gateway produces when it has no collector
+         *     to relay to.
+         */
+        get: operations["getIndexStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/mail-moves": {
         parameters: {
             query?: never;
@@ -1580,6 +1609,52 @@ export interface paths {
          *     is here and a persona that receives nothing.
          */
         get: operations["readRuntimePresence"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The owner's archive, searched through the Gateway and never read by it.
+         * @description The search of everything the owner's own accounts hold (lot 3a): their
+         *     mail, and later the networks the bridges carry. A capability of the
+         *     owner in their session, so it sits behind the device-token guard like
+         *     every other `/api` route — not behind Hermes's signature.
+         *
+         *     **The Gateway never reads a message body.** It relays the query to the
+         *     collector's internal `/search` route, which holds the index and the
+         *     consent cache the hits are filtered with, and answers what the
+         *     collector answered. A hit carries a `snippet` and never a `body`: this
+         *     route adds no member, opens no inbound event and parses no hit, so a
+         *     deployment cannot leak a message through the search the way it could
+         *     through a second implementation of it.
+         *
+         *     **The filters are the collector's.** `source`, `from` and `to` are
+         *     relayed untouched and applied on the collector's side; a second
+         *     filtering here would be a second answer to a question that already has
+         *     one. `limit` is a hint the collector clamps.
+         *
+         *     **The refusals are the collector's codes, relayed unchanged**
+         *     (`index_not_configured`, `index_unavailable`, `invalid_query`,
+         *     `invalid_window`), so a browser is never taught two vocabularies for
+         *     one fact. The one code this Gateway produces itself is
+         *     `search_unavailable`: a Gateway with no `GATEWAY_COLLECTOR_URL` — and
+         *     so no collector to relay to — answers that rather than freebusy's
+         *     `collector_not_configured`, because this route's caller is the owner's
+         *     browser and "the search is unavailable on this deployment" is the
+         *     sentence it can act on.
+         */
+        get: operations["searchArchive"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3843,6 +3918,14 @@ export interface components {
             matrix_errcode?: string;
         };
         /**
+         * @description What `GET /api/index/status` answers: the collector's index in one
+         *     number, for a progress bar.
+         */
+        IndexStatus: {
+            /** @description How many documents the index holds. */
+            documents: number;
+        };
+        /**
          * @description The user's Matrix access token and the rooms they selected. Closed,
          *     for the same reason as the registration request.
          */
@@ -4728,6 +4811,55 @@ export interface components {
             llm: components["schemas"]["RuntimeLlm"] | null;
             /** @description Per-persona overrides. Always `{}` in v0.1. */
             personas: Record<string, unknown>;
+        };
+        /**
+         * @description What `GET /api/search` answers, relayed from the collector. A hit
+         *     carries a `snippet` and never a `body` — the Gateway adds no member
+         *     and the collector serves no full text — which is the property the
+         *     whole lot rests on.
+         */
+        SearchAnswer: {
+            /** @description How many hits are in this answer. */
+            count: number;
+            /** @description The matching documents, as the collector shaped them; never a message body. */
+            hits: components["schemas"]["SearchHit"][];
+            /** @description How many hits the collector withheld from this answer on consent grounds. */
+            withheld: number;
+            /**
+             * @description Why hits were withheld, when any were. `consent` for the only
+             *     reason there is today (ADR 0012/#C18); absent rather than
+             *     `null` when nothing was withheld, so a deployment that withholds
+             *     nothing does not answer a member saying it did.
+             */
+            withheld_reason?: string;
+        };
+        /**
+         * @description One document the index matched. Every member is the collector's; the
+         *     Gateway relays the object as it stands and adds nothing, so a member
+         *     the collector grows crosses without this description learning of it.
+         *     There is deliberately no `body`: what is served to search is a
+         *     `snippet`, never the message.
+         */
+        SearchHit: {
+            /** @description Who wrote it, as a `mailto:` or a Matrix id. */
+            correspondent?: string;
+            /** @description When it was written, in seconds since the Unix epoch. */
+            date?: number;
+            /** @description The document's stable id, as the collector indexed it. */
+            id?: string;
+            /** @description The mailbox or folder it sits in, when the source has one. */
+            mailbox?: string | null;
+            /**
+             * @description An excerpt around the match. This is what search answers with,
+             *     and never the whole message.
+             */
+            snippet?: string;
+            /** @description The connection the document came from, as `GET /api/connections` names connections. */
+            source?: string;
+            /** @description Its subject line, when it has one. */
+            subject?: string;
+        } & {
+            [key: string]: unknown;
         };
         /** @description One outcome per room asked about, in the order asked. */
         SensorInvitation: {
@@ -7951,6 +8083,59 @@ export interface operations {
             503: components["responses"]["SignInNotConfigured"];
         };
     };
+    getIndexStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The index as the collector reports it right now. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IndexStatus"];
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description - `collector_unreachable` — the collector did not answer.
+             *     - `collector_refused` — the collector refused with a code of its
+             *       own this Gateway does not map.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "collector_unreachable" | "collector_refused";
+                    };
+                };
+            };
+            /**
+             * @description - `index_not_configured` — this deployment has no search index.
+             *     - `search_unavailable` — this Gateway has no collector to relay
+             *       to.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "index_not_configured" | "search_unavailable";
+                    };
+                };
+            };
+        };
+    };
     reportMailMoves: {
         parameters: {
             query?: never;
@@ -8318,6 +8503,93 @@ export interface operations {
                     "application/json": components["schemas"]["Error"] & {
                         /** @enum {unknown} */
                         error?: "runtime_not_configured" | "sign_in_not_configured";
+                    };
+                };
+            };
+        };
+    };
+    searchArchive: {
+        parameters: {
+            query: {
+                /** @description The earliest date to search, RFC 3339. Absent has no lower bound. */
+                from?: string;
+                /** @description The most hits to answer. The collector clamps it to its own bounds. */
+                limit?: number;
+                /** @description The text to search, between 1 and 512 characters. An empty or over-long `q` is the collector's `400 invalid_query`. */
+                q: string;
+                /** @description One connection id to search within, as `GET /api/connections` names it. Absent searches every source. */
+                source?: string;
+                /** @description The latest date to search, RFC 3339. Absent has no upper bound. */
+                to?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /**
+             * @description The hits the collector answered, filtered by consent on its side,
+             *     with how many were withheld and why.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchAnswer"];
+                };
+            };
+            /**
+             * @description - `invalid_query` — `q` is empty or longer than the collector accepts.
+             *     - `invalid_window` — `from` is after `to`, or a bound is not a date.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "invalid_query" | "invalid_window";
+                    };
+                };
+            };
+            401: components["responses"]["Unauthenticated"];
+            /**
+             * @description - `collector_unreachable` — the collector did not answer, or
+             *       answered something that is not JSON.
+             *     - `collector_refused` — the collector refused the search with a
+             *       code of its own this Gateway does not map; the code travels in
+             *       `detail`.
+             */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "collector_unreachable" | "collector_refused";
+                    };
+                };
+            };
+            /**
+             * @description - `index_not_configured` — this deployment has no search index
+             *       configured (`COLLECTOR_INDEX_KEY_FILE` is unset).
+             *     - `index_unavailable` — the collector holds one and could not read
+             *       it.
+             *     - `search_unavailable` — this Gateway has no collector to relay
+             *       to (`GATEWAY_COLLECTOR_URL` is unset).
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "index_not_configured" | "index_unavailable" | "search_unavailable";
                     };
                 };
             };
