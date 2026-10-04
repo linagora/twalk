@@ -8,6 +8,15 @@
 .env
 # Backups a deploy edit leaves beside it: the same secrets, never versioned
 .env.bak*
+# Secret files an operator keeps at the root under their own names — the OpenRAG
+# token (`token-or.env`, `token_OpenRAG.env`) and the like. `.env` alone did not
+# cover these: `token-or.env` holds a live `or-<32 hex>` bearer and was one
+# `git add -A` from being committed. A `*.env` name at the root is a secret file
+# by convention here, whatever it is called.
+/*.env
+# A dump of the host's Docker state (containers, images, env). It prints every
+# container's environment, so it is the same class of secret as a `.env`.
+.docker-snapshot-*.txt
 
 # Python bytecode, from running the SDK's own unit tests
 __pycache__/
