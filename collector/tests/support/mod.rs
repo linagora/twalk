@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use twalk_collector::oidc::{Client, Settings};
+use twalk_test_harness::jmap_fake::FakeMail;
 use twalk_test_harness::sso::{write_client_secret, CLIENT_ID};
 use twalk_test_harness::{nats_url, poll_until, Bus, FakeSso};
 
@@ -220,6 +221,49 @@ impl Run {
         CollectorProc::start(&self.env_with_gateway())
     }
 
+    /// The collector, against the fake Gateway, **with a search index** (lot
+    /// 3a): `COLLECTOR_INDEX_KEY_FILE` points at a throwaway key file in this
+    /// run's state directory (the key is read — proving it is there — and the
+    /// index itself is the deployment's encrypted mount, spec §4.2), and
+    /// `COLLECTOR_METRICS_LISTEN` is served on a free port so the gauge the
+    /// real-time indexing poses can be read. The port is on the returned
+    /// process, for `wait_metric`.
+    pub fn start_with_gateway_and_index(&self) -> Result<(CollectorProc, u16)> {
+        let key = self.dir.path().join("index.key");
+        std::fs::write(&key, b"test-only-key")
+            .with_context(|| format!("failed to write the index key {}", key.display()))?;
+        let port = free_port()?;
+        let mut env = self.env_with_gateway();
+        env.push((
+            "COLLECTOR_INDEX_KEY_FILE".to_owned(),
+            key.to_string_lossy().into_owned(),
+        ));
+        env.push((
+            "COLLECTOR_METRICS_LISTEN".to_owned(),
+            format!("127.0.0.1:{port}"),
+        ));
+        Ok((CollectorProc::start(&env)?, port))
+    }
+
+    /// Un mail arrive dans l'INBOX du propriétaire, d'un tiers : poussé au
+    /// fake JMAP, qui bouge l'état et règle la sonnette du push — le poll le
+    /// lit au tour suivant (#276, #277).
+    pub fn deliver_mail(&self, name: &str, from: &str, subject: &str) -> String {
+        self.sso.deliver(FakeMail::from_person(
+            name,
+            from,
+            OWNER,
+            subject,
+            &format!("Corps de {name}."),
+        ))
+    }
+
+    /// L'index de recherche écrit sous le répertoire d'état de ce run :
+    /// `COLLECTOR_STATE_DIR/index` par défaut (config.rs).
+    pub fn index_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("index")
+    }
+
     /// Every byte the collector wrote under its state directory, the grant
     /// and the cursors alike: what "never on disk" is asserted on.
     pub fn stored_bytes(&self) -> Result<String> {
@@ -369,4 +413,42 @@ impl CollectorProc {
 
 pub fn sha256_hex(input: &str) -> String {
     twalk_test_harness::sha256_hex(input)
+}
+
+/// A free port on the loopback, for an endpoint a test must know the address
+/// of: what `freebusy.rs` and this suite both need.
+pub fn free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
+/// The `/metrics` text as it stands, and one gauge's value off it: "the
+/// index is behind" is read off the same text a dashboard scrapes.
+pub async fn metric(port: u16, name: &str) -> Result<Option<f64>> {
+    let text = reqwest::get(format!("http://127.0.0.1:{port}/metrics"))
+        .await?
+        .text()
+        .await?;
+    Ok(text.lines().find_map(|line| {
+        line.strip_prefix(&format!("{name} "))
+            .and_then(|value| value.trim().parse::<f64>().ok())
+    }))
+}
+
+/// Waits until the named gauge equals `value` (to the Prometheus text's own
+/// spelling, so `1.0` is `1`). Used for the search index's document count,
+/// which no route serves before T6 (C25).
+pub async fn wait_metric(port: u16, name: &str, value: f64) -> Result<()> {
+    poll_until(
+        || async {
+            metric(port, name)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|found| found == value)
+                .then_some(())
+        },
+        &format!("{name} to reach {value}"),
+    )
+    .await
 }

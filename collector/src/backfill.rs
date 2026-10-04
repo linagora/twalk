@@ -102,3 +102,43 @@ pub fn run_once(
     }
     Ok(written)
 }
+
+/// Indexe maintenant les mails qu'un poll vient de lire — pas de curseur : le
+/// dédoublonnage par `id` (T3, `Writer::add`) rend la ré-indexation
+/// inoffensive, et le temps réel n'a pas de « position » à retenir, seulement
+/// des mails à écrire. Le backfill (`run_once`) reste seul à tenir un curseur.
+///
+/// Le `Stored` est fourni par l'appelant (C24) : celui du processus, tenu
+/// ouvert pour sa vie, et non un `Stored` par poll — ouvrir un index à chaque
+/// tour serait coûteux. **N'écrit rien sur le bus** : indexer est une écriture
+/// locale, et ADR 0037 (rétention de 90 jours / 2 GiB) en ferait un défaut.
+pub fn index_mails(
+    stored: &Stored,
+    connection: &str,
+    account: &str,
+    owner: &Owner,
+    mails: &[crate::jmap::Mail],
+) -> Result<usize> {
+    if mails.is_empty() {
+        return Ok(0);
+    }
+    let source = MailSource::new(connection.to_owned(), account.to_owned(), owner.clone());
+    let mut writer = stored.writer()?;
+    let mut written = 0usize;
+    for mail in mails {
+        let Some(document) = source.document(&Native::Mail(mail.clone())) else {
+            continue;
+        };
+        writer
+            .add(&document)
+            .with_context(|| format!("the document {} could not be indexed", document.id))?;
+        written += 1;
+    }
+    writer.commit().context("the index could not be committed")?;
+    // Le lecteur est rechargé tout de suite : la jauge que l'appelant lit
+    // après ce poll (`document_count`) doit refléter ce commit, et la
+    // politique de rechargement par défaut de Tantivy a un délai de quelques
+    // millisecondes.
+    stored.reader_reload();
+    Ok(written)
+}

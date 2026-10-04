@@ -156,6 +156,16 @@ pub struct Filed {
 #[derive(Default)]
 pub struct MailPoll {
     pub envelopes: Vec<Value>,
+    /// L'`accountId` JMAP sous lequel ce poll a lu — local à `poll()`
+    /// (`session.account_id`) et remonté ici pour que l'appelant puisse
+    /// indexer les mails (lot 3a, #XXX) : `MailSource::new` ne peut pas s'en
+    /// passer, et l'id du document en dépend (§3.3).
+    pub account: String,
+    /// Les mails publiés de ce poll, dans l'ordre des `envelopes` : le
+    /// collecteur les indexe pour la recherche (lot 3a, #XXX). Même ensemble
+    /// que les enveloppes — ce que la frontière a laissé passer — pour que
+    /// l'index et le bus ne puissent pas diverger.
+    pub mails: Vec<Mail>,
     /// The mails the frontier dropped, by reason — counted, never named.
     pub dropped: Vec<Dropped>,
     /// What the owner's rules filed, and where from (#417). Reported to the
@@ -239,6 +249,10 @@ impl Mailbox {
             })?;
         let account = session.account_id.as_str();
         let mut poll = MailPoll::default();
+        // The JMAP account this round reads under, carried out for the
+        // index (lot 3a) — set before any early return, so a poll that
+        // publishes nothing still tells the caller which account it read.
+        poll.account = account.to_owned();
         let previous = match self.read_state() {
             Ok(state) => state,
             Err(error) => {
@@ -443,6 +457,9 @@ impl Mailbox {
                         let consent = self.consent.state(&mail.from.mailto(), &self.connection);
                         poll.envelopes
                             .push(envelopes.message_received(&mail, consent, now));
+                        // Le même mail, gardé pour l'index (C22) : ce que la
+                        // frontière laisse passer est indexé comme il est publié.
+                        poll.mails.push(mail.clone());
                     }
                     Err(why) => poll.dropped.push(why),
                 }

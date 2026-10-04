@@ -46,6 +46,10 @@ pub struct Metrics {
     push_connected: AtomicU64,
     /// How many times the server woke the mail poll.
     push_wakes: AtomicU64,
+    /// Combien de documents l'index de recherche détient (lot 3a, #XXX) :
+    /// la preuve observable de l'indexation temps réel tant que
+    /// `/index/status` n'existe pas (C25).
+    index_documents: AtomicU64,
 }
 
 impl Default for Metrics {
@@ -67,7 +71,16 @@ impl Metrics {
             event_fact_reads: Mutex::new(BTreeMap::new()),
             push_connected: AtomicU64::new(0),
             push_wakes: AtomicU64::new(0),
+            index_documents: AtomicU64::new(0),
         }
+    }
+
+    /// `twalk_collector_index_documents` — combien de documents l'index de
+    /// recherche détient (lot 3a, #XXX). C'est la preuve observable de
+    /// l'indexation temps réel tant que `/index/status` n'existe pas (C25).
+    pub fn set_index_documents(&self, count: usize) {
+        self.index_documents
+            .store(count as u64, Ordering::Relaxed);
     }
 
     pub fn record_event_fact_read(&self, outcome: &'static str) {
@@ -263,6 +276,12 @@ impl Metrics {
             "twalk_collector_push_wakes_total {}\n",
             self.push_wakes.load(Ordering::Relaxed)
         ));
+        out.push_str("# HELP twalk_collector_index_documents How many documents the search index holds (lot 3a, #XXX). A gauge: it says how far the archive has come, not how much it wrote. Absent — zero — until the index is opened and a poll has indexed something.\n");
+        out.push_str("# TYPE twalk_collector_index_documents gauge\n");
+        out.push_str(&format!(
+            "twalk_collector_index_documents {}\n",
+            self.index_documents.load(Ordering::Relaxed)
+        ));
         out.push_str("# HELP twalk_collector_connection_state Each connection's state: 1 on the state it is in, 0 on the three it is not.\n");
         out.push_str("# TYPE twalk_collector_connection_state gauge\n");
         for ((connection, state), value) in self
@@ -323,6 +342,11 @@ mod tests {
             );
         }
         assert!(body.contains("twalk_collector_push_connected 0\n"));
+        // The index gauge is rendered at zero before anything is indexed, so a
+        // dashboard has the series (#XXX, C25).
+        assert!(body.contains("twalk_collector_index_documents 0\n"));
+        metrics.set_index_documents(3);
+        assert!(metrics.render(1_000).contains("twalk_collector_index_documents 3\n"));
         metrics.set_push_connected(true);
         metrics.record_push_wake();
         assert!(metrics

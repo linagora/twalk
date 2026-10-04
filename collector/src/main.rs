@@ -10,7 +10,7 @@
 //! turns out to be for another account — both said in words, once.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 use twalk_collector::config::Config;
 use twalk_collector::metrics::Metrics;
 use twalk_collector::oidc::{Client, Grant, Identities, Renewal, ServiceRefusal};
+use twalk_collector::search_index::Stored;
 use twalk_collector::side::SideError;
 use twalk_collector::status::{self, Observation, State, Tracker};
 
@@ -216,6 +217,29 @@ async fn run(config: Config) -> Result<()> {
         info!(%listen, "serving metrics");
         tokio::spawn(serve_metrics(listener, metrics.clone()));
     }
+
+    // The search index (lot 3a, C24): opened **once**, at start, and held for
+    // the life of the process — a `Stored` per poll would reopen an index every
+    // few seconds. T6 (#XXX) will add this to the HTTP `Endpoint`; until then
+    // it stays in scope here, under this name, beside the run loop.
+    //
+    // Without a key there is no index: `None`, and nothing is indexed (spec
+    // §4.2). The log line is the observable the process-boundary test waits
+    // for.
+    let search_index: Option<Arc<Mutex<Stored>>> = match twalk_collector::search_index::store(
+        &config.index_dir,
+        config.index_key_file.as_deref(),
+    )? {
+        Some(_) => {
+            let stored = Stored::open_or_create(&config.index_dir)?;
+            info!("search index opened");
+            Some(Arc::new(Mutex::new(stored)))
+        }
+        None => {
+            info!("search index is disabled");
+            None
+        }
+    };
 
     // The registry: a connection this process holds must be one the Companion Gateway
     // names, or every event it published would be about a perimeter no
@@ -876,6 +900,30 @@ async fn run(config: Config) -> Result<()> {
                     }
                     for envelope in &found.envelopes {
                         publish(&jetstream, envelope, &metrics).await;
+                    }
+                    // L'indexation temps réel (lot 3a, C22–C25) : les mails
+                    // que ce poll vient de lire, écrits dans l'index — jamais
+                    // sur le bus (ADR 0037). Le `Stored` est celui du
+                    // processus (C24), pas un par poll. L'`account` vient du
+                    // poll (C23) : `MailSource::new` ne peut pas s'en passer.
+                    if let Some(stored) = &search_index {
+                        let stored = stored.lock().expect("the index lock is not poisoned");
+                        match twalk_collector::backfill::index_mails(
+                            &stored,
+                            &mailbox.connection,
+                            &found.account,
+                            &config.owner,
+                            &found.mails,
+                        ) {
+                            Ok(count) => {
+                                metrics.set_index_documents(stored.document_count());
+                                debug!(count, "mails indexed for search");
+                            }
+                            Err(error) => warn!(
+                                error = %format!("{error:#}"),
+                                "the polled mails could not be indexed; the search index is behind"
+                            ),
+                        }
                     }
                     if let Some(state) = &found.state {
                         if let Err(error) = mailbox.commit(state) {
