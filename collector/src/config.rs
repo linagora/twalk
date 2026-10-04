@@ -78,6 +78,14 @@ pub struct Config {
     /// serves none. Its bearer is `gateway_service_token`, so one is not
     /// set without the other.
     pub http_listen: Option<SocketAddr>,
+    /// Le répertoire de l'index de recherche (`COLLECTOR_STATE_DIR/index`
+    /// par défaut, #XXX). Vit sous le répertoire d'état, donc monté chiffré
+    /// au déploiement (spec §4.2).
+    pub index_dir: PathBuf,
+    /// La clé de l'index (`COLLECTOR_INDEX_KEY_FILE`) : sans elle, aucun
+    /// index n'est ouvert et `/search` répond `503 index_not_configured`
+    /// (spec §4.2). Un fichier, jamais une variable — leçon #239.
+    pub index_key_file: Option<PathBuf>,
     pub log_level: String,
     /// How often the run loop checks the grant and the services when all is
     /// well (`COLLECTOR_HEALTH_INTERVAL_SECONDS`, 60 by default; a test sets
@@ -113,6 +121,10 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let state_dir = PathBuf::from(required("COLLECTOR_STATE_DIR")?);
+        // Le répertoire de l'index de recherche vit sous celui d'état
+        // (spec §4.2) ; calculé ici, avant que `state_dir` ne soit déplacé
+        // dans la structure.
+        let index_dir = state_dir.join("index");
         // Which kind of credential this process holds (#342). `oidc` is the
         // default and what every deployment before this one had; `basic` is
         // for a service that challenges `Basic` and does not read the SSO's
@@ -244,6 +256,8 @@ impl Config {
                 }
                 None => None,
             },
+            index_dir,
+            index_key_file: optional_string("COLLECTOR_INDEX_KEY_FILE").map(PathBuf::from),
             log_level: optional_string("COLLECTOR_LOG_LEVEL").unwrap_or_else(|| "info".to_owned()),
             health_interval: std::time::Duration::from_secs(
                 match optional_string("COLLECTOR_HEALTH_INTERVAL_SECONDS") {
@@ -369,6 +383,8 @@ mod tests {
             state_dir: PathBuf::from("/nonexistent"),
             metrics_listen: None,
             http_listen: None,
+            index_dir: PathBuf::from("/nonexistent/index"),
+            index_key_file: None,
             log_level: "info".to_owned(),
             health_interval: std::time::Duration::from_secs(60),
             calendar_poll_interval: std::time::Duration::from_secs(60),

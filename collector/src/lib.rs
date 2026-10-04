@@ -26,6 +26,7 @@ pub mod outbound;
 pub mod owner;
 pub mod push;
 pub mod replies;
+pub mod search_index;
 pub mod side;
 pub mod status;
 pub mod triage;
