@@ -11,6 +11,7 @@
 //! The pure, seam-independent logic lives in these modules; the binary in
 //! `main.rs` wires them to the SSO, the services and NATS.
 
+pub mod backfill;
 pub mod caldav;
 pub mod calendars;
 pub mod config;
