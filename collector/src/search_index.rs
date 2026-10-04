@@ -15,6 +15,8 @@ use anyhow::{Context, Result};
 use tantivy::schema::{Field, Schema as TantivySchema, INDEXED, STORED, STRING, TEXT};
 use tantivy::Index;
 
+use crate::source::Document;
+
 /// Le schéma d'un document indexé (spec §3.2). Chaque champ est construit
 /// ici et nulle part ailleurs : une facette ajoutée plus tard l'est à un
 /// endroit, et `search_index::Schema` la voit.
@@ -95,9 +97,143 @@ pub fn open_or_create(index_dir: &Path) -> Result<Index> {
     }
 }
 
+/// L'index ouvert, son schéma et un lecteur : la moitié qu'on interroge.
+pub struct Stored {
+    index: Index,
+    schema: Schema,
+    reader: tantivy::IndexReader,
+}
+
+impl Stored {
+    pub fn open_or_create(index_dir: &Path) -> Result<Self> {
+        let index = open_or_create(index_dir)?;
+        let schema = Schema::build();
+        let reader = index
+            .reader()
+            .context("failed to open a reader on the index")?;
+        Ok(Self {
+            index,
+            schema,
+            reader,
+        })
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
+    /// Le nombre de documents vivants — ce que T6 sert sur `/index/status`.
+    pub fn document_count(&self) -> usize {
+        self.reader.searcher().num_docs() as usize
+    }
+
+    /// Un écrivain pour cette génération de l'index.
+    pub fn writer(&self) -> Result<Writer<'_>> {
+        let writer = self
+            .index
+            .writer(50_000_000)
+            .context("failed to open an index writer")?;
+        Ok(Writer {
+            writer,
+            schema: &self.schema,
+        })
+    }
+
+    /// Recharge le lecteur après un commit (le `IndexReader` voit les
+    /// nouveaux segments après `reload`).
+    pub fn reader_reload(&self) {
+        let _ = self.reader.reload();
+    }
+}
+
+/// Écrit des documents, en remplaçant tout document de même `id`.
+pub struct Writer<'a> {
+    writer: tantivy::IndexWriter,
+    schema: &'a Schema,
+}
+
+impl Writer<'_> {
+    pub fn add(&mut self, document: &Document) -> Result<()> {
+        // Tantivy n'a pas d'upsert : on supprime par `id` puis on ajoute,
+        // dans le même commit. C'est ce qui fait qu'un mail vu deux fois
+        // reste un document (§3.3).
+        self.writer
+            .delete_term(tantivy::Term::from_field_text(self.schema.id, &document.id));
+        let mut doc = tantivy::TantivyDocument::default();
+        doc.add_text(self.schema.id, &document.id);
+        doc.add_text(self.schema.source, &document.source);
+        doc.add_text(self.schema.correspondent, &document.correspondent);
+        if let Some(mailbox) = &document.mailbox {
+            doc.add_text(self.schema.mailbox, mailbox);
+        }
+        if let Some(thread) = &document.thread {
+            doc.add_text(self.schema.thread, thread);
+        }
+        doc.add_i64(self.schema.date, document.date);
+        doc.add_text(self.schema.subject, &document.subject);
+        doc.add_text(self.schema.body, &document.body);
+        doc.add_bool(self.schema.has_attachment, document.has_attachment);
+        doc.add_bool(self.schema.replied, false);
+        self.writer
+            .add_document(doc)
+            .context("failed to add a document to the index")?;
+        Ok(())
+    }
+
+    pub fn commit(&mut self) -> Result<()> {
+        self.writer
+            .commit()
+            .context("failed to commit the index")?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_document() -> crate::source::Document {
+        crate::source::Document {
+            id: "jmap:acct:1".to_owned(),
+            source: "mail-linagora".to_owned(),
+            correspondent: "mailto:alice@example.org".to_owned(),
+            mailbox: Some("inbox".to_owned()),
+            thread: Some("<root@example.org>".to_owned()),
+            date: 1_756_700_000,
+            subject: "Point hebdo".to_owned(),
+            body: "Le point de la semaine, déjà corrigé.".to_owned(),
+            has_attachment: false,
+        }
+    }
+
+    /// Le dédoublonnage par `id` (§3.3) : indexer deux fois le même mail —
+    /// push puis backfill — ne fait pas deux documents. C'est la propriété
+    /// que la Review Focus place en premier.
+    ///
+    /// L'assertion « le document survivant porte le sujet corrigé » (la
+    /// propriété *replace*) vit dans T5, qui possède `search` (ruling C13) :
+    /// ici on ne peut affirmer que le **compte**.
+    #[test]
+    fn indexing_the_same_id_twice_leaves_one_document() {
+        let dir = std::env::temp_dir().join(format!("twalk-idx-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let stored = Stored::open_or_create(&dir).expect("an index");
+        let mut writer = stored.writer().expect("a writer");
+
+        let mut document = sample_document();
+        writer.add(&document).unwrap();
+        document.subject = "Un sujet corrigé".to_owned();
+        writer.add(&document).unwrap();
+        writer.commit().unwrap();
+        stored.reader_reload();
+
+        assert_eq!(
+            1,
+            stored.document_count(),
+            "the same id was indexed twice"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Sans clé, il n'y a pas d'index : `store` rend `None`, aucun
     /// répertoire n'est créé. C'est la règle « désactivé par défaut » (spec
