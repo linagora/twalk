@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::process::Command;
@@ -99,7 +100,148 @@ async fn do_ensure_stack() -> Result<()> {
     }
 
     ensure_appservice_registered(&compose).await?;
+    keep_the_stack_bounded().await;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Keeping the shared stack from growing without bound (#432)
+// ---------------------------------------------------------------------------
+
+/// How often one stack is swept, at most.
+///
+/// The walk asks the homeserver about every account it holds — 478 of them on
+/// 2026-10-04 — and a `cargo test` of one component runs nineteen binaries,
+/// each calling [`ensure_stack`] once. Sweeping in all nineteen would spend
+/// more time on housekeeping than on the suite, and nothing accumulates in an
+/// hour that two days of grace will not cover. The marker is a file in the
+/// temp directory named after the compose project, so parallel worktrees that
+/// share a stack share its sweep, and one that moved its stack aside with
+/// `TWALK_TEST_STACK` sweeps its own.
+const SWEEP_AT_MOST_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// Says how old the stack's data is, sweeps it if it is due, and prints both.
+///
+/// **Never fails a suite.** This is housekeeping: a sweep that cannot run is a
+/// line on stderr and nothing more. A harness that failed here would report
+/// its own chores as a defect in the code under test, which is the shape of
+/// the bug this whole ticket is about.
+async fn keep_the_stack_bounded() {
+    eprintln!("harness: {}", stack_report().await);
+    if !sweep_is_due() {
+        return;
+    }
+    // Marked before the sweep rather than after, so that a sweep which fails
+    // (or a run killed in the middle of one) is not retried by all eighteen
+    // binaries behind this one.
+    mark_swept();
+    match crate::sweep::sweep_stack(crate::sweep::UNSEEN_FOR).await {
+        Ok(swept) => eprintln!("harness: {swept}"),
+        Err(error) => eprintln!(
+            "harness: the shared stack could not be swept, and no test depends on it having \
+             been: {error:#}"
+        ),
+    }
+}
+
+/// What the stack is, how old its data is, and what starts it over — the line
+/// a reader of a timed-out wait needs.
+///
+/// A wait that gives up on a fortnight-old stack reads as a defect in the
+/// component under test; it took reading `homeserver.db` by hand to find that
+/// four failures in one suite were a shared homeserver holding 1 395 rooms
+/// (#432). The age is no longer something to infer from `docker ps`.
+pub async fn stack_report() -> String {
+    let project = stack_id();
+    let age = match data_age(&project).await {
+        Some(age) => format!("has held data for {}", how_long(age)),
+        // The volume is the thing that accumulates and the container is not:
+        // every worktree's first run recreates the container (its compose file
+        // binds a configuration directory at its own path), so container
+        // uptime says nothing about how much the homeserver holds.
+        None => {
+            "has held data for an unknown time (its data volume could not be inspected)".to_owned()
+        }
+    };
+    let swept = match swept_ago(&project) {
+        Some(ago) => format!("swept {} ago", how_long(ago)),
+        None => "not swept by this host yet".to_owned(),
+    };
+    format!(
+        "the shared test stack {project} {age}, {swept}; \
+         `tools/twalk-test-stacks.sh --recreate {project}` starts it over, and nothing does that \
+         by itself — sibling suites share this stack (#432)"
+    )
+}
+
+/// `16 day(s)`, `3 hour(s)`, `12 minute(s)` — one unit, because the reader is
+/// deciding whether to suspect the stack and not measuring it.
+fn how_long(age: Duration) -> String {
+    let days = age.as_secs() / 86_400;
+    let hours = age.as_secs() / 3_600;
+    if days > 0 {
+        format!("{days} day(s)")
+    } else if hours > 0 {
+        format!("{hours} hour(s)")
+    } else {
+        format!("{} minute(s)", age.as_secs() / 60)
+    }
+}
+
+/// How long ago the stack's data volume was created, which is how long the
+/// homeserver has been accumulating.
+async fn data_age(project: &str) -> Option<Duration> {
+    let output = Command::new("docker")
+        .args([
+            "volume",
+            "inspect",
+            &format!("{project}_synapse-data"),
+            "--format",
+            "{{.CreatedAt}}",
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let created =
+        chrono::DateTime::parse_from_rfc3339(String::from_utf8_lossy(&output.stdout).trim())
+            .ok()?;
+    // `chrono` is built here without its clock, so now comes from the standard
+    // library and the comparison is in plain epoch seconds.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    u64::try_from(created.timestamp())
+        .ok()
+        .and_then(|created| now.checked_sub(created))
+        .map(Duration::from_secs)
+}
+
+fn sweep_marker(project: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{project}.swept"))
+}
+
+fn swept_ago(project: &str) -> Option<Duration> {
+    std::fs::metadata(sweep_marker(project))
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
+}
+
+fn sweep_is_due() -> bool {
+    swept_ago(&stack_id()).is_none_or(|ago| ago >= SWEEP_AT_MOST_EVERY)
+}
+
+fn mark_swept() {
+    // Best effort by design: a temp directory this process cannot write to
+    // means the sweep runs more often than it needs to, which is the harmless
+    // direction.
+    let _ = std::fs::write(sweep_marker(&stack_id()), b"");
 }
 
 /// Makes sure the test Synapse has read `synapse/appservice-portals.yaml`.

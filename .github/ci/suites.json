@@ -45,12 +45,25 @@
 		},
 
 		"harness": {
-			"what": "The shared harness's own unit tests — the stub LLM, the poller, the deterministic id — with no Docker and no stack.",
+			"what": "The shared harness's own unit tests — the stub LLM, the poller, the deterministic id, which devices the sweep may take — with no Docker and no stack.",
 			"component": "tests",
 			"workdir": "tests/harness",
-			"run": "cargo test",
+			"run": "cargo test --lib",
 			"needs": ["rust"],
 			"tier": "required",
+			"triggers": ["tests/harness/", "contracts/"],
+			"run_note": "`--lib` and not plain `cargo test` since #432: the harness grew a test target of its own that needs a homeserver, and a required suite on a hosted runner must not be the thing that runs it. `harness-stack` does."
+		},
+
+		"harness-stack": {
+			"what": "The harness's own behaviour against a real homeserver: the device sweep that keeps the shared test stack from growing without bound (#432). A device the homeserver saw before the cutoff is taken and its token refused afterwards; one seen inside the window is kept, and so is one the homeserver has never seen at all — that one because a login which has not synced yet may belong to a suite running beside this one. The sweep logs out of the account it reads the admin API with, and the stack says how old its data is.",
+			"component": "tests",
+			"workdir": "tests/harness",
+			"run": "cargo test --test stack_sweep",
+			"targets": ["stack_sweep"],
+			"needs": ["rust", "docker"],
+			"tier": "advisory",
+			"tier_note": "Required in substance and advisory in fact: this suite needs a Docker host, so it is gated by `verified-stack`, which branch protection does not require. Calling it `required` asserted a guarantee the repository does not give — and four defects reached `main` and the reference deployment through that gap in one feature (#422, then #426, #430, #431). It returns to `required` the day `TWALK_STACK_RUNNER` names a runner and `verified-stack` joins the required checks (#428).",
 			"triggers": ["tests/harness/", "contracts/"]
 		},
 

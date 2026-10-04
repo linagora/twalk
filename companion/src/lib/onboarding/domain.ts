@@ -108,6 +108,49 @@ export function homeserverBaseUrl(value: string): string {
 	return `${isLoopbackHost(host) ? 'http' : 'https'}://${authority}`;
 }
 
+/**
+ * Where to send a Matrix request: the one rule the sign-in and recovery
+ * screens share (#323).
+ *
+ * Three sources, in the order they are allowed to win:
+ *
+ * 1. **what the deployment says about itself** — `client_url` from
+ *    `GET /api/deployment`, which the operator sets when the server name is
+ *    not an address a browser can call. It is authoritative about its own
+ *    deployment, so it beats anything derived here;
+ * 2. **what screen 1 resolved** for the domain in play (`.well-known`
+ *    delegation, `$lib/matrix/discovery.ts`);
+ * 3. **the domain itself**, turned into an address.
+ *
+ * The first two apply only while the domain in play is still the
+ * deployment's own: a user correcting the domain must not be sent to the old
+ * deployment's address. That guard is why this takes four values and not two.
+ *
+ * Without it the reference deployment is unusable from outside: its server
+ * name is `twalk.localhost`, so a browser out there resolved **its own**
+ * loopback and the owner read `the login response was not a session` — their
+ * own machine answering a login.
+ */
+export function matrixBaseUrl(options: {
+	/** `client_url` from `GET /api/deployment`, or `null`. */
+	deploymentClientUrl: string | null;
+	/** What screen 1 resolved, or `''`. */
+	discoveredHomeserver: string;
+	/** The deployment's own domain, as this browser knows it. */
+	deploymentDomain: string;
+	/** The domain actually in play — the typed one, when there is one. */
+	effectiveDomain: string;
+}): string {
+	const ours = options.effectiveDomain === options.deploymentDomain;
+	if (ours && options.deploymentClientUrl !== null && options.deploymentClientUrl !== '') {
+		return options.deploymentClientUrl.replace(/\/+$/u, '');
+	}
+	if (ours && options.discoveredHomeserver !== '') {
+		return options.discoveredHomeserver;
+	}
+	return homeserverBaseUrl(options.effectiveDomain);
+}
+
 /** Splits `host[:port]`, leaving an IPv6 literal's colons alone. */
 function splitAuthority(authority: string): { host: string; port: string | null } {
 	const match = /^(.*?):(\d+)$/u.exec(authority);

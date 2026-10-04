@@ -288,6 +288,12 @@ services:
       # federation API, on this compose network. Pinned rather than resolved
       # from the server name — one deployment, one homeserver.
       GATEWAY_HOMESERVER_FEDERATION_URL: ${GATEWAY_HOMESERVER_FEDERATION_URL:-http://synapse:8008}
+      # Where a browser reaches that homeserver's client API, when the server
+      # name is not an address it can call (#323) — the deployment published
+      # under another name than its homeserver's. Empty: the Companion derives
+      # https://<server name>, which is right for a deployment whose name is
+      # its address. See .env.example: it takes a reverse-proxy rule as well.
+      GATEWAY_HOMESERVER_CLIENT_URL: ${GATEWAY_HOMESERVER_CLIENT_URL:-}
       # Where the Gateway keeps its SQLite stores: the session store and the
       # consent decision journal. Must stay on the gateway-data volume
       # mounted below — the journal is the record of truth for consent.

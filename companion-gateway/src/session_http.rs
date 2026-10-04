@@ -134,6 +134,20 @@ pub fn requirement(method: &Method, path: &str) -> Requirement {
     if path == crate::hermes_answer::ANSWER_PATH && method == Method::POST {
         return Requirement::HermesSignature;
     }
+    // The agent's rule proposal (#420, ADR 0042): the same secret, the same
+    // caller, the same reason to be in this table.
+    //
+    // **This row was missing**, so the default below applied and the route
+    // demanded a device token the drafting agent does not have: the one write
+    // ADR 0042 allows was closed to the only caller it has, and the refusal
+    // the agent saw — `401 unauthenticated` — is the word the route's own
+    // signature check uses, so it read as a wrong secret. The same defect as
+    // `/api/internal/mail-moves` below, in the same feature, found the same
+    // way: by describing the route and letting `tests/openapi.rs` hold the
+    // description and this table to each other (#431).
+    if path == crate::hermes_answer::PROPOSAL_PATH && method == Method::POST {
+        return Requirement::HermesSignature;
+    }
     // Hermes's free/busy read (ticket #281): the one pull, signed with the
     // same secret as the answers, over the request line since a GET has no
     // body. In the table for the same reason as the answers.
@@ -409,6 +423,10 @@ async fn deployment(State(gateway): State<Gateway>) -> Response {
     Json(serde_json::json!({
         "bootstrapped": bootstrapped,
         "homeserver": sessions.homeserver_name(),
+        // Where a browser reaches the client API, when the server name is not
+        // an address it can use (#323). `null` on a deployment that needs no
+        // such thing, which is what the Companion's own fallback assumes.
+        "client_url": gateway.client_base_url(),
     }))
     .into_response()
 }

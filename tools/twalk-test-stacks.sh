@@ -9,6 +9,14 @@
 #     tools/twalk-test-stacks.sh                 # what is here
 #     tools/twalk-test-stacks.sh --remove-stale  # and take the dead ones away
 #     tools/twalk-test-stacks.sh --around 'cargo test --test deployment'
+#     tools/twalk-test-stacks.sh --recreate twalk-sensor-test   # start one over
+#
+# `--recreate` is the operator's half of #432. The harness sweeps the shared
+# stack's devices by itself, and that is all it is allowed to do: the stack is
+# shared by every session on this host, so tearing it down is a decision with
+# somebody else's suite on the other side of it. It is therefore here, with the
+# project named in full, what is about to be destroyed printed first, and a
+# confirmation — and never in `ensure_stack`.
 #
 # `--around` is the honest form of "a run leaves the host as it found it": it
 # counts the networks and the projects, runs the command, counts again, and says
@@ -86,6 +94,92 @@ declare -A KNOWN=(
   [twalk-ci-test]="CI's shared harness stack"
   [twalk-ci-deploy]="CI's deployment stack"
 )
+
+# --- starting a stack over, on purpose --------------------------------------
+
+# The two projects that are not test stacks at all. The reference deployment on
+# this host may be serving the owner's own messages, and `down -v` on it would
+# take its Synapse database with it: naming one of these is a mistake, not a
+# choice, so it is refused rather than confirmed.
+declare -A NEVER_RECREATE=(
+  [twalk]="the reference deployment — possibly in production on this host"
+  [twalk-public]="the reference deployment's published half"
+)
+
+if [ "${1:-}" = "--recreate" ]; then
+  project="${2:-}"
+  [ -n "$project" ] || {
+    echo "--recreate needs the compose project to start over, spelled out:" >&2
+    echo "  $(basename "$0") --recreate twalk-sensor-test" >&2
+    echo "(the shared harness stack's name is in the harness's own output, and" >&2
+    echo " TWALK_TEST_STACK overrides it)" >&2
+    exit 2
+  }
+  if [ -n "${NEVER_RECREATE[$project]:-}" ]; then
+    echo "Refusing: $project is ${NEVER_RECREATE[$project]}." >&2
+    echo "This command destroys a project's volumes. That one is not a test stack." >&2
+    exit 2
+  fi
+
+  echo "About to destroy the compose project $project and its volumes."
+  echo
+  volume="${project}_synapse-data"
+  created=$(docker volume inspect "$volume" --format '{{.CreatedAt}}' 2>/dev/null || true)
+  [ -n "$created" ] && echo "  $volume has held data since $created"
+  containers=$(docker ps -a --filter "label=com.docker.compose.project=$project" \
+      --format '{{.Names}} ({{.Status}})' 2>/dev/null | sed 's/^/    /' || true)
+  if [ -n "$containers" ]; then
+    echo "  containers:"
+    printf '%s\n' "$containers"
+  else
+    echo "  no container of that project is on this host — check the name"
+  fi
+  # What is lost, from the homeserver's own database rather than from a guess.
+  if docker exec "${project}-synapse-1" test -f /data/homeserver.db 2>/dev/null; then
+    docker exec "${project}-synapse-1" python3 -c '
+import sqlite3
+db = sqlite3.connect("file:/data/homeserver.db?mode=ro", uri=True)
+one = lambda sql: db.execute(sql).fetchone()[0]
+print("  the homeserver holds %d account(s), %d room(s), %d device(s), %d event(s)"
+      % (one("select count(*) from users"), one("select count(*) from rooms"),
+         one("select count(*) from devices"), one("select count(*) from events")))' 2>/dev/null || true
+  fi
+  echo
+  echo "Another session on this host may be running a suite against it right now —"
+  echo "this stack is shared, which is why nothing recreates it by itself (#432)."
+  echo "The next suite to run will bring it up again, empty, and provision it."
+  echo
+  echo "And one suite is known to fail on a homeserver that has never served a run:"
+  echo "sensor/tests/bridge_bots_are_not_contacts.rs — its presence assertion passes"
+  echo "on a Synapse that has already answered a suite (measured twice each way, see"
+  echo "CONTRIBUTING.md). After recreating, run it a second time before believing it."
+  echo
+
+  if [ "${3:-}" != "--yes" ]; then
+    printf 'Type the project name to confirm: '
+    read -r typed
+    if [ "$typed" != "$project" ]; then
+      echo "Not confirmed ($typed); nothing was touched."
+      exit 1
+    fi
+  fi
+
+  docker compose -p "$project" down -v --remove-orphans --timeout 30
+  # `down -v` reconstructs the project from its containers' labels, so a project
+  # whose containers were already gone leaves its volume behind. Said and taken
+  # by name, because a volume left here is the accumulation this command exists
+  # to end.
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
+    echo "$volume outlived the project's containers; removing it by name."
+    docker volume rm "$volume" >/dev/null || {
+      echo "could not remove $volume — something still uses it:" >&2
+      docker ps -a --filter "volume=$volume" --format '{{.Names}} ({{.Status}})' | sed 's/^/    /' >&2
+      exit 1
+    }
+  fi
+  echo "$project is gone. The next run of any suite brings it back."
+  exit 0
+fi
 
 networks_total=$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -c . || echo 0)
 networks_ours=$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -c '^\(twalk\|h21-\|h23-\)' || echo 0)

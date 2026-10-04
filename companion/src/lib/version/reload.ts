@@ -21,42 +21,67 @@ const RELOAD_MARKER = 'twalk:reloaded-for-gateway-version';
 export type ReloadDecision = 'reloading' | 'already-tried';
 
 /**
- * Purges the caches this build's service worker owns, drops its registration
- * and reloads — once per Gateway version.
+ * Drops the service worker, purges the caches it owns and reloads — once per
+ * Gateway version. On the *second* sight of the same version it purges again
+ * and says so instead of reloading.
  *
- * Unregistering as well as purging matters: a registered worker intercepts the
- * navigation the reload triggers, and would answer it from the cache we just
- * emptied with whatever it fetched next. Letting it go means the next load
- * comes from the Gateway, and the fresh shell registers its own worker.
+ * **Dropping the worker is the half that matters, and it goes first.** A
+ * registered worker intercepts the navigation the reload triggers and would
+ * answer it from the cache we just emptied with whatever it fetched next;
+ * letting it go means the next load comes from the Gateway, and the fresh
+ * shell registers its own worker.
+ *
+ * **And a purge from a page the worker still controls cannot be final** —
+ * which is #442, measured rather than reasoned. An unregistered worker keeps
+ * serving its existing clients until they unload, and this one re-populates
+ * its cache on a fetch miss (`src/service-worker.ts`), so any fingerprinted
+ * request the page makes between the purge and the unload puts a file back.
+ * Two runs in five left exactly one entry behind — the landing page's
+ * `$lib/crypto/store` import, whose chunk lands while this function is
+ * finishing — in the cache of the build we had just emptied, with the
+ * registration already gone.
+ *
+ * So the purge runs twice, and the second one is the one that sticks: on the
+ * boot that refuses to reload, nothing is registered any more (this path
+ * returns before `registerServiceWorker`), nothing can put anything back, and
+ * `$lib/boot.ts` awaits it before the banner appears.
  */
 export async function reloadForNewGateway(actual: string): Promise<ReloadDecision> {
 	if (readMarker() === actual) {
+		await purgeTheShell();
 		return 'already-tried';
 	}
 	writeMarker(actual);
-
-	if ('caches' in window) {
-		try {
-			const names = await caches.keys();
-			await Promise.all(
-				names.filter((name) => name.startsWith('twalk-companion-')).map((name) => caches.delete(name))
-			);
-		} catch {
-			// A browser that refuses the Cache API has nothing stale to hold.
-		}
-	}
 
 	if ('serviceWorker' in navigator) {
 		try {
 			const registrations = await navigator.serviceWorker.getRegistrations();
 			await Promise.all(registrations.map((registration) => registration.unregister()));
 		} catch {
-			// Same: nothing registered, nothing to drop.
+			// Nothing registered, nothing to drop.
 		}
 	}
 
+	await purgeTheShell();
+
 	window.location.reload();
 	return 'reloading';
+}
+
+/** Every cache this build's worker owns, and nothing else on the origin. */
+async function purgeTheShell(): Promise<void> {
+	if (!('caches' in window)) {
+		// A browser that refuses the Cache API has nothing stale to hold.
+		return;
+	}
+	try {
+		const names = await caches.keys();
+		await Promise.all(
+			names.filter((name) => name.startsWith('twalk-companion-')).map((name) => caches.delete(name))
+		);
+	} catch {
+		// Same.
+	}
 }
 
 function readMarker(): string | null {

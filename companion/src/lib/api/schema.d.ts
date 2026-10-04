@@ -286,6 +286,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/_twalk/hermes/mail-rule-proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The drafting agent proposes a triage rule, and nothing is applied.
+         * @description The one write the Hermes seam is allowed (#420, ADR 0042), and the
+         *     reason it is the only one. Triage itself is the owner's rules applied
+         *     by the collector — no model decides where a mail goes — but
+         *     recognising a pattern across weeks of mail is what a rule cannot do
+         *     and a model can. So the agent gets a route for the judgement and none
+         *     for the act: **it records a proposal, and applies nothing.**
+         *
+         *     There is no endpoint on this origin by which the agent writes a rule,
+         *     edits the allowlist or moves a mail. Approving is the owner's, on
+         *     their own screen (`POST /api/mail-rule-proposals/{sequence}/approve`),
+         *     and the rule is written then, with the owner as the actor. That
+         *     asymmetry is the ticket rather than a precaution: the agent reads text
+         *     written by strangers, and a proposal is the only shape in which that
+         *     reading cannot become an action.
+         *
+         *     **Authentication** is the answers hook's: an HMAC-SHA256 over the raw
+         *     request body as `X-Hermes-Signature-256: sha256=<hex>`, with
+         *     `GATEWAY_HERMES_ANSWER_SECRET`, checked before a byte of the body is
+         *     looked at. A device token is not accepted here.
+         *
+         *     **What is checked, and what is deliberately not.** The rule's own
+         *     shape is — an id, a match that is neither empty nor out of range, a
+         *     destination that is not the trash — so a proposal the owner could
+         *     never approve is refused at the door instead of being shown to them as
+         *     something they might say yes to. The **allowlist** is not: a mailbox
+         *     the owner has not declared yet is a reasonable thing to propose, and
+         *     they declare it by approving. The trash is not an oversight in that
+         *     rule, it is the exception ADR 0042 names — neither a typo nor a
+         *     proposal may invent a destructive destination.
+         *
+         *     `because` is the agent's own words for why, kept to 500 characters and
+         *     shown to the owner beside the rule. It is read by nobody and acted on
+         *     by nothing.
+         */
+        post: operations["proposeMailRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/{companionPath}": {
         parameters: {
             query?: never;
@@ -1126,6 +1178,24 @@ export interface paths {
          *     It is the same fact the registration relay refuses on, so this
          *     publishes nothing a registration attempt would not reveal.
          *     `homeserver` is the server name, which is in the deployment's own DNS.
+         *
+         *     `client_url` is **where a browser reaches that homeserver's client
+         *     API**, and it is a different question (#323). A server name is in every
+         *     user id, room id and device a deployment has, so it cannot be renamed;
+         *     it is not always an address the outside can call. The reference
+         *     deployment is exactly that: its server name is `twalk.localhost` while
+         *     its Companion is published elsewhere with `/_matrix/` proxied to
+         *     Synapse beside it, so a browser out there resolved `twalk.localhost` to
+         *     **its own** loopback — the first sign-in on a new device could not
+         *     reach a homeserver at all, and the recovery screen read `the login
+         *     response was not a session`, which was that browser's own machine
+         *     answering.
+         *
+         *     `null` when the name is the address, which is every deployment that
+         *     needs nothing here, and then the Companion derives
+         *     `https://<server name>` as it always has. Matrix's own `.well-known`
+         *     delegation answers the same question and cannot help: it would have to
+         *     be served *at* the unreachable name.
          *
          *     Absent by design: the owner's Matrix ID. Naming the human who owns a
          *     deployment to anyone who can reach it is a different disclosure, and no
@@ -3838,18 +3908,47 @@ export interface components {
             /** @enum {string|null} */
             language: "en" | "fr" | "it" | "es" | "de" | null;
         };
-        MailMove: components["schemas"]["MailMoveReport"] & {
+        /**
+         * @description One move as the journal holds it: everything the collector reported,
+         *     plus its position and whether the owner has asked for it back.
+         *
+         *     **Written out rather than composed**, and that is not a style choice.
+         *     It was `allOf: [MailMoveReport, {sequence, undo_requested_at}]`, and
+         *     each branch of an `allOf` is applied to the whole instance on its
+         *     own: `MailMoveReport` says `additionalProperties: false`, so it
+         *     rejected the two members the other branch had just added. The
+         *     composition described nothing — no answer this route can give could
+         *     validate — and nobody found out, because no test had asked the
+         *     Gateway for this response (#431). `the_two_mail_move_schemas_agree`
+         *     is what keeps the two member lists together now that they are two.
+         */
+        MailMove: {
+            connection: string;
+            email_id: string;
+            from_mailbox_id: string;
+            from_mailbox_name: string;
+            /** Format: date-time */
+            occurred_at: string;
+            /** @description The rule that caused it, or `undo` when the owner asked for it back. */
+            rule_id: string;
             /**
              * Format: int64
              * @description Its position in the journal, and what an undo names.
              */
             sequence: number;
+            to_mailbox_id: string;
+            to_mailbox_name: string;
             /**
              * Format: date-time
              * @description Set when the owner asked for this move to be put back and the
              *     collector has not done it yet.
              */
             undo_requested_at: string | null;
+            /**
+             * Format: int64
+             * @description The move this one reverses, when it is an undo.
+             */
+            undoes?: number | null;
         };
         /** @description One move, as the collector reports it. */
         MailMoveReport: {
@@ -3922,6 +4021,21 @@ export interface components {
             sequence: number;
             /** @enum {string} */
             state: "proposed" | "approved" | "refused";
+        };
+        /**
+         * @description What the drafting agent posts to
+         *     `POST /_twalk/hermes/mail-rule-proposals`: one rule, and optionally
+         *     the agent's own words for why. Additional members are allowed and
+         *     dropped, as on the answers hook — the agent's side of the seam is
+         *     Hermes's and grows with it.
+         */
+        MailRuleProposalPush: {
+            /**
+             * @description The agent's reason, in its own words, kept to the first 500
+             *     characters. Shown to the owner beside the rule; read by nothing.
+             */
+            because?: string | null;
+            rule: components["schemas"]["MailRule"];
         };
         /** @description The mailboxes a rule may file into, and the rules themselves. */
         MailTriage: {
@@ -6194,6 +6308,136 @@ export interface operations {
             };
         };
     };
+    proposeMailRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description One rule and, optionally, a sentence about it. */
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MailRuleProposalPush"];
+            };
+        };
+        responses: {
+            /**
+             * @description Recorded, with the journal sequence the owner's screen will name
+             *     it by. `state` is `proposed` and can be nothing else here: this
+             *     route has no way to record a decided one.
+             */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** Format: int64 */
+                        sequence: number;
+                        /** @enum {string} */
+                        state: "proposed";
+                    };
+                };
+            };
+            /**
+             * @description `unauthenticated` — no `X-Hermes-Signature-256`, one that cannot
+             *     be read, or one this Gateway's secret does not produce over these
+             *     bytes. One answer for all of them, as on the answers hook.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "unauthenticated";
+                    };
+                };
+            };
+            /**
+             * @description `push_too_large` — over this endpoint's limit, which is the
+             *     answers hook's. A proposal is one rule and a sentence, so a body
+             *     that size is pointed at the wrong endpoint.
+             */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "push_too_large";
+                    };
+                };
+            };
+            /**
+             * @description Signed, and not a rule this deployment could apply.
+             *     `malformed_request` is a body that is not a proposal at all; the
+             *     rest are the rule's own refusals, each its own word because an
+             *     agent that proposed a destructive destination has made a
+             *     different mistake from one that proposed an empty match:
+             *     `destination_is_destructive`, `destination_is_empty`,
+             *     `destination_too_long`, `match_is_empty`, `match_too_long`,
+             *     `match_out_of_range`, `rule_id_is_empty`, `rule_id_too_long`.
+             *
+             *     `destination_not_allowed` is **not** among them, and that absence
+             *     is the point above: the allowlist is the owner's to extend when
+             *     they approve.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "malformed_request" | "destination_is_destructive" | "destination_is_empty" | "destination_too_long" | "match_is_empty" | "match_too_long" | "match_out_of_range" | "rule_id_is_empty" | "rule_id_too_long";
+                    };
+                };
+            };
+            /**
+             * @description `store_unavailable` — the proposal could not be written to the
+             *     journal. Nothing was recorded, and the agent's own retry is the
+             *     remedy.
+             */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "store_unavailable";
+                    };
+                };
+            };
+            /**
+             * @description - `hermes_answers_not_configured` —
+             *       `GATEWAY_HERMES_ANSWER_SECRET`, `GATEWAY_HERMES_DOMAIN` or
+             *       `GATEWAY_NATS_URL` is unset, so this deployment has no seam to
+             *       Hermes and takes no proposals through it.
+             *     - `consent_not_configured` — there is no store to journal a
+             *       proposal in. **No deployment can answer this**, and it is
+             *       declared because the handler can: the Gateway builds its Hermes
+             *       seam inside the branch that has the store, so the seam exists
+             *       only where the store does. A route that writes to a store does
+             *       not assume one.
+             */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] & {
+                        /** @enum {unknown} */
+                        error?: "hermes_answers_not_configured" | "consent_not_configured";
+                    };
+                };
+            };
+        };
+    };
     getCompanionFile: {
         parameters: {
             query?: never;
@@ -7605,6 +7849,14 @@ export interface operations {
                     "application/json": {
                         /** @description Whether this deployment's one account exists. */
                         bootstrapped: boolean;
+                        /**
+                         * Format: uri
+                         * @description Where a browser reaches the homeserver's client API
+                         *     (`GATEWAY_HOMESERVER_CLIENT_URL`), or `null` when the
+                         *     server name is the address. No trailing slash.
+                         * @example https://companion.example.com
+                         */
+                        client_url: string | null;
                         /**
                          * @description The server name this deployment's owner is on.
                          * @example example.com

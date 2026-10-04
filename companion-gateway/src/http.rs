@@ -75,6 +75,16 @@ pub struct Gateway {
     /// homeserver to bootstrap against — each half is then answered with the
     /// variable that would enable it.
     bootstrap: Option<Arc<Bootstrap>>,
+    /// Where a **browser** reaches this deployment's Matrix client API, when
+    /// the server name is not an address it can use (#323,
+    /// `GATEWAY_HOMESERVER_CLIENT_URL`). `None` on a deployment whose name is
+    /// its address, which is every deployment that needs nothing here.
+    ///
+    /// Published by `GET /api/deployment` and used by nothing on this side:
+    /// the Gateway keeps verifying OpenID tokens against the federation URL
+    /// inside the deployment. It is a fact about the outside that only the
+    /// operator knows.
+    client_base_url: Option<String>,
     /// The consent store and its outbox ([`crate::store`],
     /// [`crate::outbox`]). `None` when this deployment writes no consent —
     /// the consent endpoints then answer `503 consent_not_configured`.
@@ -178,6 +188,7 @@ impl Gateway {
             metrics,
             sessions: None,
             bootstrap: None,
+            client_base_url: None,
             consent: None,
             bridges: Arc::new(
                 Bridges::new(Vec::new()).expect("no bridge configured is a valid configuration"),
@@ -211,6 +222,17 @@ impl Gateway {
     pub fn with_bootstrap(mut self, bootstrap: Option<Arc<Bootstrap>>) -> Self {
         self.bootstrap = bootstrap;
         self
+    }
+
+    /// Adds the address a browser reaches the homeserver at (#323).
+    pub fn with_client_base_url(mut self, client_base_url: Option<String>) -> Self {
+        self.client_base_url = client_base_url;
+        self
+    }
+
+    /// What `GET /api/deployment` publishes beside the server name.
+    pub fn client_base_url(&self) -> Option<&str> {
+        self.client_base_url.as_deref()
     }
 
     pub fn sessions(&self) -> Option<Arc<Sessions>> {

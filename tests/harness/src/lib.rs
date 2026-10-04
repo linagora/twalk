@@ -2,7 +2,8 @@
 //!
 //! Every component's suite tests at the same seam — its process boundary,
 //! against a real stack — and therefore needs the same four things: the test
-//! stack's lifecycle ([`stack`]), the bus ([`bus`]), contract validation
+//! stack's lifecycle ([`stack`], which also keeps it from growing without
+//! bound — [`sweep`]), the bus ([`bus`]), contract validation
 //! ([`contract`]) and a poller ([`poll_until`]). They started life inside the
 //! Sensor suite (ticket 01) and live here so `sensor/` and `hermes/` share
 //! one implementation. Persona tests additionally need an LLM that answers
@@ -21,6 +22,7 @@ pub mod jmap_push;
 pub mod sso;
 pub mod stack;
 pub mod stub_llm;
+pub mod sweep;
 mod wait;
 
 pub use bus::{Bus, ConsumerState, StoredMessage};
@@ -32,11 +34,11 @@ pub use contract::{
 };
 pub use sso::FakeSso;
 pub use stack::{
-    compose_up_failed, ensure_stack, hold_deploy_stack, nats_url, synapse_url, StackHeld,
-    PORTALS_APPSERVICE_AS_TOKEN,
-    PORTALS_APPSERVICE_SENDER, SERVER_NAME,
+    compose_up_failed, ensure_stack, hold_deploy_stack, nats_url, stack_report, synapse_url,
+    StackHeld, PORTALS_APPSERVICE_AS_TOKEN, PORTALS_APPSERVICE_SENDER, SERVER_NAME,
 };
 pub use stub_llm::{StubAnswer, StubLlm, StubRequest, DEFAULT_LANGUAGE_ANSWER, LANGUAGE_ASK_MARK};
+pub use sweep::{sweep_account, sweep_stack, Swept, ADMIN_LOCALPART, UNSEEN_FOR};
 pub use wait::{poll_until, DEADLINE};
 
 use sha2::{Digest, Sha256};

@@ -352,6 +352,31 @@ Filter Subjects: twalk.persona.reply.approved.v1.posted, twalk.persona.reply.app
 
 Nothing already on the relay is lost — the clerk holds no state of its own (ADR 0035) — but a report published while the durable is gone is one the journal will not carry, so do it while nothing is being approved.
 
+## Publishing the Companion: two lines, and one that must stay unpublished
+
+The Companion is a browser application, so publishing it means publishing the **homeserver** too — and that is the part a deployment gets wrong silently. The browser signs a device in with Matrix OpenID (ADR 0011): it asks the owner's homeserver for a token and posts it to the Gateway. To find that homeserver it used the deployment's **server name**, turned into `https://<server name>`.
+
+A server name is not always an address the outside can call, and it cannot be changed: it is in every user id, room id and device a live deployment has. This one is the case — `MATRIX_DOMAIN=twalk.localhost`, Synapse on loopback, and the Companion published behind the operator's SSO at another name entirely. A browser there resolved `twalk.localhost` to **its own** machine. What that looked like to the owner, on 2026-10-04, was the recovery screen answering `the login response was not a session` — their own laptop replying to a password login (#323).
+
+So, two lines that go together:
+
+1. **In your reverse proxy**, put `/_matrix/` in front of Synapse on the **same** public name the Companion is served under, so the browser's Matrix requests are same-origin:
+
+   ```
+   companion.example.com/_matrix/   →  synapse:8008/_matrix/
+   companion.example.com/           →  companion-gateway:8080
+   ```
+
+2. **In `.env`**, tell the deployment that address, with no trailing slash:
+
+   ```
+   GATEWAY_HOMESERVER_CLIENT_URL=https://companion.example.com
+   ```
+
+`GET /api/deployment` then carries it as `client_url`, the sign-in and recovery screens call that address instead of deriving one from the name, and **nothing server-side changes**: the Gateway still verifies the OpenID token against `GATEWAY_HOMESERVER_FEDERATION_URL` inside the deployment, and still checks the user is `GATEWAY_OWNER`. Unset, a deployment whose name *is* its address behaves exactly as before.
+
+Two paths must be left out of what you publish. **`/_twalk/*`** carries its own credentials — a bridge's `as_token`, the secret shared with Hermes — and belongs on the deployment's own network. And if your proxy authenticates the Companion (an SSO in front of it), the Matrix routes a browser needs *before* it has a session have to be let through: `/_matrix/client/versions`, `/.well-known/matrix/`, and the OpenID token request `/_matrix/client/v3/user/{userId}/openid/request_token`.
+
 ## What is where
 
 | Path | What it is |

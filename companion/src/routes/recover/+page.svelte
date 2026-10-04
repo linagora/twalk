@@ -16,32 +16,67 @@
 	What happens is a *new device joining an existing identity*: log in again,
 	then open the account's secret storage with the recovery key and pull the
 	cross-signing secrets and the key-backup key back out. Nothing is created
-	and nothing is reset — resetting would break every other device and lose
-	the message history, which is exactly what screen 2 promised would happen
-	if the key were lost.
+	and nothing is reset, and that is the better outcome — the other devices
+	stay verified and whatever is in the key backup stays reachable.
+
+	**And there is a second path, for the browser that has no key** (#439). It
+	is beside the first and never instead of it: the key field comes first, the
+	reset is offered under it, and choosing it shows what a reset costs **this
+	account** — read from the account a moment earlier, not from a warning
+	written in advance. This screen used to say that resetting "would break
+	every other device and lose the message history", and on the deployment
+	where that mattered both halves were false: not one device was
+	cross-signed, and the key backup held 0 room keys against 132 encrypted
+	rooms. So an owner who had their password was sent to another Matrix client
+	against a homeserver published nowhere, which means an SSH tunnel and a
+	desktop client.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
 
 	import Icon from '$lib/icons/Icon.svelte';
+	import RecoveryKeyCard from '$lib/components/RecoveryKeyCard.svelte';
 	import { t } from '$lib/i18n';
 	import { gateway } from '$lib/api/client';
 	import {
 		domain,
 		restoreDomain,
 		rememberDomain,
-		homeserverBaseUrl,
+		matrixBaseUrl,
 		isValidDomain,
 		normaliseDomain
 	} from '$lib/onboarding/domain';
 	import { homeserver, restoreHomeserver, matrixSession } from '$lib/onboarding/progress';
 	import { localpartOf } from '$lib/onboarding/account';
 	import { decodeRecoveryKey, groupRecoveryKey, type RecoveryKeyProblem } from '$lib/recovery/key';
+	import type { ResetCost, ResettableCrypto } from '$lib/crypto/reset';
 
-	type Stage = 'form' | 'working' | 'done';
+	type Stage = 'form' | 'working' | 'cost' | 'done';
 
 	let stage = $state<Stage>('form');
-	let step = $state<'signing-in' | 'loading-crypto' | 'unlocking'>('signing-in');
+	let step = $state<
+		'signing-in' | 'loading-crypto' | 'unlocking' | 'reading' | 'resetting'
+	>('signing-in');
+
+	/**
+	 * The reset path's own state (#439).
+	 *
+	 * `cost` is what this account would lose, measured; `session` is the login
+	 * the measurement was made through, kept so the reset itself does not sign
+	 * in a second time and leave a second device behind. `resetKey` is the new
+	 * key, which exists in this variable and nowhere else.
+	 */
+	let cost = $state<ResetCost | null>(null);
+	let session = $state<{
+		crypto: ResettableCrypto;
+		userId: string;
+		deviceId: string;
+		accessToken: string;
+	} | null>(null);
+	let resetKey = $state<string | null>(null);
+	/** What the deployment says about where its homeserver answers (#323). */
+	let clientUrl = $state<string | null>(null);
+	let resetBackup = $state(false);
 
 	/** Filled from the Gateway session when there is one: one less thing to type. */
 	let owner = $state<string | null>(null);
@@ -89,6 +124,15 @@
 			} catch {
 				// No session: the user types their username like anyone else.
 			}
+			try {
+				// Where this deployment's homeserver answers a browser (#323).
+				// Asked of the deployment rather than derived from its name,
+				// which is not always an address the outside can call.
+				const described = await gateway.GET('/api/deployment');
+				clientUrl = described.data?.client_url ?? null;
+			} catch {
+				// The screen still works: the address falls back to the name.
+			}
 		})();
 	});
 
@@ -97,17 +141,38 @@
 	const effectiveDomain = $derived(askDomain ? normaliseDomain(typedDomain) : $domain);
 	const domainValid = $derived(isValidDomain(effectiveDomain));
 
-	// The homeserver screen 1 resolved, but only if it belongs to the domain in
-	// play: a user correcting the domain here must not be sent to the old one.
+	/**
+	 * Where this browser sends its Matrix requests (#323). The deployment's
+	 * own answer wins when there is one, then what screen 1 resolved, then the
+	 * domain itself — and the last two only while the domain in play is still
+	 * the deployment's, so a user correcting it is not sent to the old one.
+	 *
+	 * This screen is where it was found: both paths below begin with a
+	 * password login, and on a deployment published under another name than
+	 * its server name the login went to the browser's own loopback. What the
+	 * owner read was `the login response was not a session`.
+	 */
 	const baseUrl = $derived(
-		$homeserver !== '' && effectiveDomain === $domain
-			? $homeserver
-			: homeserverBaseUrl(effectiveDomain)
+		matrixBaseUrl({
+			deploymentClientUrl: clientUrl,
+			discoveredHomeserver: $homeserver,
+			deploymentDomain: $domain,
+			effectiveDomain
+		})
 	);
 	const decoded = $derived(decodeRecoveryKey(typedKey));
 	const keyProblem = $derived<RecoveryKeyProblem | null>(decoded.ok ? null : decoded.problem);
 	const ready = $derived(
 		domainValid && username.trim().length > 0 && password.length > 0 && decoded.ok
+	);
+	/**
+	 * The reset path needs everything the restore path does **except** the key
+	 * — which is the whole of why it exists. Its own derivation rather than a
+	 * relaxation of `ready`, so the primary button can never become clickable
+	 * without a key by accident.
+	 */
+	const readyWithoutKey = $derived(
+		domainValid && username.trim().length > 0 && password.length > 0
 	);
 
 	async function submit(event: SubmitEvent) {
@@ -183,6 +248,103 @@
 	}
 
 	/**
+	 * The reset path's first half: sign in, and ask the account what a reset
+	 * would cost **it** (#439).
+	 *
+	 * Nothing is changed here. The owner is shown the measurement and chooses
+	 * — which is the whole shape of this feature: the cost is not the same on
+	 * every deployment, and the client can tell the difference before asking.
+	 */
+	async function askWhatAResetCosts(): Promise<void> {
+		touched = true;
+		if (!readyWithoutKey || stage === 'working') {
+			return;
+		}
+		failure = null;
+		failureKind = null;
+		stage = 'working';
+		step = 'signing-in';
+
+		try {
+			const { signInWithoutRecoveryKey } = await import('$lib/crypto/bootstrap');
+			const signedIn = await signInWithoutRecoveryKey({
+				baseUrl,
+				userId: owner ?? username.trim(),
+				password,
+				onStep: (next) => {
+					step = next;
+				}
+			});
+			step = 'reading';
+			const { whatAResetCosts } = await import('$lib/crypto/reset');
+			cost = await whatAResetCosts(signedIn.crypto, signedIn.userId);
+			session = signedIn;
+			stage = 'cost';
+		} catch (cause) {
+			stage = 'form';
+			const problem = (cause as { problem?: string }).problem;
+			failureKind = problem ?? classify(cause);
+			failure = cause instanceof Error ? cause.message : String(cause);
+		}
+	}
+
+	/**
+	 * The second half, after the owner has read the cost and said yes.
+	 *
+	 * The new key is shown once, on the card onboarding uses — it exists in
+	 * `resetKey` and nowhere else, and travels in no request.
+	 */
+	async function confirmReset(): Promise<void> {
+		if (session === null || stage === 'working') {
+			return;
+		}
+		const signedIn = session;
+		failure = null;
+		failureKind = null;
+		stage = 'working';
+		step = 'resetting';
+
+		try {
+			const { resetIdentity } = await import('$lib/crypto/reset');
+			const result = await resetIdentity({
+				crypto: signedIn.crypto,
+				userId: signedIn.userId,
+				password,
+				deviceId: signedIn.deviceId
+			});
+			resetKey = result.recoveryKey;
+			resetBackup = result.keyBackup;
+			matrixSession.set({
+				baseUrl,
+				userId: signedIn.userId,
+				deviceId: signedIn.deviceId,
+				accessToken: signedIn.accessToken
+			});
+
+			// As on the restore path: the Gateway cookie may have gone with the
+			// store, and the keys are back either way if this fails.
+			const { signInToGateway } = await import('$lib/session/signin');
+			await signInToGateway({
+				baseUrl,
+				userId: signedIn.userId,
+				accessToken: signedIn.accessToken
+			}).catch(() => {});
+
+			rememberDomain(effectiveDomain);
+			verified = true;
+			stage = 'done';
+		} catch (cause) {
+			// Back to the measurement rather than to the form: the owner has
+			// already signed in, and sending them to type their password again
+			// would read as a refused password.
+			stage = 'cost';
+			const problem = (cause as { problem?: string }).problem;
+			failureKind = problem ?? classify(cause);
+			failure = cause instanceof Error ? cause.message : String(cause);
+		}
+	}
+
+	/**
 	 * A cause that is not a `RestoreError` at all. The classification of a
 	 * failure the homeserver never saw is `$lib/crypto/bootstrap`'s job now —
 	 * it is the only place that can tell a rejected `fetch` from a refusal —
@@ -197,7 +359,82 @@
 </script>
 
 <section class="screen" data-testid="screen-recover">
-	{#if stage === 'done'}
+	{#if stage === 'done' && resetKey !== null}
+		<!--
+			The reset's own end: the new key, on the card onboarding shows, once.
+			A different header from the restore path's on purpose — this device
+			is not "back", it is signed by an identity that is one minute old.
+		-->
+		<header class="stack">
+			<h1>{$t('recover.reset.title')}</h1>
+			<p class="subtitle" data-testid="recover-reset-done">{$t('recover.reset.body')}</p>
+		</header>
+		<RecoveryKeyCard
+			recoveryKey={resetKey}
+			userId={session?.userId ?? owner ?? username}
+			domain={effectiveDomain}
+			keyBackup={resetBackup}
+			onContinue={() => {
+				resetKey = null;
+				window.location.assign('/');
+			}}
+		/>
+	{:else if stage === 'cost'}
+		<!--
+			What this account loses, measured a moment ago. The numbers are the
+			point: a generic warning is what kept this path shut, and it was
+			false on the account it was protecting (#439).
+		-->
+		<header class="stack">
+			<h1>{$t('recover.cost.title')}</h1>
+			<p class="subtitle">{$t('recover.cost.intro')}</p>
+		</header>
+		<!--
+			The account's total is on the element and not in the sentence: "one of
+			your 1 devices" is reachable and reads as a bug, and the number the
+			owner acts on is how many devices lose their signature. The journey
+			asserts both attributes.
+		-->
+		<ul class="stack" data-testid="recover-cost" data-signed={cost?.signedDevices}
+			data-devices={cost?.devices} data-room-keys={cost?.roomKeys ?? 'none'}>
+			<li>
+				{$t('recover.cost.devices', { signed: cost?.signedDevices ?? 0 })}
+			</li>
+			<li>
+				{#if cost?.roomKeys === null || cost?.roomKeys === undefined}
+					{$t('recover.cost.noBackup')}
+				{:else}
+					{$t('recover.cost.history', { count: cost.roomKeys })}
+				{/if}
+			</li>
+		</ul>
+		{#if failure !== null}
+			<p class="error-text" role="alert" data-testid="recover-reset-error" data-kind={failureKind}>
+				{$t('recover.error.failed', { detail: failure })}
+			</p>
+		{/if}
+		<p class="stack">
+			<button
+				class="button button--primary"
+				type="button"
+				data-testid="recover-reset-confirm"
+				onclick={confirmReset}
+			>
+				{$t('recover.cost.confirm')}
+			</button>
+			<button
+				class="button"
+				type="button"
+				data-testid="recover-reset-back"
+				onclick={() => {
+					stage = 'form';
+					cost = null;
+				}}
+			>
+				{$t('recover.cost.back')}
+			</button>
+		</p>
+	{:else if stage === 'done'}
 		<header class="stack">
 			<h1>{$t('recover.done.title')}</h1>
 			<p
@@ -361,6 +598,26 @@
 					<Icon name="continue" size="dense" />
 				{/if}
 			</button>
+
+			<!--
+				The second path, and its placement is the ticket's own
+				requirement: **beside** the key field and under the primary
+				button, never instead of them. Entering the key keeps every
+				other device verified and the key backup reachable, so it stays
+				the thing to do; this is for the browser that cannot (#439).
+			-->
+			<div class="stack" data-testid="recover-no-key">
+				<p class="small muted">{$t('recover.noKey.offer')}</p>
+				<button
+					class="button"
+					type="button"
+					disabled={!readyWithoutKey || stage === 'working'}
+					data-testid="recover-no-key-action"
+					onclick={askWhatAResetCosts}
+				>
+					{$t('recover.noKey.action')}
+				</button>
+			</div>
 		</form>
 
 		<p class="small muted">

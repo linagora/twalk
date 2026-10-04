@@ -781,3 +781,75 @@ async fn the_deployment_has_its_account_whoever_created_it() -> Result<()> {
     gateway.stop().await;
     Ok(())
 }
+
+/// The address a browser reaches the homeserver at, when the server name is
+/// not one (#323).
+///
+/// A server name is in every user id, room id and device a live deployment
+/// has, so it cannot be renamed to suit the outside — and the outside is where
+/// the Companion is published. The reference deployment is that case: its name
+/// is `twalk.localhost` while its Companion answers at another address, with
+/// `/_matrix/` proxied to Synapse beside it. A browser there resolved the name
+/// to **its own** loopback, so the first sign-in on a new device, and the
+/// recovery screen with it, reached no homeserver at all — the owner read
+/// `the login response was not a session`, which was their own machine
+/// answering.
+///
+/// Both halves are here, because the one that must not change is the one
+/// nobody would notice breaking: a deployment that sets nothing still answers
+/// `null`, and its browsers keep deriving the address from the name.
+#[tokio::test]
+async fn the_deployment_says_where_a_browser_reaches_its_homeserver() -> Result<()> {
+    ensure_stack().await?;
+    let published = companion_build("deployment-client-url")?;
+    let gateway = GatewayProc::start(&harness::gateway_env_with(
+        &published,
+        &[(
+            "GATEWAY_HOMESERVER_CLIENT_URL",
+            // With a trailing slash, which the Gateway trims: the Companion
+            // appends `/_matrix/…`, and `https://host//_matrix` is a path a
+            // proxy may or may not forgive.
+            "https://companion.example.com/",
+        )],
+    ))?;
+    let base = gateway.base_url().await?;
+    wait_until_answering(&base).await?;
+
+    let document = json(
+        client()?
+            .get(format!("{base}/api/deployment"))
+            .send()
+            .await?,
+    )
+    .await?;
+    assert_eq!(
+        document["client_url"].as_str(),
+        Some("https://companion.example.com"),
+        "the deployment publishes the address, without its trailing slash: {document}"
+    );
+    assert_eq!(
+        document["homeserver"].as_str(),
+        Some(SERVER_NAME),
+        "and the server name is untouched — only the address the browser calls changes: \
+         {document}"
+    );
+    gateway.stop().await;
+
+    // And a deployment that needs none says so with a null rather than a
+    // silence: a client cannot tell an absent member from an older Gateway
+    // that never knew the question.
+    let (plain, plain_base, _state) = start("deployment-no-client-url").await?;
+    let plain_document = json(
+        client()?
+            .get(format!("{plain_base}/api/deployment"))
+            .send()
+            .await?,
+    )
+    .await?;
+    assert!(
+        plain_document["client_url"].is_null(),
+        "nothing configured, nothing claimed: {plain_document}"
+    );
+    plain.stop().await;
+    Ok(())
+}

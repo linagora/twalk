@@ -137,6 +137,13 @@ mod tests {
         // drifting, which would leave the guard's table classifying a path the
         // router does not serve.
         assert_eq!(crate::hermes_answer::ANSWER_PATH, "/_twalk/hermes/answers");
+        // And the proposal's, which is what the guard's table was missing
+        // altogether until #431: a `/_twalk/` path the table does not name is
+        // closed to everything but a browser's device token.
+        assert_eq!(
+            crate::hermes_answer::PROPOSAL_PATH,
+            "/_twalk/hermes/mail-rule-proposals"
+        );
     }
 }
 
@@ -152,45 +159,58 @@ mod tests {
 ///
 /// Signed with the same secret the answers hook uses, and verified before a
 /// byte of the body is looked at.
+///
+/// **Every refusal here goes through [`api_error`]**, like every other answer
+/// this origin gives. It did not, until #431 described this route: the
+/// refusals named their code `code` where the whole origin names it `error`,
+/// which `openapi.yaml`'s `Error` schema forbids outright
+/// (`additionalProperties: false`). Nothing read it — this is the one route
+/// the description had missed, so no client had been generated against it —
+/// and that is exactly the window in which a second error vocabulary gets
+/// established. The codes are the sibling route's words too, for one reason
+/// each: the seam is unconfigured by the same variable, and a body over the
+/// limit is `push_too_large` on both.
 async fn propose_mail_rule(
     State(gateway): State<Gateway>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let Some(answers) = gateway.answers() else {
-        return (
+        return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "code": "hermes_seam_not_configured",
-                "detail": "this Gateway takes no proposals: set GATEWAY_HERMES_ANSWER_SECRET"
-            })),
-        )
-            .into_response();
+            "hermes_answers_not_configured",
+            "this Gateway takes no proposals: set GATEWAY_HERMES_ANSWER_SECRET",
+        );
     };
     if body.len() > MAX_PUSH_BYTES {
-        return (
+        return api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(json!({ "code": "too_large", "detail": "a proposal is one rule and a sentence" })),
-        )
-            .into_response();
+            "push_too_large",
+            "a proposal is one rule and a sentence",
+        );
     }
     let signature = headers
         .get(SIGNATURE_HEADER)
         .and_then(|value| value.to_str().ok());
     if !answers.authenticates(signature, &body) {
         warn!("refused a rule proposal: the signature is missing or wrong");
-        return (
+        return api_error(
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "code": "unauthenticated", "detail": "the proposal is not signed by this deployment's Hermes" })),
-        )
-            .into_response();
+            "unauthenticated",
+            "the proposal is not signed by this deployment's Hermes",
+        );
     }
+    // Unreachable as this Gateway is wired, and kept: `main.rs` builds the
+    // Hermes seam inside the branch that has the store, so `answers()` is
+    // `Some` only where `consent()` is. A route that writes to a store must
+    // not assume one, and the description says this is the branch no
+    // deployment can produce.
     let Some(consent) = gateway.consent() else {
-        return (
+        return api_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "code": "consent_not_configured", "detail": "no store to journal a proposal in" })),
-        )
-            .into_response();
+            "consent_not_configured",
+            "no store to journal a proposal in",
+        );
     };
     #[derive(serde::Deserialize)]
     struct Body {
@@ -201,11 +221,11 @@ async fn propose_mail_rule(
     let proposal: Body = match serde_json::from_slice(&body) {
         Ok(proposal) => proposal,
         Err(error) => {
-            return (
+            return api_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({ "code": "malformed_request", "detail": format!("the proposal could not be read: {error}") })),
-            )
-                .into_response();
+                "malformed_request",
+                &format!("the proposal could not be read: {error}"),
+            );
         }
     };
     // The rule's own shape is checked now — an empty match, an age out of
@@ -219,18 +239,18 @@ async fn propose_mail_rule(
     // a proposal can invent one, so it is refused at the door rather than
     // shown to the owner as something they might approve (found in review).
     if let Err(why) = crate::mail_rules::check_destination(&proposal.rule.destination) {
-        return (
+        return api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "code": why.code(), "detail": "this rule is not one this deployment could apply" })),
-        )
-            .into_response();
+            why.code(),
+            "this rule is not one this deployment could apply",
+        );
     }
     if let Err(why) = proposal.rule.matches.check() {
-        return (
+        return api_error(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(json!({ "code": why.code(), "detail": "this rule is not one this deployment could apply" })),
-        )
-            .into_response();
+            why.code(),
+            "this rule is not one this deployment could apply",
+        );
     }
     let at = crate::consent::rfc3339_millis(std::time::SystemTime::now());
     let because = proposal

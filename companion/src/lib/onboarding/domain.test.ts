@@ -7,6 +7,7 @@ import { get } from 'svelte/store';
 import {
 	domain,
 	homeserverBaseUrl,
+	matrixBaseUrl,
 	isValidDomain,
 	normaliseDomain,
 	rememberDomain,
@@ -144,5 +145,66 @@ describe('remembering the domain', () => {
 			restoreDomain();
 			expect(get(domain)).toBe('');
 		});
+	});
+});
+
+describe('matrixBaseUrl', () => {
+	const deployment = {
+		deploymentClientUrl: null as string | null,
+		discoveredHomeserver: '',
+		deploymentDomain: 'twalk.localhost',
+		effectiveDomain: 'twalk.localhost'
+	};
+
+	/**
+	 * The case that made #323: the server name resolves to the *browser's* own
+	 * loopback, so deriving an address from it sends a password login to the
+	 * user's own machine. The deployment is the only party that knows better.
+	 */
+	it('prefers what the deployment says about itself', () => {
+		expect(
+			matrixBaseUrl({
+				...deployment,
+				deploymentClientUrl: 'https://companion.example.com',
+				discoveredHomeserver: 'https://twalk.localhost'
+			})
+		).toBe('https://companion.example.com');
+	});
+
+	it('trims a trailing slash, because the caller appends a path', () => {
+		expect(
+			matrixBaseUrl({ ...deployment, deploymentClientUrl: 'https://companion.example.com/' })
+		).toBe('https://companion.example.com');
+	});
+
+	it('falls back to what screen 1 resolved, then to the domain itself', () => {
+		expect(
+			matrixBaseUrl({ ...deployment, discoveredHomeserver: 'https://matrix.example.com' })
+		).toBe('https://matrix.example.com');
+		expect(matrixBaseUrl({ ...deployment, deploymentDomain: '', effectiveDomain: 'example.com' })).toBe(
+			'https://example.com'
+		);
+	});
+
+	/**
+	 * A user correcting the domain must not be sent to the old deployment's
+	 * address — neither the one it published nor the one screen 1 resolved for
+	 * it. Both are about *that* deployment, and this is no longer it.
+	 */
+	it('ignores both when the domain in play belongs to another deployment', () => {
+		expect(
+			matrixBaseUrl({
+				deploymentClientUrl: 'https://companion.example.com',
+				discoveredHomeserver: 'https://twalk.localhost',
+				deploymentDomain: 'twalk.localhost',
+				effectiveDomain: 'elsewhere.example'
+			})
+		).toBe('https://elsewhere.example');
+	});
+
+	it('is still plain HTTP on loopback, where there is no certificate', () => {
+		expect(
+			matrixBaseUrl({ ...deployment, deploymentDomain: '', effectiveDomain: 'localhost:8008' })
+		).toBe('http://localhost:8008');
 	});
 });

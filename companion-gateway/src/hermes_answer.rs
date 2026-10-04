@@ -102,6 +102,17 @@ pub const SUGGEST_PRODUCED_DATASCHEMA: &str =
 /// credential.
 pub const ANSWER_PATH: &str = "/_twalk/hermes/answers";
 
+/// The path a rule proposal arrives on (#420, ADR 0042), on the same
+/// credential as [`ANSWER_PATH`] and for the same reason.
+///
+/// A constant because the guard's table is what makes a `/_twalk/` route
+/// reachable at all: anything under that prefix the table does not classify
+/// falls through to a device token, and the agent has none. This route had no
+/// row, so the proposal path ADR 0042 rests on was closed to its only caller
+/// — found by describing it (#431), which is what put the description and the
+/// table side by side.
+pub const PROPOSAL_PATH: &str = "/_twalk/hermes/mail-rule-proposals";
+
 /// The header Hermes's outbound hook signs with: `sha256=<hex>` over the raw
 /// body, GitHub's shape.
 pub const SIGNATURE_HEADER: &str = "X-Hermes-Signature-256";

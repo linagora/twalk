@@ -49,9 +49,10 @@ use harness::{
     bridge_status_path, companion_build, ensure_stack, fresh_owner_user_id, gateway_env,
     gateway_env_with, gateway_env_with_bridges_and_consent, gateway_env_with_consent,
     gateway_env_without_sign_in, missing_static_dir, nats_url, owner_user_id, poll_until,
-    GatewayProc, MatrixUser, StubBridge, FALLBACK_HTML, INDEX_HTML, OTHER_LOCALPART,
-    OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN, STUB_AS_TOKEN, STUB_BRIDGE_ID,
-    STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID, UNREACHABLE_STATUS_BRIDGE_ID,
+    GatewayProc, MatrixUser, StubBridge, StubCollector, FALLBACK_HTML, HERMES_ANSWER_SECRET,
+    HERMES_DOMAIN, INDEX_HTML, OTHER_LOCALPART, OWNER_LOCALPART, SERVER_NAME, SERVICE_TOKEN,
+    STUB_AS_TOKEN, STUB_BRIDGE_ID, STUB_STATUS_BRIDGE_ID, UNREACHABLE_BRIDGE_ID,
+    UNREACHABLE_STATUS_BRIDGE_ID,
 };
 use harness::{sha256_hex, unreachable_nats_url, validate_against_contract, Bus};
 use harness::{StubEndpoint, StubLlm};
@@ -322,6 +323,12 @@ const UNEXERCISED: &[(&str, &str, &str, &str)] = &[
         "/api/suggestions/{suggestion_event_id}/message",
         "409",
         "consent_revoked, consent_pending and suggestion_was_never_consented need a decision in the journal or a label that is not granted on the bus; `approvals.rs::the_message_a_suggestion_answers_is_read_while_consent_stands` stages both",
+    ),
+    (
+        "post",
+        "/_twalk/hermes/mail-rule-proposals",
+        "500",
+        "store_unavailable needs the Gateway's own SQLite file to fail under a running process: the same fault-injection seam as every other 500 here",
     ),
 ];
 
@@ -1108,6 +1115,91 @@ fn mentions_call(arguments: &str, name: &str) -> bool {
     false
 }
 
+/// `MailMove` is `MailMoveReport` plus two members, and the two are written
+/// out separately — so this is what keeps them from drifting.
+///
+/// They were composed with `allOf`, which described nothing at all: each
+/// branch of an `allOf` is applied to the whole instance on its own, and
+/// `MailMoveReport` closes itself with `additionalProperties: false`, so it
+/// rejected the `sequence` and `undo_requested_at` the other branch added. No
+/// answer `GET /api/mail-moves` can give could validate against it (#431).
+/// Spelling the composed schema out is the fix; this assertion is the cost of
+/// it.
+#[test]
+fn the_two_mail_move_schemas_agree() -> Result<()> {
+    let description = Description::load()?;
+    let members = |name: &str| -> Result<BTreeSet<String>> {
+        Ok(description.doc["components"]["schemas"][name]["properties"]
+            .as_object()
+            .with_context(|| format!("components.schemas.{name}.properties"))?
+            .keys()
+            .cloned()
+            .collect())
+    };
+    let reported = members("MailMoveReport")?;
+    let journalled = members("MailMove")?;
+    let missing: Vec<&String> = reported.difference(&journalled).collect();
+    assert!(
+        missing.is_empty(),
+        "MailMove must carry everything the collector reports, and is missing {missing:?}"
+    );
+    let added: Vec<&String> = journalled.difference(&reported).collect();
+    assert_eq!(
+        vec!["sequence", "undo_requested_at"],
+        added
+            .iter()
+            .map(|member| member.as_str())
+            .collect::<Vec<_>>(),
+        "the journal adds exactly two members to a report; a third needs a line here"
+    );
+    Ok(())
+}
+
+/// `nullable: true` is OpenAPI **3.0** and means nothing here.
+///
+/// This document is 3.1, whose schemas are JSON Schema 2020-12, where a
+/// member that may be absent is written `type: ["string", "null"]`. A
+/// `nullable: true` beside `type: string` is an unknown keyword: it is
+/// ignored, the schema says the member is always a string, and the
+/// description now claims something the Gateway does not do — which the
+/// generated client then types.
+///
+/// Six of them reached the triage schemas with #422 (#431), and the response
+/// test caught them only once somebody drove those responses:
+/// `decided_at: null` on an undecided proposal is what an undecided proposal
+/// *is*. This is the cheaper way to find the seventh.
+#[test]
+fn the_description_uses_no_openapi_30_keyword() -> Result<()> {
+    let description = Description::load()?;
+    let mut found = Vec::new();
+    fn walk(node: &Value, path: &str, found: &mut Vec<String>) {
+        match node {
+            Value::Object(members) => {
+                for (key, value) in members {
+                    if key == "nullable" {
+                        found.push(path.to_owned());
+                    }
+                    walk(value, &format!("{path}/{key}"), found);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    walk(item, &format!("{path}/{index}"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(&description.doc, "", &mut found);
+    assert!(
+        found.is_empty(),
+        "`nullable` is OpenAPI 3.0 and this document is 3.1, where it is an unknown keyword \
+         that changes nothing: write `type: [\"string\", \"null\"]` instead. At {}",
+        found.join(", ")
+    );
+    Ok(())
+}
+
 /// The contract is the one authority for the network values (ADR 0033, #268),
 /// and this description's `Network` schema is a copy: tested against what it
 /// copies, order included, so a network added to the contract fails here
@@ -1413,6 +1505,17 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
     assert!(
         described.body["bootstrapped"].is_boolean(),
         "bootstrapped is a fact, not an absence"
+    );
+    // The address a browser calls, which is not the server name (#323). This
+    // Gateway sets no `GATEWAY_HOMESERVER_CLIENT_URL`, so the honest answer is
+    // `null` — and it is **present and null** rather than absent, because a
+    // client that must tell "this deployment needs no other address" from "an
+    // older Gateway that does not know the question" cannot do it with a
+    // missing member.
+    assert_eq!(
+        described.body["client_url"],
+        Value::Null,
+        "a deployment whose name is its address says so with a null, not a silence"
     );
     assert!(
         described.body.get("owner").is_none(),
@@ -1720,6 +1823,39 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/working-day",
             "/api/settings/working-day",
         ),
+        // The owner's triage rules and what they moved (#431): the owner's
+        // decisions, so the owner's credential, so the same answer.
+        (
+            Method::GET,
+            "/api/settings/mail-triage",
+            "/api/settings/mail-triage",
+        ),
+        (
+            Method::PUT,
+            "/api/settings/mail-triage",
+            "/api/settings/mail-triage",
+        ),
+        (
+            Method::GET,
+            "/api/mail-rule-proposals",
+            "/api/mail-rule-proposals",
+        ),
+        (
+            Method::POST,
+            "/api/mail-rule-proposals/{sequence}/approve",
+            "/api/mail-rule-proposals/1/approve",
+        ),
+        (
+            Method::POST,
+            "/api/mail-rule-proposals/{sequence}/refuse",
+            "/api/mail-rule-proposals/1/refuse",
+        ),
+        (Method::GET, "/api/mail-moves", "/api/mail-moves"),
+        (
+            Method::POST,
+            "/api/mail-moves/{sequence}/undo",
+            "/api/mail-moves/1/undo",
+        ),
         // As the snapshot above: a different reason — no service token
         // rather than no device token — and deliberately the same answer.
         (
@@ -1732,6 +1868,20 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/collection",
             "/api/settings/collection",
         ),
+        // And the collector's half of triage, for that second reason: #430
+        // was this route refusing the only credential it takes, so the one
+        // that it does not take is worth a line of its own.
+        (
+            Method::POST,
+            "/api/internal/mail-moves",
+            "/api/internal/mail-moves",
+        ),
+        // The owner's search (lot 3a): a capability of the owner in their
+        // session, so the guard closes it to a caller with no device token
+        // like every other `/api` route. Both routes, since one is the
+        // other's progress read and they must not diverge on who may call.
+        (Method::GET, "/api/search", "/api/search?q=x"),
+        (Method::GET, "/api/index/status", "/api/index/status"),
     ] {
         call.check(
             method,
@@ -2404,6 +2554,18 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             "/api/settings/working-day",
             Some(json!({ "days": [1], "starts_at": "09:00", "ends_at": "18:00" })),
         ),
+        // The triage rules, the proposals and the moves are journalled in
+        // that same store (#431), so all five say the one word. The two that
+        // name a sequence are driven on the templates' own paths below,
+        // because the refusal comes before the sequence is looked at.
+        (Method::GET, "/api/settings/mail-triage", None),
+        (
+            Method::PUT,
+            "/api/settings/mail-triage",
+            Some(json!({ "triage": { "destinations": [], "rules": [] } })),
+        ),
+        (Method::GET, "/api/mail-rule-proposals", None),
+        (Method::GET, "/api/mail-moves", None),
     ] {
         call.check(
             method,
@@ -2412,6 +2574,29 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
             template,
             &settings_cookie,
             body,
+            503,
+            Some("consent_not_configured"),
+        )
+        .await?;
+    }
+    for (template, target) in [
+        (
+            "/api/mail-rule-proposals/{sequence}/approve",
+            "/api/mail-rule-proposals/1/approve",
+        ),
+        (
+            "/api/mail-rule-proposals/{sequence}/refuse",
+            "/api/mail-rule-proposals/1/refuse",
+        ),
+        ("/api/mail-moves/{sequence}/undo", "/api/mail-moves/1/undo"),
+    ] {
+        call.check(
+            Method::POST,
+            &base,
+            template,
+            target,
+            &settings_cookie,
+            None,
             503,
             Some("consent_not_configured"),
         )
@@ -3930,6 +4115,23 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("service_token_not_configured"),
     )
     .await?;
+    // The collector's other half (#431) answers the same way for the same
+    // reason, and it is the route where that mattered: #430 was this one
+    // refusing the credential it does take. A deployment that configured no
+    // service token says which variable, rather than looking like a mail
+    // move that was rejected.
+    call.check_with_bearer(
+        Method::POST,
+        &tokenless_base,
+        "/api/internal/mail-moves",
+        "/api/internal/mail-moves",
+        &[],
+        Some(SERVICE_TOKEN),
+        Some(json!({ "moves": [] })),
+        503,
+        Some("service_token_not_configured"),
+    )
+    .await?;
     tokenless.stop().await;
 
     // --- the bridge facade (#55): a Gateway of its own, with a stub bridge
@@ -5099,6 +5301,487 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         )
         .await?;
     assert_eq!(refused.body["state"], "unknown", "{}", refused.body);
+
+    // --- mail triage, both halves of ADR 0042 on one Gateway (#431).
+    //
+    // This one, because it has the seam *and* a store: the agent's proposal
+    // comes in over the signed Hermes route and the owner's decision goes out
+    // over `/api/`, and the point of ADR 0042 is which of those two can change
+    // anything. Driven in one order rather than as independent calls, because
+    // several of these answers exist only after an earlier one: a `409` needs
+    // a proposal already decided, and the `422` on an approval needs a rule
+    // whose destination the owner has not declared.
+    //
+    // #422 added these eight routes and drove none of their answers. The two
+    // defects that reached the reference deployment through that gap are in
+    // this list: #426's deadlock on `PUT /api/settings/mail-triage`, and
+    // #430's `POST /api/internal/mail-moves` answering `401` to the only
+    // caller it has.
+    let (triage_device, _) =
+        sign_in_cookies(&http, &hermes_base, &owner, "the triage device").await?;
+    let triage_cookie = [("twalk_device", triage_device.as_str())];
+
+    let nothing_filed = call
+        .check(
+            Method::GET,
+            &hermes_base,
+            "/api/settings/mail-triage",
+            "/api/settings/mail-triage",
+            &triage_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        nothing_filed.body,
+        json!({ "triage": { "destinations": [], "rules": [] } }),
+        "a deployment ships triaging nothing, and the empty allowlist says so: {}",
+        nothing_filed.body
+    );
+
+    // The owner declares a mailbox and a rule. Accepted whole: a rule is only
+    // valid against the allowlist it was written for.
+    let declared = call
+        .check(
+            Method::PUT,
+            &hermes_base,
+            "/api/settings/mail-triage",
+            "/api/settings/mail-triage",
+            &triage_cookie,
+            Some(json!({
+                "triage": {
+                    "destinations": ["Newsletters"],
+                    "rules": [{
+                        "id": "the-conformance-suite",
+                        "field": "list_id",
+                        "value": "conformance.example.com",
+                        "destination": "Newsletters",
+                    }],
+                },
+                "reason": "the conformance suite",
+            })),
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        declared.body["triage"]["destinations"],
+        json!(["Newsletters"])
+    );
+
+    // Nothing is repaired on the way in, and each refusal is its own word: a
+    // body that is not a triage set, and a set naming a mailbox no allowlist
+    // may ever hold.
+    call.check(
+        Method::PUT,
+        &hermes_base,
+        "/api/settings/mail-triage",
+        "/api/settings/mail-triage",
+        &triage_cookie,
+        Some(json!({ "triage": { "destinations": ["Newsletters"] } })),
+        422,
+        Some("malformed_request"),
+    )
+    .await?;
+    call.check(
+        Method::PUT,
+        &hermes_base,
+        "/api/settings/mail-triage",
+        "/api/settings/mail-triage",
+        &triage_cookie,
+        Some(json!({
+            "triage": { "destinations": ["Trash"], "rules": [] }
+        })),
+        422,
+        Some("destination_is_destructive"),
+    )
+    .await?;
+
+    // --- the agent proposes, over the seam, signed.
+    let proposal = |id: &str, destination: &str| {
+        json!({
+            "rule": {
+                "id": id,
+                "field": "sender",
+                "value": format!("{id}@example.com"),
+                "destination": destination,
+            },
+            "because": "every one of these is a newsletter, and you file them all",
+        })
+        .to_string()
+    };
+    let proposed = proposal("a-proposal-the-owner-can-apply", "Newsletters");
+    let allowed = call
+        .check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/mail-rule-proposals",
+            "/_twalk/hermes/mail-rule-proposals",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&proposed).as_str(),
+            )],
+            &proposed,
+            201,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        allowed.body["state"], "proposed",
+        "a proposal is recorded and nothing is applied (ADR 0042): {}",
+        allowed.body
+    );
+    let allowed_sequence = allowed.body["sequence"]
+        .as_i64()
+        .context("a recorded proposal names its sequence")?;
+
+    // A destination the owner has **not** declared is a reasonable thing to
+    // propose — they declare it by approving — so this is a `201` too, and it
+    // is what makes the `422` on an approval reachable below.
+    let undeclared = proposal("a-proposal-the-owner-has-no-mailbox-for", "Receipts");
+    let not_applicable = call
+        .check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/mail-rule-proposals",
+            "/_twalk/hermes/mail-rule-proposals",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&undeclared).as_str(),
+            )],
+            &undeclared,
+            201,
+            None,
+        )
+        .await?;
+    let undeclared_sequence = not_applicable.body["sequence"]
+        .as_i64()
+        .context("a recorded proposal names its sequence")?;
+
+    // One more, to be refused rather than approved: a refusal is a decision
+    // and stays readable, which is what `409` on the second one proves.
+    let to_refuse = proposal("a-proposal-the-owner-says-no-to", "Newsletters");
+    let refusable = call
+        .check_raw(
+            Method::POST,
+            &hermes_base,
+            "/_twalk/hermes/mail-rule-proposals",
+            "/_twalk/hermes/mail-rule-proposals",
+            &[(
+                "X-Hermes-Signature-256",
+                harness::hermes_signature(&to_refuse).as_str(),
+            )],
+            &to_refuse,
+            201,
+            None,
+        )
+        .await?;
+    let refusable_sequence = refusable.body["sequence"]
+        .as_i64()
+        .context("a recorded proposal names its sequence")?;
+
+    // Unsigned, and signed over other bytes: one answer for both, as on the
+    // answers hook.
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/mail-rule-proposals",
+        "/_twalk/hermes/mail-rule-proposals",
+        &[],
+        &proposed,
+        401,
+        Some("unauthenticated"),
+    )
+    .await?;
+    // Over the limit, and signed — so what is asserted is the limit and not
+    // the credential.
+    let fat_proposal = json!({
+        "rule": {
+            "id": "a-proposal-the-size-of-a-conversation",
+            "field": "subject",
+            "value": "x".repeat(300_000),
+            "destination": "Newsletters",
+        }
+    })
+    .to_string();
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/mail-rule-proposals",
+        "/_twalk/hermes/mail-rule-proposals",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&fat_proposal).as_str(),
+        )],
+        &fat_proposal,
+        413,
+        Some("push_too_large"),
+    )
+    .await?;
+    // Signed, and not a proposal at all; then signed, a proposal, and naming
+    // the one destination ADR 0042 says neither a typo nor an agent may
+    // invent.
+    let nonsense = json!({ "because": "a rule is missing" }).to_string();
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/mail-rule-proposals",
+        "/_twalk/hermes/mail-rule-proposals",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&nonsense).as_str(),
+        )],
+        &nonsense,
+        422,
+        Some("malformed_request"),
+    )
+    .await?;
+    let destructive = proposal("a-proposal-that-would-delete-mail", "Trash");
+    call.check_raw(
+        Method::POST,
+        &hermes_base,
+        "/_twalk/hermes/mail-rule-proposals",
+        "/_twalk/hermes/mail-rule-proposals",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&destructive).as_str(),
+        )],
+        &destructive,
+        422,
+        Some("destination_is_destructive"),
+    )
+    .await?;
+
+    // --- and the owner decides, on their own screen.
+    let listed = call
+        .check(
+            Method::GET,
+            &hermes_base,
+            "/api/mail-rule-proposals",
+            "/api/mail-rule-proposals",
+            &triage_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    let proposals = listed.body["proposals"]
+        .as_array()
+        .context("the proposals are a list")?;
+    assert!(
+        proposals
+            .iter()
+            .all(|proposal| proposal["state"] == "proposed"),
+        "nothing is decided until the owner decides it: {}",
+        listed.body
+    );
+    assert!(
+        proposals
+            .iter()
+            .any(|proposal| proposal["sequence"].as_i64() == Some(allowed_sequence)),
+        "the proposal the agent just made is in the list: {}",
+        listed.body
+    );
+
+    let approved = call
+        .check(
+            Method::POST,
+            &hermes_base,
+            "/api/mail-rule-proposals/{sequence}/approve",
+            &format!("/api/mail-rule-proposals/{allowed_sequence}/approve"),
+            &triage_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        approved.body["triage"]["rules"]
+            .as_array()
+            .context("the answer is the triage set the approval wrote")?
+            .iter()
+            .any(|rule| rule["id"] == "a-proposal-the-owner-can-apply"),
+        "approving writes the rule, with the owner as the actor: {}",
+        approved.body
+    );
+    // A decision is taken once. The second one is not an error about the
+    // rule, it is an answer about the proposal.
+    call.check(
+        Method::POST,
+        &hermes_base,
+        "/api/mail-rule-proposals/{sequence}/approve",
+        &format!("/api/mail-rule-proposals/{allowed_sequence}/approve"),
+        &triage_cookie,
+        None,
+        409,
+        Some("already_decided"),
+    )
+    .await?;
+    // The one whose mailbox the owner never declared: the allowlist is
+    // checked as it stands **now**, which is the honest answer and the one
+    // the handler's own comment promises.
+    call.check(
+        Method::POST,
+        &hermes_base,
+        "/api/mail-rule-proposals/{sequence}/approve",
+        &format!("/api/mail-rule-proposals/{undeclared_sequence}/approve"),
+        &triage_cookie,
+        None,
+        422,
+        Some("not_applicable"),
+    )
+    .await?;
+    let refused_proposal = call
+        .check(
+            Method::POST,
+            &hermes_base,
+            "/api/mail-rule-proposals/{sequence}/refuse",
+            &format!("/api/mail-rule-proposals/{refusable_sequence}/refuse"),
+            &triage_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert!(
+        !refused_proposal.body["triage"]["rules"]
+            .as_array()
+            .context("the answer is the triage set the refusal left alone")?
+            .iter()
+            .any(|rule| rule["id"] == "a-proposal-the-owner-says-no-to"),
+        "refusing writes no rule: {}",
+        refused_proposal.body
+    );
+    call.check(
+        Method::POST,
+        &hermes_base,
+        "/api/mail-rule-proposals/{sequence}/refuse",
+        &format!("/api/mail-rule-proposals/{refusable_sequence}/refuse"),
+        &triage_cookie,
+        None,
+        409,
+        Some("already_decided"),
+    )
+    .await?;
+
+    // --- what triage moved, reported by the collector and put back by the
+    // owner. The report's credential is the **service token**: #430 was this
+    // route answering `401` to the only caller it has, so a moved mail left
+    // no record and could not be undone.
+    let moved_at = "2026-10-04T09:00:00.000Z";
+    let email_id = format!(
+        "the-conformance-suite-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    let reported = call
+        .check_with_bearer(
+            Method::POST,
+            &hermes_base,
+            "/api/internal/mail-moves",
+            "/api/internal/mail-moves",
+            &[],
+            Some(SERVICE_TOKEN),
+            Some(json!({
+                "moves": [{
+                    "connection": "mail",
+                    "email_id": email_id,
+                    "rule_id": "the-conformance-suite",
+                    "from_mailbox_id": "inbox-id",
+                    "from_mailbox_name": "Inbox",
+                    "to_mailbox_id": "newsletters-id",
+                    "to_mailbox_name": "Newsletters",
+                    "occurred_at": moved_at,
+                }]
+            })),
+            201,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        (
+            reported.body["recorded"].as_u64(),
+            reported.body["reported"].as_u64()
+        ),
+        (Some(1), Some(1)),
+        "one move reported and one recorded: {}",
+        reported.body
+    );
+    call.check_with_bearer(
+        Method::POST,
+        &hermes_base,
+        "/api/internal/mail-moves",
+        "/api/internal/mail-moves",
+        &[],
+        Some(SERVICE_TOKEN),
+        Some(json!({ "moves": [{ "connection": "mail" }] })),
+        422,
+        Some("malformed_request"),
+    )
+    .await?;
+
+    let filed = call
+        .check(
+            Method::GET,
+            &hermes_base,
+            "/api/mail-moves",
+            "/api/mail-moves",
+            &triage_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    let mine = filed.body["moves"]
+        .as_array()
+        .context("the moves are a list")?
+        .iter()
+        .find(|moved| moved["email_id"] == json!(email_id))
+        .context("the move just reported is in the journal")?
+        .clone();
+    assert_eq!(
+        mine["undo_requested_at"],
+        Value::Null,
+        "nobody has asked for it back yet: {mine}"
+    );
+    let move_sequence = mine["sequence"]
+        .as_i64()
+        .context("a recorded move names its sequence")?;
+
+    // `202` and not `200`: this Gateway cannot move a mail, so what it
+    // records is that the owner asked, and the collector does it.
+    let asked = call
+        .check(
+            Method::POST,
+            &hermes_base,
+            "/api/mail-moves/{sequence}/undo",
+            &format!("/api/mail-moves/{move_sequence}/undo"),
+            &triage_cookie,
+            None,
+            202,
+            None,
+        )
+        .await?;
+    assert!(
+        asked.body["undo_requested_at"].is_string(),
+        "the answer is when the request was taken: {}",
+        asked.body
+    );
+    // Asking twice is not asking harder. The same answer as a move that was
+    // never there, deliberately: both are "there is nothing here to undo".
+    call.check(
+        Method::POST,
+        &hermes_base,
+        "/api/mail-moves/{sequence}/undo",
+        &format!("/api/mail-moves/{move_sequence}/undo"),
+        &triage_cookie,
+        None,
+        409,
+        Some("not_undoable"),
+    )
+    .await?;
     hermes.stop().await;
 
     // And the same route on a Gateway that configured no seam: the variable
@@ -5156,7 +5839,205 @@ async fn every_described_response_is_answered_as_described() -> Result<()> {
         Some("hermes_answers_not_configured"),
     )
     .await?;
+    // The proposal route answers the same way, for the same reason and with
+    // the same word: one variable opens the seam, and the agent's proposal is
+    // not a special case of it.
+    let unseamed = json!({
+        "rule": {
+            "id": "a-proposal-to-a-deployment-with-no-seam",
+            "field": "list_id",
+            "value": "conformance.example.com",
+            "destination": "Newsletters",
+        }
+    })
+    .to_string();
+    call.check_raw(
+        Method::POST,
+        &seamless_base,
+        "/_twalk/hermes/mail-rule-proposals",
+        "/_twalk/hermes/mail-rule-proposals",
+        &[(
+            "X-Hermes-Signature-256",
+            harness::hermes_signature(&unseamed).as_str(),
+        )],
+        &unseamed,
+        503,
+        Some("hermes_answers_not_configured"),
+    )
+    .await?;
     seamless_gateway.stop().await;
+
+    // --- the owner's search of their archive (lot 3a): `GET /api/search` and
+    // `GET /api/index/status`, both behind the device-token guard. A Gateway
+    // of its own, because the one above carries the Hermes seam this route's
+    // collector URL rides on and a relay needs a collector to relay to. The
+    // stub stands in for the collector; what is asserted here is the wire —
+    // the collector's own route and its code travelling — while the property
+    // that no `body` ever crosses is `tests/search.rs`'s, on the wire and on
+    // the bytes.
+    let search_static = companion_build("openapi-search")?;
+    let collector = StubCollector::start_search(json!({
+        "hits": [{ "id": "doc-1", "snippet": "…" }],
+        "count": 1,
+        "withheld": 0,
+        "withheld_reason": "consent",
+    }))
+    .await?;
+    let search_gateway = GatewayProc::start(&gateway_env_with(
+        &search_static,
+        &[
+            ("GATEWAY_NATS_URL", nats_url().as_str()),
+            ("GATEWAY_HERMES_ANSWER_SECRET", HERMES_ANSWER_SECRET),
+            ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
+            ("GATEWAY_COLLECTOR_URL", collector.url().as_str()),
+        ],
+    ))?;
+    let search_base = search_gateway.base_url().await?;
+    wait_until_answering(&search_base).await?;
+    let (search_device, _) =
+        sign_in_cookies(&http, &search_base, &owner, "the searching device").await?;
+    let search_cookie = [("twalk_device", search_device.as_str())];
+
+    // Served: the collector's hits, relayed.
+    let served = call
+        .check(
+            Method::GET,
+            &search_base,
+            "/api/search",
+            "/api/search?q=hebdo",
+            &search_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(served.body["count"], 1, "{}", served.body);
+    assert_eq!(served.body["hits"][0]["snippet"], "…", "{}", served.body);
+
+    // A `400` of the collector's own, relayed with its code unchanged.
+    collector.answer(400, json!({ "error": "invalid_query" }));
+    call.check(
+        Method::GET,
+        &search_base,
+        "/api/search",
+        "/api/search?q=",
+        &search_cookie,
+        None,
+        400,
+        Some("invalid_query"),
+    )
+    .await?;
+
+    // The collector answers a code this Gateway does not map, and a `502` for
+    // a code that is not one: `collector_refused`, with the code in `detail`.
+    collector.answer(502, json!({ "error": "index_corrupt" }));
+    call.check(
+        Method::GET,
+        &search_base,
+        "/api/search",
+        "/api/search?q=hebdo",
+        &search_cookie,
+        None,
+        502,
+        Some("collector_refused"),
+    )
+    .await?;
+
+    // And a collector that stops answering at all: `collector_unreachable`.
+    collector.stop();
+    call.check(
+        Method::GET,
+        &search_base,
+        "/api/search",
+        "/api/search?q=hebdo",
+        &search_cookie,
+        None,
+        502,
+        Some("collector_unreachable"),
+    )
+    .await?;
+
+    // The progress route on the same Gateway: served while the collector was
+    // up, and `collector_unreachable` once it is gone — the two doors onto one
+    // refusal.
+    let progress = StubCollector::answering(200, json!({ "documents": 7 })).await?;
+    let progress_gateway = GatewayProc::start(&gateway_env_with(
+        &search_static,
+        &[
+            ("GATEWAY_NATS_URL", nats_url().as_str()),
+            ("GATEWAY_HERMES_ANSWER_SECRET", HERMES_ANSWER_SECRET),
+            ("GATEWAY_HERMES_DOMAIN", HERMES_DOMAIN),
+            ("GATEWAY_COLLECTOR_URL", progress.url().as_str()),
+        ],
+    ))?;
+    let progress_base = progress_gateway.base_url().await?;
+    wait_until_answering(&progress_base).await?;
+    let (progress_device, _) =
+        sign_in_cookies(&http, &progress_base, &owner, "the progress device").await?;
+    let progress_cookie = [("twalk_device", progress_device.as_str())];
+    let status = call
+        .check(
+            Method::GET,
+            &progress_base,
+            "/api/index/status",
+            "/api/index/status",
+            &progress_cookie,
+            None,
+            200,
+            None,
+        )
+        .await?;
+    assert_eq!(status.body["documents"], 7, "{}", status.body);
+    progress.stop();
+    call.check(
+        Method::GET,
+        &progress_base,
+        "/api/index/status",
+        "/api/index/status",
+        &progress_cookie,
+        None,
+        502,
+        Some("collector_unreachable"),
+    )
+    .await?;
+    progress_gateway.stop().await;
+
+    // The `503` of this Gateway's own, on a deployment with no collector URL:
+    // `search_unavailable`, its own code and not freebusy's
+    // `collector_not_configured` (C8), on both routes. A Gateway with the
+    // device-token guard on and no collector — the shape an operator who runs
+    // no collector has.
+    let collectorless_static = companion_build("openapi-search-no-collector")?;
+    let collectorless = GatewayProc::start(&gateway_env(&collectorless_static))?;
+    let collectorless_base = collectorless.base_url().await?;
+    wait_until_answering(&collectorless_base).await?;
+    let (collectorless_device, _) =
+        sign_in_cookies(&http, &collectorless_base, &owner, "the collectorless device").await?;
+    let collectorless_cookie = [("twalk_device", collectorless_device.as_str())];
+    call.check(
+        Method::GET,
+        &collectorless_base,
+        "/api/search",
+        "/api/search?q=hebdo",
+        &collectorless_cookie,
+        None,
+        503,
+        Some("search_unavailable"),
+    )
+    .await?;
+    call.check(
+        Method::GET,
+        &collectorless_base,
+        "/api/index/status",
+        "/api/index/status",
+        &collectorless_cookie,
+        None,
+        503,
+        Some("search_unavailable"),
+    )
+    .await?;
+    collectorless.stop().await;
+    search_gateway.stop().await;
 
     // --- and now the coverage assertion: everything the description
     // declares was either exercised above, or is listed with its reason.

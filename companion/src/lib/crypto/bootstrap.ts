@@ -36,7 +36,7 @@
 // asserts that against every request the page makes.
 
 import type { MatrixClient } from 'matrix-js-sdk';
-import type { GeneratedSecretStorageKey } from 'matrix-js-sdk/lib/crypto-api';
+import type { CryptoApi, GeneratedSecretStorageKey } from 'matrix-js-sdk/lib/crypto-api';
 
 import type { CredentialCrypto } from '$lib/matrix/credential';
 import type { HandoverCrypto } from '$lib/matrix/handover';
@@ -189,10 +189,19 @@ export class RestoreError extends Error {
  * secret storage with the recovery key the user typed.
  *
  * Note the asymmetry with [`bootstrapIdentity`]: nothing is created here. The
- * account's cryptographic identity already exists and must not be replaced —
- * replacing it would break every other device and lose the key backup, which
- * is exactly what screen 2's copy warns about. This is a *new device* joining
- * an existing identity.
+ * account's cryptographic identity already exists and is **kept**, because
+ * keeping it is the better outcome — every other device stays verified and
+ * whatever is in the key backup stays reachable. This is a *new device*
+ * joining an existing identity.
+ *
+ * It is no longer the *only* way in. An owner who has lost the key can reset
+ * the identity instead (`$lib/crypto/reset.ts`), and what that costs is
+ * measured on their account rather than asserted: on the deployment where
+ * this mattered, no device was cross-signed and the backup held no room key,
+ * so the sentence this comment used to carry — "replacing it would break
+ * every other device and lose the key backup" — was false there (#439).
+ * Entering the key is still what this path is for, and still what the screen
+ * offers first.
  */
 export async function restoreFromRecoveryKey(options: {
 	baseUrl: string;
@@ -328,6 +337,62 @@ export async function restoreFromRecoveryKey(options: {
 		crossSigningReady,
 		deviceSigned,
 		keyBackup
+	};
+}
+
+/**
+ * Signs in and brings the crypto stack up, with **no recovery key** — the
+ * precondition of a reset (#439).
+ *
+ * The sibling of [`restoreFromRecoveryKey`], and deliberately not a flag on
+ * it: that one opens the account's secret storage and imports what is in it,
+ * and the whole point here is that the key which would open it is lost. What
+ * this returns is a crypto stack the caller can *ask about the account* with
+ * (`$lib/crypto/reset.ts`'s `whatAResetCosts`) before it changes anything —
+ * so the screen can state what a reset costs this account rather than warn
+ * about what it might cost somebody's.
+ *
+ * It creates a device, like any sign-in. A browser that gets here and
+ * changes its mind has left one behind, which is the same cost as a sign-in
+ * that goes nowhere.
+ */
+export async function signInWithoutRecoveryKey(options: {
+	baseUrl: string;
+	userId: string;
+	password: string;
+	deviceName?: string;
+	onStep?: (step: 'signing-in' | 'loading-crypto') => void;
+}): Promise<{
+	crypto: CryptoApi;
+	userId: string;
+	deviceId: string;
+	accessToken: string;
+}> {
+	const onStep = options.onStep ?? ((): void => {});
+	onStep('signing-in');
+	const login = await passwordLogin(
+		options.baseUrl,
+		options.userId,
+		options.password,
+		options.deviceName
+	);
+
+	onStep('loading-crypto');
+	const client = await startClient({
+		baseUrl: options.baseUrl,
+		userId: login.userId,
+		deviceId: login.deviceId,
+		accessToken: login.accessToken
+	});
+	const crypto = client.getCrypto();
+	if (crypto === undefined) {
+		throw new RestoreError('failed', 'the crypto stack did not start');
+	}
+	return {
+		crypto,
+		userId: login.userId,
+		deviceId: login.deviceId,
+		accessToken: login.accessToken
 	};
 }
 

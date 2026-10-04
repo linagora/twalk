@@ -642,6 +642,12 @@ async fn main() -> Result<()> {
         Gateway::new(companion, metrics, now_unix_seconds)
             .with_sessions(sessions)
             .with_bootstrap(bootstrap)
+            .with_client_base_url(
+                config
+                    .sign_in
+                    .as_ref()
+                    .and_then(|sign_in| sign_in.client_base_url.clone()),
+            )
             .with_consent(consent)
             .with_bridges(bridges.clone())
             .with_snapshots(snapshots)

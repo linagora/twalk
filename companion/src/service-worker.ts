@@ -102,13 +102,29 @@ worker.addEventListener('fetch', (event) => {
 			if (cached !== undefined) {
 				return cached;
 			}
-			// A fingerprinted file we do not have: fetch it and keep it. Its
-			// name pins its content, so this can never cache the wrong thing.
-			const response = await fetch(request);
-			if (response.ok) {
-				await cache.put(request, response.clone());
-			}
-			return response;
+			// A fingerprinted file we do not have goes to the network and is
+			// **not kept**: this cache is written at `install` and nowhere
+			// else.
+			//
+			// It used to be kept — its name pins its content, so a cached copy
+			// can never be the wrong version, and keeping it repaired a
+			// partial install. That cost more than it bought (#442). A worker
+			// keeps controlling its clients until they unload, *including
+			// after it has been unregistered*, so a cache emptied by
+			// `$lib/version/reload.ts` was re-populated by this very handler
+			// from the next chunk the dying page imported — measured two times
+			// in five, and still one time in eighty with the purge reordered.
+			// A version mismatch means this shell is the wrong one, and the
+			// wrong shell writing itself back into storage is what the purge
+			// exists to prevent.
+			//
+			// What that costs: a file missing from the cache stays missing
+			// until a new worker installs. `install` does `cache.addAll`,
+			// which is all-or-nothing — a partial install fails the worker
+			// outright — so the only ways to be here are an eviction under
+			// storage pressure and a purge, and neither is a case for putting
+			// the file back.
+			return await fetch(request);
 		})()
 	);
 });

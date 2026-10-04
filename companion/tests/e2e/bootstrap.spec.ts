@@ -170,14 +170,19 @@ test.describe.serial('the bootstrap journey', () => {
 		await expect(page.getByTestId('key-backup-state')).toContainText(/key backup is on/i);
 	});
 
-	test('the copy says what is lost without the key, and that there is no reset', async () => {
+	test('the copy says what is lost without the key, and what a reset is not', async () => {
 		if (stack === null) {
 			return;
 		}
 		const warning = page.getByTestId('recovery-key-warning');
 		await expect(warning).toContainText(/encrypted for ever/i);
 		await expect(warning).toContainText(/no longer be verified/i);
-		await expect(warning).toContainText(/no reset in this version/i);
+		// This used to assert "no reset in this version", and there is one now
+		// (#439). The copy has to stay uncomfortable rather than becoming "you
+		// can always reset": a reset is not a recovery, and the sentence says
+		// what it costs. The last journey in this file is where that is proved.
+		await expect(warning).toContainText(/not a recovery/i);
+		await expect(warning).toContainText(/verified again/i);
 	});
 
 	test('the key saves as a printable PDF, built in the browser', async () => {
@@ -511,8 +516,18 @@ test.describe.serial('the bootstrap journey', () => {
 
 		forget();
 
-		// Recognised on the next visit, without the user asking for anything.
+		// Recognised on the next visit, and **offered** rather than imposed:
+		// the landing page says the keys are gone and links to the screen that
+		// asks for the key. It used to redirect, and this test asserted the
+		// redirect; #433 removed it, because that screen is the only one in the
+		// Companion that reads the store and the redirect gated five screens
+		// that never needed a key. The assertion had not followed, and nothing
+		// said so — these journeys need a Docker host, so they are advisory and
+		// CI does not run them (#428). Measured on `main` while #439 added the
+		// journey below: the same failure, in the same line.
 		await page.goto('/');
+		await expect(page.getByTestId('keys-gone')).toBeVisible();
+		await page.getByTestId('keys-gone').getByRole('link').click();
 		await expect(page.getByTestId('screen-recover')).toBeVisible();
 		await expect(page.getByTestId('recover-account')).toContainText(stack.ownerId);
 
@@ -650,5 +665,87 @@ test.describe.serial('the bootstrap journey', () => {
 		// The keys were never touched: this is the same device it was before,
 		// asked of the homeserver rather than of the browser.
 		await expectDeviceIsCrossSigned(stack, password);
+	});
+
+	/**
+	 * The journey of #439, and it is **last in this file on purpose**: a reset
+	 * replaces the account's cross-signing identity, so the `recoveryKey`
+	 * screen 2 showed stops opening anything. Every test above still needs it.
+	 *
+	 * What happened on the reference deployment on 2026-10-04: an owner with
+	 * their password, a browser with no store, and no recovery key. The screen
+	 * asked for 48 characters and offered nothing else, so the way back was
+	 * another Matrix client against a homeserver published nowhere — an SSH
+	 * tunnel and a desktop client. The reason the screen gave was that a reset
+	 * "would break every other device and lose the message history", and on
+	 * that account neither half was true.
+	 */
+	test('a browser with the password and no key resets the identity, and is told the cost first', async () => {
+		if (stack === null) {
+			return;
+		}
+		await page.evaluate(
+			async (name) =>
+				await new Promise<void>((resolve) => {
+					const request = indexedDB.deleteDatabase(name);
+					request.onsuccess = () => resolve();
+					request.onerror = () => resolve();
+					request.onblocked = () => resolve();
+				}),
+			CRYPTO_STORE_NAME
+		);
+		forget();
+
+		// The same way in as the journey above — the notice, followed — because
+		// it is the same browser in the same state. What is different is that
+		// this owner does not have the key.
+		await page.goto('/');
+		await expect(page.getByTestId('keys-gone')).toBeVisible();
+		await page.getByTestId('keys-gone').getByRole('link').click();
+		await expect(page.getByTestId('screen-recover')).toBeVisible();
+
+		// Entering the key is still what the screen offers first, and the
+		// reset is under it: the ticket's own requirement, asserted rather
+		// than described.
+		await expect(page.getByTestId('recovery-key-input')).toBeVisible();
+		await expect(page.getByTestId('recover-no-key')).toBeVisible();
+
+		// And it needs the password, like the other path: a browser that has
+		// typed nothing cannot reset an identity by clicking.
+		await expect(page.getByTestId('recover-no-key-action')).toBeDisabled();
+		await page.getByLabel('Password', { exact: true }).fill(password);
+		await expect(page.getByTestId('recover-no-key-action')).toBeEnabled();
+		await page.getByTestId('recover-no-key-action').click();
+
+		// The cost, read from this account rather than written in advance.
+		const measured = page.getByTestId('recover-cost');
+		await expect(measured).toBeVisible({ timeout: 180_000 });
+		// A number, whatever it is: what this asserts is that the screen
+		// counted the account's devices instead of warning in the abstract.
+		await expect(measured).toHaveAttribute('data-devices', /^[0-9]+$/u);
+		await expect(measured).toHaveAttribute('data-signed', /^[0-9]+$/u);
+
+		// Nothing has been reset yet — the identity the previous journeys left
+		// is still the one on the homeserver, and the way back from here is a
+		// button that returns to the key field.
+		await expect(page.getByTestId('recover-reset-back')).toBeVisible();
+
+		await page.getByTestId('recover-reset-confirm').click();
+
+		// The new key, shown once, on the same card onboarding uses.
+		await expect(page.getByTestId('recover-reset-done')).toBeVisible({ timeout: 180_000 });
+		const shown = await page.getByTestId('recovery-key').innerText();
+		const newKey = shown.replace(/\s+/gu, ' ').trim();
+		expect(newKey.split(' ')).toHaveLength(12);
+		expect(newKey).not.toBe(recoveryKey);
+
+		// And the fact that matters to everyone else: the homeserver carries a
+		// signature on this device by the account's self-signing key — a *new*
+		// self-signing key, since the identity was replaced. Asked of the
+		// homeserver, because that is where the answer is authoritative.
+		await expectDeviceIsCrossSigned(stack, password);
+
+		// The new key never left the page either.
+		await assertKeyNeverLeft(newKey);
 	});
 });

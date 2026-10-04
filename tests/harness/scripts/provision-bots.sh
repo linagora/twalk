@@ -39,6 +39,25 @@ COMPOSE="docker compose -p ${TWALK_TEST_STACK:-twalk-sensor-test} -f $COMPOSE_FI
 # (@michel:test.twalk, an account that does not exist); this one has to log in,
 # hand its device token to the Sensor and join portal rooms, so it is its own
 # account and is deliberately in none of the presence suites' rooms.
+
+# `harness` is not a test bot: it is the account the harness itself acts as, a
+# Synapse **administrator**, and the only one here provisioned with `-a`. The
+# device sweep (#432) needs the admin API to read what every account holds —
+# `@bot_alpha` alone had 3 373 devices on 2026-10-04, and no suite can see
+# another account's devices without it. It plays no part in any test.
+output=$($COMPOSE exec -T synapse register_new_matrix_user \
+    -u harness -p test-only-password-harness -a \
+    -c /config/homeserver.yaml http://localhost:8008 2>&1) || true
+if echo "$output" | grep -q "Success"; then
+  echo "provisioned harness (administrator)"
+elif echo "$output" | grep -qi "already"; then
+  echo "harness already exists, skipped"
+else
+  echo "failed to provision the harness administrator:" >&2
+  echo "$output" >&2
+  exit 1
+fi
+
 for bot in bot_alpha bot_beta bot_gamma bot_delta sensor owner whatsapp_33612345678 \
            whatsapp_33660469852 whatsapp_lid-115332874281144 \
            whatsapp_33698765432 whatsappbot signalbot; do

@@ -417,6 +417,32 @@ pub struct SignIn {
     /// not federate. It decides which server is asked; the domain check on
     /// the answer stays either way (see [`crate::matrix_openid`]).
     pub federation_base_url: String,
+    /// Where a **browser** reaches this homeserver's client API
+    /// (GATEWAY_HOMESERVER_CLIENT_URL, e.g.
+    /// `https://companion.example.com`), when that is not derivable from the
+    /// server name. Optional; unset, nothing changes and the Companion keeps
+    /// turning the server name into `https://<server name>`.
+    ///
+    /// The two are not the same question, and this deployment is the proof
+    /// (#323). Its server name is `twalk.localhost` — in every user id, room
+    /// id and device it has — while its Companion is published at
+    /// `companion.maudet.cloud` with `/_matrix/` proxied to Synapse beside it.
+    /// A browser out there resolves `twalk.localhost` to **its own** loopback,
+    /// so the first sign-in on a new device cannot reach a homeserver at all,
+    /// and neither can the recovery screen: both begin with a password login,
+    /// and the owner of the reference deployment read
+    /// `the login response was not a session` — their own machine answering.
+    ///
+    /// Renaming the homeserver is not the answer: a server name is in every
+    /// id a live deployment has. So the name stays what it is and only the
+    /// address the browser calls changes, which is what Matrix's own
+    /// `.well-known` delegation says — and that cannot help here, since it
+    /// would have to be served *at* `twalk.localhost`.
+    ///
+    /// It changes nothing server-side: the Gateway still verifies an OpenID
+    /// token against [`Self::federation_base_url`] inside the deployment and
+    /// still checks the user is [`Self::owner`].
+    pub client_base_url: Option<String>,
     /// Directory the Gateway keeps its SQLite stores in (GATEWAY_STATE_DIR).
     /// The session store is `sessions.db` inside it.
     pub state_dir: PathBuf,
@@ -826,6 +852,13 @@ impl SignIn {
             owner,
             homeserver_name,
             federation_base_url: required("GATEWAY_HOMESERVER_FEDERATION_URL")?,
+            // Trailing slash trimmed here rather than at every caller: the
+            // Companion appends `/_matrix/...` to it, and
+            // `https://host//_matrix` is a path a proxy may or may not
+            // forgive.
+            client_base_url: env("GATEWAY_HOMESERVER_CLIENT_URL")
+                .map(|url| url.trim_end_matches('/').to_owned())
+                .filter(|url| !url.is_empty()),
             state_dir: PathBuf::from(required("GATEWAY_STATE_DIR")?),
             device_token_ttl_seconds: optional(
                 "GATEWAY_DEVICE_TOKEN_TTL",

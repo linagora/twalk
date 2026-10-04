@@ -141,7 +141,9 @@ impl CryptoBot {
         Ok(room.room_id().to_string())
     }
 
-    /// This login's own device id: what the handover's offer names (#228).
+    /// This login's own device id: what the handover's offer names (#228),
+    /// and what `Drop` takes away again — which a test can ask the homeserver
+    /// about to prove it did.
     pub fn device_id(&self) -> String {
         self.client
             .device_id()
@@ -355,6 +357,51 @@ impl CryptoBot {
 impl Drop for CryptoBot {
     fn drop(&mut self) {
         self.sync_task.abort();
+        // The store goes, and so does the device — the symmetric half that was
+        // missing. Every login here creates a device the homeserver keeps
+        // forever, and nothing removed one: `@bot_alpha` held **3 373 devices**
+        // on 2026-10-04, `@sensor` 993, and a cold client's initial sync pays
+        // for all of them, which is how four waits in one suite came to fail on
+        // a deadline (#432). The sweep in `twalk_test_harness::sweep` takes
+        // what crashed runs leave behind; this keeps the normal case from
+        // producing any.
+        //
+        // On a thread of its own because `drop` cannot await and `block_on`
+        // inside a runtime panics, joined because a task spawned here would be
+        // cancelled when the test's runtime shuts down a moment later — which
+        // is exactly when a bot is dropped — and **over plain HTTP with a
+        // client of its own** rather than through the SDK.
+        //
+        // That last part is not a preference, it is a measured deadlock. These
+        // tests are `#[tokio::test]`, so the runtime is current-thread: one
+        // thread, and `drop` is standing on it. `client.matrix_auth().logout()`
+        // from a second runtime wants the SDK's own machinery — a connection
+        // pool, a store, state behind locks — whose driving tasks live on the
+        // runtime that is now blocked in this `join`. The suite hung: Synapse
+        // logged one logout and then no request at all for sixteen minutes.
+        // A bare token, a URL and a fresh client share nothing with it.
+        //
+        // A failure is nothing: a device left behind is swept two days later.
+        let token = self.client.access_token();
+        let _ = std::thread::spawn(move || {
+            let Some(token) = token else { return };
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                let _ = runtime.block_on(async {
+                    reqwest::Client::new()
+                        .post(format!("{}/_matrix/client/v3/logout", synapse_url()))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({}))
+                        // Bounded, because nothing here is worth a hung suite.
+                        .timeout(std::time::Duration::from_secs(10))
+                        .send()
+                        .await
+                });
+            }
+        })
+        .join();
         let _ = std::fs::remove_dir_all(&self.store_dir);
     }
 }

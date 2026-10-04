@@ -42,7 +42,7 @@
 		domain,
 		restoreDomain,
 		rememberDomain,
-		homeserverBaseUrl,
+		matrixBaseUrl,
 		isValidDomain,
 		normaliseDomain
 	} from '$lib/onboarding/domain';
@@ -91,10 +91,21 @@
 	const askDomain = $derived($domain === '');
 	const effectiveDomain = $derived(askDomain ? normaliseDomain(typedDomain) : $domain);
 	const domainValid = $derived(isValidDomain(effectiveDomain));
+	/** What the deployment says about where its homeserver answers (#323). */
+	let clientUrl = $state<string | null>(null);
+
+	/**
+	 * Where this browser sends its Matrix requests (#323). The deployment's
+	 * own answer wins when there is one: a server name is not always an
+	 * address the outside can call, and only the deployment knows.
+	 */
 	const baseUrl = $derived(
-		$homeserver !== '' && effectiveDomain === $domain
-			? $homeserver
-			: homeserverBaseUrl(effectiveDomain)
+		matrixBaseUrl({
+			deploymentClientUrl: clientUrl,
+			discoveredHomeserver: $homeserver,
+			deploymentDomain: $domain,
+			effectiveDomain
+		})
 	);
 	const ready = $derived(domainValid && username.trim().length > 0 && password.length > 0);
 
@@ -114,6 +125,7 @@
 				const described = await gateway.GET('/api/deployment');
 				if (described.data !== undefined) {
 					bootstrapped = described.data.bootstrapped;
+					clientUrl = described.data.client_url ?? null;
 					if ($domain === '') {
 						domain.set(described.data.homeserver);
 					}

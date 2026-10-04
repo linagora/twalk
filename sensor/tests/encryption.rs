@@ -511,3 +511,41 @@ async fn a_reaction_in_an_encrypted_room_carries_the_decrypted_excerpt() -> Resu
     let _ = std::fs::remove_dir_all(&state_dir);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_crypto_bot_takes_its_device_with_it() -> Result<()> {
+    ensure_stack().await?;
+
+    // Every `CryptoBot::login` is a fresh device, and for sixteen days nothing
+    // took one away: `@bot_alpha` — this account — held 3 373 devices on
+    // 2026-10-04, and a cold client's initial sync pays for every one of them
+    // (#432). The store directory was always removed on `Drop`; the device is
+    // the symmetric half that was missing.
+    let observer = Bot::login("bot_alpha").await?;
+    let device_id = {
+        let bot = CryptoBot::login("bot_alpha").await?;
+        let device_id = bot.device_id();
+        assert!(!device_id.is_empty(), "the login produced no device id");
+        assert!(
+            devices_of(&observer).await?.contains(&device_id),
+            "the homeserver does not know the device the bot just created"
+        );
+        device_id
+    };
+
+    assert!(
+        !devices_of(&observer).await?.contains(&device_id),
+        "the dropped bot left {device_id} on the homeserver"
+    );
+    Ok(())
+}
+
+/// The device ids an account's own device list names.
+async fn devices_of(bot: &Bot) -> Result<Vec<String>> {
+    Ok(bot
+        .devices()
+        .await?
+        .iter()
+        .filter_map(|device| device["device_id"].as_str().map(str::to_owned))
+        .collect())
+}
