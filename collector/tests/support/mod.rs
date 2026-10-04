@@ -221,28 +221,56 @@ impl Run {
         CollectorProc::start(&self.env_with_gateway())
     }
 
-    /// The collector, against the fake Gateway, **with a search index** (lot
-    /// 3a): `COLLECTOR_INDEX_KEY_FILE` points at a throwaway key file in this
-    /// run's state directory (the key is read — proving it is there — and the
-    /// index itself is the deployment's encrypted mount, spec §4.2), and
-    /// `COLLECTOR_METRICS_LISTEN` is served on a free port so the gauge the
-    /// real-time indexing poses can be read. The port is on the returned
-    /// process, for `wait_metric`.
-    pub fn start_with_gateway_and_index(&self) -> Result<(CollectorProc, u16)> {
-        let key = self.dir.path().join("index.key");
-        std::fs::write(&key, b"test-only-key")
-            .with_context(|| format!("failed to write the index key {}", key.display()))?;
-        let port = free_port()?;
+    /// The environment of the suites that need the internal HTTP endpoint
+    /// (lot 3a): the Gateway's snapshot seam, the endpoint on a free port,
+    /// the metrics on another so the counters can be read, and — when
+    /// `index` — a throwaway key file in this run's state directory, which is
+    /// what opens the search index (the key is read, proving it is there; the
+    /// index itself is the deployment's encrypted mount, spec §4.2).
+    /// Returns the environment and the two ports, so one builder serves both
+    /// starters rather than the suite growing a second way to start the
+    /// binary.
+    fn env_serving(&self, index: bool) -> Result<(Vec<(String, String)>, u16, u16)> {
+        let http_port = free_port()?;
+        let metrics_port = free_port()?;
         let mut env = self.env_with_gateway();
         env.push((
-            "COLLECTOR_INDEX_KEY_FILE".to_owned(),
-            key.to_string_lossy().into_owned(),
+            "COLLECTOR_HTTP_LISTEN".to_owned(),
+            format!("127.0.0.1:{http_port}"),
         ));
         env.push((
             "COLLECTOR_METRICS_LISTEN".to_owned(),
-            format!("127.0.0.1:{port}"),
+            format!("127.0.0.1:{metrics_port}"),
         ));
-        Ok((CollectorProc::start(&env)?, port))
+        if index {
+            let key = self.dir.path().join("index.key");
+            std::fs::write(&key, b"test-only-key")
+                .with_context(|| format!("failed to write the index key {}", key.display()))?;
+            env.push((
+                "COLLECTOR_INDEX_KEY_FILE".to_owned(),
+                key.to_string_lossy().into_owned(),
+            ));
+        }
+        Ok((env, http_port, metrics_port))
+    }
+
+    /// The collector, against the fake Gateway, with the internal HTTP
+    /// endpoint served and **no** search index: `/search` is the structured
+    /// `503 index_not_configured` the suite asserts. Returns the process and
+    /// the endpoint's port.
+    pub fn start_with_gateway_and_http(&self) -> Result<(CollectorProc, u16)> {
+        let (env, http_port, _metrics_port) = self.env_serving(false)?;
+        Ok((CollectorProc::start(&env)?, http_port))
+    }
+
+    /// The collector, against the fake Gateway, with the internal HTTP
+    /// endpoint **and a search index** (lot 3a): the second free port carries
+    /// the metrics, for `wait_metric` and the refusal counters, and the first
+    /// is the endpoint `/search` and `/index/status` answer on. Returns
+    /// `(process, http_port, metrics_port)`.
+    pub fn start_with_gateway_and_index(&self) -> Result<(CollectorProc, u16, u16)> {
+        let (env, http_port, metrics_port) = self.env_serving(true)?;
+        Ok((CollectorProc::start(&env)?, http_port, metrics_port))
     }
 
     /// Un mail arrive dans l'INBOX du propriétaire, d'un tiers : poussé au

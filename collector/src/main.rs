@@ -411,6 +411,14 @@ async fn run(config: Config) -> Result<()> {
                 calendar_access: calendar_access.clone(),
                 access: shared_access.clone(),
                 metrics: metrics.clone(),
+                // C27 : **le même** handle que la boucle de poll tient
+                // (`search_index`) — un seul `Stored` pour un seul index,
+                // écrit par l'indexation temps réel et lu par `/search`.
+                search: search_index.clone(),
+                // Le cache de consentement du lot 2 (`consent`, plus haut) :
+                // la route retire les révoqués avec le cache que le collecteur
+                // tient déjà, plutôt que d'en ouvrir un second.
+                consent: consent.clone(),
             },
         ));
     }

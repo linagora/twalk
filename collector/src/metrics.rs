@@ -54,6 +54,10 @@ pub struct Metrics {
     /// (lot 3a, #XXX), par raison : un révoqué n'est pas une absence, c'est
     /// un retrait, et le produit compte ses silences.
     search_hits_withheld: Mutex<BTreeMap<&'static str, u64>>,
+    /// Les recherches servies ou refusées sur l'endpoint interne (lot 3a),
+    /// par code : `served`, ou le code du refus. Une recherche qui n'est pas
+    /// comptée est une lecture de l'archive de l'owner que personne ne voit.
+    search_reads: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 impl Default for Metrics {
@@ -77,7 +81,21 @@ impl Metrics {
             push_wakes: AtomicU64::new(0),
             index_documents: AtomicU64::new(0),
             search_hits_withheld: Mutex::new(BTreeMap::new()),
+            search_reads: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// `twalk_collector_search_reads_total{outcome}` — une recherche servie
+    /// ou refusée, par code (lot 3a). Le calque de `record_freebusy_read` :
+    /// toute lecture de l'archive de l'owner est comptée, et le code du refus
+    /// est ce qui dit laquelle des façons elle a échoué.
+    pub fn record_search_read(&self, outcome: &'static str) {
+        *self
+            .search_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned")
+            .entry(outcome)
+            .or_insert(0) += 1;
     }
 
     /// Les hits qu'une recherche a retirés par décision de consentement
@@ -311,6 +329,19 @@ impl Metrics {
                 "twalk_collector_search_hits_withheld_total{{reason=\"{reason}\"}} {count}\n"
             ));
         }
+        out.push_str("# HELP twalk_collector_search_reads_total Searches served or refused on the internal endpoint, by outcome: served, or the refusal's code (lot 3a).\n");
+        out.push_str("# TYPE twalk_collector_search_reads_total counter\n");
+        let search_reads = self
+            .search_reads
+            .lock()
+            .expect("the metrics mutex is never poisoned");
+        for outcome in crate::http::SEARCH_OUTCOMES {
+            out.push_str(&format!(
+                "twalk_collector_search_reads_total{{outcome=\"{outcome}\"}} {}\n",
+                search_reads.get(outcome).copied().unwrap_or(0)
+            ));
+        }
+        drop(search_reads);
         out.push_str("# HELP twalk_collector_connection_state Each connection's state: 1 on the state it is in, 0 on the three it is not.\n");
         out.push_str("# TYPE twalk_collector_connection_state gauge\n");
         for ((connection, state), value) in self
@@ -380,6 +411,20 @@ mod tests {
         metrics.record_search_hit_withheld("revoked");
         assert!(metrics.render(1_000).contains(
             "twalk_collector_search_hits_withheld_total{reason=\"revoked\"} 1\n"
+        ));
+        // Chaque code de refus de recherche est rendu à zéro avant toute
+        // lecture, alors qu'un tableau de bord a la série sous la main (lot 3a).
+        for outcome in crate::http::SEARCH_OUTCOMES {
+            assert!(
+                body.contains(&format!(
+                    "twalk_collector_search_reads_total{{outcome=\"{outcome}\"}} 0\n"
+                )),
+                "{outcome} is missing from the search read series"
+            );
+        }
+        metrics.record_search_read("index_not_configured");
+        assert!(metrics.render(1_000).contains(
+            "twalk_collector_search_reads_total{outcome=\"index_not_configured\"} 1\n"
         ));
         metrics.set_push_connected(true);
         metrics.record_push_wake();

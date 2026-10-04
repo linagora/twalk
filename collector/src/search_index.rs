@@ -199,7 +199,11 @@ impl Stored {
 
 /// Un résultat de recherche : ce que le Companion affiche, jamais un corps
 /// entier (§5.3, §9).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` : c'est exactement ce que `GET /search` rend, membre pour
+/// membre — le corps (`body`) est resté dans l'index et n'est jamais un
+/// champ de cette structure (T6).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Hit {
     pub id: String,
     pub source: String,
