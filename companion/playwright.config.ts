@@ -170,6 +170,7 @@ export default defineConfig({
 				'approvals/**',
 				'consent/**',
 				'portals/**',
+				'search/**',
 				'session/**'
 			],
 			// Half the cores is Playwright's default, which on the reference host
@@ -313,6 +314,30 @@ export default defineConfig({
 			fullyParallel: false,
 			workers: 1,
 			dependencies: ['consent'],
+			use: {
+				...devices['Desktop Chrome'],
+				channel: 'chromium',
+				viewport: { width: 390, height: 844 },
+				baseURL: `http://127.0.0.1:${bridgePort}`
+			}
+		},
+		{
+			// The search screen (lot 3a), on the bridge origin: it needs a
+			// signed-in device like every other `/api` screen, and the bridge
+			// Gateway is the one configured with the session machinery.
+			//
+			// One worker, and after `portals`. It starts no Sensor and writes
+			// no consent state — its search is fulfilled in the browser, since
+			// this stack has no collector — so it carries none of the ordering
+			// the earlier projects need for one bus and one consent journal.
+			// It sits in the chain all the same, so a journey ahead of it
+			// going red still reads as "did not run" rather than as a green
+			// nobody earned.
+			name: 'search',
+			testMatch: 'search/**/*.spec.ts',
+			fullyParallel: false,
+			workers: 1,
+			dependencies: ['portals'],
 			use: {
 				...devices['Desktop Chrome'],
 				channel: 'chromium',
