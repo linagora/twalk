@@ -106,7 +106,7 @@ export function withheldCopy(answer: { withheld: number }, t: Translate): string
  * before it ever reaches here, so a screen that had to shorten a snippet for
  * display would do it by the one rule rather than a second one.
  *
- * Counted in characters, not bytes: the products's own bodies are French and
+ * Counted in characters, not bytes: the product's own bodies are French and
  * Arabic as often as English, and cutting a UTF-8 continuation byte in half
  * renders a replacement glyph. The ellipsis is added only when something was
  * cut, so a complete excerpt never claims to be truncated.

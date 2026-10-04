@@ -88,9 +88,17 @@ export COLLECTOR_OIDC_CLIENT_SECRET_FILE=/run/collector/client-secret
 # omission, and its absence must never be a startup refusal that would turn an
 # optional capability into a failure of the mail.
 index_key=/run/secrets/collector-index-key
-if [ -f "$index_key" ]; then
+if [ -s "$index_key" ]; then
 	install -m 0600 -o collector -g collector "$index_key" /run/collector/index-key
 	export COLLECTOR_INDEX_KEY_FILE=/run/collector/index-key
+elif [ -f "$index_key" ]; then
+	# A key file that exists but is empty is not a key: the index would open
+	# on nothing. Handled like the OIDC block's refusal of an absent key —
+	# warn, and stay OFF (no key, no index) rather than start up on a file
+	# that cannot encrypt anything.
+	echo "collector: COLLECTOR_INDEX_KEY_FILE names an empty file, so the search" >&2
+	echo "index stays OFF (no key, no index). Write a key into it and start again." >&2
+	export COLLECTOR_INDEX_KEY_FILE=
 elif [ -d "$index_key" ]; then
 	# A path named in COLLECTOR_INDEX_KEY_FILE that did not exist became a
 	# directory instead of a mount — a typo in `.env`. compose has already

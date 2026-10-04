@@ -10,8 +10,12 @@
 //   1. the **withdrawal is said** — the collector's `withheld` count reaches the
 //      screen as a sentence, and a revoked correspondent is not silently
 //      absent;
-//   2. the revoked correspondent's hits are **not on screen**, proven by
-//      searching the whole rendered page for their identity;
+//   2. the screen **renders what the route renders** — the fixture it is given
+//      carries no revoked marker, and none appears on the page. Withholding by
+//      consent is the **collector's** guarantee, proven by
+//      `companion/src/lib/search/model.test.ts` and
+//      `companion-gateway/tests/search.rs`; this e2e proves the screen adds no
+//      absence of its own;
 //   3. a hit names its correspondent — the first surface of the product allowed
 //      to (§9.3) — and hands the document to the mail client rather than
 //      routing it here.
@@ -112,8 +116,10 @@ test.describe('the search screen', () => {
 		await expect(page.getByTestId('search-results').getByTestId('search-hit')).toHaveCount(2);
 		await expect(page.getByTestId('search-results')).toContainText(GRANTED);
 
-		// The person the user revoked is nowhere on the page — not in their
-		// identity, not in the subject of their message, not in its excerpt.
+		// The fixture carries no revoked marker, and none reaches the page:
+		// the screen renders the hits the route gave it, adding no absence of
+		// its own. The withholding itself happens in the collector, before the
+		// answer ever arrives (proven by the model and Gateway suites).
 		const text = await rendered(page);
 		expect(text).not.toContain(REVOKED_MARKER);
 		expect(text).not.toContain(REVOKED_SUBJECT_MARKER);

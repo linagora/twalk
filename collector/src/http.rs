@@ -464,6 +464,10 @@ pub const SEARCH_OUTCOMES: [&str; 6] = [
     "invalid_window",
 ];
 
+/// La raison d'un retrait par consentement, telle qu'elle part dans la
+/// métrique — une seule chaîne, lue par la production et par son test.
+pub const SEARCH_WITHHELD_CONSENT: &str = "consent";
+
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
     q: Option<String>,
@@ -524,12 +528,17 @@ async fn search(
             return refuse_search(&endpoint, StatusCode::BAD_REQUEST, "invalid_window");
         }
     }
-    let limit = query
-        .limit
-        .as_deref()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(20)
-        .clamp(1, 100);
+    // Un `limit` hors bornes est un refus, jamais une borne silencieuse : un
+    // client qui demande 1000 résultats et en reçoit 100 croit que l'archive
+    // n'en contient pas plus (Review Focus classe 2, spec §5.1). Le code de
+    // refus est `invalid_query`, déjà déclaré pour cette route.
+    let limit = match query.limit.as_deref() {
+        None => 20usize,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if (1..=100).contains(&n) => n,
+            _ => return refuse_search(&endpoint, StatusCode::BAD_REQUEST, "invalid_query"),
+        },
+    };
     // C27 : le `Stored` est partagé avec l'indexation temps réel — on le
     // verrouille le temps de la lecture, et l'on ne fait aucune I/O sous le
     // verrou (`Stored::search` lit l'index en mémoire).
@@ -556,7 +565,7 @@ async fn search(
             let (kept, withheld) =
                 crate::search_index::filter_by_consent(hits, &endpoint.consent);
             if withheld > 0 {
-                endpoint.metrics.record_search_hit_withheld("consent");
+                endpoint.metrics.record_search_hit_withheld(SEARCH_WITHHELD_CONSENT);
             }
             endpoint.metrics.record_search_read("served");
             info!(

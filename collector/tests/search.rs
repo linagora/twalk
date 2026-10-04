@@ -150,6 +150,24 @@ async fn search(
     Ok((status, body))
 }
 
+/// Comme `search`, mais avec un `limit` explicite (classe 2 du plan).
+async fn search_with_limit(
+    port: u16,
+    token: &str,
+    query: &str,
+    limit: &str,
+) -> Result<(u16, Value)> {
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/search"))
+        .query(&[("q", query), ("limit", limit)])
+        .bearer_auth(token)
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
 /// Attends que l'endpoint interne réponde : une lecture sans jeton suffit, et
 /// elle est comptée comme les autres.
 async fn wait_for_endpoint(port: u16) -> Result<()> {
@@ -240,6 +258,57 @@ async fn an_empty_query_is_refused() -> Result<()> {
     let (status, answer) = search(port, SERVICE_TOKEN, "", None, None, None).await?;
     assert_eq!(status, 400, "{answer}");
     assert_eq!("invalid_query", answer["error"], "{answer}");
+    let _ = collector.stop().await;
+    Ok(())
+}
+
+/// Une requête trop longue (513 caractères) est refusée : le plan exige un
+/// refus structuré pour un `q` « vide ou trop long », et seule la borne haute
+/// manquait à ses tests. Un `q` de 512 reste accepté — la borne est inclusive.
+#[tokio::test]
+async fn an_over_long_query_is_refused() -> Result<()> {
+    ensure_stack().await?;
+    let bus = twalk_test_harness::Bus::connect().await?;
+    let run = support::Run::prepare("search-long-query").await?;
+    run.authorize().await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
+    let (collector, port, _metrics) = run.start_with_gateway_and_index()?;
+    collector.wait_logged("search index opened", 1).await?;
+    wait_for_endpoint(port).await?;
+
+    let long = "a".repeat(513);
+    let (status, answer) = search(port, SERVICE_TOKEN, &long, None, None, None).await?;
+    assert_eq!(status, 400, "{answer}");
+    assert_eq!("invalid_query", answer["error"], "{answer}");
+
+    let at_the_bound = "a".repeat(512);
+    let (status, answer) = search(port, SERVICE_TOKEN, &at_the_bound, None, None, None).await?;
+    assert_eq!(status, 200, "a 512-character query is accepted: {answer}");
+    let _ = collector.stop().await;
+    Ok(())
+}
+
+/// Un `limit` hors bornes est un refus, jamais une borne silencieuse : un
+/// client qui demande 1000 résultats et en reçoit 100 croirait que l'archive
+/// n'en contient pas plus (classe 2, spec §5.1). Un `limit` valide reste 200.
+#[tokio::test]
+async fn a_limit_out_of_range_is_refused() -> Result<()> {
+    ensure_stack().await?;
+    let bus = twalk_test_harness::Bus::connect().await?;
+    let run = support::Run::prepare("search-limit").await?;
+    run.authorize().await?;
+    run.serve_snapshot(&bus, Vec::new()).await?;
+    let (collector, port, _metrics) = run.start_with_gateway_and_index()?;
+    collector.wait_logged("search index opened", 1).await?;
+    wait_for_endpoint(port).await?;
+
+    for limit in ["1000", "abc", "0"] {
+        let (status, answer) = search_with_limit(port, SERVICE_TOKEN, "hello", limit).await?;
+        assert_eq!(status, 400, "limit={limit}: {answer}");
+        assert_eq!("invalid_query", answer["error"], "limit={limit}: {answer}");
+    }
+    let (status, answer) = search_with_limit(port, SERVICE_TOKEN, "hello", "5").await?;
+    assert_eq!(status, 200, "a limit within range is accepted: {answer}");
     let _ = collector.stop().await;
     Ok(())
 }

@@ -10,6 +10,11 @@
 //! échoue, le curseur n'avance **pas** : un id vu mais non commité n'est
 //! jamais dit « vu », sans quoi le prochain passage le croirait indexé et le
 //! perdrait (§8.3).
+//!
+//! **L'énumération de l'archive qui appelle `run_once` n'est pas câblée en
+//! 3a** : elle arrive au lot 3b (JMAP `Email/query` paginé, reprenable). Tant
+//! qu'elle n'existe pas, `run_once` n'est atteint que par ses tests — le lot
+//! 3a ne câble que l'indexation temps réel, à chaque poll.
 
 use std::collections::BTreeSet;
 use std::path::Path;

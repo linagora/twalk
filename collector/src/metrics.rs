@@ -408,10 +408,13 @@ mod tests {
         metrics.set_index_documents(3);
         assert!(metrics.render(1_000).contains("twalk_collector_index_documents 3\n"));
         // Un hit retiré par consentement est compté, par raison (#XXX, §5.3).
-        metrics.record_search_hit_withheld("revoked");
-        assert!(metrics.render(1_000).contains(
-            "twalk_collector_search_hits_withheld_total{reason=\"revoked\"} 1\n"
-        ));
+        // Le libellé vient de la production, pas d'un littéral : c'est la
+        // même chaîne qui part dans la métrique et qui est assertée ici.
+        metrics.record_search_hit_withheld(crate::http::SEARCH_WITHHELD_CONSENT);
+        assert!(metrics.render(1_000).contains(&format!(
+            "twalk_collector_search_hits_withheld_total{{reason=\"{}\"}} 1\n",
+            crate::http::SEARCH_WITHHELD_CONSENT
+        )));
         // Chaque code de refus de recherche est rendu à zéro avant toute
         // lecture, alors qu'un tableau de bord a la série sous la main (lot 3a).
         for outcome in crate::http::SEARCH_OUTCOMES {

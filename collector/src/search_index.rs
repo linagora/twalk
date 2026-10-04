@@ -211,7 +211,7 @@ pub struct Hit {
     pub mailbox: Option<String>,
     pub date: i64,
     pub subject: String,
-    /// Un extrait autour du terme trouvé, borné — jamais le document.
+    /// Un extrait borné pris **en tête** du corps, jamais le document.
     pub snippet: String,
 }
 
